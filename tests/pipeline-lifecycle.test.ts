@@ -508,8 +508,8 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         });
         await save('webhooks', 'hook', {
           id: 'hook', name: 'test', provider: 'GENERIC_HMAC', enabled: true, events: ['ALL'],
-          url: encrypt('https://example.com/hook', config.ENCRYPTION_KEY, 'webhook-url:hook'),
-          secretToken: encrypt('test-secret', config.ENCRYPTION_KEY, 'webhook:hook'), deliveryCount: 0,
+          url: encrypt('https://example.com/hook', [config.ENCRYPTION_KEY], 'webhook-url:hook'),
+          secretToken: encrypt('test-secret', [config.ENCRYPTION_KEY], 'webhook:hook'), deliveryCount: 0,
         });
         await run();
         const finding = (await list<Finding>(pool, 'findings'))[0];
@@ -1452,8 +1452,8 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       await save('webhooks', 'hook', {
         id: 'hook',
         name: 'Test hook',
-        url: encrypt('https://example.invalid/hook', config.ENCRYPTION_KEY, 'webhook-url:hook'),
-        secretToken: encrypt('secret', config.ENCRYPTION_KEY, 'webhook:hook'),
+        url: encrypt('https://example.invalid/hook', [config.ENCRYPTION_KEY], 'webhook-url:hook'),
+        secretToken: encrypt('secret', [config.ENCRYPTION_KEY], 'webhook:hook'),
         provider: 'GENERIC_HMAC',
         events: ['ALL'],
         enabled: true,

@@ -131,7 +131,7 @@ test('searchNvdCpes throws on non-JSON or unexpected NVD responses', async () =>
 });
 
 test('loadNvdApiKey decrypts the configured NVD feed key', async () => {
-  const secret = encrypt('nvd-real-key', config.ENCRYPTION_KEY, 'feed:feed-nvd');
+  const secret = encrypt('nvd-real-key', [config.ENCRYPTION_KEY], 'feed:feed-nvd');
   const db = {
     query: async () => ({
       rows: [

@@ -78,43 +78,66 @@ function useApplication() {
   const [activeExecutionId, setActiveExecutionId] = useState<string | null>(() =>
     snapshot.executions.find((e) => ['RUNNING', 'QUEUED'].includes(e.status))?.id ?? snapshot.executions[0]?.id ?? null,
   );
+  const inFlightMutations = new Set<string>();
   const request = useCallback(
     async <T,>(url: string, body?: unknown, method = body === undefined ? 'GET' : 'POST'): Promise<T> => {
-      let response: Response;
-      for (let attempt = 0; ; attempt++) {
-        response = await fetch(`/api${url}`, {
-          method,
-          credentials: 'same-origin',
-          headers: {
-            'content-type': 'application/json',
-            ...(sessionRef.current ? { 'x-csrf-token': sessionRef.current.csrfToken } : {}),
-          },
-          body: body === undefined ? undefined : JSON.stringify(body),
-          signal: AbortSignal.timeout(30000),
-        });
-        // Retry transient gateway errors only for idempotent state reads.
-        if (method !== 'GET' || ![502, 503, 504].includes(response.status) || attempt >= 2) break;
-        await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
-      }
-      const data = await response
-        .json()
-        .catch(() => ({ error: `Server returned an empty or non-JSON response (HTTP ${response.status})` }));
-      if (!response.ok) {
-        if (response.status === 401) {
-          setSessionExpired(true);
-          setSession(null);
-          setSnapshot(emptyState());
+      // Debounce repeated mutations to the same endpoint to prevent rapid-fire
+      // requests (e.g. double-clicking a button, accidental re-submission).
+      if (method !== 'GET') {
+        const key = `${method}:${url}`;
+        if (inFlightMutations.has(key)) throw new Error('Request already in progress');
+        inFlightMutations.add(key);
+        try {
+          return await executeRequest(url, body, method, undefined);
+        } finally {
+          inFlightMutations.delete(key);
         }
-        throw new Error(
-          data.error === 'Validation failed'
-            ? `${data.error}: ${(data.details || []).map((d: any) => d.path.join('.') + ': ' + d.message).join('; ')}`
-            : data.error || 'Request failed',
-        );
       }
-      return data;
+      return executeRequest(url, body, method, undefined);
     },
     [],
   );
+
+  /** Performs the actual HTTP fetch with retries for transient gateway errors. */
+  async function executeRequest<T>(
+    url: string,
+    body: unknown,
+    method: string,
+    signal: AbortSignal | undefined,
+  ): Promise<T> {
+    let response: Response;
+    for (let attempt = 0; ; attempt++) {
+      response = await fetch(`/api${url}`, {
+        method,
+        credentials: 'same-origin',
+        headers: {
+          'content-type': 'application/json',
+          ...(sessionRef.current ? { 'x-csrf-token': sessionRef.current.csrfToken } : {}),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: signal ?? AbortSignal.timeout(30000),
+      });
+      // Retry transient gateway errors only for idempotent state reads.
+      if (method !== 'GET' || ![502, 503, 504].includes(response.status) || attempt >= 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+    }
+    const data = await response
+      .json()
+      .catch(() => ({ error: `Server returned an empty or non-JSON response (HTTP ${response.status})` }));
+    if (!response.ok) {
+      if (response.status === 401) {
+        setSessionExpired(true);
+        setSession(null);
+        setSnapshot(emptyState());
+      }
+      throw new Error(
+        data.error === 'Validation failed'
+          ? `${data.error}: ${(data.details || []).map((d: any) => d.path.join('.') + ': ' + d.message).join('; ')}`
+          : data.error || 'Request failed',
+      );
+    }
+    return data;
+  }
 
   const [systemUptime, setSystemUptime] = useState<{ upSince: string; uptime: string; loadAverage: number[] }>({ upSince: 'unknown', uptime: 'unknown', loadAverage: [0, 0, 0] });
 
@@ -344,6 +367,7 @@ function useApplication() {
       }
     } catch {}
   };
+
   return {
     ...snapshot,
     activeTab,

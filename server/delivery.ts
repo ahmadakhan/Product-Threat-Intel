@@ -87,7 +87,7 @@ import {
   lookupProviderDelivery,
   sendProviderEmail,
 } from './emailProviders';
-import { decrypt } from './secrets';
+import { decrypt, encryptionKeys } from './secrets';
 import { isSmtpEmailProvider } from '../src/types/index.ts';
 import type {
   Advisory,
@@ -573,7 +573,7 @@ async function confirmPriorDelivery(
   // never left, and it is what lets those jobs be recovered instead of held.
   const messageId = job.payload.unconfirmedProviderId || log?.providerId || '';
   if (!messageId) return 'unknown';
-  const token = decrypt(saved.apiKey, config.ENCRYPTION_KEY, `email-provider:${saved.provider}`);
+  const token = decrypt(saved.apiKey, encryptionKeys(config), `email-provider:${saved.provider}`);
   if (!token) return 'unknown';
   return lookupProviderDelivery(saved, token, messageId, request);
 }
@@ -602,11 +602,11 @@ export function createMailSender(
     if (!emailIsConfigured(saved, config)) throw new Error('Email provider is not configured');
     const attachment = await buildPdfAttachment(job, config, db);
     if (!isSmtpEmailProvider(saved.provider)) {
-      const token = decrypt(saved.apiKey, config.ENCRYPTION_KEY, `email-provider:${saved.provider}`);
+      const token = decrypt(saved.apiKey, encryptionKeys(config), `email-provider:${saved.provider}`);
       if (!token) throw new Error('Email provider token is missing');
       const mailjetSecret =
         saved.provider === 'MAILJET_API'
-          ? decrypt(saved.mailjetApiSecret, config.ENCRYPTION_KEY, `email-mailjet:${saved.provider}`)
+          ? decrypt(saved.mailjetApiSecret, encryptionKeys(config), `email-mailjet:${saved.provider}`)
           : saved.mailjetApiSecret;
       const provider = EMAIL_PROVIDER_LABELS[saved.provider];
       try {
@@ -634,7 +634,7 @@ export function createMailSender(
     const usesDeploymentSmtp = saved.provider === 'SMTP' && !configuredSmtpHost;
     const smtpPassword = usesDeploymentSmtp
       ? config.SMTP_PASSWORD
-      : decrypt(saved.smtpPassword, config.ENCRYPTION_KEY, `email-smtp:${saved.provider}`);
+      : decrypt(saved.smtpPassword, encryptionKeys(config), `email-smtp:${saved.provider}`);
     const smtpTransport = usesDeploymentSmtp
       ? transporter
       : nodemailer.createTransport({
@@ -1813,8 +1813,8 @@ export async function deliverNext(
         permanent = true;
         throw new Error('Webhook event subscription no longer permits all advisory findings');
       }
-      const url = decrypt(hook.url, config.ENCRYPTION_KEY, `webhook-url:${hook.id}`),
-        secret = decrypt(hook.secretToken, config.ENCRYPTION_KEY, `webhook:${hook.id}`);
+      const url = decrypt(hook.url, encryptionKeys(config), `webhook-url:${hook.id}`),
+        secret = decrypt(hook.secretToken, encryptionKeys(config), `webhook:${hook.id}`);
       const body = JSON.stringify(
         hook.provider === 'GENERIC_HMAC'
           ? { id: job.id, advisoryId: job.advisory_id, ...job.payload }

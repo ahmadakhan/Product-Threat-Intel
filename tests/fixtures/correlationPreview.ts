@@ -22,7 +22,7 @@ const config = loadConfig({NODE_ENV:'test',DATABASE_URL:process.env.TEST_DATABAS
 await createUser(pool,'preview','Disposable-preview-password-2026!','ADMIN');
 await pool.query("INSERT INTO assets(id,vendor,product,version,purl) VALUES($1,'kubernetes','kubernetes','1.28.0','pkg:generic/kubernetes@1.28.0')",[randomUUID()]);
 await transaction(pool,db=>applyCommand(db,config,{action:'asset.save',actor:'preview',data:{vendor:'example',product:'widget',cpes:['cpe:2.3:a:example:widget:1.0:*:*:*:*:*:*:*'],assetTag:'Preview widget',ownerGroup:'Preview',active:true}}));
-const runtime = new CorrelationRuntime(pool,config.ENCRYPTION_KEY,directory);
+const runtime = new CorrelationRuntime(pool,[config.ENCRYPTION_KEY],directory);
 runtime.start();
 await runtime.supervisor.ingestor.processIncomingAdvisory({title:'Kubernetes vulnerability actively exploited',content:'Researchers report an unpatched vulnerability in k8s.',url:'https://example.org/preview/1'},pool);
 await runtime.supervisor.ingestor.processIncomingAdvisory({title:'Unpatched unknown software vulnerability',content:'Unknown software actively exploited in the wild; an unpatched zero-day.',url:'https://example.org/preview/review'},pool);

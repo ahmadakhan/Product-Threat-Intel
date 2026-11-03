@@ -1,6 +1,6 @@
 import type { Db } from './db';
 import { list } from './db';
-import { decrypt } from './secrets';
+import { decrypt, encryptionKeys } from './secrets';
 import { parseCPE23, normalizeCpeForComparison } from '../src/utils/cpeMatcher.ts';
 import type { Config } from './config';
 import type { Requester } from './network';
@@ -144,7 +144,7 @@ export async function loadNvdApiKey(db: Db, config: Config): Promise<string> {
     return '';
   }
   try {
-    return decrypt(nvd.authSecretKey, config.ENCRYPTION_KEY, `feed:${nvd.id}`);
+    return decrypt(nvd.authSecretKey, encryptionKeys(config), `feed:${nvd.id}`);
   } catch (err) {
     console.warn(
       JSON.stringify({

@@ -33,25 +33,49 @@ export async function checkPassword(password: string, stored: string) {
   const result = (await scrypt(password, salt, 64)) as Buffer;
   return timingSafeEqual(result, Buffer.from(expected, 'hex'));
 }
-export function encrypt(value: string, key: string, context: string): string {
+/**
+ * Resolves the ordered list of encryption keys from configuration.
+ *
+ * `ENCRYPTION_KEY` is the current (write) key. `ENCRYPTION_KEYS` (comma-separated)
+ * lists all keys that can decrypt, with the current key first. This enables
+ * key rotation: data encrypted with a retired key can still be decrypted, and
+ * re-encryption with the current key happens on the next write.
+ */
+export function encryptionKeys(config: { ENCRYPTION_KEY?: string; ENCRYPTION_KEYS?: string }): string[] {
+  const keys: string[] = [];
+  if (config.ENCRYPTION_KEYS) {
+    for (const raw of config.ENCRYPTION_KEYS.split(',')) {
+      const key = raw.trim();
+      if (key && !keys.includes(key)) keys.push(key);
+    }
+  }
+  if (config.ENCRYPTION_KEY && !keys.includes(config.ENCRYPTION_KEY)) keys.unshift(config.ENCRYPTION_KEY);
+  if (!keys.length) throw new Error('No encryption keys configured');
+  return keys;
+}
+export function encrypt(value: string, keys: string[], context: string): string {
   if (!value) return '';
+  const key = Buffer.from(keys[0], 'base64');
+  if (key.length !== 32) throw new Error('Invalid encryption key: must be 32 bytes');
   const iv = randomBytes(12),
-    cipher = createCipheriv('aes-256-gcm', Buffer.from(key, 'base64'), iv);
+    cipher = createCipheriv('aes-256-gcm', key, iv);
   cipher.setAAD(Buffer.from(context));
   const payload = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
   return [
     'v1',
+    '0', // key index: current key is always index 0
     iv.toString('base64'),
     cipher.getAuthTag().toString('base64'),
     payload.toString('base64'),
   ].join('.');
 }
-export function decrypt(value: string, key: string, context: string): string {
+export function decrypt(value: string, keys: string[], context: string): string {
   if (!value) return '';
   const parts = value.split('.');
-  const [version, iv, tag, body] = parts;
+  const [version, keyIndex, iv, tag, body] = parts;
   if (
-    parts.length !== 4 ||
+    parts.length !== 5 ||
+    version !== 'v1' ||
     !iv || !tag || !body ||
     !/^[A-Za-z0-9+/]+={0,2}$/.test(iv) ||
     !/^[A-Za-z0-9+/]+={0,2}$/.test(tag) ||
@@ -60,13 +84,32 @@ export function decrypt(value: string, key: string, context: string): string {
     Buffer.from(tag, 'base64').length !== 16
   )
     throw new Error('Invalid encrypted secret encoding');
-  if (version !== 'v1') throw new Error('Invalid encrypted secret');
+  const index = Number(keyIndex);
+  if (!Number.isInteger(index) || index < 0 || index >= keys.length)
+    throw new Error('Invalid encrypted secret key index');
+  const key = Buffer.from(keys[index], 'base64');
+  if (key.length !== 32) throw new Error('Invalid encryption key: must be 32 bytes');
   try {
-    const cipher = createDecipheriv('aes-256-gcm', Buffer.from(key, 'base64'), Buffer.from(iv, 'base64'));
+    const cipher = createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64'));
     cipher.setAAD(Buffer.from(context));
     cipher.setAuthTag(Buffer.from(tag, 'base64'));
     return Buffer.concat([cipher.update(Buffer.from(body, 'base64')), cipher.final()]).toString('utf8');
   } catch (e) {
+    // Try older keys for backward compatibility during rotation.
+    if (index > 0) {
+      for (let i = index - 1; i >= 0; i--) {
+        const olderKey = Buffer.from(keys[i], 'base64');
+        if (olderKey.length !== 32) continue;
+        try {
+          const cipher = createDecipheriv('aes-256-gcm', olderKey, Buffer.from(iv, 'base64'));
+          cipher.setAAD(Buffer.from(context));
+          cipher.setAuthTag(Buffer.from(tag, 'base64'));
+          return Buffer.concat([cipher.update(Buffer.from(body, 'base64')), cipher.final()]).toString('utf8');
+        } catch {
+          // Continue trying older keys.
+        }
+      }
+    }
     throw new Error('Failed to decrypt secret: invalid key or corrupted ciphertext');
   }
 }

@@ -98,7 +98,7 @@ test('MITRE re-fetches revised records and limits concurrent requests while paci
   assert.ok(waits >= 7);
 });
 test('OpenCVE lists changed records but does not fetch unchanged details within the overlap', async () => {
-  const source = { ...feed('OPENCVE_API'), authType: 'BEARER' as const, authSecretKey: encrypt('test-token', config.ENCRYPTION_KEY, 'feed:source') };
+  const source = { ...feed('OPENCVE_API'), authType: 'BEARER' as const, authSecretKey: encrypt('test-token', [config.ENCRYPTION_KEY], 'feed:source') };
   const date = new Date(Date.now() - 1000).toISOString();
   let details = 0;
   const request = async (raw: string) => {
@@ -118,7 +118,7 @@ test('OpenCVE lists changed records but does not fetch unchanged details within 
   assert.equal(second.count, 0);
 });
 test('OpenCVE uses a reduced 3-hour incremental window to stay under the 500-CVE cap', async () => {
-  const source = { ...feed('OPENCVE_API'), authType: 'BEARER' as const, authSecretKey: encrypt('test-token', config.ENCRYPTION_KEY, 'feed:source') };
+  const source = { ...feed('OPENCVE_API'), authType: 'BEARER' as const, authSecretKey: encrypt('test-token', [config.ENCRYPTION_KEY], 'feed:source') };
   const cursorDate = new Date(Date.now() - 60000);
   const date = new Date(Date.now() - 30000).toISOString();
   const request = async (raw: string) => {

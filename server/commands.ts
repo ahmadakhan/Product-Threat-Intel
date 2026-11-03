@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { Db } from './db.ts';
 import { get, getForUpdate, list, put, remove, appendAudit, schemaLockKey } from './db.ts';
 import { transaction } from './db.ts';
+import { encryptionKeys } from './secrets.ts';
 import type pg from 'pg';
 
 /**
@@ -225,7 +226,7 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
         input.authType === 'NONE'
           ? ''
           : input.authSecretKey
-            ? encrypt(input.authSecretKey, config.ENCRYPTION_KEY, `feed:${newId}`)
+            ? encrypt(input.authSecretKey, encryptionKeys(config), `feed:${newId}`)
             : (sameSource ? old?.authSecretKey : '') || '',
       healthStatus: 'UNTESTED',
       lastSync: sameSource ? old?.lastSync || null : null,
@@ -253,7 +254,7 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
           feed.authType === 'NONE'
             ? ''
             : feed.authSecretKey
-              ? encrypt(feed.authSecretKey, config.ENCRYPTION_KEY, `feed:${feed.id}`)
+              ? encrypt(feed.authSecretKey, encryptionKeys(config), `feed:${feed.id}`)
               : (sameSource ? old?.authSecretKey : '') || '',
         healthStatus: 'UNTESTED',
         lastSync: sameSource ? (old?.lastSync ?? null) : null,
@@ -628,12 +629,12 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
     await put(db, 'webhooks', newId, {
       ...input,
       id: newId,
-      url: encrypt(input.url, config.ENCRYPTION_KEY, `webhook-url:${newId}`),
+      url: encrypt(input.url, encryptionKeys(config), `webhook-url:${newId}`),
       // An edit with a blank secret keeps the stored credential. Rotating it
       // silently would break the receiver without an explicit operator action.
       secretToken: input.secretToken
-        ? encrypt(input.secretToken, config.ENCRYPTION_KEY, `webhook:${newId}`)
-        : old?.secretToken || encrypt(randomToken(), config.ENCRYPTION_KEY, `webhook:${newId}`),
+        ? encrypt(input.secretToken, encryptionKeys(config), `webhook:${newId}`)
+        : old?.secretToken || encrypt(randomToken(), encryptionKeys(config), `webhook:${newId}`),
       deliveryCount: old?.deliveryCount ?? 0,
     });
     
@@ -689,21 +690,21 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
     const apiKey = smtpProvider
       ? ''
       : input.apiKey
-        ? encrypt(input.apiKey, config.ENCRYPTION_KEY, `email-provider:${input.provider}`)
+        ? encrypt(input.apiKey, encryptionKeys(config), `email-provider:${input.provider}`)
         : sameApiDestination
           ? old.apiKey
           : '';
     const smtpPassword =
       smtpProvider && (input.provider !== 'SMTP' || !!input.smtpHost)
         ? input.smtpPassword
-          ? encrypt(input.smtpPassword, config.ENCRYPTION_KEY, `email-smtp:${input.provider}`)
+          ? encrypt(input.smtpPassword, encryptionKeys(config), `email-smtp:${input.provider}`)
           : sameSmtpIdentity
             ? old.smtpPassword
             : ''
         : '';
     const mailjetApiSecret =
       input.provider === 'MAILJET_API' && input.mailjetApiSecret
-        ? encrypt(input.mailjetApiSecret, config.ENCRYPTION_KEY, `email-mailjet:${input.provider}`)
+        ? encrypt(input.mailjetApiSecret, encryptionKeys(config), `email-mailjet:${input.provider}`)
         : old.provider === input.provider
           ? old.mailjetApiSecret
           : '';

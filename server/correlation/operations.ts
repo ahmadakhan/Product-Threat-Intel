@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { Db } from '../db.ts';
 import { appendAudit } from '../db.ts';
-import { decrypt } from '../secrets.ts';
+import { decrypt, encryptionKeys } from '../secrets.ts';
 import { HttpError } from '../validation.ts';
 import { AdvisoryInputSchema } from './validation.ts';
 import {
@@ -165,7 +165,7 @@ export async function decideDeadLetter(
   id: string,
   raw: unknown,
   actor: string,
-  key: string,
+  keys: string[],
 ): Promise<void> {
   const input = z
     .object({
@@ -186,7 +186,7 @@ export async function decideDeadLetter(
     let payload: unknown = input.payload;
     if (!payload) {
       try {
-        payload = JSON.parse(decrypt(row.rows[0].encrypted_payload, key, 'correlation-dlq'));
+        payload = JSON.parse(decrypt(row.rows[0].encrypted_payload, keys, 'correlation-dlq'));
       } catch {
         throw new HttpError(409, 'Dead letter cannot be decoded; provide a corrected payload');
       }

@@ -78,7 +78,7 @@ test(
       );
       const ingestor = new AdvisoryIngestor(
         telemetry,
-        new DeadLetterQueue(directory, randomBytes(32).toString('base64'), telemetry),
+        new DeadLetterQueue(directory, [randomBytes(32).toString('base64')], telemetry),
       );
       supervisor = new PipelineSupervisor(pool, ingestor);
       await supervisor.check();

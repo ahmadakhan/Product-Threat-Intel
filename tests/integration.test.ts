@@ -65,10 +65,10 @@ test('configuration rejects absent secrets and insecure production origin', () =
   );
 });
 test('encryption authenticates ciphertext and its record context', () => {
-  const secret = encrypt('private-value', key, 'record:1');
-  assert.equal(decrypt(secret, key, 'record:1'), 'private-value');
-  assert.throws(() => decrypt(secret, key, 'record:2'));
-  assert.throws(() => decrypt(secret.replace(/.$/, 'x'), key, 'record:1'));
+  const secret = encrypt('private-value', [key], 'record:1');
+      assert.equal(decrypt(secret, [key], 'record:1'), 'private-value');
+      assert.throws(() => decrypt(secret, [key], 'record:2'));
+      assert.throws(() => decrypt(secret.replace(/.$/, 'x'), [key], 'record:1'));
 });
 test('password hashes are salted and verify only the correct password', async () => {
   const hash = await passwordHash(password);
@@ -673,7 +673,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       const cpeName = 'cpe:2.3:o:microsoft:windows_10:22h2:*:*:*:*:*:*:*';
       await put(pool, 'feeds', feedId, {
         id: feedId, type: 'NVD_API', authType: 'API_KEY', enabled: true,
-        authSecretKey: encrypt('cpe-test-api-key', key, `feed:${feedId}`),
+        authSecretKey: encrypt('cpe-test-api-key', [key], `feed:${feedId}`),
       });
       try {
         responseBody = JSON.stringify({ totalResults: 1, products: [{ cpe: { cpeName, cpeNameId: 'test-cpe-id' } }] });
@@ -751,7 +751,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       );
       const saved = (await list<any>(pool, 'feeds'))[0];
       assert.notEqual(saved.authSecretKey, 'fixture-secret');
-      assert.equal(decrypt(saved.authSecretKey, key, `feed:${saved.id}`), 'fixture-secret');
+      assert.equal(decrypt(saved.authSecretKey, [key], `feed:${saved.id}`), 'fixture-secret');
       const snapshot = (await admin.get('/api/state')).body;
       assert.equal(snapshot.feeds[0].authSecretKey, undefined);
       const page = await viewer.get('/api/collections/feeds');

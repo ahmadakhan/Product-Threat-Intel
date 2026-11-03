@@ -30,6 +30,7 @@ import { flushDueDigest } from './digest';
 import { runDailyDigest } from './dailyDigest';
 import { closePdfRenderer } from './pdf';
 import { initMlRuntime } from './ml/integration.ts';
+import { encryptionKeys } from './secrets';
 import { runScheduledTraining } from './ml/train/cron.ts';
 import type { TrainingSummary } from './ml/train/orchestrator.ts';
 import type { Db } from './db';
@@ -105,7 +106,7 @@ const request = createRequester(config),
   // to keep the 60-minute scheduler aligned with the pipeline's interval.
   const correlation = new CorrelationRuntime(
     pool,
-    config.ENCRYPTION_KEY,
+    [config.ENCRYPTION_KEY],
     config.CORRELATION_DLQ_DIRECTORY,
     {
       url: config.HEARTBEAT_URL,
@@ -228,8 +229,9 @@ async function logMlTrainingResult(pool: Db, summary: TrainingSummary): Promise<
  * Retention and the digest renderer have explicit cancellation; this only covers
  * the case where cancellation itself cannot complete, so it is deliberately
  * longer than any legitimate run and is a last resort, not the deadline.
+ * Configurable via STUCK_PROMISE_MS (default: 5 minutes).
  */
-const STUCK_PROMISE_MS = 15 * 60_000;
+const STUCK_PROMISE_MS = Number(process.env.STUCK_PROMISE_MS ?? 5 * 60_000);
 let digestStartedAt = 0;
 let pipelineStartedAt = 0;
 let outboxStartedAt = 0;
@@ -322,7 +324,8 @@ const tick = () => {
       });
   }
 };
-const timer = setInterval(tick, 5000);
+const WORKER_TICK_MS = Number(process.env.WORKER_TICK_MS ?? 5000);
+const timer = setInterval(tick, WORKER_TICK_MS);
 tick();
 // Retention runs on its own cadence because the policy is operator-configurable
 // and can be much slower than the worker tick. The last successful run is
@@ -459,7 +462,7 @@ const dailyDigestTick = () => {
       if (dailyDigestGeneration === generation) dailyDigestRunning = null;
     });
 };
-const ML_TRAINING_INTERVAL_MS = 60 * 60_000;
+const ML_TRAINING_INTERVAL_MS = Number(process.env.ML_TRAINING_INTERVAL_MS ?? 60 * 60_000);
 const ML_TRAINING_SCHEDULE_ID = 'ml-training-schedule';
 let trainingRunning: Promise<unknown> | null = null;
 let trainingStartedAt = 0;

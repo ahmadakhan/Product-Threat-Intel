@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
-import { encrypt, decrypt } from '../secrets.ts';
+import { encrypt, decrypt, encryptionKeys } from '../secrets.ts';
 import type { CorrelationTelemetry } from './telemetry.ts';
 import { boundedJson } from './boundedJson.ts';
 interface Letter {
@@ -24,10 +24,11 @@ export class DeadLetterQueue {
   private readonly corruptFiles = new Set<string>();
   constructor(
     private readonly directory: string,
-    private readonly key: string,
+    private readonly keys: string[],
     private readonly telemetry: CorrelationTelemetry,
   ) {
-    if (Buffer.from(key, 'base64').length !== 32) throw new Error('DLQ_KEY_REQUIRED');
+    if (!keys.length || keys.some((key) => Buffer.from(key, 'base64').length !== 32))
+      throw new Error('DLQ_KEY_REQUIRED');
   }
   /**
    * Persist a failed advisory. Returns the durability outcome instead of
@@ -51,7 +52,7 @@ export class DeadLetterQueue {
       id: randomUUID(),
       trackingId,
       errorCode,
-      encryptedPayload: encrypt(serialized, this.key, 'correlation-dlq'),
+      encryptedPayload: encrypt(serialized, this.keys, 'correlation-dlq'),
     };
     const persist = async (): Promise<'SPOOLED' | 'capacity'> => {
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
@@ -128,7 +129,7 @@ export class DeadLetterQueue {
         timedQuery(
           `INSERT INTO correlation_dead_letters(id,tracking_id,error_code,encrypted_payload)
            VALUES($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING`,
-          [randomUUID(), trackingId, errorCode, encrypt(serialized, this.key, 'correlation-dlq')],
+          [randomUUID(), trackingId, errorCode, encrypt(serialized, this.keys, 'correlation-dlq')],
           2000,
         ),
       );
@@ -163,7 +164,7 @@ export class DeadLetterQueue {
           if (bytes > 360000) throw new Error('INVALID_SPOOL_FILE');
           letter = letterSchema.parse(JSON.parse(buffer.subarray(0, bytes).toString('utf8')));
           if (name !== letter.id + '.json') throw new Error('SPOOL_IDENTITY_MISMATCH');
-          decrypt(letter.encryptedPayload, this.key, 'correlation-dlq');
+          decrypt(letter.encryptedPayload, this.keys, 'correlation-dlq');
         } finally { await file.close(); }
       } catch (error) {
         if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') continue;

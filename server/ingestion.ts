@@ -4,7 +4,7 @@ import { ingestionWindow, recentRevisions, type IngestionState, OPENCVE_MAX_WIND
 import { parseSyndication, RSS_MAX_BYTES, RSS_USER_AGENT } from './rss';
 import type { Requester, RequestOptions, ResponseData } from './network';
 import { cveSchema } from './validation';
-import { decrypt } from './secrets';
+import { decrypt, encryptionKeys } from './secrets';
 import type { Config } from './config';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
@@ -252,7 +252,7 @@ export async function ingestFeed(
   const nvdInterval = Math.max(60000 / feed.rateLimitPerMin, feed.authType === 'API_KEY' ? 610 : 6100);
   if (feed.authType !== 'NONE') {
     let secret: string;
-    try { secret = decrypt(feed.authSecretKey || '', config.ENCRYPTION_KEY, `feed:${feed.id}`); }
+    try { secret = decrypt(feed.authSecretKey || '', encryptionKeys(config), `feed:${feed.id}`); }
     catch { throw new Error('Stored feed credentials could not be decrypted; re-enter the secret or restore the original encryption key'); }
     if (!secret) throw new Error('Feed credentials are not configured');
     if (feed.authType === 'API_KEY') headers.apiKey = secret;

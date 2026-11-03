@@ -70,7 +70,7 @@ test(
           },
         }),
       );
-      const letters = new DeadLetterQueue(directory, key, telemetry);
+      const letters = new DeadLetterQueue(directory, [key], telemetry);
       const ingestor = new AdvisoryIngestor(telemetry, letters);
       const asset: WatchListItem = {
         id: 'legacy-inventory-id',
@@ -256,7 +256,7 @@ test(
           ),
         );
         await letters.capture({ invalid: 'malformed' }, 'VALIDATION_FAILED', randomUUID(), db);
-        await Promise.all([letters.flush(db),new DeadLetterQueue(directory,key,telemetry).flush(db)]);
+        await Promise.all([letters.flush(db),      new DeadLetterQueue(directory,[key],telemetry).flush(db)]);
         workflows = await correlationWorkflows(db);
         const letter = workflows.deadLetters[0];
         assert.ok(letter);
@@ -267,7 +267,7 @@ test(
               letter.id,
               { action: 'REPLAYED', note: 'Replay original invalid input' },
               'reviewer',
-              key,
+              [key],
             ),
           ),
         );
@@ -277,7 +277,7 @@ test(
             letter.id,
             { action: 'REPLAYED', note: 'Corrected advisory validated', payload: article('corrected') },
             'reviewer',
-            key,
+            [key],
           ),
         );
         assert.equal(

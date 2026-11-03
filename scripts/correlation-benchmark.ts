@@ -53,7 +53,7 @@ try {
   );
   const ingestor = new AdvisoryIngestor(
     telemetry,
-    new DeadLetterQueue(directory, randomBytes(32).toString('base64'), telemetry),
+    new DeadLetterQueue(directory, [randomBytes(32).toString('base64')], telemetry),
   );
   const supervisor = new PipelineSupervisor(db, ingestor);
   supervisor.setConcurrency(concurrency);

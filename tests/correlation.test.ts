@@ -105,7 +105,7 @@ test('extraction uses an isolated worker and routes CVE-free exploitation to rev
 test('dead-letter fallback encrypts payload before filesystem persistence', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'correlation-dlq-'));
   try {
-    const queue = new DeadLetterQueue(directory, key, silent());
+    const queue = new DeadLetterQueue(directory, [key], silent());
     await queue.capture(
       { secret: 'sensitive-customer-value' },
       'VALIDATION_FAILED',
@@ -118,7 +118,7 @@ test('dead-letter fallback encrypts payload before filesystem persistence', asyn
     assert.equal(stored.includes('sensitive-customer-value'), false);
     const letter = JSON.parse(stored);
     assert.equal(
-      JSON.parse(decrypt(letter.encryptedPayload, key, 'correlation-dlq')).secret,
+      JSON.parse(decrypt(letter.encryptedPayload, [key], 'correlation-dlq')).secret,
       'sensitive-customer-value',
     );
   } finally {
@@ -210,7 +210,7 @@ test(
           telemetry,
           ingestor: new AdvisoryIngestor(
             telemetry,
-            new DeadLetterQueue(join(tmpdir(), 'vlq-' + randomBytes(6).toString('hex')), key, telemetry),
+            new DeadLetterQueue(join(tmpdir(), 'vlq-' + randomBytes(6).toString('hex')), [key], telemetry),
           ),
         };
       };
@@ -247,7 +247,7 @@ test('a full dead-letter spool must not silently discard the advisory', async ()
   // then reports a rejection instead of DEAD_LETTER and the stream aborts.
   const directory = await mkdtemp(join(tmpdir(), 'correlation-dlq-full-'));
   try {
-    const queue = new DeadLetterQueue(directory, key, silent());
+    const queue = new DeadLetterQueue(directory, [key], silent());
     // Fill the spool to its documented ceiling (file i is the (i+1)th letter).
     for (let i = 0; i < 255; i++)
       await queue.capture({ i }, 'VALIDATION_FAILED', randomUUID(), {} as pg.Pool);
@@ -285,7 +285,7 @@ test(
       await migrate(pool);
       await migrate(pool);
       const telemetry = silent();
-      const queue = new DeadLetterQueue(directory, key, telemetry);
+      const queue = new DeadLetterQueue(directory, [key], telemetry);
       const ingestor = new AdvisoryIngestor(telemetry, queue);
       const assetId = randomUUID();
       await pool.query(
@@ -612,7 +612,7 @@ test(
         WORKER_ENABLED: 'false',
       });
       await createUser(pool, 'native-admin', 'Disposable-native-test-password-2026!', 'ADMIN');
-      const runtime = new CorrelationRuntime(pool, key, directory);
+      const runtime = new CorrelationRuntime(pool, [key], directory);
       const app = createApp(pool, config, async () => ({ status: 200, headers: {}, body: '[]' }), {
         correlation: runtime,
       });

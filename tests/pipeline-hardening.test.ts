@@ -79,7 +79,7 @@ test(
       try {
         const supervisor = new PipelineSupervisor(
           pool,
-          new AdvisoryIngestor(telemetry, new DeadLetterQueue(directory, key, telemetry)),
+          new AdvisoryIngestor(telemetry, new DeadLetterQueue(directory, [key], telemetry)),
         );
         // Make the auxiliary health step fail with a *schema* error while the
         // database stays perfectly reachable. Before the fix, the supervisor
@@ -133,7 +133,7 @@ test(
       try {
         const supervisor = new PipelineSupervisor(
           pool,
-          new AdvisoryIngestor(telemetry, new DeadLetterQueue(directory, key, telemetry)),
+          new AdvisoryIngestor(telemetry, new DeadLetterQueue(directory, [key], telemetry)),
         );
         Object.defineProperty(supervisor, 'pool', {
           value: {

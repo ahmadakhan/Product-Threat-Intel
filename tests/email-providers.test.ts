@@ -309,7 +309,7 @@ test(
       const stored = await get<EmailConfiguration>(pool, 'emailConfig', 'main');
       assert.ok(stored);
       assert.notEqual(stored.apiKey, token);
-      assert.equal(decrypt(stored.apiKey, config.ENCRYPTION_KEY, 'email-provider:SENDGRID'), token);
+      assert.equal(decrypt(stored.apiKey, [config.ENCRYPTION_KEY], 'email-provider:SENDGRID'), token);
       const snapshot = (await admin.get('/api/state')).body;
       assert.equal(snapshot.emailConfig.apiKey, '');
       assert.equal(snapshot.emailConfig.hasApiKey, true);
@@ -375,7 +375,7 @@ test(
       };
       assert.equal((await command(apiA)).status, 200);
       const storedA = await get<EmailConfiguration>(pool, 'emailConfig', 'main');
-      assert.equal(decrypt(storedA!.apiKey, config.ENCRYPTION_KEY, 'email-provider:API'), token);
+      assert.equal(decrypt(storedA!.apiKey, [config.ENCRYPTION_KEY], 'email-provider:API'), token);
       const apiB = {
         ...apiA,
         // Restores the original fixture: the destination must actually CHANGE,
@@ -392,14 +392,14 @@ test(
       assert.equal(
         decrypt(
           (await get<EmailConfiguration>(pool, 'emailConfig', 'main'))!.apiKey,
-          config.ENCRYPTION_KEY,
+          [config.ENCRYPTION_KEY],
           'email-provider:API',
         ),
         token,
       );
       assert.equal((await command({ ...apiB, apiKey: token })).status, 200);
       const storedB = await get<EmailConfiguration>(pool, 'emailConfig', 'main');
-      assert.equal(decrypt(storedB!.apiKey, config.ENCRYPTION_KEY, 'email-provider:API'), token);
+      assert.equal(decrypt(storedB!.apiKey, [config.ENCRYPTION_KEY], 'email-provider:API'), token);
       // Re-saving the same destination without a new token keeps the secret.
       assert.equal((await command({ ...apiB, apiKey: '' })).status, 200);
       assert.equal((await get<EmailConfiguration>(pool, 'emailConfig', 'main'))?.apiKey, storedB!.apiKey);

@@ -205,7 +205,7 @@ test(
       await transaction(pool, async (db) => {
         const secret = (await import('../server/secrets.ts')).encrypt(
           'token',
-          config.ENCRYPTION_KEY,
+          [config.ENCRYPTION_KEY],
           'email-provider:SENDGRID',
         );
         const stored = await get<EmailConfiguration>(db, 'emailConfig', 'main');

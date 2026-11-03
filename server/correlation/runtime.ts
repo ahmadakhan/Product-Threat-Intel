@@ -61,7 +61,7 @@ export class CorrelationRuntime {
   private scheduledStateRefreshIntervalSeconds: number;
   constructor(
     private readonly pool: Pool,
-    key: string,
+    keys: string[],
     directory: string,
     options: {
       url: string;
@@ -72,7 +72,7 @@ export class CorrelationRuntime {
   ) {
     const telemetry = new CorrelationTelemetry();
     telemetry.verbosity = options.logLevel ?? 'standard';
-    const queue = new DeadLetterQueue(directory, key, telemetry);
+    const queue = new DeadLetterQueue(directory, keys, telemetry);
     this.supervisor = new PipelineSupervisor(pool, new AdvisoryIngestor(telemetry, queue));
     this.processor = new AdvisoryStreamProcessor(this.supervisor);
     this.heartbeat = new Heartbeat({

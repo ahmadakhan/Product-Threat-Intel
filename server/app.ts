@@ -46,7 +46,7 @@ import { runCpeSimulation } from '../src/utils/cpeSimulation.ts';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine.ts';
 import { HttpError } from './validation';
 import { applyCommand, assertCommandRole } from './commands';
-import { checkPassword, passwordHash, decrypt, secureEqual, tokenHash } from './secrets';
+import { checkPassword, passwordHash, decrypt, encryptionKeys, randomToken, secureEqual, tokenHash } from './secrets';
 import { createRequester, resolvePublic } from './network';
 import type { Requester, ResponseData } from './network';
 import { queueRun, stopRun, renderAdvisory } from './pipeline';
@@ -738,7 +738,7 @@ export function createApp(
       asyncRoute(async (req, res) => {
         const id = z.uuid().parse(req.params.id);
         await transaction(pool, (db) =>
-          decideDeadLetter(db, id, req.body, req.operator!.username, config.ENCRYPTION_KEY),
+          decideDeadLetter(db, id, req.body, req.operator!.username, encryptionKeys(config)),
         );
         res.json({ success: true });
       }),
@@ -1190,10 +1190,13 @@ export function createApp(
     requireAuth(pool, config),
     asyncRoute(async (req, res) => {
       const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
+      // Rotate the CSRF token on every renewal so a captured token cannot be
+      // reused beyond the current session lifetime.
+      const csrf = randomToken();
       const row = (
         await pool.query(
-          "UPDATE sessions SET expires_at=LEAST(now()+($2::int * interval '1 minute'),absolute_expires_at) WHERE token_hash=$1 RETURNING expires_at",
-          [req.operator!.sessionHash, settings.securityPolicy.sessionTimeoutMins],
+          "UPDATE sessions SET expires_at=LEAST(now()+($2::int * interval '1 minute'),absolute_expires_at),csrf=$3 WHERE token_hash=$1 RETURNING expires_at",
+          [req.operator!.sessionHash, settings.securityPolicy.sessionTimeoutMins, csrf],
         )
       ).rows[0];
       // A session can be invalidated between requireAuth and this handler
@@ -1205,7 +1208,7 @@ export function createApp(
         res.clearCookie(cookieName(config), sessionCookieOptions(config));
         throw new HttpError(401, 'Session expired');
       }
-      res.json({ expiresAt: row.expires_at.toISOString() });
+      res.json({ expiresAt: row.expires_at.toISOString(), csrfToken: csrf });
     }),
   );
   app.post(
@@ -1652,7 +1655,7 @@ export function createApp(
           : {};
       let secret: string;
       try {
-        secret = decrypt(feed.authSecretKey || '', config.ENCRYPTION_KEY, `feed:${feed.id}`);
+        secret = decrypt(feed.authSecretKey || '', encryptionKeys(config), `feed:${feed.id}`);
       } catch {
         throw new HttpError(
           400,
