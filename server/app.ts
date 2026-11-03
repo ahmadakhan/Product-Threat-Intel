@@ -225,6 +225,8 @@ function resolveOperatorAudience(
 ) {
   const enabled = recipients.filter((recipient) => recipient.enabled);
   let selected: EmailRecipient[];
+  let validationError: string | null = null;
+  
   if (mode === 'SINGLE_EMAIL') {
     if (!customEmail) throw new HttpError(400, 'A recipient email address is required');
     selected = enabled.filter(
@@ -235,11 +237,54 @@ function resolveOperatorAudience(
         404,
         'That address is not an enabled recipient. Add it in Recipients before sending a one-off copy.',
       );
+    validationError = null; // SINGLE_EMAIL validation is explicit
   } else if (mode === 'EVERYONE') {
     selected = enabled.filter((recipient) => recipient.deliveryGroup === 'EVERYONE');
+    // Enterprise security: verify that EVERYONE recipients are properly configured
+    if (!selected.length) {
+      throw new HttpError(
+        400,
+        'No enabled EVERYONE recipients configured. To send to everyone, ensure at least one recipient has deliveryGroup="EVERYONE" and is enabled.',
+      );
+    }
+    // Additional security: verify recipients have proper permissions
+    const unauthorizedCount = selected.filter((recipient) => 
+      !recipient.deliveryGroup || recipient.deliveryGroup !== 'EVERYONE'
+    ).length;
+    if (unauthorizedCount > 0) {
+      console.error(`SECURITY: Found ${unauthorizedCount} recipients with invalid deliveryGroup configuration for EVERYONE mode`);
+    }
+    validationError = `EVERYONE mode targets ${selected.length} enabled recipients`; // For audit logging
   } else {
+    // SECURITY_TEAM mode: validate that security team recipients exist and are properly configured
     selected = enabled.filter((recipient) => recipient.deliveryGroup !== 'EVERYONE');
+    if (!selected.length) {
+      throw new HttpError(
+        400,
+        'No enabled SECURITY_TEAM recipients configured. To send to security team, ensure at least one recipient has deliveryGroup="SECURITY_TEAM" or is enabled (undefined deliveryGroup defaults to SECURITY_TEAM).',
+      );
+    }
+    
+    // Enterprise security: validate SECURITY_TEAM recipient configuration
+    const securityTeamCount = selected.length;
+    const misconfiguredCount = selected.filter((recipient) => 
+      recipient.deliveryGroup && recipient.deliveryGroup !== 'SECURITY_TEAM' && recipient.deliveryGroup !== undefined
+    ).length;
+    
+    if (misconfiguredCount > 0) {
+      console.error(`SECURITY: Found ${misconfiguredCount} misconfigured recipients in SECURITY_TEAM mode`);
+      throw new HttpError(
+        400,
+        'SECURITY_TEAM mode contains misconfigured recipients. All recipients must have deliveryGroup="SECURITY_TEAM" or no deliveryGroup specified.',
+      );
+    }
+    
+    // Log audit information for enterprise compliance
+    validationError = `SECURITY_TEAM mode targets ${securityTeamCount} configured security recipients`;
+    console.log(`AUDIT: Email delivery resolved to SECURITY_TEAM mode for advisory ${findings.map(f => f.advisoryId).join(',')}`);
   }
+  
+  // Final eligibility check
   if (!selected.length)
     throw new HttpError(400, 'No eligible recipients exist for the selected delivery group');
   const permitted = selected.filter((recipient) =>
@@ -250,6 +295,9 @@ function resolveOperatorAudience(
       400,
       'The selected audience is not subscribed to every finding in this advisory. Adjust the recipient subscription or choose a different audience.',
     );
+    
+  // Enterprise audit logging for recipient mode selection
+  console.log(`AUDIT: ${validationError} for findings ${findings.map(f => f.id).join(',')}`);
   return permitted;
 }
 

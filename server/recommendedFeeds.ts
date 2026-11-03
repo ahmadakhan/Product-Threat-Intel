@@ -227,24 +227,9 @@ export const RECOMMENDED_FEEDS = [
     id: 'feed-github-security-advisories',
     name: 'GitHub Security Advisories',
     type: 'RSS_ATOM' as const,
-    // github.com/advisories.atom answers HTTP 406 to non-browser agents on
-    // most networks (verified 2026-11 across UA/Accept/compression/edge-IP
-    // variants), and /security-advisories.atom returns GitHub's 5xx error
-    // page. The GitHub Security blog's Atom feed on github.blog serves the
-    // same advisories as RSS/Atom (verified 200 + parse), so use that.
-    url: 'https://github.blog/security.atom',
+    url: 'https://github.com/advisories.atom',
     authType: 'NONE' as const,
     rateLimitPerMin: 5,
-    enabled: false,
-    vendorSeed: true,
-  },
-  {
-    id: 'feed-pentestpartners',
-    name: 'Pentest Partners Research',
-    type: 'RSS_ATOM' as const,
-    url: 'https://www.pentestpartners.com/feed/',
-    authType: 'NONE' as const,
-    rateLimitPerMin: 3,
     enabled: false,
     vendorSeed: true,
   },
@@ -259,13 +244,23 @@ export const RECOMMENDED_FEEDS = [
     vendorSeed: true,
   },
   {
+    id: 'feed-forbes-cybersecurity',
+    name: 'Forbes Cybersecurity News',
+    type: 'RSS_ATOM' as const,
+    url: 'https://www.forbes.com/cybersecurity/rss.xml',
+    authType: 'NONE' as const,
+    rateLimitPerMin: 5,
+    enabled: false,
+    vendorSeed: true,
+  },
+  {
     id: 'feed-the-registrar-security',
     name: 'The Register Security',
     type: 'RSS_ATOM' as const,
     // /security/feed/ returns HTTP 404 (verified 2026-11). /security/headlines.atom
     // 302-redirects to api.theregister.com, which serves valid RSS (verified 200 +
     // application/xml); api.theregister.com is allowlisted in config.ts.
-    url: 'https://www.theregister.com/security/headlines.atom',
+    url: 'https://api.theregister.com/security/headlines.atom',
     authType: 'NONE' as const,
     rateLimitPerMin: 5,
     enabled: false,
@@ -328,6 +323,16 @@ export const RECOMMENDED_FEEDS = [
     url: 'https://news.google.com/rss/search?q=vulnerability+CVE&hl=en-US&gl=US&ceid=US:en',
     authType: 'NONE' as const,
     rateLimitPerMin: 5,
+    enabled: false,
+    vendorSeed: true,
+  },
+  {
+    id: 'feed-pentestpartners',
+    name: 'Pentest Partners Research',
+    type: 'RSS_ATOM' as const,
+    url: 'https://www.pentestpartners.com/research/feed/',
+    authType: 'NONE' as const,
+    rateLimitPerMin: 3,
     enabled: false,
     vendorSeed: true,
   },

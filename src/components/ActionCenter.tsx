@@ -1256,11 +1256,9 @@ export const ActionCenter: React.FC = () => {
                           <RefreshCw className="h-4 w-4 animate-spin" /> Generating preview…
                         </div>
                       ) : (
-                        <iframe
-                          title="Email preview"
-                          sandbox="allow-same-origin"
-                          className="h-[480px] w-full rounded-xl border border-zinc-800/80 light:border-zinc-200"
-                          srcDoc={previewHtml}
+                        <div
+                          className="h-[480px] w-full overflow-auto rounded-xl border border-zinc-800/80 light:border-zinc-200 bg-white p-4"
+                          dangerouslySetInnerHTML={{ __html: previewHtml }}
                         />
                       )
                     ) : (
@@ -1271,17 +1269,26 @@ export const ActionCenter: React.FC = () => {
                           </div>
                         ) : pdfError ? (
                           <div className="flex h-full items-center justify-center p-6 text-center text-xs text-rose-400">
-                            {pdfError}
+                            <FileText className="h-8 w-8 mb-2" />
+                            <div>{pdfError}</div>
+                            <button
+                              onClick={() => void refreshPdf()}
+                              className="mt-4 px-3 py-1.5 rounded-lg bg-rose-500/10 text-rose-400 border border-rose-500/20 hover:bg-rose-500/20 text-xs font-medium transition"
+                            >
+                              <RefreshCw className="h-3 w-3 inline mr-1" /> Retry
+                            </button>
                           </div>
                         ) : pdfUrl ? (
                           <iframe
                             title="PDF preview"
-                            className="h-full w-full bg-white"
-                            src={`${pdfUrl}#toolbar=0`}
+                            className="h-full w-full"
+                            src={`${pdfUrl}#toolbar=0&view=FitH&scrollbar=0&statusbar=0&messages=0&navpanes=0`}
+                            sandbox="allow-same-origin allow-scripts allow-popups"
                           />
                         ) : (
                           <div className="flex h-full items-center justify-center text-xs text-zinc-500">
-                            Open the PDF tab to render the attachment.
+                            <FileText className="h-8 w-8 mb-2" />
+                            <div>Open the PDF tab to render the attachment.</div>
                           </div>
                         )}
                       </div>
