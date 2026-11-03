@@ -1,0 +1,124 @@
+import { randomBytes } from 'node:crypto';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readCookie, requireRole } from '../server/auth.ts';
+import { loadConfig } from '../server/config.ts';
+import { RECOMMENDED_FEEDS } from '../server/recommendedFeeds.ts';
+import type { Request, Response } from 'express';
+
+const baseEnv = {
+  NODE_ENV: 'test',
+  DATABASE_URL: 'postgres://user:pass@127.0.0.1:5432/db',
+  APP_ORIGIN: 'http://127.0.0.1:8080',
+  ENCRYPTION_KEY: randomBytes(32).toString('base64'),
+};
+
+const runRole = (roles: Parameters<typeof requireRole>, operator?: { role: string }) => {
+  let error: unknown;
+  let passed = false;
+  const middleware = requireRole(...roles);
+  middleware(
+    { operator } as unknown as Request,
+    {} as Response,
+    ((nextError?: unknown) => {
+      error = nextError;
+      passed = !nextError;
+    }) as never,
+  );
+  return { error, passed };
+};
+
+test('cookie parsing matches the exact cookie name and ignores prefix shadows', () => {
+  assert.equal(readCookie('vulnstream=real-token', 'vulnstream'), 'real-token');
+  assert.equal(
+    readCookie('vulnstream_attacker=shadow; vulnstream=real-token', 'vulnstream'),
+    'real-token',
+  );
+  assert.equal(readCookie('other=value; vulnstream=', 'vulnstream'), '');
+  assert.equal(readCookie('vulnstream=first; vulnstream=second', 'vulnstream'), 'first');
+  assert.equal(readCookie(undefined, 'vulnstream'), '');
+  assert.equal(readCookie('malformed; =empty; vulnstream=ok', 'vulnstream'), 'ok');
+});
+
+test('requireRole fails closed when authentication middleware did not run', () => {
+  const missing = runRole(['ADMIN']);
+  assert.equal(missing.passed, false);
+  assert.equal((missing.error as { status?: number }).status, 401);
+
+  const denied = runRole(['ADMIN'], { role: 'VIEWER' });
+  assert.equal(denied.passed, false);
+  assert.equal((denied.error as { status?: number }).status, 403);
+
+  const allowed = runRole(['ADMIN', 'OPERATOR'], { role: 'OPERATOR' });
+  assert.equal(allowed.passed, true);
+  assert.equal(allowed.error, undefined);
+});
+
+test('configuration rejects malformed database URLs and trust-all proxy settings', () => {
+  assert.throws(() => loadConfig({ ...baseEnv, DATABASE_URL: 'not-a-url' }), /DATABASE_URL/);
+  assert.throws(
+    () => loadConfig({ ...baseEnv, DATABASE_URL: 'mysql://127.0.0.1/db' }),
+    /DATABASE_URL/,
+  );
+  for (const trust of ['*', 'true', '0.0.0.0/0', '::/0']) {
+    assert.throws(
+      () => loadConfig({ ...baseEnv, TRUST_PROXY: trust }),
+      /TRUST_PROXY/,
+      `trust proxy ${trust} must be rejected`,
+    );
+  }
+  assert.equal(loadConfig({ ...baseEnv, TRUST_PROXY: 'loopback,10.0.0.0/8' }).TRUST_PROXY, 'loopback,10.0.0.0/8');
+  assert.equal(loadConfig(baseEnv).TRUST_PROXY, '');
+});
+
+test('the default egress allowlist covers every redirect target of the recommended feeds', () => {
+  const hosts = new Set(loadConfig(baseEnv).EGRESS_ALLOWED_HOSTS.split(','));
+  // Probed over the network: each of these answers the feed URL with a
+  // cross-host or same-host redirect. A hop is re-validated against the
+  // allowlist, so a missing target fails the feed with "not in
+  // EGRESS_ALLOWED_HOSTS".
+  for (const host of [
+    'www.cisecurity.org',
+    'cisecurity.org',
+    'feeds.feedburner.com',
+    'projectzero.google',
+    'sec.cloudapps.cisco.com',
+  ]) {
+    assert.ok(hosts.has(host), `${host} must be allowlisted for its feed to follow its redirect`);
+  }
+  assert.ok(hosts.has('www.cisecurity.com'), 'the configured URL host must stay allowlisted');
+  assert.ok(hosts.has('api.osv.dev'), 'the vulnerability search primary database must stay allowlisted');
+  assert.ok(hosts.has('services.nvd.nist.gov'), 'the vulnerability search CVE enrichment must stay allowlisted');
+});
+
+test('every recommended feed URL host is allowlisted', () => {
+  const hosts = new Set(loadConfig(baseEnv).EGRESS_ALLOWED_HOSTS.split(','));
+  for (const feed of RECOMMENDED_FEEDS) {
+    const host = new URL(feed.url).hostname.toLowerCase();
+    assert.ok(hosts.has(host), `${feed.id} (${host}) must be allowlisted or its first request is blocked`);
+  }
+});
+
+test('EGRESS_ALLOWED_HOSTS_EXTRA appends to the default allowlist instead of replacing it', () => {
+  const merged = loadConfig({
+    ...baseEnv,
+    EGRESS_ALLOWED_HOSTS_EXTRA: ' Example.test , feeds.example.test,EXAMPLE.test ',
+  }).EGRESS_ALLOWED_HOSTS.split(',');
+  assert.ok(merged.includes('feeds.example.test'));
+  assert.deepEqual(merged.filter((host) => host === 'example.test'), ['example.test'], 'duplicates are collapsed');
+  assert.ok(merged.includes('www.cisecurity.org'), 'defaults survive when only extra hosts are configured');
+});
+
+test('setting EGRESS_ALLOWED_HOSTS explicitly still retains the recommended-feed baseline', () => {
+  const merged = loadConfig({
+    ...baseEnv,
+    EGRESS_ALLOWED_HOSTS: 'api.sendgrid.com,smtp.gmail.com',
+  }).EGRESS_ALLOWED_HOSTS.split(',');
+  // The operator's mail hosts are admitted...
+  assert.ok(merged.includes('api.sendgrid.com'));
+  assert.ok(merged.includes('smtp.gmail.com'));
+  // ...but the default feed/API hosts are never dropped, so feeds keep working.
+  assert.ok(merged.includes('www.darkreading.com'), 'darkreading must stay allowlisted');
+  assert.ok(merged.includes('services.nvd.nist.gov'), 'nvd must stay allowlisted');
+  assert.ok(merged.includes('www.googleapis.com'), 'googleapis must stay allowlisted');
+});

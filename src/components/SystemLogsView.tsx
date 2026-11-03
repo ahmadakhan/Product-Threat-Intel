@@ -1,0 +1,417 @@
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  AlertTriangle,
+  ArrowLeft,
+  ArrowRight,
+  ChevronRight,
+  Clock3,
+  Database,
+  Filter,
+  HardDrive,
+  Play,
+  RotateCw,
+  Search,
+  Server,
+  X,
+} from 'lucide-react';
+import { useApp } from '../context/AppContext';
+import type { OperationalEvent } from '../types';
+import { EventDetailPanel } from './EventDetailPanel';
+import { formatDate, formatTime, timezoneLabel } from '../utils/dateTime';
+import './logs-view.css';
+
+function contextPreview(event: OperationalEvent) {
+  const context = event.context || {};
+  const priority = [
+    'source',
+    'container',
+    'host',
+    'database',
+    'table',
+    'query',
+    'stack',
+    'traceId',
+    'connection',
+    'durationMs',
+    'error',
+    'message',
+  ];
+  return [...new Set([...priority, ...Object.keys(context)])]
+    .filter(
+      (key) =>
+        context[key] !== undefined &&
+        context[key] !== null &&
+        ['string', 'number', 'boolean'].includes(typeof context[key]) &&
+        !['timestamp'].includes(key),
+    )
+    .slice(0, 3)
+    .map((key) => ({
+      label: key.charAt(0).toUpperCase() + key.slice(1).replace(/([A-Z])/g, ' $1').trim(),
+      value: typeof context[key] === 'boolean' ? (context[key] ? 'Yes' : 'No') : String(context[key]),
+    }));
+}
+
+export const SystemLogsView: React.FC = () => {
+  const { fetchEvents, settings } = useApp();
+  const [query, setQuery] = useState('');
+  const [level, setLevel] = useState('');
+  const [history, setHistory] = useState<string[]>([]);
+  const cursor = history.at(-1) || '';
+  const [next, setNext] = useState<string | null>(null);
+  const [events, setEvents] = useState<OperationalEvent[]>([]);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [updatedAt, setUpdatedAt] = useState('');
+  const [selectedEvent, setSelectedEvent] = useState<OperationalEvent | null>(null);
+  const [refresh, setRefresh] = useState(0);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const pendingRequest = useRef(false);
+  const filtered = Boolean(query || level);
+  const clearFilters = () => {
+    setQuery('');
+    setLevel('');
+    setHistory([]);
+  };
+
+  useEffect(() => {
+    let disposed = false;
+    setLoading(true);
+    pendingRequest.current = true;
+    setError('');
+    const timer = setTimeout(() => {
+      fetchEvents(
+        new URLSearchParams({
+          category: 'SYSTEM',
+          ...(level && { level }),
+          ...(query && { q: query }),
+          ...(cursor && { before: cursor }),
+        }).toString(),
+      )
+        .then((result) => {
+          if (!disposed) {
+            setEvents(result.events);
+            setNext(result.nextCursor);
+            setUpdatedAt(new Date().toISOString());
+          }
+        })
+        .catch((error: unknown) => {
+          if (!disposed) setError(error instanceof Error ? error.message : 'Please try again.');
+        })
+        .finally(() => {
+          if (!disposed) {
+            pendingRequest.current = false;
+            setLoading(false);
+          }
+        });
+    }, 250);
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
+  }, [query, level, cursor, refresh]);
+
+  useEffect(() => {
+    if (cursor) return;
+    const update = () => {
+      if (!pendingRequest.current && document.visibilityState !== 'hidden') setRefresh((value) => value + 1);
+    };
+    const interval = setInterval(update, 10_000);
+    document.addEventListener('visibilitychange', update);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', update);
+    };
+  }, [cursor]);
+
+  const errors = events.filter((event) => event.level === 'ERROR').length;
+  const warnings = events.filter((event) => event.level === 'WARNING').length;
+  return (
+    <section id="logs-system-panel" role="tabpanel" aria-labelledby="logs-system-tab" className="system-logs">
+      <header className="system-logs-header">
+        <div className="system-logs-heading">
+          <span className="system-logs-icon">
+            <Server size={21} aria-hidden="true" />
+          </span>
+          <div>
+            <h2>System & Application logs</h2>
+            <p>Database queries, Docker containers, application errors, and runtime diagnostics.</p>
+          </div>
+        </div>
+        <span className={`system-logs-live ${cursor ? 'is-paused' : ''}`}>
+          <span aria-hidden="true" />
+          {cursor ? 'History · auto-refresh paused' : 'Auto-refresh · every 10s'}
+        </span>
+      </header>
+
+      <div className="ui-panel system-logs-filters">
+        <div className="system-logs-filter-title">
+          <Filter size={14} aria-hidden="true" /> Filter system logs
+        </div>
+        <div className="system-logs-filter-grid">
+          <label className="system-logs-search">
+            <span>Search logs</span>
+            <div className="system-logs-search-control">
+              <Search size={16} aria-hidden="true" />
+              <input
+                ref={searchRef}
+                type="search"
+                aria-label="Search system logs"
+                maxLength={200}
+                value={query}
+                placeholder="Database queries, Docker, containers, application errors…"
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  setHistory([]);
+                }}
+              />
+              {query && (
+                <button
+                  type="button"
+                  aria-label="Clear system search"
+                  onClick={() => {
+                    setQuery('');
+                    setHistory([]);
+                    searchRef.current?.focus();
+                  }}
+                >
+                  <X size={15} aria-hidden="true" />
+                </button>
+              )}
+            </div>
+          </label>
+          <label>
+            <span>Event level</span>
+            <select
+              aria-label="System event level"
+              value={level}
+              onChange={(event) => {
+                setLevel(event.target.value);
+                setHistory([]);
+              }}
+            >
+              <option value="">All levels</option>
+              <option value="INFO">Info</option>
+              <option value="WARNING">Warning</option>
+              <option value="ERROR">Error</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            className="system-logs-button system-logs-refresh"
+            disabled={loading}
+            onClick={() => setRefresh((value) => value + 1)}
+          >
+            <RotateCw size={15} className={loading ? 'animate-spin' : ''} aria-hidden="true" />
+            Refresh
+          </button>
+        </div>
+        {filtered && (
+          <div className="system-logs-filter-summary">
+            <span>
+              Filtered system logs
+              {level ? ` · ${level === 'INFO' ? 'Info' : level === 'WARNING' ? 'Warning' : 'Error'}` : ''}
+            </span>
+            <button type="button" onClick={clearFilters}>
+              <X size={13} aria-hidden="true" />
+              Clear filters
+            </button>
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <div role="alert" className="system-logs-error">
+          <AlertTriangle size={19} aria-hidden="true" />
+          <div>
+            <strong>Could not {events.length ? 'refresh' : 'load'} system logs</strong>
+            <p>{error}</p>
+            {events.length > 0 && <p>The last loaded logs are still shown below.</p>}
+          </div>
+          <button
+            type="button"
+            className="system-logs-button"
+            disabled={loading}
+            onClick={() => setRefresh((value) => value + 1)}
+          >
+            Try again
+          </button>
+        </div>
+      )}
+
+      <div className="ui-panel system-logs-events" aria-busy={loading}>
+        <div className="system-logs-events-heading">
+          <div>
+            <h3>Log history</h3>
+            <p>
+              {cursor ? 'Earlier system activity' : 'Latest system activity'}
+              <span aria-hidden="true"> · </span>Times in {timezoneLabel(settings.timezone)}
+            </p>
+          </div>
+          <div className="system-logs-page-count" role="status" aria-live="polite">
+            <span>{loading ? 'Updating…' : `${events.length} logs on this page`}</span>
+            {events.length > 0 && (
+              <>
+                <span className="system-logs-count-error">
+                  {errors} {errors === 1 ? 'error' : 'errors'}
+                </span>
+                <span className="system-logs-count-warning">
+                  {warnings} {warnings === 1 ? 'warning' : 'warnings'}
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+        {!events.length && !error && (
+          <div className="system-logs-empty" role="status">
+            {loading ? (
+              <RotateCw size={25} className="animate-spin" aria-hidden="true" />
+            ) : (
+              <Server size={27} aria-hidden="true" />
+            )}
+            <h3>{loading ? 'Loading system logs…' : filtered ? 'No matching logs' : 'No system logs yet'}</h3>
+            <p>
+              {loading
+                ? 'Retrieving the system log history.'
+                : filtered
+                  ? 'Try another search or clear your filters to see more logs.'
+                  : 'Database queries, Docker containers, application errors, and runtime diagnostics will appear here when recorded.'}
+            </p>
+            {filtered && !loading && (
+              <button type="button" className="system-logs-button" onClick={clearFilters}>
+                Clear filters
+              </button>
+            )}
+          </div>
+        )}
+        {events.length > 0 && (
+          <table className="system-logs-table">
+            <thead>
+              <tr>
+                <th scope="col">Source & Details</th>
+                <th scope="col">Level</th>
+                <th scope="col">Recorded</th>
+                <th scope="col">
+                  <span className="sr-only">Details</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {events.map((event) => {
+                const preview = contextPreview(event);
+                return (
+                  <tr
+                    key={event.id}
+                    onClick={() => setSelectedEvent(event)}
+                    className="cursor-pointer"
+                  >
+                    <td className="system-logs-event-cell">
+                      <code className="system-logs-code">{event.code}</code>
+                      <button
+                        type="button"
+                        className="system-logs-event-title"
+                        onClick={() => setSelectedEvent(event)}
+                      >
+                        {event.message}
+                        <ChevronRight size={15} aria-hidden="true" />
+                      </button>
+                      {preview.length > 0 && (
+                        <dl className="system-logs-context">
+                          {preview.map((item) => (
+                            <div key={item.label}>
+                              <dt>{item.label}</dt>
+                              <dd>{item.value}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      )}
+                      {event.level === 'ERROR' && event.context?.error !== undefined && (
+                        <p className="system-logs-error-preview">
+                          {typeof event.context.error === 'string'
+                            ? event.context.error
+                            : 'Error details available'}
+                        </p>
+                      )}
+                      {event.runId && <span className="system-logs-run">Run {event.runId}</span>}
+                    </td>
+                    <td className="system-logs-level-cell">
+                      <span className={`system-logs-level is-${event.level.toLowerCase()}`}>
+                        <span aria-hidden="true" />
+                        {event.level === 'INFO' ? 'Info' : event.level === 'WARNING' ? 'Warning' : 'Error'}
+                      </span>
+                    </td>
+                    <td className="system-logs-time-cell">
+                      <time dateTime={event.timestamp} title={event.timestamp}>
+                        {formatDate(event.timestamp, settings.timezone)}
+                        <span>{formatTime(event.timestamp, settings.timezone)}</span>
+                      </time>
+                    </td>
+                    <td className="system-logs-detail-cell">
+                      <button
+                        type="button"
+                        className="system-logs-detail"
+                        aria-label={`View details: ${event.message}`}
+                        onClick={() => setSelectedEvent(event)}
+                      >
+                        Details
+                        <ChevronRight size={14} aria-hidden="true" />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+        <footer className="system-logs-footer">
+          <span className="system-logs-update">
+            <Clock3 size={13} aria-hidden="true" />
+            {updatedAt ? `Last updated ${formatTime(updatedAt, settings.timezone)}` : 'Waiting for logs'}
+            {cursor && ` · Page ${history.length + 1}`}
+          </span>
+          <nav aria-label="System log pages">
+            <button
+              type="button"
+              className="system-logs-button"
+              disabled={!cursor || loading}
+              onClick={() => {
+                setHistory([]);
+                setRefresh((value) => value + 1);
+              }}
+            >
+              Latest
+            </button>
+            <button
+              type="button"
+              className="system-logs-button"
+              disabled={!cursor || loading}
+              onClick={() => {
+                setHistory((value) => value.slice(0, -1));
+              }}
+            >
+              <ArrowLeft size={14} aria-hidden="true" />
+              Newer
+            </button>
+            <button
+              type="button"
+              className="system-logs-button"
+              disabled={!next || loading || Boolean(error)}
+              onClick={() => {
+                if (next) setHistory((value) => [...value, next]);
+              }}
+            >
+              Older
+              <ArrowRight size={14} aria-hidden="true" />
+            </button>
+          </nav>
+        </footer>
+      </div>
+      {selectedEvent && (
+        <EventDetailPanel
+          event={selectedEvent}
+          timezone={settings.timezone}
+          onClose={() => setSelectedEvent(null)}
+        />
+      )}
+    </section>
+  );
+};
