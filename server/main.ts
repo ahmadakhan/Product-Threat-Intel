@@ -118,7 +118,10 @@ const request = createRequester(config),
 if (config.WORKER_ENABLED === 'true') correlation.start();
 else correlation.supervisor.start();
 
-const mlRuntime = await initMlRuntime(pool, { directory: config.ML_DIRECTORY }).catch((error) => { console.error('ML runtime init failed:', error); return undefined; });
+const mlRuntime = await initMlRuntime(pool, {
+  directory: config.ML_DIRECTORY,
+  signingKey: config.ML_SIGNING_KEY,
+}).catch((error) => { console.error('ML runtime init failed:', error); return undefined; });
 const app = createApp(pool, config, request, { correlation, mlRuntime,
   // The liveness probe only performs the stall check where the probe timeout is
   // comfortably above the block threshold; see the option's documentation.

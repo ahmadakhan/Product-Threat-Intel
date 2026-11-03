@@ -1078,6 +1078,8 @@ export interface AppSettings {
     minPasswordLen: number;
     maxLoginAttempts: number;
     lockoutMins: number;
+    /** Days an automatically learned alias survives after its last supporting evidence. */
+    autoAliasTtlDays: number;
   };
   /**
    * Operational logging detail level.

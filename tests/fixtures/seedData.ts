@@ -813,6 +813,7 @@ export const INITIAL_SETTINGS: AppSettings = {
     minPasswordLen: 12,
     maxLoginAttempts: 5,
     lockoutMins: 15,
+    autoAliasTtlDays: 30,
   },
   selfHealing: {
     enabled: true,

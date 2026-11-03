@@ -7,8 +7,10 @@
  * automatic rollback to the last known-good version.
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, renameSync } from 'node:fs';
+import { createHmac } from 'node:crypto';
 import { join } from 'node:path';
 import type { ModelArtifact, ModelMetadata, ModelRegistryEntry, ModelStorageOptions, TrainableModel, PredictionResult, FeedbackSignal } from './types.ts';
+import { secureEqual } from '../secrets.ts';
 
 interface ManifestArtifactEntry {
   version: string;
@@ -36,9 +38,11 @@ export class ModelRegistry {
   private models = new Map<string, ModelRegistryEntry>();
   private manifest: ModelManifest = {};
   private directory: string;
+  private signingKey: string | undefined;
 
   constructor(options: ModelStorageOptions) {
     this.directory = options.directory;
+    this.signingKey = options.signingKey;
     if (!existsSync(this.directory)) {
       mkdirSync(this.directory, { recursive: true });
     }
@@ -113,7 +117,15 @@ export class ModelRegistry {
       const data = JSON.parse(
         readFileSync(join(this.directory, active.path), 'utf8'),
       ) as ModelArtifact;
-       model.load(data);
+      if (this.signingKey && data.signature) {
+        const expected = createHmac('sha256', this.signingKey)
+          .update(JSON.stringify({ metadata: data.metadata, weights: data.weights }, null, 2))
+          .digest('hex');
+        if (!secureEqual(data.signature, expected)) {
+          return this.rollback(model, modelId, 'INVALID_SIGNATURE');
+        }
+      }
+      model.load(data);
        this.models.set(modelId, {
          model: model as TrainableModel,
          metadata: data.metadata,
@@ -126,7 +138,12 @@ export class ModelRegistry {
      }
    }
 
-  private async rollback(model: { load(artifact: ModelArtifact): void }, modelId: string, reason: string): Promise<boolean> {
+  private async rollback(
+    model: { load(artifact: ModelArtifact): void },
+    modelId: string,
+    reason: string,
+    preFilteredCandidates?: ManifestArtifactEntry[],
+  ): Promise<boolean> {
     const entry = this.manifest[modelId];
     if (!entry) return false;
 
@@ -136,17 +153,27 @@ export class ModelRegistry {
       active.rollbackTrigger = reason;
     }
 
-    const candidates = entry.artifacts.filter(
+    const rollbackCandidates = preFilteredCandidates ?? entry.artifacts.filter(
       (a) => a.version !== entry.activeVersion && a.status !== 'DEGRADED',
     );
-    if (candidates.length === 0) {
+    if (rollbackCandidates.length === 0) {
       this.saveManifest();
       return false;
     }
 
-    const prev = candidates.sort((a, b) => b.trainedAt.localeCompare(a.trainedAt))[0];
+    const prev = rollbackCandidates.sort((a, b) => b.trainedAt.localeCompare(a.trainedAt))[0];
     try {
       const data = JSON.parse(readFileSync(join(this.directory, prev.path), 'utf8')) as ModelArtifact;
+      if (this.signingKey && data.signature) {
+        const expected = createHmac('sha256', this.signingKey)
+          .update(JSON.stringify({ metadata: data.metadata, weights: data.weights }, null, 2))
+          .digest('hex');
+        if (!secureEqual(data.signature, expected)) {
+          // Skip this corrupted artifact and try the next candidate.
+          const remainingRollbackCandidates = rollbackCandidates.filter((c) => c.version !== prev.version);
+          return this.rollback(model, modelId, 'INVALID_SIGNATURE_ROLLBACK', remainingRollbackCandidates);
+        }
+      }
       model.load(data);
       prev.status = 'STANDBY_ROLLBACK';
       this.models.set(modelId, {
@@ -190,6 +217,10 @@ export class ModelRegistry {
     const artifact: ModelArtifact = model.serialize();
     const filename = `${metadata.version}.json`;
     const path = join(dir, filename);
+    if (this.signingKey) {
+      const payload = JSON.stringify(artifact, null, 2);
+      artifact.signature = createHmac('sha256', this.signingKey).update(payload).digest('hex');
+    }
     writeFileSync(path, JSON.stringify(artifact, null, 2), 'utf8');
 
     const manifestEntry = this.manifest[modelId] ?? {
@@ -230,6 +261,10 @@ export class ModelRegistry {
 
     const filename = `${metadata.version}.json`;
     const path = join(dir, filename);
+    if (this.signingKey) {
+      const payload = JSON.stringify(artifact, null, 2);
+      artifact.signature = createHmac('sha256', this.signingKey).update(payload).digest('hex');
+    }
     writeFileSync(path, JSON.stringify(artifact, null, 2), 'utf8');
 
     const manifestEntry = this.manifest[modelId] ?? {

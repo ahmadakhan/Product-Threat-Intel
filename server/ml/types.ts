@@ -48,6 +48,8 @@ export interface PredictionResult {
 export interface ModelArtifact {
   metadata: ModelMetadata;
   weights: unknown;
+  /** HMAC-SHA256 signature over the artifact content, for integrity verification on load. */
+  signature?: string;
 }
 
 export interface TrainableModel {
@@ -108,6 +110,8 @@ export interface Scaler {
 /** Options for the local persistence layer. */
 export interface ModelStorageOptions {
   directory: string;
+  /** HMAC-SHA256 key used to sign artifacts on save and verify on load. */
+  signingKey?: string;
 }
 
 /**

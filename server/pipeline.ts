@@ -1634,7 +1634,9 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         ...deriveInventoryAliases(snapshot.watchlist, aliasEntries),
         ...deriveCorrelationAliases(persistedFindings, snapshot.watchlist, byId, aliasEntries),
       ];
-      const autoAliases = reconcileAutoAliases(aliasEntries, desiredAutoAliases);
+      const autoAliases = reconcileAutoAliases(aliasEntries, desiredAutoAliases, undefined, {
+        ttlDays: settings.securityPolicy.autoAliasTtlDays,
+      });
       // Batched, not per-row (audit finding #10): alias reconciliation can
       // touch hundreds of entries per run; putMany/removeMany issue one
       // parameterised statement each instead of one round trip per row.

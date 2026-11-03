@@ -88,6 +88,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     minPasswordLen: 14,
     maxLoginAttempts: 5,
     lockoutMins: 15,
+    autoAliasTtlDays: 30,
   },
   // Standard keeps the event table small enough to stay fast during an
   // incident; verbose is an explicit forensic choice.
