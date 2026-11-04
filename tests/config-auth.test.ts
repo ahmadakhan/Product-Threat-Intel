@@ -1,8 +1,9 @@
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readCookie, requireRole } from '../server/auth.ts';
-import { loadConfig } from '../server/config.ts';
+import { DEFAULT_EGRESS_HOSTS, loadConfig } from '../server/config.ts';
 import { RECOMMENDED_FEEDS } from '../server/recommendedFeeds.ts';
 import type { Request, Response } from 'express';
 
@@ -97,6 +98,24 @@ test('every recommended feed URL host is allowlisted', () => {
     const host = new URL(feed.url).hostname.toLowerCase();
     assert.ok(hosts.has(host), `${feed.id} (${host}) must be allowlisted or its first request is blocked`);
   }
+});
+
+test('Compose egress defaults match the application and preserve explicit empty deny-all settings', () => {
+  const compose = readFileSync(new URL('../compose.yaml', import.meta.url), 'utf8');
+  const hostsLine = compose.split('\n').find((line) => line.includes('EGRESS_ALLOWED_HOSTS:'));
+  const extrasLine = compose.split('\n').find((line) => line.includes('EGRESS_ALLOWED_HOSTS_EXTRA:'));
+  assert.ok(hostsLine);
+  assert.ok(extrasLine);
+  const fallback = hostsLine.match(/\$\{EGRESS_ALLOWED_HOSTS-([^}]+)\}/)?.[1];
+  assert.ok(fallback, 'Compose must use the unset-only default operator');
+  assert.deepEqual(
+    new Set(fallback.split(',')),
+    new Set(DEFAULT_EGRESS_HOSTS.split(',')),
+    'Compose and application egress defaults must stay in sync',
+  );
+  assert.doesNotMatch(hostsLine, /\$\{EGRESS_ALLOWED_HOSTS:-/);
+  assert.match(extrasLine, /\$\{EGRESS_ALLOWED_HOSTS_EXTRA-\}/);
+  assert.doesNotMatch(extrasLine, /\$\{EGRESS_ALLOWED_HOSTS_EXTRA:-/);
 });
 
 test('EGRESS_ALLOWED_HOSTS_EXTRA appends to the default allowlist instead of replacing it', () => {

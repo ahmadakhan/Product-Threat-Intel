@@ -4,7 +4,13 @@ import { join } from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
 
-import { CronDataProvider, runScheduledTraining } from '../server/ml/train/cron.ts';
+import {
+  CronDataProvider,
+  runScheduledTraining,
+  TrainingAlreadyRunningError,
+} from '../server/ml/train/cron.ts';
+import { ModelRegistry } from '../server/ml/runtime.ts';
+import type { ModelArtifact, ModelMetadata } from '../server/ml/types.ts';
 import type { Db } from '../server/db.ts';
 import type { Pool as pgPool } from 'pg';
 
@@ -22,11 +28,22 @@ function createMockDb(rowsByQuery: Record<string, { rows: unknown[] }>): Db {
 }
 
 /** Mock pool that returns our mock client on connect(). */
-function createMockPool(client: ReturnType<typeof createMockDb>) {
+function createMockPool(client: ReturnType<typeof createMockDb>, lockAvailable = true) {
+  const query = async (sql: string, params?: unknown[]) => {
+    if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: lockAvailable }] };
+    if (sql.includes('pg_advisory_unlock')) return { rows: [{ unlocked: true }] };
+    return client.query(sql, params);
+  };
+  const lockClient = {
+    query,
+    release: () => undefined,
+    on: () => undefined,
+    removeListener: () => undefined,
+  };
   return {
-    connect: async () => client,
+    connect: async () => lockClient,
     end: async () => undefined,
-    query: client.query,
+    query,
   };
 }
 
@@ -176,6 +193,78 @@ describe('CronDataProvider', () => {
 });
 
 describe('runScheduledTraining', () => {
+  it('does not collect or train data when another process owns the session lock', async () => {
+    const mockPool = createMockPool(createMockDb({}), false);
+    let collected = false;
+
+    await assert.rejects(
+      runScheduledTraining(mockPool as unknown as pgPool, {
+        directory: tmpDir(),
+        dataCollector: async () => {
+          collected = true;
+          return {};
+        },
+      }),
+      TrainingAlreadyRunningError,
+    );
+    assert.equal(collected, false);
+  });
+
+  it('requires signed artifacts when signing is configured while preserving unsigned legacy loading otherwise', async () => {
+    const root = tmpDir();
+    const unsignedDirectory = join(root, 'unsigned');
+    const signedDirectory = join(root, 'signed');
+    const metadata: ModelMetadata = {
+      id: 'signature-probe',
+      type: 'logistic',
+      version: '1',
+      trainedAt: new Date().toISOString(),
+      featureSchema: [],
+      description: 'Signature verification test artifact',
+    };
+    const artifactModel = { serialize: () => ({ metadata, weights: { value: 1 } }) };
+    try {
+      const legacyWriter = new ModelRegistry({ directory: unsignedDirectory });
+      await legacyWriter.saveArtifact(artifactModel, metadata.id, metadata);
+      const legacyLoaded: ModelArtifact[] = [];
+      assert.equal(
+        await new ModelRegistry({ directory: unsignedDirectory }).loadArtifact(
+          { load: (artifact) => legacyLoaded.push(artifact) },
+          metadata.id,
+        ),
+        true,
+      );
+
+      const unsignedLoaded: ModelArtifact[] = [];
+      assert.equal(
+        await new ModelRegistry({ directory: unsignedDirectory, signingKey: 'test-signing-key' }).loadArtifact(
+          { load: (artifact) => unsignedLoaded.push(artifact) },
+          metadata.id,
+        ),
+        false,
+      );
+      assert.equal(unsignedLoaded.length, 0);
+
+      const signingKey = 'test-signing-key';
+      await new ModelRegistry({ directory: signedDirectory, signingKey }).saveArtifact(
+        artifactModel,
+        metadata.id,
+        metadata,
+      );
+      const signedLoaded: ModelArtifact[] = [];
+      assert.equal(
+        await new ModelRegistry({ directory: signedDirectory, signingKey }).loadArtifact(
+          { load: (artifact) => signedLoaded.push(artifact) },
+          metadata.id,
+        ),
+        true,
+      );
+      assert.equal(signedLoaded.length, 1);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('skips models when database has no training data', async () => {
     const mockDb = createMockDb({});
     const mockPool = createMockPool(mockDb);

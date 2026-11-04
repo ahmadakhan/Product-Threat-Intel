@@ -107,6 +107,8 @@ export const RECOMMENDED_FEEDS = [
     rateLimitPerMin: 5,
     enabled: false,
     vendorSeed: true,
+      // The endpoint returned HTTP 403 to both service and browser user agents
+      // during the 2026-11-04 catalog audit; keep it disabled until access changes.
   },
   {
     id: 'feed-debian-security',
@@ -237,6 +239,8 @@ export const RECOMMENDED_FEEDS = [
     rateLimitPerMin: 10,
     enabled: false,
     vendorSeed: true,
+      // This URL redirects to blog.x.com, which returned HTTP 404 to both service
+      // and browser user agents during the 2026-11-04 catalog audit.
   },
   {
     id: 'feed-github-security-advisories',

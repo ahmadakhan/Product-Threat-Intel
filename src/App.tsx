@@ -1,34 +1,35 @@
-import { CorrelationDashboard } from './components/CorrelationDashboard';
-import React, { useEffect, useRef } from 'react';
+import React, { lazy, Suspense, useEffect, useRef } from 'react';
 import { LogOut, ShieldCheck } from 'lucide-react';
 import { LoginView } from './components/LoginView';
 import { AppProvider, useApp } from './context/AppContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Sidebar } from './components/Sidebar';
 import { TopHeader } from './components/TopHeader';
-import { DashboardView } from './components/DashboardView';
-import { WatchListView } from './components/WatchListView';
-import { FindingsView } from './components/FindingsView';
-import { ThreatDataView } from './components/ThreatDataView';
-import { ThreatIntelligenceSearch } from './components/ThreatIntelligenceSearch';
-import { VulnerabilitySearchView } from './components/VulnerabilitySearchView';
-import { ThreatAnalyticsView } from './components/ThreatAnalyticsView';
-import { CpeMatcherView } from './components/CpeMatcherView';
-import { AdvisoriesView } from './components/AdvisoriesView';
-import { PipelineExecutionsView } from './components/PipelineExecutionsView';
-import { AlertedCVEsView } from './components/AlertedCVEsView';
-import { ThreatFeedsView } from './components/ThreatFeedsView';
-import { RecipientsView } from './components/RecipientsView';
-import { AdvisoryTemplateView } from './components/AdvisoryTemplateView';
-import { DailyDigestView } from './components/DailyDigestView';
-import { EmailHistoryView } from './components/EmailHistoryView';
-import { EmailQueueView } from './components/EmailQueueView';
-import { OperationalLogsView } from './components/OperationalLogsView';
-import { SystemHealthView } from './components/SystemHealthView';
-import { ActionCenter } from './components/ActionCenter';
-import { SettingsView } from './components/SettingsView';
-import { ArchiveRetentionView } from './components/ArchiveRetentionView';
-import { AliasesView } from './components/AliasesView';
+
+const CorrelationDashboard = lazy(() => import('./components/CorrelationDashboard').then((m) => ({ default: m.CorrelationDashboard })));
+const DashboardView = lazy(() => import('./components/DashboardView').then((m) => ({ default: m.DashboardView })));
+const WatchListView = lazy(() => import('./components/WatchListView').then((m) => ({ default: m.WatchListView })));
+const FindingsView = lazy(() => import('./components/FindingsView').then((m) => ({ default: m.FindingsView })));
+const ThreatDataView = lazy(() => import('./components/ThreatDataView').then((m) => ({ default: m.ThreatDataView })));
+const ThreatIntelligenceSearch = lazy(() => import('./components/ThreatIntelligenceSearch').then((m) => ({ default: m.ThreatIntelligenceSearch })));
+const VulnerabilitySearchView = lazy(() => import('./components/VulnerabilitySearchView').then((m) => ({ default: m.VulnerabilitySearchView })));
+const ThreatAnalyticsView = lazy(() => import('./components/ThreatAnalyticsView').then((m) => ({ default: m.ThreatAnalyticsView })));
+const CpeMatcherView = lazy(() => import('./components/CpeMatcherView').then((m) => ({ default: m.CpeMatcherView })));
+const AdvisoriesView = lazy(() => import('./components/AdvisoriesView').then((m) => ({ default: m.AdvisoriesView })));
+const PipelineExecutionsView = lazy(() => import('./components/PipelineExecutionsView').then((m) => ({ default: m.PipelineExecutionsView })));
+const AlertedCVEsView = lazy(() => import('./components/AlertedCVEsView').then((m) => ({ default: m.AlertedCVEsView })));
+const ThreatFeedsView = lazy(() => import('./components/ThreatFeedsView').then((m) => ({ default: m.ThreatFeedsView })));
+const RecipientsView = lazy(() => import('./components/RecipientsView').then((m) => ({ default: m.RecipientsView })));
+const AdvisoryTemplateView = lazy(() => import('./components/AdvisoryTemplateView').then((m) => ({ default: m.AdvisoryTemplateView })));
+const DailyDigestView = lazy(() => import('./components/DailyDigestView').then((m) => ({ default: m.DailyDigestView })));
+const EmailHistoryView = lazy(() => import('./components/EmailHistoryView').then((m) => ({ default: m.EmailHistoryView })));
+const EmailQueueView = lazy(() => import('./components/EmailQueueView').then((m) => ({ default: m.EmailQueueView })));
+const OperationalLogsView = lazy(() => import('./components/OperationalLogsView').then((m) => ({ default: m.OperationalLogsView })));
+const SystemHealthView = lazy(() => import('./components/SystemHealthView').then((m) => ({ default: m.SystemHealthView })));
+const ActionCenter = lazy(() => import('./components/ActionCenter').then((m) => ({ default: m.ActionCenter })));
+const SettingsView = lazy(() => import('./components/SettingsView').then((m) => ({ default: m.SettingsView })));
+const ArchiveRetentionView = lazy(() => import('./components/ArchiveRetentionView').then((m) => ({ default: m.ArchiveRetentionView })));
+const AliasesView = lazy(() => import('./components/AliasesView').then((m) => ({ default: m.AliasesView })));
 
 export const MainContent: React.FC = () => {
   const { activeTab } = useApp();
@@ -46,30 +47,32 @@ export const MainContent: React.FC = () => {
       aria-labelledby="page-title"
       className="ui-main flex-1 px-4 sm:px-6 lg:px-8 py-6 pb-16"
     >
-      {activeTab === 'dashboard' && <DashboardView />}
-      {activeTab === 'watchlist' && <WatchListView />}
-      {activeTab === 'findings' && <FindingsView />}
-      {activeTab === 'threat-intelligence-search' && <ThreatIntelligenceSearch />}
-      {activeTab === 'vulnerability-search' && <VulnerabilitySearchView />}
-      {activeTab === 'threat-analytics' && <ThreatAnalyticsView />}
-      {activeTab === 'cpe-matcher' && <CpeMatcherView />}
-      {activeTab === 'threat-data' && <ThreatDataView />}
-      {activeTab === 'advisories' && <AdvisoriesView />}
-      {activeTab === 'correlation' && <CorrelationDashboard />}
-      {activeTab === 'pipeline' && <PipelineExecutionsView />}
-      {activeTab === 'alerted-cves' && <AlertedCVEsView />}
-      {activeTab === 'feeds' && <ThreatFeedsView />}
-      {activeTab === 'recipients' && <RecipientsView />}
-      {activeTab === 'template' && <AdvisoryTemplateView />}
-      {activeTab === 'daily-digest' && <DailyDigestView />}
-      {activeTab === 'emails' && <EmailHistoryView />}
-      {activeTab === 'email-queue' && <EmailQueueView />}
-      {activeTab === 'logs' && <OperationalLogsView />}
-      {activeTab === 'health' && <SystemHealthView />}
-      {activeTab === 'settings' && <SettingsView />}
-      {activeTab === 'archive' && <ArchiveRetentionView />}
-      {activeTab === 'aliases' && <AliasesView />}
-      {activeTab === 'action-center' && <ActionCenter />}
+      <Suspense fallback={<div role="status" className="py-8 text-sm text-zinc-500">Loading view…</div>}>
+        {activeTab === 'dashboard' && <DashboardView />}
+        {activeTab === 'watchlist' && <WatchListView />}
+        {activeTab === 'findings' && <FindingsView />}
+        {activeTab === 'threat-intelligence-search' && <ThreatIntelligenceSearch />}
+        {activeTab === 'vulnerability-search' && <VulnerabilitySearchView />}
+        {activeTab === 'threat-analytics' && <ThreatAnalyticsView />}
+        {activeTab === 'cpe-matcher' && <CpeMatcherView />}
+        {activeTab === 'threat-data' && <ThreatDataView />}
+        {activeTab === 'advisories' && <AdvisoriesView />}
+        {activeTab === 'correlation' && <CorrelationDashboard />}
+        {activeTab === 'pipeline' && <PipelineExecutionsView />}
+        {activeTab === 'alerted-cves' && <AlertedCVEsView />}
+        {activeTab === 'feeds' && <ThreatFeedsView />}
+        {activeTab === 'recipients' && <RecipientsView />}
+        {activeTab === 'template' && <AdvisoryTemplateView />}
+        {activeTab === 'daily-digest' && <DailyDigestView />}
+        {activeTab === 'emails' && <EmailHistoryView />}
+        {activeTab === 'email-queue' && <EmailQueueView />}
+        {activeTab === 'logs' && <OperationalLogsView />}
+        {activeTab === 'health' && <SystemHealthView />}
+        {activeTab === 'settings' && <SettingsView />}
+        {activeTab === 'archive' && <ArchiveRetentionView />}
+        {activeTab === 'aliases' && <AliasesView />}
+        {activeTab === 'action-center' && <ActionCenter />}
+      </Suspense>
     </main>
   );
 };

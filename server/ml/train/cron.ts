@@ -13,6 +13,7 @@
  *   await runScheduledTraining(pgPool, { directory: '/var/lib/vulnstream/ml' });
  */
 import pg from 'pg';
+import { schemaLockKey } from '../../db.ts';
 import type { Db } from '../../db.ts';
 import type { ModelStorageOptions } from '../types.ts';
 import { TrainingOrchestrator, type TrainingDataSources, type TrainingSummary } from './orchestrator.ts';
@@ -34,6 +35,14 @@ import type { AliasConfidenceFeatures } from '../models/aliasConfidenceModel.ts'
 import type { EmailCompositionFeatures, PerFindingFeatures } from '../models/advisoryComposer.ts';
 
 const { Pool } = pg;
+const TRAINING_LOCK_NAMESPACE = 800004;
+
+export class TrainingAlreadyRunningError extends Error {
+  constructor() {
+    super('Another process already holds the ML training lock');
+    this.name = 'TrainingAlreadyRunningError';
+  }
+}
 
 /**
  * Collects training data from the database for all ML models.
@@ -141,7 +150,25 @@ export async function runScheduledTraining(
   const dataCollector = options.dataCollector ?? ((db) => new CronDataProvider(lookbackDays).collectAll(db));
 
   const client = await pool.connect();
+  let lockAcquired = false;
+  let releaseWithError = false;
+  const onConnectionError = () => {
+    releaseWithError = true;
+  };
+  client.on('error', onConnectionError);
   try {
+    let lockResult;
+    try {
+      lockResult = await client.query<{ locked: boolean }>(
+        `SELECT pg_try_advisory_lock(${TRAINING_LOCK_NAMESPACE}, ${schemaLockKey}) AS locked`,
+      );
+    } catch (error) {
+      releaseWithError = true;
+      throw error;
+    }
+    if (lockResult.rows[0]?.locked !== true) throw new TrainingAlreadyRunningError();
+    lockAcquired = true;
+
     const data = await dataCollector(client);
     const orchestrator = new TrainingOrchestrator({ directory: options.directory });
     const summary = await orchestrator.trainAll(data);
@@ -161,7 +188,18 @@ export async function runScheduledTraining(
 
     return summary;
   } finally {
-    client.release();
+    if (lockAcquired) {
+      try {
+        const result = await client.query<{ unlocked: boolean }>(
+          `SELECT pg_advisory_unlock(${TRAINING_LOCK_NAMESPACE}, ${schemaLockKey}) AS unlocked`,
+        );
+        if (result.rows[0]?.unlocked !== true) releaseWithError = true;
+      } catch {
+        releaseWithError = true;
+      }
+    }
+    client.removeListener('error', onConnectionError);
+    client.release(releaseWithError);
   }
 }
 

@@ -1,4 +1,5 @@
 import { readFileSync, existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 const _envPath = join(process.cwd(), '.env');
@@ -31,7 +32,7 @@ import { runDailyDigest } from './dailyDigest';
 import { closePdfRenderer } from './pdf';
 import { initMlRuntime } from './ml/integration.ts';
 import { encryptionKeys } from './secrets';
-import { runScheduledTraining } from './ml/train/cron.ts';
+import { runScheduledTraining, TrainingAlreadyRunningError } from './ml/train/cron.ts';
 import type { TrainingSummary } from './ml/train/orchestrator.ts';
 import type { Db } from './db';
 import { processPipeline } from './pipeline';
@@ -479,6 +480,7 @@ const mlTrainingTick = () => {
   trainingStartedAt = Date.now();
   const generation = ++trainingGeneration;
   trainingRunning = (async () => {
+    const claimToken = randomUUID();
     const claimed = await transaction(
       pool,
       async (db) => {
@@ -495,6 +497,7 @@ const mlTrainingTick = () => {
         await put(db, 'systemState', ML_TRAINING_SCHEDULE_ID, {
           ...data,
           claimedAt: new Date(now).toISOString(),
+          claimToken,
         });
         return true;
       },
@@ -508,20 +511,23 @@ const mlTrainingTick = () => {
       lookbackDays: config.ML_LOOKBACK_DAYS,
     }).catch((error) => {
       // Release the claim on failure so the next tick (or another replica) can
-      // retry immediately instead of waiting out the claim TTL.
+      // retry immediately instead of waiting out the claim TTL. A stale run
+      // must not clear a newer owner's claim.
       return pool
         .query(
-          "UPDATE records SET data=jsonb_set(data,'{\"claimedAt\"}','null'::jsonb) WHERE kind='systemState' AND id=$1",
-          [ML_TRAINING_SCHEDULE_ID],
+          "UPDATE records SET data=data || jsonb_build_object('claimedAt',NULL,'claimToken',NULL) WHERE kind='systemState' AND id=$1 AND data->>'claimToken'=$2",
+          [ML_TRAINING_SCHEDULE_ID, claimToken],
         )
         .catch(() => undefined)
         .then(() => {
+          if (error instanceof TrainingAlreadyRunningError) return null;
           throw error;
         });
     });
+    if (!summary) return;
     await pool.query(
-      "UPDATE records SET data=jsonb_set(data,'{\"lastRun\"}',to_jsonb(now())) || jsonb_build_object('claimedAt', NULL) WHERE kind='systemState' AND id=$1",
-      [ML_TRAINING_SCHEDULE_ID],
+      "UPDATE records SET data=jsonb_set(data,'{\"lastRun\"}',to_jsonb(now())) || jsonb_build_object('claimedAt',NULL,'claimToken',NULL) WHERE kind='systemState' AND id=$1 AND data->>'claimToken'=$2",
+      [ML_TRAINING_SCHEDULE_ID, claimToken],
     );
     void logMlTrainingResult(pool, summary);
     verboseLog('ml.training.completed', { result: summary.results.map((r) => ({ modelId: r.modelId, status: r.status })) });

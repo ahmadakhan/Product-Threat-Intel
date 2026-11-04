@@ -80,6 +80,15 @@ export class ModelRegistry {
     }
   }
 
+  private hasValidSignature(data: ModelArtifact): boolean {
+    if (!this.signingKey) return true;
+    if (typeof data.signature !== 'string') return false;
+    const expected = createHmac('sha256', this.signingKey)
+      .update(JSON.stringify({ metadata: data.metadata, weights: data.weights }, null, 2))
+      .digest('hex');
+    return secureEqual(data.signature, expected);
+  }
+
   /** Register an in-memory model instance for immediate use (testing/bootstrap). */
   register(model: TrainableModel, metadata: ModelMetadata): void {
     this.models.set(metadata.id, {
@@ -117,14 +126,7 @@ export class ModelRegistry {
       const data = JSON.parse(
         readFileSync(join(this.directory, active.path), 'utf8'),
       ) as ModelArtifact;
-      if (this.signingKey && data.signature) {
-        const expected = createHmac('sha256', this.signingKey)
-          .update(JSON.stringify({ metadata: data.metadata, weights: data.weights }, null, 2))
-          .digest('hex');
-        if (!secureEqual(data.signature, expected)) {
-          return this.rollback(model, modelId, 'INVALID_SIGNATURE');
-        }
-      }
+      if (!this.hasValidSignature(data)) return this.rollback(model, modelId, 'INVALID_SIGNATURE');
       model.load(data);
        this.models.set(modelId, {
          model: model as TrainableModel,
@@ -164,15 +166,10 @@ export class ModelRegistry {
     const prev = rollbackCandidates.sort((a, b) => b.trainedAt.localeCompare(a.trainedAt))[0];
     try {
       const data = JSON.parse(readFileSync(join(this.directory, prev.path), 'utf8')) as ModelArtifact;
-      if (this.signingKey && data.signature) {
-        const expected = createHmac('sha256', this.signingKey)
-          .update(JSON.stringify({ metadata: data.metadata, weights: data.weights }, null, 2))
-          .digest('hex');
-        if (!secureEqual(data.signature, expected)) {
-          // Skip this corrupted artifact and try the next candidate.
-          const remainingRollbackCandidates = rollbackCandidates.filter((c) => c.version !== prev.version);
-          return this.rollback(model, modelId, 'INVALID_SIGNATURE_ROLLBACK', remainingRollbackCandidates);
-        }
+      if (!this.hasValidSignature(data)) {
+        // Skip this corrupted or unsigned artifact and try the next candidate.
+        const remainingRollbackCandidates = rollbackCandidates.filter((c) => c.version !== prev.version);
+        return this.rollback(model, modelId, 'INVALID_SIGNATURE_ROLLBACK', remainingRollbackCandidates);
       }
       model.load(data);
       prev.status = 'STANDBY_ROLLBACK';

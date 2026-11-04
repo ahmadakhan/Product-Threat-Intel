@@ -30,7 +30,7 @@ const trustProxy = z
           ['loopback', 'linklocal', 'uniquelocal'].includes(entry.toLowerCase())),
     );
   }, 'TRUST_PROXY must list explicit proxy IPs, CIDRs, or presets (trust-all is not permitted)');
-const DEFAULT_EGRESS_HOSTS = [
+export const DEFAULT_EGRESS_HOSTS = [
   // Feed, API and mail hosts. Every redirect target of the recommended
   // feeds is listed alongside the URL that redirects to it, because the
   // requester re-validates each hop against this list: a feed whose

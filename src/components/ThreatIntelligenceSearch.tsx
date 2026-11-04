@@ -888,34 +888,6 @@ export const ThreatIntelligenceSearch: React.FC = () => {
             void handleSearch();
           }}
         >
-          <div className="threat-examples">
-            <span>Common products</span>
-            {[
-              { vendor: 'microsoft', product: 'windows_server_2025', label: 'Windows Server 2025' },
-              { vendor: 'fortinet', product: 'fortios', label: 'Fortinet FortiOS' },
-              { vendor: 'apache', product: 'http_server', label: 'Apache HTTP Server' },
-            ].map((example) => (
-              <button
-                type="button"
-                key={example.product}
-                aria-pressed={vendorSelected === example.vendor && effectiveProduct === example.product}
-                disabled={loading}
-                onClick={() => {
-                  const vendor = ENTERPRISE_VENDOR_CATALOG.find(
-                    (item) => item.normalizedId === example.vendor,
-                  );
-                  if (vendor) {
-                    chooseCatalogVendor(vendor);
-                    setProductSelected(example.product);
-                  }
-                }}
-              >
-                {example.label}
-                <ChevronRight size={13} aria-hidden="true" />
-              </button>
-            ))}
-          </div>
-
           <div className="threat-search-fields grid gap-5 lg:grid-cols-14">
             {/* Vendor */}
             <div className="threat-vendor-field">
@@ -1214,6 +1186,33 @@ export const ThreatIntelligenceSearch: React.FC = () => {
               </div>
             </div>
           </div>
+          <div className="threat-examples">
+            <span>Common products</span>
+            {[
+              { vendor: 'microsoft', product: 'windows_server_2025', label: 'Windows Server 2025' },
+              { vendor: 'fortinet', product: 'fortios', label: 'Fortinet FortiOS' },
+              { vendor: 'apache', product: 'http_server', label: 'Apache HTTP Server' },
+            ].map((example) => (
+              <button
+                type="button"
+                key={example.product}
+                aria-pressed={vendorSelected === example.vendor && effectiveProduct === example.product}
+                disabled={loading}
+                onClick={() => {
+                  const vendor = ENTERPRISE_VENDOR_CATALOG.find(
+                    (item) => item.normalizedId === example.vendor,
+                  );
+                  if (vendor) {
+                    chooseCatalogVendor(vendor);
+                    setProductSelected(example.product);
+                  }
+                }}
+              >
+                {example.label}
+                <ChevronRight size={13} aria-hidden="true" />
+              </button>
+            ))}
+          </div>
           <div className="threat-search-actions">
             <div className={`threat-search-context ${draftChanged ? 'is-changed' : ''}`} role="status">
               <Crosshair className="h-4 w-4 shrink-0" aria-hidden="true" />
@@ -1337,47 +1336,11 @@ export const ThreatIntelligenceSearch: React.FC = () => {
         </ThreatApiKeyDialog>
       )}
 
-      {/* Guidance before the first search */}
+      {/* Results placeholder before the first search */}
       {!results && !loading && !error && (
-        <section className={`${panel} threat-search-welcome`} aria-label="Start an investigation">
-          <div className="threat-welcome-heading">
-            <span className="threat-welcome-icon">
-              <PackageSearch size={26} strokeWidth={1.5} aria-hidden="true" />
-            </span>
-            <div>
-              <h2>Start with the product you want to investigate</h2>
-              <p>
-                Choose from the catalog or enter a custom vendor and product. Your results will appear here.
-              </p>
-            </div>
-          </div>
-          <div className="threat-capabilities">
-            {[
-              {
-                icon: ShieldAlert,
-                title: 'Understand severity',
-                body: 'Compare CVSS scores and vulnerability details.',
-              },
-              {
-                icon: Flame,
-                title: 'Prioritize exploit risk',
-                body: 'Review known exploitation and available EPSS data.',
-              },
-              {
-                icon: Download,
-                title: 'Share the evidence',
-                body: 'Inspect matched products and export CSV or JSON.',
-              },
-            ].map(({ icon: Icon, title, body }) => (
-              <div key={title}>
-                <Icon size={18} strokeWidth={1.6} aria-hidden="true" />
-                <div>
-                  <h3>{title}</h3>
-                  <p>{body}</p>
-                </div>
-              </div>
-            ))}
-          </div>
+        <section className="threat-search-placeholder" aria-label="Search results">
+          <p>No search run yet</p>
+          <span>Results will appear here.</span>
         </section>
       )}
 
