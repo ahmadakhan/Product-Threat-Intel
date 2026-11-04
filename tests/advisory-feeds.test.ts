@@ -202,6 +202,19 @@ test('GitHub global advisories follow only the API-provided same-endpoint cursor
   assert.equal(result.cves.length, 101);
 });
 
+test('GitHub global advisories reject a repeated pagination cursor', async () => {
+  let requests = 0;
+  await assert.rejects(ingestFeed(feed('GITHUB_ADVISORIES'), 24, async () => {
+    requests++;
+    return {
+      status: 200,
+      headers: { link: '<https://api.github.com/advisories?after=cursor-one>; rel="next"' },
+      body: JSON.stringify([github()]),
+    };
+  }, config, sleep), /repeated a pagination cursor/);
+  assert.equal(requests, 2);
+});
+
 test('advisory parsers reject malformed records and preserve withdrawal data', () => {
   assert.throws(() => parseOsvVulnerability({ ...osv(), modified: 'not-a-date' }, 'osv', []), /Invalid OSV modified timestamp/);
   assert.throws(() => parseGitHubAdvisories([github({ ghsa_id: 'not-ghsa' })], 'gh', new Date(0), now), /ghsa_id/);
