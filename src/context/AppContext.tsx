@@ -447,12 +447,26 @@ function useApplication() {
       if (result?.success) await refreshAfterMutation();
       return result?.success || false;
     },
-    addFeed: (
+    addFeed: async (
       feed: Omit<
         ThreatFeed,
         'id' | 'healthStatus' | 'lastSync' | 'latencyMs' | 'itemCountLastRun' | 'ssrfValidated'
       >,
-    ) => save('feed.save', feed),
+    ) => {
+      setPending((count) => count + 1);
+      try {
+        setError(null);
+        await request('/commands', { action: 'feed.save', data: feed });
+        await refreshAfterMutation();
+        return { success: true as const };
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : 'Feed could not be added';
+        setError(message);
+        return { success: false as const, error: message };
+      } finally {
+        setPending((count) => count - 1);
+      }
+    },
     updateFeed: (feed: ThreatFeed) => save('feed.save', feed, feed.id),
     deleteFeed: async (id: string) => {
       const result = await command('feed.delete', undefined, id);
@@ -740,6 +754,17 @@ function useApplication() {
       (await call<{ success: boolean; message: string }>('/test-daily-digest', { email })) || {
         success: false,
         message: 'Test could not be queued; see the error banner.',
+      },
+    testEmailConnectivity: async (input: {
+      provider: string;
+      smtpHost: string;
+      smtpPort: number;
+      smtpSecurity?: string;
+    }) =>
+      (await call<{ success: boolean; latency: number; error?: string }>('/test-email-connectivity', input)) || {
+        success: false,
+        latency: 0,
+        error: 'Connectivity test could not be completed; see the error banner.',
       },
     updateSettings: (settings: Partial<AppSettings>) => save('settings.save', settings),
     configureEmailProvider: (configuration: EmailConfiguration) => save('email.configure', configuration),

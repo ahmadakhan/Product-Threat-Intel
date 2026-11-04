@@ -20,10 +20,11 @@ import { WorkCapacityError } from './workLimiter.ts';
 import compression from 'compression';
 import helmet from 'helmet';
 import path from 'node:path';
+import net from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type pg from 'pg';
-import type { Config } from './config';
+import { feedEgressHosts, type Config } from './config';
 import {
   asyncRoute,
   requireAuth,
@@ -73,6 +74,7 @@ import {
 import { DEFAULT_SETTINGS, DEFAULT_EMAIL_CONFIG, isCollectionKind } from '../shared/state.ts';
 import { emailIsConfigured } from './emailProviders';
 import { parseSyndication, RSS_MAX_BYTES, RSS_USER_AGENT } from './rss';
+import { OTX_SUBSCRIBED_PULSES_URL, parseOtxPulsePage, validateOtxNextUrl } from './otx.ts';
 import {
   describeError,
   describeFailureSummary,
@@ -1713,13 +1715,21 @@ export function createApp(
         );
       }
       if (feed.authType !== 'NONE' && !secret) throw new HttpError(400, 'Feed secret is missing');
-      if (feed.authType === 'API_KEY') headers.apiKey = secret;
+      if (feed.authType === 'API_KEY') {
+        if (feed.type === 'OTX_API') headers['X-OTX-API-KEY'] = secret;
+        else headers.apiKey = secret;
+      }
       if (['BEARER', 'BASIC'].includes(feed.authType))
         headers.Authorization = `${feed.authType === 'BASIC' ? 'Basic' : 'Bearer'} ${feed.authType === 'BASIC' ? Buffer.from(secret).toString('base64') : secret}`;
       let response: ResponseData;
       try {
         const testUrl = new URL(feed.url);
         if (feed.type === 'NVD_API') testUrl.searchParams.set('resultsPerPage', '1');
+        if (feed.type === 'OTX_API') {
+          if (feed.url !== OTX_SUBSCRIBED_PULSES_URL || feed.authType !== 'API_KEY')
+            throw new HttpError(400, 'AlienVault OTX requires its subscribed-pulses API endpoint and an API key');
+          testUrl.searchParams.set('limit', '1');
+        }
         const requestOptions =
           feed.type === 'NVD_API'
             ? { headers, timeoutMs: 25000, socketTimeoutMs: 20000, maxResponseBytes: 256 * 1024 }
@@ -1734,6 +1744,13 @@ export function createApp(
                   }
                 : feed.type === 'RSS_ATOM'
                   ? { headers, timeoutMs: 25000, maxResponseBytes: RSS_MAX_BYTES }
+                  : feed.type === 'OTX_API'
+                    ? {
+                        headers,
+                        timeoutMs: (feed.requestTimeoutSeconds || 60) * 1000,
+                        socketTimeoutMs: Math.min((feed.requestTimeoutSeconds || 60) * 1000, 30000),
+                        maxResponseBytes: 8 * 1024 * 1024,
+                      }
                   : { headers };
         response = await request(testUrl.href, requestOptions);
         if (response.status >= 200 && response.status < 300) {
@@ -1742,10 +1759,15 @@ export function createApp(
             // A successful HTTP status is not proof that the endpoint returned
             // the JSON contract this adapter needs. Reject an HTML error page or
             // truncated body during the test instead of reporting HEALTHY.
+            let data: unknown;
             try {
-              JSON.parse(response.body);
+              data = JSON.parse(response.body);
             } catch {
               throw new Error('Feed returned a non-JSON response body');
+            }
+            if (feed.type === 'OTX_API') {
+              const page = parseOtxPulsePage(data, feed.id, Number.NEGATIVE_INFINITY);
+              if (page.next) validateOtxNextUrl(page.next, testUrl.href);
             }
           }
         }
@@ -1866,6 +1888,51 @@ export function createApp(
       res
         .status(202)
         .json({ success: true, message: 'Test queued. Check the delivery log for provider acceptance.', id });
+    }),
+  );
+  app.post(
+    '/api/test-email-connectivity',
+    requireRole('ADMIN'),
+    asyncRoute(async (req, res) => {
+      const { provider, smtpHost, smtpPort, smtpSecurity } = z
+        .object({
+          provider: z.string(),
+          smtpHost: z.string().min(1),
+          smtpPort: z.coerce.number().min(1).max(65535),
+          smtpSecurity: z.string().optional(),
+        })
+        .parse(req.body);
+      const start = Date.now();
+      const socket = net.createConnection(smtpPort, smtpHost);
+      let resolved = false;
+      const promise = new Promise<{ ok: boolean; latency: number; error?: string }>((resolve, reject) => {
+        const timeout = setTimeout(() => { if (!resolved) { resolved = true; reject(new Error('Connection timed out')); socket.destroy(); } }, 10000);
+        socket.on('connect', () => {
+          resolved = true;
+          clearTimeout(timeout);
+          resolve({ ok: true, latency: Date.now() - start });
+        });
+        socket.on('error', (e) => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            resolve({ ok: false, latency: Date.now() - start, error: e.message });
+          }
+        });
+      });
+      const result = await promise.finally(() => socket.destroy());
+      await transaction(pool, async (db) => {
+        await appendAudit(
+          db,
+          'Email connectivity tested',
+          `${smtpHost}:${smtpPort}`,
+          req.operator!.username,
+          'EMAIL',
+          result.ok ? 'INFO' : 'ERROR',
+          req.ip || '',
+        );
+      });
+      res.json({ success: result.ok, latency: result.latency, error: result.error });
     }),
   );
   app.post(
@@ -2895,7 +2962,11 @@ export function createApp(
         try {
           await resolvePublic(
             new URL(url),
-            config.EGRESS_ALLOWED_HOSTS.split(',').map((s) => s.trim().toLowerCase()),
+            feedEgressHosts(
+              (data as { type?: unknown })?.type,
+              url,
+              config.EGRESS_ALLOWED_HOSTS.split(',').map((s) => s.trim().toLowerCase()),
+            ),
           );
         } catch {
           throw new HttpError(

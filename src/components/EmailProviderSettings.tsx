@@ -7,9 +7,7 @@ const methodName = (provider: EmailProvider) =>
   isSmtpEmailProvider(provider)
     ? provider === 'SENDGRID_SMTP'
       ? 'SendGrid SMTP'
-      : provider === 'GMAIL_SMTP'
-        ? 'Gmail SMTP'
-        : 'SMTP'
+      : 'SMTP'
     : provider === 'SENDGRID'
       ? 'SendGrid API'
       : provider === 'MAILJET_API'
@@ -28,7 +26,7 @@ const initialForm = (configuration: EmailConfiguration): EmailConfiguration => (
   apiHeaderKey: configuration.apiHeaderKey || 'Authorization',
   apiAuthPrefix: configuration.apiAuthPrefix ?? 'Bearer',
   apiSourceDomain: configuration.apiSourceDomain || '',
-  smtpHost: configuration.smtpHost || (configuration.provider === 'GMAIL_SMTP' ? 'smtp.gmail.com' : configuration.provider === 'SENDGRID_SMTP' ? 'smtp.sendgrid.net' : ''),
+  smtpHost: configuration.smtpHost || (configuration.provider === 'SENDGRID_SMTP' ? 'smtp.sendgrid.net' : ''),
   smtpPort: configuration.smtpPort || 587,
   smtpSecurity: configuration.smtpSecurity || 'STARTTLS',
   smtpUsername: configuration.smtpUsername || (configuration.provider === 'SENDGRID_SMTP' ? 'apikey' : ''),
@@ -36,11 +34,22 @@ const initialForm = (configuration: EmailConfiguration): EmailConfiguration => (
 });
 
 export function EmailProviderSettings() {
-  const { emailConfig, configureEmailProvider, sendTestEmail, pending } = useApp();
+  const {
+    emailConfig,
+    configureEmailProvider,
+    sendTestEmail,
+    testEmailConnectivity,
+    pending,
+  } = useApp();
   const [form, setForm] = useState<EmailConfiguration>(() => initialForm(emailConfig));
   const [dirty, setDirty] = useState(false);
   const [message, setMessage] = useState('');
   const [testEmail, setTestEmail] = useState('');
+  const [connectivityTest, setConnectivityTest] = useState<{
+    ok: boolean;
+    latency: number;
+    error?: string;
+  } | null>(null);
   const savedVersion = JSON.stringify(emailConfig);
   useEffect(() => {
     setForm(initialForm(emailConfig));
@@ -57,26 +66,36 @@ export function EmailProviderSettings() {
       apiKey: '',
       smtpPassword: '',
       mailjetApiSecret: '',
-      ...(provider === 'GMAIL_SMTP'
+      ...(provider === 'SENDGRID_SMTP'
         ? {
-            smtpHost: 'smtp.gmail.com',
+            smtpHost: 'smtp.sendgrid.net',
             smtpPort: 587,
             smtpSecurity: 'STARTTLS' as const,
+            smtpUsername: 'apikey',
           }
-        : provider === 'SENDGRID_SMTP'
-          ? {
-              smtpHost: 'smtp.sendgrid.net',
-              smtpPort: 587,
-              smtpSecurity: 'STARTTLS' as const,
-              smtpUsername: 'apikey',
-            }
-          : {}),
+        : {}),
     });
+  };
+  const testConnectivity = async () => {
+    setConnectivityTest(null);
+    setMessage('');
+    const input = {
+      provider: form.provider,
+      smtpHost: form.smtpHost,
+      smtpPort: form.smtpPort,
+      smtpSecurity: form.smtpSecurity,
+    };
+    const result = await testEmailConnectivity(input);
+    setConnectivityTest({ ok: result.success, latency: result.latency, error: result.error });
+    if (result.success) {
+      setMessage(`SMTP connectivity OK — ${result.latency}ms`);
+    } else {
+      setMessage(`Connectivity failed: ${result.error}`);
+    }
   };
   const isSmtp = isSmtpEmailProvider(form.provider);
   const isMailjet = form.provider === 'MAILJET_API';
   const isSendGridSmtp = form.provider === 'SENDGRID_SMTP';
-  const isGmailSmtp = form.provider === 'GMAIL_SMTP' || form.smtpHost.trim().toLowerCase() === 'smtp.gmail.com';
   const selectedProvider = isSendGridSmtp
     ? 'SENDGRID_SMTP'
     : isSmtp
@@ -126,12 +145,6 @@ export function EmailProviderSettings() {
               {(
                 [
                   { id: 'SMTP', title: 'SMTP relay', description: 'Your existing mail server', icon: Server },
-                  {
-                    id: 'GMAIL_SMTP',
-                    title: 'Gmail SMTP',
-                    description: 'Send via Gmail with an App Password',
-                    icon: Mail,
-                  },
                   {
                     id: 'SENDGRID_SMTP',
                     title: 'SendGrid SMTP',
@@ -259,24 +272,18 @@ export function EmailProviderSettings() {
                     </select>
                   </label>
                   <label htmlFor="smtp-username">
-                    {isGmailSmtp
-                      ? 'Authentication username'
-                      : isSendGridSmtp
-                        ? 'API key as username'
-                        : 'SMTP username'}
+                    {isSendGridSmtp ? 'API key as username' : 'SMTP username'}
                     <input
                       id="smtp-username"
                       className="ui-field"
                       autoComplete="username"
                       value={form.smtpUsername}
-                      placeholder={
-                        isGmailSmtp ? 'yourusername@gmail.com' : isSendGridSmtp ? 'apikey' : 'SMTP username'
-                      }
+                      placeholder={isSendGridSmtp ? 'apikey' : 'SMTP username'}
                       onChange={(event) => update({ smtpUsername: event.target.value })}
                     />
                   </label>
                   <label htmlFor="smtp-password" className="sm:col-span-2">
-                    {isGmailSmtp ? 'Authentication password' : isSendGridSmtp ? 'API key' : 'SMTP password'}
+                    {isSendGridSmtp ? 'API key' : 'SMTP password'}
                     <input
                       id="smtp-password"
                       type="password"
@@ -289,11 +296,9 @@ export function EmailProviderSettings() {
                       placeholder={
                         hasSavedSmtpPassword
                           ? 'Credential saved — leave blank to keep it'
-                          : isGmailSmtp
-                            ? '16-character Gmail App Password'
-                            : isSendGridSmtp
-                              ? 'Enter your SendGrid API key'
-                              : 'Enter SMTP password'
+                          : isSendGridSmtp
+                            ? 'Enter your SendGrid API key'
+                            : 'Enter SMTP password'
                       }
                       onChange={(event) => update({ smtpPassword: event.target.value })}
                     />
@@ -307,10 +312,10 @@ export function EmailProviderSettings() {
               <details className="settings-provider-help sm:col-span-2">
                 <summary>SMTP setup notes</summary>
                 <p className="ui-description">
-                  Gmail configuration: host smtp.gmail.com; use your full Gmail address and generated
-                  16-character App Password. Port 587 uses STARTTLS (recommended); port 465 uses implicit TLS.
-                  SMTP also supports SendGrid (username <code>apikey</code>), Maileroo, Lettr, Mailjet, and
-                  other relays.
+                  Enter the SMTP host (for example smtp.example.com), port, and credentials. Port 587 uses
+                  STARTTLS (recommended); port 465 uses implicit TLS. SMTP also supports SendGrid (username
+                  <code>apikey</code>), Maileroo, Lettr, Mailjet, and other relays. The hostname must be in
+                  EGRESS_ALLOWED_HOSTS on the server.
                 </p>
               </details>
             </>
@@ -469,6 +474,17 @@ export function EmailProviderSettings() {
                 Reset changes
               </button>
             )}
+            {isSmtp && form.smtpHost && (
+              <button
+                type="button"
+                className="ui-secondary"
+                disabled={pending > 0 || !!connectivityTest}
+                onClick={testConnectivity}
+              >
+                {pending > 0 ? <LoaderCircle size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+                {pending > 0 ? 'Testing…' : connectivityTest ? 'Test connectivity again' : 'Test connectivity'}
+              </button>
+            )}
             <button type="submit" className="ui-primary" disabled={pending > 0 || !dirty}>
               {pending > 0 ? <LoaderCircle size={14} className="animate-spin" /> : <Save size={14} />}
               {pending > 0 ? 'Saving…' : 'Save email settings'}
@@ -520,6 +536,13 @@ export function EmailProviderSettings() {
         <p className="ui-success" role="status">
           {message}
         </p>
+      )}
+      {connectivityTest && (
+        <div className={`settings-test-result ${connectivityTest.ok ? 'ui-success' : 'ui-error'}`}>
+          {connectivityTest.ok
+            ? `SMTP connectivity OK — ${connectivityTest.latency}ms`
+            : `Connectivity failed: ${connectivityTest.error}`}
+        </div>
       )}
     </section>
   );
