@@ -697,15 +697,21 @@ function useApplication() {
     triggerPipelineRun: async (scopeHours?: number, incrementalFeeds = true) =>
       (await call<PipelineExecution>('/pipeline', { scopeHours, incrementalFeeds })) || null,
     templateCustomization: customization,
+    customAdvisoryTemplate: snapshot.customAdvisoryTemplate,
     advisoryTemplate: draft ? compileCustomizedTemplate(draft) : snapshot.advisoryTemplate,
     updateTemplateCustomization: (update: Partial<TemplateCustomization>) =>
       setDraft((prev) => ({ ...snapshot.templateCustomization, ...prev, ...update })),
-    saveTemplate: async () => {
-      const success = await save('template.save', { templateCustomization: customization });
+    saveTemplate: async (customAdvisoryTemplate?: string | null) => {
+      const data: { templateCustomization: typeof customization; customAdvisoryTemplate?: string | null } = {
+        templateCustomization: customization,
+      };
+      if (customAdvisoryTemplate !== undefined) data.customAdvisoryTemplate = customAdvisoryTemplate;
+      const success = await save('template.save', data);
       if (success) setDraft(null);
       return success;
     },
-    setAdvisoryTemplate: (advisoryTemplate: string) => save('template.save', { advisoryTemplate }),
+    setAdvisoryTemplate: (advisoryTemplate: string) =>
+      save('template.save', { templateCustomization: customization, customAdvisoryTemplate: advisoryTemplate }),
     dailyDigestCustomization,
     dailyDigestTemplate,
     setDailyDigestCustomTemplate: setDailyDigestCustomTemplatePersisted,

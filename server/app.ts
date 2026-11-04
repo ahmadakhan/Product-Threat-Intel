@@ -62,7 +62,7 @@ import {
 import { createHash } from 'node:crypto';
 import { stableJson } from '../src/utils/deduplicator.ts';
 import { advisoryEmail } from './advisoryEmail';
-import { renderAdvisoryPdf, resolveChromeExecutablePath } from './pdf';
+import { renderAdvisoryPdf } from './pdf';
 import {
   effectiveSubject,
   normalizeEmailSubject,
@@ -2219,13 +2219,8 @@ export function createApp(
       });
       if (!content.html.trim())
         throw new HttpError(400, 'The edited email has no renderable body to convert to PDF');
-      if (!resolveChromeExecutablePath(config))
-        throw new HttpError(
-          503,
-          'PDF rendering is not available on this server (no Chrome executable configured)',
-        );
       try {
-        const pdf = await renderAdvisoryPdf(content.html, config);
+        const pdf = await renderAdvisoryPdf(content.html);
         res.setHeader('content-type', 'application/pdf');
         res.setHeader('content-disposition', 'inline; filename="email-preview.pdf"');
         res.setHeader('cache-control', 'no-store');

@@ -834,7 +834,8 @@ export async function state(db: Db, options: StateOptions = {}): Promise<AppStat
   snapshot.watchlist = orderWatchlist(snapshot.watchlist);
   // Saved branding is authoritative; regenerate HTML with the current layout so
   // existing installations receive layout fixes without losing customization.
-  snapshot.advisoryTemplate = compileCustomizedTemplate(snapshot.templateCustomization);
+  snapshot.advisoryTemplate =
+    snapshot.customAdvisoryTemplate || compileCustomizedTemplate(snapshot.templateCustomization);
   snapshot.dailyDigestTemplate =
     snapshot.dailyDigestCustomTemplate || compileDailyDigestTemplate(snapshot.dailyDigestCustomization);
   await attachCounts(db, snapshot);
@@ -886,7 +887,8 @@ export async function pipelineState(db: Db, opts?: { skipCveData?: boolean }): P
     else if (row.kind === 'settings') snapshot.settings = row.data;
     else if (row.kind === 'template') Object.assign(snapshot, row.data);
   }
-  snapshot.advisoryTemplate = compileCustomizedTemplate(snapshot.templateCustomization);
+  snapshot.advisoryTemplate =
+    snapshot.customAdvisoryTemplate || compileCustomizedTemplate(snapshot.templateCustomization);
   snapshot.dailyDigestTemplate =
     snapshot.dailyDigestCustomTemplate || compileDailyDigestTemplate(snapshot.dailyDigestCustomization);
   return snapshot;

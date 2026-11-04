@@ -8,9 +8,15 @@ const methodName = (provider: EmailProvider) =>
     ? provider === 'SENDGRID_SMTP'
       ? 'SendGrid SMTP'
       : 'SMTP'
-    : provider === 'MAILJET_API'
-      ? 'Mailjet API'
-      : 'Email API';
+    : provider === 'SENDGRID'
+      ? 'SendGrid API'
+      : provider === 'MAILJET_API'
+        ? 'Mailjet API'
+        : provider === 'POSTMARK'
+          ? 'Postmark API'
+          : provider === 'MAILTRAP'
+            ? 'Mailtrap API'
+            : 'Custom email API';
 const initialForm = (configuration: EmailConfiguration): EmailConfiguration => ({
   ...configuration,
   provider: isSmtpEmailProvider(configuration.provider) ? configuration.provider : configuration.provider,
@@ -63,6 +69,13 @@ export function EmailProviderSettings() {
   const isMailjet = form.provider === 'MAILJET_API';
   const isSendGridSmtp = form.provider === 'SENDGRID_SMTP';
   const isGmailSmtp = form.smtpHost.trim().toLowerCase() === 'smtp.gmail.com';
+  const selectedProvider = isSendGridSmtp
+    ? 'SENDGRID_SMTP'
+    : isSmtp
+      ? 'SMTP'
+      : isMailjet
+        ? 'MAILJET_API'
+        : 'API';
   const hasSavedApiKey = form.provider === emailConfig.provider && !!emailConfig.hasApiKey;
   const hasSavedSmtpPassword = form.provider === emailConfig.provider && !!emailConfig.hasSmtpPassword;
   const hasSavedMailjetSecret = form.provider === emailConfig.provider && !!emailConfig.hasMailjetApiSecret;
@@ -78,7 +91,7 @@ export function EmailProviderSettings() {
             <h2 id="email-settings-heading" className="ui-card-title">
               Email delivery
             </h2>
-            <p className="ui-description mt-1">Choose SMTP relay or a custom HTTPS email API.</p>
+            <p className="ui-description mt-1">Choose an SMTP relay or email API provider.</p>
           </div>
         </div>
         <span className="inline-flex items-center gap-1.5 rounded-full border border-zinc-700 light:border-zinc-200 px-2.5 py-1 text-[11px] text-zinc-400">
@@ -128,15 +141,7 @@ export function EmailProviderSettings() {
                 <button
                   type="button"
                   key={id}
-                  aria-pressed={
-                    (isSendGridSmtp
-                      ? 'SENDGRID_SMTP'
-                      : isSmtp
-                        ? 'SMTP'
-                        : isMailjet
-                          ? 'MAILJET_API'
-                          : 'API') === id
-                  }
+                  aria-pressed={selectedProvider === id}
                   disabled={pending > 0}
                   onClick={() => selectProvider(id)}
                 >

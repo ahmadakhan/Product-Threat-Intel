@@ -1,18 +1,43 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { build } from 'esbuild';
 import puppeteer from 'puppeteer-core';
-import { resolveChromeExecutablePath } from '../server/pdf.ts';
 import { sanitizeEmailHtml } from '../src/utils/sanitizeEmailHtml.ts';
+
+const resolveTestChrome = () => {
+  const candidates = [
+    process.env.CHROME_EXECUTABLE_PATH,
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    process.env.ProgramFiles && join(process.env.ProgramFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    process.env['ProgramFiles(x86)'] && join(process.env['ProgramFiles(x86)'], 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+  ];
+  for (const candidate of candidates) {
+    if (!candidate || !isAbsolute(candidate)) continue;
+    try {
+      const path = realpathSync(candidate);
+      if (statSync(path).isFile()) return path;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+};
+const chrome = resolveTestChrome();
 
 test('email preview sanitization fails closed without a browser DOM', () => {
   assert.equal(sanitizeEmailHtml('<script>alert(1)</script>'), '');
 });
 
-test('email preview sanitization blocks encoded execution and UI/resource injection', { skip: !resolveChromeExecutablePath() }, async () => {
+test('email preview sanitization blocks encoded execution and UI/resource injection', { skip: !chrome }, async () => {
   const bundle = await build({ entryPoints: ['src/utils/sanitizeEmailHtml.ts'], bundle: true, write: false,
     platform: 'browser', format: 'iife', globalName: 'EmailSanitizer' });
-  const browser = await puppeteer.launch({ executablePath: resolveChromeExecutablePath(), headless: true });
+  const browser = await puppeteer.launch({ executablePath: chrome, headless: true });
   try {
     const page = await browser.newPage();
     await page.setRequestInterception(true);

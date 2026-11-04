@@ -1,44 +1,24 @@
 import { createHash } from 'node:crypto';
-import { existsSync, realpathSync, statSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
-import puppeteer from 'puppeteer-core';
-import type { Browser, BrowserContext, Page } from 'puppeteer-core';
-import type { Config } from './config';
+import PDFDocument from 'pdfkit';
+import { convert, type HtmlToTextOptions } from 'html-to-text';
 import { resolveTimezone } from '../src/utils/dateTime.ts';
 
 const PDF_CACHE_TTL_MS = 5 * 60_000;
 const PDF_CACHE_MAX = 64;
-const COMMON_CHROME_PATHS = [
-  '/usr/bin/google-chrome',
-  '/usr/bin/google-chrome-stable',
-  '/usr/bin/chromium',
-  '/usr/bin/chromium-browser',
-  '/usr/local/bin/google-chrome',
-  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-];
-
 const pdfCache = new Map<string, { content: Uint8Array; expires: number }>();
 let cacheAccess = 0;
-const browserCache = new Map<string, Promise<Browser>>();
-
-export function resolveChromeExecutablePath(config?: Config): string | undefined {
-  const configured = config?.CHROME_EXECUTABLE_PATH || process.env.CHROME_EXECUTABLE_PATH;
-  // The value becomes a spawned process, so it is accepted only as an absolute
-  // path to an existing executable file; a directory, a relative name resolved
-  // through PATH, or an empty string is treated as "no Chrome configured".
-  const executable = (candidate: string | undefined) => {
-    if (!candidate || !isAbsolute(candidate)) return undefined;
-    try {
-      // realpathSync throws for a missing path and resolves a symlink to its
-      // target, so a directory can be rejected by asking for its stats here.
-      const resolved = realpathSync(candidate);
-      return statSync(resolved).isFile() ? resolved : undefined;
-    } catch {
-      return undefined;
-    }
-  };
-  return executable(configured) ?? COMMON_CHROME_PATHS.map(executable).find(Boolean);
-}
+const HTML_TO_TEXT_OPTIONS: HtmlToTextOptions = {
+  baseElements: { selectors: ['body'], returnDomByDefault: false },
+  wordwrap: 92,
+  limits: { maxInputLength: 2_000_000 },
+  selectors: [
+    { selector: 'script', format: 'skip' },
+    { selector: 'style', format: 'skip' },
+    { selector: 'img', format: 'skip' },
+    { selector: 'svg', format: 'skip' },
+    { selector: 'a', options: { hideLinkHrefIfSameAsText: true, linkBrackets: [' (', ')'] } },
+  ],
+};
 
 export interface PdfAttachment {
   filename: string;
@@ -79,82 +59,57 @@ export function unverifiableMatchFilename(at: Date = new Date(), timezone?: stri
   return advisoryFilename('unverifiable', at, timezone);
 }
 
-export async function renderAdvisoryPdf(html: string, config?: Config): Promise<Uint8Array> {
-  // sha256 over the rendered body. A hash collision here would serve a
-  // different advisory's cached PDF under this one's filename.
+export function advisoryHtmlToText(html: string): string {
+  if (Buffer.byteLength(html, 'utf8') > 2_000_000) throw new Error('Advisory HTML exceeds the PDF size limit');
+  return convert(html, HTML_TO_TEXT_OPTIONS).trim();
+}
+
+export async function renderAdvisoryPdf(html: string): Promise<Uint8Array> {
   const key = createHash('sha256').update(html).digest('hex');
   const cached = pdfCache.get(key);
   if (cached && cached.expires > Date.now()) return cached.content;
 
-  const executablePath = resolveChromeExecutablePath(config);
-  if (!executablePath) throw new Error('No Chrome executable available for PDF rendering');
+  const text = advisoryHtmlToText(html);
+  if (!text) throw new Error('Advisory HTML contains no printable content');
 
-  const launchKey = executablePath;
-  let browserPromise = browserCache.get(launchKey);
-  if (!browserPromise) {
-    browserPromise = puppeteer.launch({
-      executablePath,
-      // puppeteer-core 23+ selects Chrome's new headless mode with `true`.
-      // The removed 'new' string fails the type check and the launch option.
-      headless: true,
-      // Deliberately no --no-sandbox: Chrome renders operator-visible advisory
-      // HTML, and the container's seccomp profile supports Chrome's own
-      // sandbox. If a host cannot run it, disable ATTACH_ADVISORY_PDF rather
-      // than removing the sandbox of a browser rendering untrusted content.
-      args: [
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--hide-scrollbars',
-        '--no-first-run',
-        '--no-default-browser-check',
-      ],
-      timeout: 15000,
+  const content = await new Promise<Uint8Array>((resolve, reject) => {
+    const document = new PDFDocument({
+      size: 'A4',
+      margin: 48,
+      bufferPages: true,
+      info: { Title: 'Security advisory', Author: 'BA Threat Intel', Creator: 'VulnStream' },
     });
-    browserCache.set(launchKey, browserPromise);
-    void browserPromise.catch(() => {
-      if (browserCache.get(launchKey) === browserPromise) browserCache.delete(launchKey);
-    });
-  }
+    const chunks: Buffer[] = [];
+    document.on('data', (chunk: Buffer) => chunks.push(chunk));
+    document.once('error', reject);
+    document.once('end', () => resolve(new Uint8Array(Buffer.concat(chunks))));
 
-  const browser = await browserPromise;
-  let context: BrowserContext | undefined;
-  try {
-    context = await browser.createBrowserContext();
-    const page = await context.newPage();
-    await securePdfPage(page);
-    await page.setViewport({ width: 1280, height: 800 });
-    await page.setContent(html, { waitUntil: 'load', timeout: 15000 });
-    const pdf = await page.pdf({
-      format: 'A4',
-      printBackground: true,
-      timeout: 15000,
-      margin: { top: '12mm', right: '8mm', bottom: '12mm', left: '8mm' },
+    document.font('Helvetica-Bold').fontSize(18).fillColor('#122033').text('Security Advisory');
+    document.moveDown(0.35);
+    document.moveTo(48, document.y).lineTo(document.page.width - 48, document.y).strokeColor('#ccd4df').stroke();
+    document.moveDown(0.8);
+    document.font('Helvetica').fontSize(10).fillColor('#202a38').text(text, {
+      lineGap: 3,
+      paragraphGap: 5,
     });
-    const content = Buffer.isBuffer(pdf) ? new Uint8Array(pdf) : new Uint8Array(pdf);
-    pdfCache.set(key, { content, expires: Date.now() + PDF_CACHE_TTL_MS });
-    if (++cacheAccess > PDF_CACHE_MAX * 2) evictPdfCache();
-    return content;
-  } finally {
-    try {
-      if (context) await context.close();
-    } catch {
-      void 0;
+
+    const pages = document.bufferedPageRange();
+    for (let pageIndex = pages.start; pageIndex < pages.start + pages.count; pageIndex++) {
+      document.switchToPage(pageIndex);
+      const footerY = document.page.height - 32;
+      document.font('Helvetica').fontSize(8).fillColor('#667085')
+        .text('BA Threat Intel | Security advisory', 48, footerY, { lineBreak: false });
+      document.text(`Page ${pageIndex - pages.start + 1} of ${pages.count}`, 48, footerY, {
+        width: document.page.width - 96,
+        align: 'right',
+        lineBreak: false,
+      });
     }
-  }
-}
-
-export async function securePdfPage(page: Page): Promise<void> {
-  await page.setJavaScriptEnabled(false);
-  await page.setBypassServiceWorker(true);
-  page.on('request', (request) => {
-    if (request.isInterceptResolutionHandled()) return;
-    const url = request.url();
-    const action = url === 'about:blank' || url.startsWith('data:')
-      ? request.continue()
-      : request.abort('blockedbyclient');
-    void action.catch(() => undefined);
+    document.end();
   });
-  await page.setRequestInterception(true);
+  pdfCache.set(key, { content, expires: Date.now() + PDF_CACHE_TTL_MS });
+  if (++cacheAccess > PDF_CACHE_MAX * 2) evictPdfCache();
+  return content;
 }
 
 function evictPdfCache(): void {
@@ -169,13 +124,5 @@ function evictPdfCache(): void {
 }
 
 export async function closePdfRenderer(): Promise<void> {
-  for (const promise of browserCache.values()) {
-    try {
-      await (await promise).close();
-    } catch {
-      void 0;
-    }
-  }
-  browserCache.clear();
   pdfCache.clear();
 }

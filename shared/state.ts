@@ -189,6 +189,7 @@ export interface AppState {
   /** Zero-day digests consolidated by the per-run cap (audit F-3 exposure). */
   zeroDayDigests: ZeroDayDigest[];
   templateCustomization: TemplateCustomization;
+  customAdvisoryTemplate: string | null;
   advisoryTemplate: string;
   dailyDigestCustomization: TemplateCustomization;
   dailyDigestTemplate: string;
@@ -223,6 +224,7 @@ export const emptyState = (): AppState => ({
   settings: structuredClone(DEFAULT_SETTINGS),
   emailConfig: { ...DEFAULT_EMAIL_CONFIG },
   templateCustomization: { ...DEFAULT_TEMPLATE_CUSTOMIZATION },
+  customAdvisoryTemplate: null,
   advisoryTemplate: compileCustomizedTemplate(DEFAULT_TEMPLATE_CUSTOMIZATION),
   dailyDigestCustomization: { ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION },
   dailyDigestTemplate: compileDailyDigestTemplate(DEFAULT_DAILY_DIGEST_CUSTOMIZATION),

@@ -69,7 +69,11 @@ import { encrypt, randomToken } from './secrets.ts';
 import { DEFAULT_SETTINGS, DEFAULT_EMAIL_CONFIG } from '../shared/state.ts';
 import { emailConfigSchema } from './validation.ts';
 import { emailEndpoint } from './emailProviders.ts';
-import { compileCustomizedTemplate, compileDailyDigestTemplate } from '../src/utils/templateCompiler.ts';
+import {
+  compileCustomizedTemplate,
+  compileDailyDigestTemplate,
+  DEFAULT_TEMPLATE_CUSTOMIZATION,
+} from '../src/utils/templateCompiler.ts';
 import type { Config } from './config';
 import {
   isSmtpEmailProvider,
@@ -757,12 +761,21 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
     const old = (await getForUpdate<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
     await put(db, 'settings', 'main', settingsSchema.parse({ ...old, ...patch }));
   } else if (action === 'template.save') {
-    const input = z.object({ templateCustomization: templateSchema }).parse(data);
+    const input = z.object({
+      templateCustomization: templateSchema,
+      customAdvisoryTemplate: z.string().max(200_000).nullable().optional(),
+    }).parse(data);
     const existing = (await getForUpdate<any>(db, 'template', 'main')) || {};
+    const customAdvisoryTemplate = input.customAdvisoryTemplate === undefined
+      ? existing.customAdvisoryTemplate ?? null
+      : input.customAdvisoryTemplate?.trim()
+        ? input.customAdvisoryTemplate
+        : null;
     await put(db, 'template', 'main', {
       ...existing,
       templateCustomization: input.templateCustomization,
-      advisoryTemplate: compileCustomizedTemplate(input.templateCustomization),
+      customAdvisoryTemplate,
+      advisoryTemplate: customAdvisoryTemplate || compileCustomizedTemplate(input.templateCustomization),
     });
   } else if (action === 'dailyDigestTemplate.save') {
     const input = z

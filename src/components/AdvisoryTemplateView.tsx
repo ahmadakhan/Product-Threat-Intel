@@ -34,6 +34,7 @@ import { DEFAULT_TEMPLATE_CUSTOMIZATION } from '../utils/templateCompiler';
 export const AdvisoryTemplateView: React.FC = () => {
   const {
     advisoryTemplate,
+    customAdvisoryTemplate,
     settings,
     templateCustomization,
     updateTemplateCustomization,
@@ -84,8 +85,8 @@ export const AdvisoryTemplateView: React.FC = () => {
    const [editorRef, setEditorRef] = useState<HTMLTextAreaElement | null>(null);
 
    const handleEnterEditor = () => {
-     setCustomTemplate(advisoryTemplate);
-     setIsCustomTemplate(true);
+      setCustomTemplate(customAdvisoryTemplate ?? advisoryTemplate);
+      setIsCustomTemplate(customAdvisoryTemplate !== null);
      setViewFormat('editor');
    };
 
@@ -258,7 +259,7 @@ export const AdvisoryTemplateView: React.FC = () => {
     };
 
   const handleSave = async () => {
-    if (!(await saveTemplate())) return;
+    if (!(await saveTemplate(isCustomTemplate ? customTemplate : undefined))) return;
     setSaveToast(true);
     setTimeout(() => setSaveToast(false), 2500);
   };
@@ -976,7 +977,10 @@ export const AdvisoryTemplateView: React.FC = () => {
                 <textarea
                   ref={setEditorRef}
                   value={customTemplate}
-                  onChange={(e) => setCustomTemplate(e.target.value)}
+                  onChange={(e) => {
+                    setCustomTemplate(e.target.value);
+                    setIsCustomTemplate(true);
+                  }}
                   onKeyDown={(e) => {
                     if (e.ctrlKey && e.key === 's') {
                       e.preventDefault();

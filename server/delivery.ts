@@ -485,7 +485,7 @@ async function buildPdfAttachment(job: Job, config: Config, db?: Db): Promise<Em
   if (typeof job.advisory_id === 'string' && job.advisory_id.startsWith('SELFHEAL:')) return undefined;
   if (content.payload.dailyDigest) return undefined;
   try {
-    const pdf = await renderAdvisoryPdf(content.payload.html, config);
+    const pdf = await renderAdvisoryPdf(content.payload.html);
     // Timestamped `ddMMMyyyyHHMM.pdf` in the workspace timezone, so the
     // attachment name matches the Generated stamp inside the advisory. The
     // sender is also invoked without a db handle (standalone cron), in which

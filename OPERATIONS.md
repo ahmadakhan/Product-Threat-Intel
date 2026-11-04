@@ -65,7 +65,7 @@ Audit verification uses a repeatable-read snapshot and bounded cursor batches, w
 
 `EGRESS_ALLOWED_HOSTS` replaces the bundled host list when explicitly configured, including an empty value to deny all outbound hosts. Omit it to use the defaults, or use `EGRESS_ALLOWED_HOSTS_EXTRA` for additions to the selected list. Include all feed, redirect and email-provider hosts needed by the deployment when supplying a restricted list.
 
-Server-side PDF rendering is offline: scripts, service workers, remote images/styles/fonts, and file URLs cannot access external resources. Embed required PDF images and fonts as data URLs. Each render uses an isolated browser context with bounded rendering time.
+Advisory PDFs are generated server-side with PDFKit from text extracted from the email HTML. Scripts, styles, images, and external resources are not executed or fetched; visible text, headings, lists, and link destinations are included. No browser or Chrome installation is required. Set `ATTACH_ADVISORY_PDF=false` for HTML-only delivery.
 
 `npm run test:unit` and `npm run test:unit:watch` use the repository's `node:test` suite. `npm run test:ci` requires `TEST_DATABASE_URL` and runs the same suite with database tests enabled; use a disposable test database, not the live application database. The legacy `test:vitest` alias invokes the supported unit runner.
 

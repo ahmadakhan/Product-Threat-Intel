@@ -131,3 +131,67 @@ test('every command action rejects a null data payload', async () => {
     );
   }
 });
+
+test('template.save persists custom HTML and preserves it when visual settings are saved', async () => {
+  const { applyCommand } = await import('../server/commands.ts');
+  const { loadConfig } = await import('../server/config.ts');
+  const { DEFAULT_TEMPLATE_CUSTOMIZATION } = await import('../src/utils/templateCompiler.ts');
+  const config = loadConfig({
+    NODE_ENV: 'test',
+    DATABASE_URL: 'postgresql://127.0.0.1:1/unused',
+    APP_ORIGIN: 'http://localhost',
+    ENCRYPTION_KEY: randomBytes(32).toString('base64'),
+    WORKER_ENABLED: 'false',
+  });
+  const customHtml = '<html><body><h1>{{advisory_title}}</h1></body></html>';
+  let template = { templateCustomization: DEFAULT_TEMPLATE_CUSTOMIZATION } as Record<string, unknown>;
+  const db = {
+    query: async (sql: string, params?: unknown[]) => {
+      if (sql.startsWith('SELECT data FROM records WHERE kind=$1 AND id=$2 FOR UPDATE'))
+        return { rows: [{ data: template }] };
+      if (sql.startsWith('INSERT INTO records(kind,id,data)')) {
+        template = JSON.parse(String(params?.[2]));
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes('pg_advisory_xact_lock')) return { rows: [{ locked: true }] };
+      if (sql.startsWith('SELECT data FROM audit ORDER BY seq DESC LIMIT 1')) return { rows: [] };
+      if (sql.startsWith('INSERT INTO audit(data)')) return { rows: [], rowCount: 1 };
+      return { rows: [] };
+    },
+  } as never;
+
+  await applyCommand(db, config, {
+    action: 'template.save',
+    data: { templateCustomization: DEFAULT_TEMPLATE_CUSTOMIZATION, customAdvisoryTemplate: customHtml },
+    actor: 'admin',
+  });
+  assert.equal(template.customAdvisoryTemplate, customHtml);
+  assert.equal(template.advisoryTemplate, customHtml);
+
+  await applyCommand(db, config, {
+    action: 'template.save',
+    data: { templateCustomization: DEFAULT_TEMPLATE_CUSTOMIZATION },
+    actor: 'admin',
+  });
+  assert.equal(template.customAdvisoryTemplate, customHtml);
+  assert.equal(template.advisoryTemplate, customHtml);
+});
+
+test('pipeline state uses saved custom advisory HTML and falls back to generated customization', async () => {
+  const { pipelineState } = await import('../server/db.ts');
+  const { DEFAULT_TEMPLATE_CUSTOMIZATION, compileCustomizedTemplate } = await import('../src/utils/templateCompiler.ts');
+  const customHtml = '<html><body><h1>Saved custom advisory</h1></body></html>';
+  const makeDb = (customAdvisoryTemplate: string | null) => ({
+    query: async () => ({
+      rows: [{
+        kind: 'template',
+        data: { templateCustomization: DEFAULT_TEMPLATE_CUSTOMIZATION, customAdvisoryTemplate },
+      }],
+    }),
+  }) as never;
+
+  const customState = await pipelineState(makeDb(customHtml));
+  assert.equal(customState.advisoryTemplate, customHtml);
+  const defaultState = await pipelineState(makeDb(null));
+  assert.equal(defaultState.advisoryTemplate, compileCustomizedTemplate(DEFAULT_TEMPLATE_CUSTOMIZATION));
+});
