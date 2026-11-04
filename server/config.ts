@@ -47,6 +47,7 @@ export const DEFAULT_EGRESS_HOSTS = [
   'api.first.org',
   'app.opencve.io',
   'api.vulncheck.com',
+  'otx.alienvault.com',
   // Mail providers
   'send.api.mailtrap.io',
   'sandbox.api.mailtrap.io',
@@ -111,6 +112,18 @@ export const DEFAULT_EGRESS_HOSTS = [
   'www.theregister.com',
   'api.theregister.com', // redirect target of The Register Security headlines.atom feed
   'news.google.com',
+  // Zero-day and vendor security advisories not previously allowlisted
+  'www.cve.org',
+  'cve.org', // cve.org redirects to the www spelling
+  'support.apple.com',
+  'helpx.adobe.com',
+  'access.redhat.com',
+  'security.redhat.com',
+  'usn.ubuntu.com',
+  'www.crowdstrike.com',
+  'crowdstrike.com',
+  'securelist.com',
+  'www.securelist.com', // feed-kaspersky-securelist uses www.securelist.com
 ].join(',');
 
 const schema = z.object({
@@ -201,6 +214,14 @@ export function mergeAllowedHosts(...parts: string[]): string {
         .filter(Boolean),
     ),
   ].join(',');
+}
+export function feedEgressHosts(type: unknown, endpoint: unknown, configuredHosts: string[]): string[] {
+  if (
+    type !== 'OTX_API' ||
+    endpoint !== 'https://otx.alienvault.com/api/v1/pulses/subscribed/'
+  )
+    return configuredHosts;
+  return [...new Set([...configuredHosts, 'otx.alienvault.com'])];
 }
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = schema.parse(env);
