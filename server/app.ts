@@ -51,7 +51,9 @@ import type { Requester, ResponseData } from './network';
 import { queueRun, stopRun, renderAdvisory } from './pipeline';
 import { formatAdvisoryId } from '../src/utils/executionName';
 import { recoveryAt, isPermanentFeedFailure } from './feedRecovery';
-import { computeFeedRecoveryDelay } from './ml/integration.ts';
+import { computeFeedRecoveryDelay, getMlRuntime } from './ml/integration.ts';
+import { mlFeedbackSchema } from './ml/feedback.ts';
+import { QUALITY_GATES } from './ml/train/qualityGates.ts';
 import {
   advisoryRevision,
   enqueue,
@@ -714,20 +716,16 @@ export function createApp(
   app.get(
     '/api/system-uptime',
     asyncRoute(async (_req, res) => {
-      try {
-        const { uptime } = await import('node:os');
-        const seconds = Math.floor(uptime());
-        const days = Math.floor(seconds / 86400);
-        const hours = Math.floor((seconds % 86400) / 3600);
-        const minutes = Math.floor((seconds % 3600) / 60);
-        const uptimeStr =
-          days > 0
-            ? `${days} day${days === 1 ? '' : 's'}, ${hours}:${String(minutes).padStart(2, '0')}`
-            : `${hours}:${String(minutes).padStart(2, '0')}`;
-        res.json({ systemUptime: uptimeStr });
-      } catch (error) {
-        res.json({ systemUptime: 'unknown' });
-      }
+      const seconds = Math.floor(process.uptime());
+      const days = Math.floor(seconds / 86400);
+      const hours = Math.floor((seconds % 86400) / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      const uptimeStr = `${days > 0 ? `${days}d ` : ''}${hours}h ${minutes}m ${seconds % 60}s`;
+      res.json({
+        systemUptime: uptimeStr,
+        uptimeSeconds: seconds,
+        startedAt: new Date(Date.now() - seconds * 1000).toISOString(),
+      });
     }),
   );
 
@@ -976,7 +974,7 @@ export function createApp(
       // The operational event log is the read side of writeEvent(): any
       // authenticated role may page it. Query validation (category enum, cursor
       // range, limit cap) lives in readEvents so HTTP and internal callers share
-      // one contract; a malformed cursor or category is a 400, not a 500.
+      // one contract; malformed filters, a cursor, or a category are 400s, not 500s.
       res.json(await readEvents(pool, req.query));
     }),
   );
@@ -1603,6 +1601,36 @@ export function createApp(
       res.json(rows.rows);
     }),
   );
+  app.get('/api/ml/status', requireRole('ADMIN', 'OPERATOR', 'VIEWER'), asyncRoute(async (_req, res) => {
+    const runtime = getMlRuntime() ?? options.mlRuntime;
+    const models = Object.entries(QUALITY_GATES).map(([id, gate]) => {
+      const loaded = runtime?.registry.get(id);
+      return {
+        id, status: loaded?.status ?? 'UNTRAINED', trained: Boolean(loaded),
+        version: loaded?.metadata.version ?? null, trainedAt: loaded?.metadata.trainedAt ?? null,
+        minimumSamples: gate.minimumSamples,
+      };
+    });
+    const training = await pool.query(
+      "SELECT occurred_at,level,context FROM operational_events WHERE code='ml.training.completed' ORDER BY id DESC LIMIT 1",
+    );
+    res.json({
+      initialized: Boolean(runtime), models,
+      trainedModels: models.filter((model) => model.trained).length,
+      totalModels: models.length, latestTraining: training.rows[0] ?? null,
+    });
+  }));
+  app.post('/api/ml/feedback', requireRole('ADMIN', 'OPERATOR'), asyncRoute(async (req, res) => {
+    const feedback = mlFeedbackSchema.parse(req.body);
+    await transaction(pool, async (db) => {
+      await writeEvent(db, {
+        category: 'ML', code: 'ml.training.feedback',
+        message: 'Analyst-verified ML training feedback recorded', context: feedback,
+      });
+      await appendAudit(db, 'ML training feedback recorded', feedback.source, req.operator!.username, 'PIPELINE');
+    });
+    res.status(201).json({ recorded: true, source: feedback.source });
+  }));
   app.get(
     '/api/health',
     // Authenticated: the body carries queue backlog counts, worker heartbeat

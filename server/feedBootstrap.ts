@@ -2,6 +2,7 @@ import type { PoolClient } from './db.ts';
 import { get, list, put, remove } from './db.ts';
 import type { ThreatFeed } from '../src/types/index.ts';
 import { RECOMMENDED_FEEDS, RECOMMENDED_FEED_URLS } from './recommendedFeeds.ts';
+import { findDuplicateFeedSource } from './feedIdentity.ts';
 
 const RETIRED_DUPLICATE_FEEDS = [{ duplicateId: 'feed-darkreading-full', canonicalId: 'feed-darkreading' }];
 
@@ -10,10 +11,10 @@ export async function reconcileRecommendedFeeds(db: PoolClient, bootstrap = fals
   const ids = new Set(existing.map((feed) => feed.id));
   if (bootstrap)
     for (const feed of RECOMMENDED_FEEDS) {
-      if (ids.has(feed.id)) continue;
+      if (ids.has(feed.id) || findDuplicateFeedSource(feed, existing)) continue;
       await put(db, 'feeds', feed.id, {
         ...feed,
-        healthStatus: 'UNTESTED',
+        healthStatus: 'healthStatus' in feed ? feed.healthStatus : 'UNTESTED',
         lastSync: null,
         latencyMs: 0,
         itemCountLastRun: 0,
@@ -33,6 +34,17 @@ export async function reconcileRecommendedFeeds(db: PoolClient, bootstrap = fals
       errorLog: undefined,
       consecutiveFailures: 0,
       circuitOpenUntil: null,
+    });
+  }
+  for (const source of RECOMMENDED_FEEDS) {
+    if (source.enabled || !('healthStatus' in source) || source.healthStatus !== 'DOWN') continue;
+    const feed = await get<ThreatFeed>(db, 'feeds', source.id);
+    if (!feed?.vendorSeed || feed.url !== source.url) continue;
+    await put(db, 'feeds', feed.id, {
+      ...feed,
+      enabled: false,
+      healthStatus: source.healthStatus,
+      errorLog: source.errorLog,
     });
   }
   for (const { duplicateId, canonicalId } of RETIRED_DUPLICATE_FEEDS) {

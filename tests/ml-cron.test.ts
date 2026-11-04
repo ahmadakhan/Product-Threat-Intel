@@ -115,7 +115,7 @@ describe('CronDataProvider', () => {
     assert.equal(remediation.playbook.patchUrl, 'https://example.com/patch');
     assert.deepEqual(remediation.playbook.immediateActions, ['Upgrade']);
   });
-  it('classifies provider HTTP errors without calling retry exhaustion a permanent rejection', async () => {
+  it('classifies known HTTP errors and excludes legacy errors without a verified disposition', async () => {
     const db = createMockDb({
       'FROM outbox o LEFT JOIN records': {
         rows: [
@@ -146,15 +146,16 @@ describe('CronDataProvider', () => {
     const errors = await new CronDataProvider().collectDeliveryErrorSamples(db);
     assert.deepEqual(
       errors.map((e) => e.isPermanent),
-      [false, false, true],
+      [false, true],
     );
     assert.equal(errors[0].provider, 'SendGrid');
     assert.equal(errors[0].hourOfDay, 14);
   });
-  it('skips models whose histories are not persisted without querying imaginary tables', async () => {
+  it('reads empty model histories from the application event store without imaginary tables', async () => {
     const db = {
-      query: async () => {
-        throw new Error('Unexpected query');
+      query: async (sql: string) => {
+        assert.ok(sql.includes('operational_events') || sql.includes('records'));
+        return { rows: [] };
       },
     } as unknown as Db;
     const provider = new CronDataProvider();
@@ -168,6 +169,7 @@ describe('CronDataProvider', () => {
       provider.collectDigestSelectionSamples,
       provider.collectSeverityTierSamples,
       provider.collectFeedRecoverySamples,
+      provider.collectEmailCompositionSamples,
     ]) {
       assert.deepEqual(await (collect as (db: Db) => Promise<unknown[]>).call(provider, db), []);
     }

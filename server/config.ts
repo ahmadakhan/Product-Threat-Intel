@@ -106,6 +106,7 @@ export const DEFAULT_EGRESS_HOSTS = [
   'www.sophos.com',
   'therecord.media',
   'blog.twitter.com',
+  'blog.x.com',
   'github.com',
   'github.blog', // github.com/advisories.atom 406s to non-browser agents; github.blog serves the Atom mirror
   'www.pentestpartners.com',

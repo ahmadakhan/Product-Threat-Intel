@@ -124,6 +124,17 @@ function match(i: number, over: Partial<IntelligenceMatch> = {}): IntelligenceMa
   };
 }
 
+test('learned zero-day caps are bounded and preserve every deferred match in a digest', () => {
+  const matches = Array.from({ length: 10 }, (_, i) => match(i, { zeroDay: true }));
+  const result = rankAndRateLimitZeroDays([], matches, 2);
+  assert.equal(result.matches.length, 2);
+  assert.equal(result.digests.reduce((sum, digest) => sum + digest.matchCount, 0), 8);
+  assert.deepEqual(new Set([...result.matches.map((m) => m.id), ...result.digests.flatMap((d) => d.matchIds)]),
+    new Set(matches.map((m) => m.id)));
+  for (const cap of [0, -1, 1.5, NaN, Infinity, MAX_ZERO_DAYS_PER_RUN + 1])
+    assert.throws(() => rankAndRateLimitZeroDays([], matches, cap), /Zero-day cap/);
+});
+
 test('C-2: digests report the group size, not the size of the whole match array', () => {
   const matches = Array.from({ length: 120 }, (_, i) => match(i));
   const { digests } = rankAndRateLimitZeroDays([], matches);

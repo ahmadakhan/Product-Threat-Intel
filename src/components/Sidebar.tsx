@@ -37,26 +37,39 @@ export const Sidebar: React.FC = () => {
 
   const navSections = [
     {
-      title: 'OPERATIONS',
-  items: [
-        { id: 'dashboard' },
+      title: 'Overview',
+      items: [{ id: 'dashboard' }],
+    },
+    {
+      title: 'Assets & Findings',
+      items: [
         { id: 'watchlist', count: watchlist.length },
         { id: 'findings', count: counts.findings },
+      ],
+    },
+    {
+      title: 'Threat Intelligence',
+      items: [
+        { id: 'threat-data' },
         { id: 'threat-intelligence-search' },
         { id: 'vulnerability-search' },
         { id: 'threat-analytics' },
         { id: 'cpe-matcher' },
-        { id: 'threat-data' },
         { id: 'advisories' },
+        { id: 'feeds', count: feeds.length },
       ],
     },
     {
-      title: 'AUTONOMOUS PIPELINE',
+      title: 'Pipeline',
       items: [
         { id: 'correlation' },
         { id: 'pipeline' },
+      ],
+    },
+    {
+      title: 'Email & Notifications',
+      items: [
         { id: 'alerted-cves' },
-        { id: 'feeds', count: feeds.length },
         { id: 'recipients' },
         { id: 'template' },
         { id: 'daily-digest' },
@@ -66,12 +79,12 @@ export const Sidebar: React.FC = () => {
       ],
     },
     {
-      title: 'ARCHIVE & RETENTION',
-      items: [{ id: 'archive' }],
+      title: 'Data Management',
+      items: [{ id: 'aliases' }, { id: 'archive' }],
     },
     {
-      title: 'SYSTEM & AUDIT',
-      items: [{ id: 'logs' }, { id: 'health' }, { id: 'aliases' }, { id: 'settings' }],
+      title: 'System & Audit',
+      items: [{ id: 'logs' }, { id: 'health' }, { id: 'settings' }],
     },
   ];
 

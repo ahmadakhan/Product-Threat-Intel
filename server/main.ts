@@ -34,6 +34,7 @@ import { initMlRuntime } from './ml/integration.ts';
 import { encryptionKeys } from './secrets';
 import { runScheduledTraining, TrainingAlreadyRunningError } from './ml/train/cron.ts';
 import type { TrainingSummary } from './ml/train/orchestrator.ts';
+import { isTelemetryAnomaly } from './ml/integration.ts';
 import type { Db } from './db';
 import { processPipeline } from './pipeline';
 import { runSelfHealCheck } from './selfHealing';
@@ -508,6 +509,7 @@ const mlTrainingTick = () => {
     verboseLog('ml.training.start');
     const summary = await runScheduledTraining(pool, {
       directory: config.ML_DIRECTORY,
+      signingKey: config.ML_SIGNING_KEY,
       lookbackDays: config.ML_LOOKBACK_DAYS,
     }).catch((error) => {
       // Release the claim on failure so the next tick (or another replica) can
@@ -525,6 +527,9 @@ const mlTrainingTick = () => {
         });
     });
     if (!summary) return;
+    if (summary.summary.saved > 0) {
+      await initMlRuntime(pool, { directory: config.ML_DIRECTORY, signingKey: config.ML_SIGNING_KEY });
+    }
     await pool.query(
       "UPDATE records SET data=jsonb_set(data,'{\"lastRun\"}',to_jsonb(now())) || jsonb_build_object('claimedAt',NULL,'claimToken',NULL) WHERE kind='systemState' AND id=$1 AND data->>'claimToken'=$2",
       [ML_TRAINING_SCHEDULE_ID, claimToken],
@@ -541,6 +546,29 @@ const dailyDigestTimer = setInterval(dailyDigestTick, 60000);
 dailyDigestTick();
 const mlTrainingTimer = setInterval(mlTrainingTick, 60000);
 mlTrainingTick();
+let mlTelemetryRunning: Promise<void> | null = null;
+let mlTelemetryPrevious = { time: Date.now(), completed: correlation.supervisor.ingestor.telemetry.completed };
+const mlTelemetryTimer = setInterval(() => {
+  if (stopping || config.WORKER_ENABLED !== 'true' || mlTelemetryRunning || correlation.pendingDepth < 0) return;
+  const telemetry = correlation.supervisor.ingestor.telemetry;
+  const now = Date.now();
+  const metrics = {
+    memoryPercent: correlation.supervisor.memoryPercent(),
+    activeWorkers: correlation.supervisor.active.size,
+    concurrencyLimit: correlation.supervisor.concurrencyLimit,
+    latencyMs: telemetry.completed ? telemetry.latencyTotal / telemetry.completed : 0,
+    deadLetters: telemetry.deadLetters,
+    pendingClaims: correlation.pendingDepth,
+    itemsPerSecond: Math.max(0, telemetry.completed - mlTelemetryPrevious.completed) / Math.max(1, (now - mlTelemetryPrevious.time) / 1000),
+    poolWaiting: pool.waitingCount,
+  };
+  mlTelemetryPrevious = { time: now, completed: telemetry.completed };
+  mlTelemetryRunning = writeEvent(pool, {
+    category: 'ML', code: 'ml.telemetry.sample', message: 'Observed ML telemetry training sample', context: metrics,
+  }).then(() => { isTelemetryAnomaly(metrics); })
+    .catch(report('ml.telemetry'))
+    .finally(() => { mlTelemetryRunning = null; });
+}, 60000);
 const cleanup = setInterval(() => {
   // Session and login-attempt expiry are security invariants, not retained
   // business data. Queue rows and operational events follow the retention
@@ -564,12 +592,13 @@ async function shutdown() {
   clearInterval(retentionTimer);
   clearInterval(dailyDigestTimer);
   clearInterval(mlTrainingTimer);
+  clearInterval(mlTelemetryTimer);
   clearInterval(cleanup);
   const deadline = setTimeout(() => process.exit(1), 30000);
   deadline.unref();
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await Promise.allSettled(
-    [pipeline, outbox, digest, retentionRunning, dailyDigestRunning, trainingRunning].filter(Boolean) as Promise<unknown>[],
+    [pipeline, outbox, digest, retentionRunning, dailyDigestRunning, trainingRunning, mlTelemetryRunning].filter(Boolean) as Promise<unknown>[],
   );
   await correlation.stop();
   await closePdfRenderer();

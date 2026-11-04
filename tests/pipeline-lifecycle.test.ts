@@ -1585,6 +1585,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       };
       const configured = zones.find((zone) => keyFor(zone) !== keyFor('UTC'));
       assert.ok(configured, 'no zone currently differs from UTC by a calendar day');
+      const defaultTimezone = resolveTimezone();
       // Pin the expected day when the digest is queued: a run that straddles
       // local midnight between this assertion and the job would otherwise read
       // as a timezone bug.
@@ -1592,9 +1593,9 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       for (const [timezone, expected] of [
         [configured, configured],
         // Unset, blank and unusable values fall back to the documented default.
-        [undefined, 'UTC'],
-        ['', 'UTC'],
-        ['Not/AZone', 'UTC'],
+        [undefined, defaultTimezone],
+        ['', defaultTimezone],
+        ['Not/AZone', defaultTimezone],
       ] as const) {
         await reset();
         await save('settings', 'main', {

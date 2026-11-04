@@ -8,6 +8,16 @@ Release with `docker compose --env-file .env.production up -d --build`. Confirm 
 
 The runtime's `/live` endpoint reports process availability and `/ready` checks PostgreSQL. Neither certifies feed freshness or successful delivery. Monitor authenticated System Health, feed errors, execution failures, queue depth, failed deliveries, database size and worker heartbeat (normally updated every five seconds outside an active run). Alert on heartbeat staleness relative to your maximum ingestion time. Logs are JSON on standard output; retain and restrict access through your platform. Feed/provider error details may contain operational information.
 
+The header displays total/enabled feed counts. Its "Online for" indicator is the current API process uptime, refreshed every minute via `/api/system-uptime`; it resets on API restart and is not host uptime or a historical availability guarantee. Failed uptime checks display "Uptime unavailable".
+
+## Operational logs
+
+The Logs workspace separates event ownership: **Operational events** contains pipeline, feed, matching, email, issue and general event activity, and intentionally excludes `ML` and `SYSTEM`; **ML logs** contains only `ML` events; **System logs** contains only `SYSTEM` events. **Audit trail** is a separate record of audited operator actions. An event missing from one view may belong to another tab rather than being absent from retention.
+
+Operational events can be searched across code, message and context, then narrowed by category, level or execution UUID. ML and System logs each support search and level filters. All three event views are newest-first and use cursor-based pages; automatic refresh pauses while browsing older pages. Clear filters before broadening a search.
+
+Select an event to inspect its full message, failure details and structured context, with execution and tracking identifiers plus available timing/correlation metadata. The operational-event detail view can use a tracking ID to search related activity. Context is redacted before persistence; it is not a substitute for protected application or provider logs, and retained log access should remain restricted.
+
 ## Back up
 
 Run from the repository directory on the Docker host. Backups are consistent PostgreSQL custom-format dumps. Restrict destination permissions and encrypt off-host copies.
@@ -53,6 +63,22 @@ The authenticated email-preview sink uses DOMPurify and restricted presentation 
 
 The read-only Compose application uses separate writable volumes for dead letters and ML models. Preserve both in backup/restore procedures. The model path is `/var/lib/vulnstream/ml`; the image creates it with runtime-user ownership. The latest audit host had no Docker CLI, so image startup, volume ownership on an existing deployment, restore drills and shared-filesystem behavior must be verified before rollout.
 
+### ML readiness and training
+
+Authenticated `GET /api/ml/status` lists all 18 models, loaded versions, minimum sample counts and the latest scheduled training result. `UNTRAINED` means the deterministic fallback is active, not that learning has completed. Never bypass quality gates or generate fictitious analyst outcomes to make this count green.
+
+With `WORKER_ENABLED=true`, training runs hourly by default (`ML_TRAINING_INTERVAL_MS`), uses `ML_LOOKBACK_DAYS`, signs artifacts when `ML_SIGNING_KEY` is configured, and refreshes the in-process runtime after saving qualified models. Each cycle has a distinct artifact version so rollback history is retained. The standalone command is `node --import tsx --env-file=.env server/ml/train/cron.ts`; supply a valid `DATABASE_URL` and the same model directory/signing key as the API. Restart an API after externally running standalone training to load its artifacts.
+
+Real correlation telemetry is sampled once per minute; finalized email attempts record observed retry intervals and outcomes. Reviewed findings train applicability/ranking models. Labels not implied by those records (calibration, exploit-risk assessment, severity assessment, recipient digest relevance, zero-day cap outcomes and composition preferences) are accepted via **ADMIN/OPERATOR-only**, CSRF-protected `POST /api/ml/feedback`. Submit one analyst-verified sample at a time; validation rejects unknown fields, nonfinite/out-of-range features, unsupported labels, oversized payloads and mismatched zero-day outcome counts. For example:
+
+```json
+{"source":"calibrationPairs","sample":{"credibilityScore":75,"isActionable":true}}
+```
+
+The other supported `source` values are `exploitRiskSamples`, `severityTierSamples`, `digestSelectionSamples`, `zeroDayRateLimitSamples` and `emailCompositionSamples`; their exact feature/label contracts are defined in [the feedback schema](server/ml/feedback.ts). These events are training data: retain ML operational events for at least the training lookback.
+
+Finding `mlAssessment` and calibrated news scores are recommendations only: they cannot upgrade confidence, undo VEX, suppress authoritative applicability, or bypass dispatch policy. Digest relevance ranks already-subscribed findings without dropping them. Learned zero-day caps cannot exceed the existing maximum; overflow remains in durable digests. Learned delivery delays cannot shorten the configured retry backoff or a provider's `Retry-After`, and classifier recommendations cannot override transport rejection evidence.
+
 ## Capacity and audit boundaries
 
 New audit entries carry optional hash-protected context: action code, resource type/identifier, explicit outcome, optional request reference and supplied field names. Supplied fields are not a before/after diff, and values are not copied from command payloads. Unknown outcomes display as recorded rather than success. Account creation records the authenticated administrator as actor; bootstrap provisioning records a system actor. Audit text is bounded, control characters are normalized, and common credential forms are redacted before hashing. Restrict audit/export access because actor names, source IPs and legitimate operational details remain sensitive.
@@ -64,6 +90,8 @@ Schema version 36 maintains exact collection counts and dashboard KPIs in `state
 Audit verification uses a repeatable-read snapshot and bounded cursor batches, with a compatible sorted Merkle root. Memory use is bounded, but verification still reads the full retained chain and can be I/O-intensive. Disconnected requests and verification deadlines cancel the transaction.
 
 `EGRESS_ALLOWED_HOSTS` replaces the bundled host list when explicitly configured, including an empty value to deny all outbound hosts. Omit it to use the defaults, or use `EGRESS_ALLOWED_HOSTS_EXTRA` for additions to the selected list. Include all feed, redirect and email-provider hosts needed by the deployment when supplying a restricted list.
+
+Recommended-feed catalog changes do not register missing feeds when `BOOTSTRAP_RECOMMENDED_FEEDS=false`. To import missing catalog entries, set it to `true` and restart the API; existing IDs and equivalent source URLs are skipped. Restore it to `false` afterward if deletions should remain deleted. Existing operator settings are preserved except for known-unavailable, unchanged vendor-seeded endpoints: X/Twitter's obsolete security feed stays disabled with an explanatory error. Its redirect host `blog.x.com` is allowlisted, but allowing the host does not make the publisher's blocked feed usable.
 
 Advisory PDFs are generated server-side with PDFKit from text extracted from the email HTML. Scripts, styles, images, and external resources are not executed or fetched; visible text, headings, lists, and link destinations are included. No browser or Chrome installation is required. Set `ATTACH_ADVISORY_PDF=false` for HTML-only delivery.
 
@@ -115,4 +143,4 @@ The initial sync fetches at most the selected lookback or 24 hours, whichever is
 
 OpenCVE and MITRE retain recent per-CVE revision timestamps to avoid fetching unchanged detail documents in the overlap. MITRE advances only through the published log watermark and installs its ETag only after consuming that index completely. EPSS scores are cached for one hour per source and queried CVE set; newly matching CVEs are fetched immediately, and an expired cache refreshes all current candidates without extending old scores indefinitely. CISA KEV and RSS/JSON sources continue to use conditional requests where the provider supplies an ETag. VulnCheck KEV uses the documented last-modified date filters with 100-record pages and durable checkpoints. Catalog-only providers still require complete authoritative snapshots when changed; skipping portions could miss withdrawals or removals. Provider rate limits and initial-sync costs still apply.
 
-RSS/Atom downloads and parsing share an 8 MiB limit and a 10,000-entry ceiling so large vendor archives (including MSRC) can be filtered to the selected time scope. XML entity/declaration restrictions remain enforced. Interrupted HTTP responses (including connection resets and aborted transfers) receive bounded retries in the provider adapters. A provider HTTP 401 requires checking its token and access; an undecryptable stored secret requires re-entry or restoration of the original encryption key.
+RSS/Atom downloads and parsing share a 16 MiB limit and a 10,000-entry ceiling so large vendor archives (including MSRC) can be filtered to the selected time scope. DTDs are accepted without resolving external DTDs or expanding declared entities; external entity declarations remain unsupported. Interrupted HTTP responses (including connection resets and aborted transfers) receive bounded retries in the provider adapters. A provider HTTP 401 requires checking its token and access; an undecryptable stored secret requires re-entry or restoration of the original encryption key.

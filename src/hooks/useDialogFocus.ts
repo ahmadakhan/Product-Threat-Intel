@@ -1,11 +1,12 @@
 import { useEffect, useRef } from 'react';
 
 /** Keep keyboard navigation inside an open dialog and restore its trigger. */
-export function useDialogFocus(onClose: () => void) {
+export function useDialogFocus(onClose: () => void, enabled = true) {
   const ref = useRef<HTMLDivElement>(null);
   const close = useRef(onClose);
   close.current = onClose;
   useEffect(() => {
+    if (!enabled) return;
     const previous = document.activeElement as HTMLElement | null;
     const overflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
@@ -15,7 +16,7 @@ export function useDialogFocus(onClose: () => void) {
           'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
         ) ?? [],
       ).filter((element) => element.getClientRects().length > 0);
-    (focusable()[0] ?? ref.current)?.focus();
+    (ref.current?.querySelector<HTMLElement>('[data-dialog-autofocus]') ?? focusable()[0] ?? ref.current)?.focus();
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -45,6 +46,6 @@ export function useDialogFocus(onClose: () => void) {
       document.body.style.overflow = overflow;
       if (previous?.isConnected) previous.focus({ preventScroll: true });
     };
-  }, []);
+  }, [enabled]);
   return ref;
 }

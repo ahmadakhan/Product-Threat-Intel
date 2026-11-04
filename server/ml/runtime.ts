@@ -211,11 +211,12 @@ export class ModelRegistry {
     const dir = join(this.directory, modelId);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
-    const artifact: ModelArtifact = model.serialize();
+    const artifact: ModelArtifact = { ...model.serialize(), metadata };
+    delete artifact.signature;
     const filename = `${metadata.version}.json`;
     const path = join(dir, filename);
     if (this.signingKey) {
-      const payload = JSON.stringify(artifact, null, 2);
+      const payload = JSON.stringify({ metadata: artifact.metadata, weights: artifact.weights }, null, 2);
       artifact.signature = createHmac('sha256', this.signingKey).update(payload).digest('hex');
     }
     writeFileSync(path, JSON.stringify(artifact, null, 2), 'utf8');
@@ -252,14 +253,15 @@ export class ModelRegistry {
    * implement TrainableModel but can serialize/load (e.g. AutoDispatchThresholdModel).
    */
   async saveArtifact(model: TrainableModel | { serialize: () => ModelArtifact }, modelId: string, metadata: ModelMetadata): Promise<void> {
-    const artifact = model.serialize();
+    const artifact = { ...model.serialize(), metadata };
+    delete artifact.signature;
     const dir = join(this.directory, modelId);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
     const filename = `${metadata.version}.json`;
     const path = join(dir, filename);
     if (this.signingKey) {
-      const payload = JSON.stringify(artifact, null, 2);
+      const payload = JSON.stringify({ metadata: artifact.metadata, weights: artifact.weights }, null, 2);
       artifact.signature = createHmac('sha256', this.signingKey).update(payload).digest('hex');
     }
     writeFileSync(path, JSON.stringify(artifact, null, 2), 'utf8');

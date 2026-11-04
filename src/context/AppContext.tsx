@@ -142,18 +142,25 @@ function useApplication() {
   const [systemUptime, setSystemUptime] = useState<{ upSince: string; uptime: string; loadAverage: number[] }>({ upSince: 'unknown', uptime: 'unknown', loadAverage: [0, 0, 0] });
 
   useEffect(() => {
+    let active = true;
     const fetchSystemUptime = async () => {
       try {
         const { getSystemUptime } = await import('../utils/systemUptime');
         const uptime = await getSystemUptime();
-        setSystemUptime(uptime);
+        if (active) setSystemUptime(uptime);
       } catch (error) {
-        setSystemUptime({ upSince: 'unknown', uptime: 'unknown', loadAverage: [0, 0, 0] });
+        if (active) {
+          console.error('Failed to load application uptime', error);
+          setSystemUptime({ upSince: 'unknown', uptime: 'unknown', loadAverage: [0, 0, 0] });
+        }
       }
     };
     fetchSystemUptime();
     const interval = setInterval(fetchSystemUptime, 60000);
-    return () => clearInterval(interval);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
   }, []);
   const refresh = useCallback(async () => {
     const id = ++refreshId.current;

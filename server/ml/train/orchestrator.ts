@@ -93,6 +93,7 @@ import type { FindingFeatures } from '../models/reviewRanker.ts';
 import type { MetricFeatures } from '../models/metricAnomalyDetector.ts';
 import type { ThresholdSample } from '../models/autoDispatchThreshold.ts';
 import { mlMetrics } from '../metrics.ts';
+import { randomUUID } from 'node:crypto';
 
 /** Raw data inputs — provided by the caller (e.g. database query layer). */
 export interface TrainingDataSources {
@@ -185,11 +186,10 @@ export interface TrainingSummary {
   };
 }
 
-const CURRENT_VERSION = '1.0.1';
-
 export class TrainingOrchestrator {
   private readonly registry: ModelRegistry;
   private readonly storage: ModelStorageOptions;
+  private readonly version = `1.0.1+${randomUUID()}`;
 
   constructor(storage: ModelStorageOptions) {
     this.storage = storage;
@@ -728,7 +728,7 @@ export class TrainingOrchestrator {
       const metadata: ModelMetadata = {
         id: 'auto-dispatch-threshold',
         type: 'threshold_optimizer',
-        version: CURRENT_VERSION,
+        version: this.version,
         trainedAt: new Date().toISOString(),
         featureSchema: model.getFeatureNames(),
         description: 'Optimal confidence threshold for auto-dispatch gate',
@@ -1018,7 +1018,7 @@ export class TrainingOrchestrator {
       const metadata: ModelMetadata = {
         id: 'news-credibility-weight-model',
         type: 'threshold_optimizer',
-        version: CURRENT_VERSION,
+        version: this.version,
         trainedAt: new Date().toISOString(),
         featureSchema: model.getFeatureNames(),
         description: 'Learned weights for blending feed credibility and keyword confidence',
@@ -1090,7 +1090,7 @@ export class TrainingOrchestrator {
       const metadata: ModelMetadata = {
         id: 'zero-day-rate-limit-optimizer',
         type: 'threshold_optimizer',
-        version: CURRENT_VERSION,
+        version: this.version,
         trainedAt: new Date().toISOString(),
         featureSchema: model.getFeatureNames(),
         description: 'Optimal cap on zero-day findings per pipeline run',
@@ -1202,7 +1202,7 @@ export class TrainingOrchestrator {
       const metadata: ModelMetadata = {
         id: 'feed-recovery-backoff-optimizer',
         type: 'threshold_optimizer',
-        version: CURRENT_VERSION,
+        version: this.version,
         trainedAt: new Date().toISOString(),
         featureSchema: model.getFeatureNames(),
         description: 'Optimal backoff parameters for feed recovery probes',
@@ -1255,7 +1255,7 @@ export class TrainingOrchestrator {
     const metadata: ModelMetadata = {
       id: modelId,
       type: this.modelTypeFor(modelId),
-      version: CURRENT_VERSION,
+      version: this.version,
       trainedAt: new Date().toISOString(),
       featureSchema: model.getFeatureNames(),
       description: gate.modelId,

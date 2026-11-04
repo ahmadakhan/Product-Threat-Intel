@@ -85,6 +85,8 @@ export interface IntelligenceMatch {
   zeroDay?: boolean;
   /** Credibility score: source feed weight × keyword confidence (0–100). */
   credibilityScore?: number;
+  /** ML calibration recommendation; original evidence score remains authoritative. */
+  calibratedCredibilityScore?: number;
   /** Historical evidence features persisted for ML training; excludes outcome-derived labels. */
   sourceFeedWeight?: number;
   keywordScore?: number;
@@ -298,6 +300,16 @@ export interface WatchListItem {
 
 export interface Finding {
   id: string;
+  /** Decision support only; never overrides applicability, VEX or operator policy. */
+  mlAssessment?: {
+    assessedAt: string;
+    cpeParseRecommended: boolean;
+    matchConfidence: number;
+    aliasConfidence: number;
+    exploitRisk: string;
+    severityTier: string;
+    remediationCompleteness: 'complete' | 'partial' | 'sparse';
+  };
   cveId: string;
   cve: NormalizedCVE;
   matchedAssetId: string;

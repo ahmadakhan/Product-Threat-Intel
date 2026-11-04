@@ -161,7 +161,7 @@ export class AdvisoryRemediationHelper {
       probs.has_immediate_actions * 0.2 +
       probs.has_workarounds * 0.15 +
       probs.has_rollback_plan * 0.1 +
-      probs.has_step_by_step * 0.25);
+      probs.has_step_by_step * 0.25) / 1.2;
 
     let recommendation: RemediationPrediction['recommendation'];
     if (overall >= 0.7) recommendation = 'complete';
@@ -208,38 +208,30 @@ export class AdvisoryRemediationHelper {
   ): Partial<RemediationPlaybook> {
     const content: Partial<RemediationPlaybook> = { ...actual };
 
-    if (!content.patchUrl) {
-      content.patchUrl = `https://nvd.nist.gov/vuln/detail/${f.cvssScore > 7 ? 'critical-patch-available' : 'security-update'}`;
-    }
     if (!content.vendorAdvisoryRef) {
       if (f.cisaKev) {
         content.vendorAdvisoryRef = `https://www.cisa.gov/news-events/known-exploited-vulnerabilities-catalog`;
       }
     }
     if (!content.immediateActions || content.immediateActions.length === 0) {
-      const vulnAge = f.daysSincePublished > 30 ? 'older' : 'recent';
       content.immediateActions = [
-        f.exploitStatus > 2
-          ? `Immediately isolate affected asset and apply workaround for ${vulnAge} vulnerability`
-          : `Patch affected systems; prioritize assets with exploit potential`,
+        'Confirm applicability and review vendor guidance through the approved change process.',
       ];
     }
     if (!content.workarounds || content.workarounds.length === 0) {
       content.workarounds = [
-        `Disable non-essential services if CVSS ${f.cvssScore.toFixed(1)} >= 7.0`,
-        `Apply network-level filtering to restrict access to affected components`,
+        'No verified vendor workaround is available. Consult the vendor before changing system configuration.',
       ];
     }
     if (!content.stepByStep || content.stepByStep.length === 0) {
       content.stepByStep = [
-        `1. Identify affected components using version evidence`,
-        `2. Apply vendor security update or patch`,
-        `3. Validate patch deployment on non-production systems`,
-        `4. Monitor for regression in production`,
+        'Confirm the affected component and version.',
+        'Obtain vendor-approved remediation and assess operational impact.',
+        'Test the proposed change and rollback procedure before production deployment.',
       ];
     }
     if (!content.rollbackPlan) {
-      content.rollbackPlan = `Revert to pre-patch state if issues arise; maintain current backups for 48 hours`;
+      content.rollbackPlan = 'Use the approved, tested backup and rollback procedure for the affected system.';
     }
 
     return content;

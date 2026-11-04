@@ -49,6 +49,7 @@ import {
   runVulnerabilityPipeline,
 } from '../src/engine/pipelineEngine';
 import { ingestFeed, type IngestContext, FeedDeferred } from './ingestion';
+import { assessFindings } from './ml/assessment.ts';
 import {
   predictCredibilityWeights,
   computeFeedRecoveryDelay,
@@ -60,6 +61,8 @@ import {
   classifyDeliveryError,
   mlOrderFindingsByImportance,
   predictExploitRisk,
+  calibrateCredibilityScore,
+  getZeroDayCap,
 } from './ml/integration.ts';
 import { bindClusterToCve, clusterSuppressedAssets } from './correlation/clusters.ts';
 import { refreshCandidatePairs } from './versionIndex';
@@ -1563,6 +1566,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         const known = new Set(correlated.newFindings.map(findingIdentity));
         correlated.newFindings.push(...historical.newFindings.filter((finding) => !known.has(findingIdentity(finding))));
       }
+      correlated.newFindings = assessFindings(correlated.newFindings);
       await put(db, 'systemState', 'matched-inventory-v1', inventoryFingerprints);
       // `correlated.newFindings` is every current match because the server asks
       // for existing candidates so it can refresh applicability. The execution
@@ -1649,7 +1653,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       // were never recorded, so a bad split could not be attributed to a model
       // version after the fact. Capture them once and persist with the run.
       const credibilityWeights = predictCredibilityWeights();
-      const intelligenceMatches = matchIntelligence(
+      const intelligenceMatches: IntelligenceMatch[] = matchIntelligence(
         articles,
         snapshot.watchlist,
         vexEnforced,
@@ -1661,7 +1665,10 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         execution!.scopeHours,
         new Date(),
         credibilityWeights,
-      );
+      ).map((match) => ({
+        ...match,
+        calibratedCredibilityScore: calibrateCredibilityScore(match.credibilityScore ?? 0).score,
+      }));
       await putMany(
         db,
         'intelligenceMatches',
@@ -1676,8 +1683,9 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       // silently lost the notification — the exact storm-to-silence failure the
       // cap was meant to convert into a digest. The digests are now recorded
       // durably so the operator and the UI can see what was withheld.
+      const zeroDayCap = Math.max(1, Math.min(MAX_ZERO_DAYS_PER_RUN, Math.floor(getZeroDayCap())));
       const { matches: rateLimitedMatches, digests: zeroDayDigests } =
-        rankAndRateLimitZeroDays(vexEnforced, intelligenceMatches);
+        rankAndRateLimitZeroDays(vexEnforced, intelligenceMatches, zeroDayCap);
       // Declared with the other queue counters below; hoisted here because the
       // digest delivery happens before the ordinary dispatch block runs.
       let zeroDayDigestNotificationsQueued = 0;
@@ -1773,7 +1781,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       });
       if (zeroDayDigests.length) {
         execution!.logs.push(
-          `Zero-day cap (${MAX_ZERO_DAYS_PER_RUN}) reached: ${zeroDayDigests.length} digest(s) consolidated ${intelligenceMatches.length - rateLimitedMatches.length} match(es)`,
+          `Zero-day cap (${zeroDayCap}) reached: ${zeroDayDigests.length} digest(s) consolidated ${intelligenceMatches.length - rateLimitedMatches.length} match(es)`,
         );
       }
       // Audit C-3: exceeding the cap must not silence the operator. Each digest

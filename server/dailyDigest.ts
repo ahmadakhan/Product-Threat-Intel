@@ -4,7 +4,7 @@ import { writeEvent } from './events';
 import { advisoryRevision, enqueue, findingRevision, revision, recipientAllows } from './delivery';
 import { advisoryEmail } from './advisoryEmail';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine';
-import { mlComposeAdvisoryEmail } from './ml/integration';
+import { mlComposeAdvisoryEmail, shouldSelectForDigest } from './ml/integration';
 import { buildAliasMap } from '../src/utils/cpeMatcher';
 import { resolveTimezone as resolveSettingsTimezone } from '../src/utils/dateTime';
 import { DEFAULT_SETTINGS } from '../shared/state';
@@ -511,7 +511,21 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
         }
         let jobs = 0;
         for (const recipient of recipients) {
-          const included = findings.filter((finding) => recipientAllows(recipient, finding));
+          // Relevance ranks eligible findings; it must never override subscriptions or hide an alert.
+          const included = findings.filter((finding) => recipientAllows(recipient, finding))
+            .map((finding) => ({
+              finding,
+              relevance: shouldSelectForDigest({
+                cvssScore: finding.cve.cvss.score, epssScore: finding.cve.epss?.score ?? 0,
+                cisaKev: finding.cve.cisaKev?.isKev === true,
+                exploitStatus: Math.max(0, ['None', 'POC Available', 'Reported In Wild', 'Active Weaponized'].indexOf(finding.cve.exploitStatus)),
+                daysSincePublished: Math.max(0, (Date.now() - Date.parse(finding.cve.publishedDate)) / 86400000) || 0,
+                sourceFeedWeight: 0, credibilityScore: finding.confidence ?? 0, assetCriticality: 0,
+                recipientTier: 'SUBSCRIBED_ONLY', findingInDigest: true, timeInDigestMinutes: 0,
+              }),
+            }))
+            .sort((a, b) => b.relevance - a.relevance)
+            .map(({ finding }) => finding);
           if (!included.length && !health) continue;
           const view = buildDailyDigestAdvisory(included, settings, todayKey);
           const severityCounts = countSeverities(included);

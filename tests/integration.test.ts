@@ -277,6 +277,22 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
     const post = (route: string, data: any = {}) =>
       admin.post(route).set('Origin', config.APP_ORIGIN).set('x-csrf-token', csrf).send(data);
     const command = (action: string, data?: any, id?: string) => post('/api/commands', { action, data, id });
+    await t.test('ML status and analyst feedback enforce authentication, roles and validation', async () => {
+      assert.equal((await supertest(app).get('/api/ml/status')).status, 401);
+      const status = await viewer.get('/api/ml/status');
+      assert.equal(status.status, 200);
+      assert.equal(status.body.totalModels, 18);
+      assert.equal(status.body.models.length, 18);
+      const feedback = { source: 'calibrationPairs', sample: { credibilityScore: 75, isActionable: true } };
+      assert.equal((await viewer.post('/api/ml/feedback').set('Origin', config.APP_ORIGIN)
+        .set('x-csrf-token', viewCsrf).send(feedback)).status, 403);
+      assert.equal((await admin.post('/api/ml/feedback').set('Origin', config.APP_ORIGIN).send(feedback)).status, 403);
+      assert.equal((await post('/api/ml/feedback', { ...feedback, sample: { credibilityScore: 101, isActionable: true } })).status, 400);
+      assert.equal((await post('/api/ml/feedback', feedback)).status, 201);
+      const saved = await pool.query("SELECT id,context FROM operational_events WHERE code='ml.training.feedback' ORDER BY id DESC LIMIT 1");
+      assert.deepEqual(saved.rows[0].context, feedback);
+      await pool.query('DELETE FROM operational_events WHERE id=$1', [saved.rows[0].id]);
+    });
     await t.test('unauthenticated reads, CSRF and foreign origins are rejected', async () => {
       assert.equal((await supertest(app).get('/api/state')).status, 401);
       assert.equal((await supertest(app).get('/api/events')).status, 401);

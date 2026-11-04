@@ -85,6 +85,7 @@ test('the default egress allowlist covers every redirect target of the recommend
     'feeds.feedburner.com',
     'projectzero.google',
     'sec.cloudapps.cisco.com',
+    'blog.x.com',
   ]) {
     assert.ok(hosts.has(host), `${host} must be allowlisted for its feed to follow its redirect`);
   }

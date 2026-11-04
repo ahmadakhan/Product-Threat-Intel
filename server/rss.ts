@@ -31,44 +31,6 @@ export function canonicalArticleUrl(value: string): string | null {
 }
 const array = (value: any): any[] => (value == null ? [] : Array.isArray(value) ? value : [value]);
 /**
- * Remove every character reference so escaped markup cannot masquerade as
- * structure when a caller needs the text form of the document.
- *
- * Retained for callers that must see decoded text; the XXE guard deliberately
- * does NOT decode before checking — see `hasDeclaration` for why that produced
- * false rejections of safe feeds whose bodies embed HTML documents.
- */
-const stripCharacterReferences = (xml: string): string =>
-  xml.replace(/&(?:#[0-9]{1,7}|#x[0-9a-f]{1,6}|[a-z][a-z0-9]{0,30});/gi, ' ');
-/**
- * Blank CDATA sections so their contents are read as text.
- *
- * Squarespace feeds wrap the article body in `<![CDATA[...]]>` and the body
- * itself can contain `<!DOCTYPE html>` for an embedded table. A CDATA section
- * has no markup at all: `<!DOCTYPE` inside it is literal characters, which is
- * why a parser does not treat it as a declaration and it cannot expand
- * anything. This is intentionally not applied to comments: a declaration in a
- * comment is still refused (see hasDeclaration).
- */
-const stripCdata = (xml: string): string => xml.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, ' ');
-/**
- * Whether a declaration that a parser could act on survives outside escaped
- * text and CDATA.
- *
- * The check runs on the RAW document: character references are NOT decoded
- * first. `<!DOCTYPE …>` inside a `<description>` is data — the configured
- * parser runs with `processEntities: false`, so it reaches the application as
- * the literal string `<!DOCTYPE …`, which no XML processor expands. Decoding
- * references before this check made the guard see markup the parser itself
- * never would, and the Google Workspace/Cloud feeds (which embed a full HTML
- * doctype in every entry body) were rejected as XXE vectors despite being safe.
- * `<!ENTITY` in live markup and `<!DOCTYPE … SYSTEM/PUBLIC` in live markup are
- * still refused.
- */
-const hasDeclaration = (xml: string): boolean =>
-  /<!\s*ENTITY/i.test(stripCdata(xml)) ||
-  /<!\s*DOCTYPE(?=[\s\S]*\b(?:SYSTEM|PUBLIC)\b)/i.test(stripCdata(xml));
-/**
  * Entries whose body lists more distinct CVEs than this are monthly round-up
  * posts ("The October 2026 Security Update Review") whose embedded tables
  * enumerate every vendor fix. They are real, useful articles, but they are not
@@ -110,12 +72,12 @@ export function parseSyndication(
 } {
   if (Buffer.byteLength(xml) > RSS_MAX_BYTES)
     throw new Error(`RSS/Atom feed exceeds ${RSS_MAX_BYTES / (1024 * 1024)} MiB`);
-  if (hasDeclaration(xml)) throw new Error('RSS/Atom document type and entity declarations are not permitted');
   if (XMLValidator.validate(xml) !== true) throw new Error('Feed is not valid XML');
   const parsed = new XMLParser({
     ignoreAttributes: false,
     parseTagValue: false,
     parseAttributeValue: false,
+    // DTDs are accepted, but declared entity references remain literal text.
     processEntities: false,
     maxNestedTags: 64,
     trimValues: true,

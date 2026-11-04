@@ -60,16 +60,12 @@ test('RSS scopes ingestion, normalizes references and deduplicates tracked URLs'
   assert.equal(result.articles[0].url, 'https://example.com/story');
   assert.equal(result.warnings.length, 1);
 });
-test('Atom handles alternate links and rejects HTML, entities and future timestamps', () => {
+test('Atom handles alternate links and rejects HTML and future timestamps', () => {
   const xml =
     '<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Acme Widget</title><link rel="alternate" href="https://example.com/atom"/><updated>2026-10-21T10:00:00Z</updated><summary>CVE-2026-12345</summary></entry></feed>';
   assert.equal(parseSyndication(xml, 'atom', 24, now).articles.length, 1);
   assert.equal(parseSyndication(xml, 'atom', 24, new Date('2026-10-20')).articles.length, 0);
   assert.throws(() => parseSyndication('<html/>', 'x', 24), /Expected/);
-  assert.throws(
-    () => parseSyndication('<!DOCTYPE rss [<!ENTITY x SYSTEM "file:///etc/passwd">]><rss/>', 'x', 24),
-    /declarations/,
-  );
   assert.throws(() => parseSyndication('<rss>', 'x', 24), /valid XML/);
   assert.throws(() =>
     parseSyndication('<rss>' + '<nested>'.repeat(100) + '</nested>'.repeat(100) + '</rss>', 'x', 24),
@@ -99,14 +95,25 @@ test('escaped and CDATA-wrapped HTML documents are content, not declarations', (
   assert.equal(parseSyndication(rss(item('https://example.com/dbl', '&amp;lt;!DOCTYPE html&amp;gt;')), 'dbl', 24, now).articles.length, 1);
 });
 
-test('real entity declarations are still refused wherever they appear', () => {
-  const payloads = [
-    '<?xml version="1.0"?><!DOCTYPE rss [<!ENTITY x "y">]>' + rss(''),
-    '<?xml version="1.0"?><!DOCTYPE rss SYSTEM "http://example.com/x.dtd">' + rss(''),
-    rss(item('https://example.com/bomb', '<!-- <!ENTITY lol "lol"> -->')),
-    rss(item('https://example.com/lol', '&lol;')).replace('<rss version="2.0">', '<!DOCTYPE rss [<!ENTITY lol "lol">]><rss version="2.0">'),
-  ];
-  for (const xml of payloads) assert.throws(() => parseSyndication(xml, 'x', 24, now), /declarations/);
+test('DOCTYPE and internal entity declarations parse without expanding entities', () => {
+  const xml =
+    '<?xml version="1.0"?>' +
+    '<!DOCTYPE rss [<!ENTITY product "Expanded entity content">]>' +
+    rss(item('https://example.com/entity', '&product; CVE-2026-12345'));
+  const [article] = parseSyndication(xml, 'x', 24, now).articles;
+  assert.ok(article);
+  assert.match(article.summary, /&product;/);
+  assert.doesNotMatch(article.summary, /Expanded entity content/);
+
+  const externalDtd = '<?xml version="1.0"?><!DOCTYPE rss SYSTEM "https://example.test/feed.dtd">' + rss(item());
+  assert.equal(parseSyndication(externalDtd, 'external-dtd', 24, now).articles.length, 1);
+});
+
+test('external entity declarations are not resolved', () => {
+  const xml =
+    '<!DOCTYPE rss [<!ENTITY secret SYSTEM "https://example.test/secret">]>' +
+    rss(item('https://example.com/external-entity', '&secret;'));
+  assert.throws(() => parseSyndication(xml, 'x', 24, now), /External entities are not supported/);
 });
 
 test('a round-up post keeps its article but not its thousands of CVE IDs', () => {
@@ -272,6 +279,29 @@ test('request failure context carries route, caller, query and error detail', ()
   assert.equal(context.role, 'ADMIN');
   assert.equal(context.ip, '127.0.0.1');
 });
+test('operations event scope excludes categories with dedicated log views', async () => {
+  let capturedSql = '';
+  let capturedValues: unknown[] = [];
+  const db = {
+    query: async (sql: string, values: unknown[]) => {
+      capturedSql = sql;
+      capturedValues = values;
+      return { rows: [] };
+    },
+  };
+
+  const result = await readEvents(db as any, {
+    scope: 'OPERATIONS',
+    category: 'PIPELINE',
+    q: 'retry',
+    limit: 20,
+  });
+
+  assert.deepEqual(result, { events: [], nextCursor: null });
+  assert.match(capturedSql, /category NOT IN \('ML', 'SYSTEM'\)/);
+  assert.match(capturedSql, /category=\$1/);
+  assert.deepEqual(capturedValues, ['PIPELINE', 'retry', 21]);
+});
 test(
   'PostgreSQL news ingestion stays idempotent; events paginate and validate filters',
   { skip: !process.env.TEST_DATABASE_URL },
@@ -329,6 +359,85 @@ test(
       assert.notEqual(next.events[0].id, first.events[0].id);
       assert.equal((await readEvents(pool, { q: 'searchable', category: 'SYSTEM' })).events.length, 1);
       assert.ok((await readEvents(pool, { category: 'MATCHING' })).events.length >= 2);
+      await writeEvent(pool, {
+        category: 'ML',
+        code: 'test.ml',
+        message: 'machine learning event',
+      });
+      await writeEvent(pool, {
+        category: 'PIPELINE',
+        code: 'test.pipeline',
+        message: 'pipeline event',
+      });
+      const operations = await readEvents(pool, { scope: 'OPERATIONS', limit: 100 });
+      assert.ok(operations.events.some((event) => event.category === 'PIPELINE'));
+      assert.ok(operations.events.every((event) => !['ML', 'SYSTEM'].includes(event.category)));
+      assert.equal((await readEvents(pool, { scope: 'OPERATIONS', category: 'SYSTEM' })).events.length, 0);
+
+      const filterRunId = randomUUID();
+      const interleavedCategories = [
+        'PIPELINE',
+        'ML',
+        'SYSTEM',
+        'ISSUE',
+        'SYSTEM',
+        'ML',
+        'PIPELINE',
+        'SYSTEM',
+        'ML',
+        'ISSUE',
+        'ML',
+        'SYSTEM',
+      ] as const;
+      for (const [index, category] of interleavedCategories.entries()) {
+        await writeEvent(pool, {
+          category,
+          code: `scope-regression-${index}`,
+          message: `Interleaved scope regression event ${index}`,
+          runId: filterRunId,
+        });
+      }
+
+      const readAllPages = async (filters: { scope?: 'OPERATIONS'; category?: 'ML' | 'SYSTEM' }) => {
+        const events = [];
+        let before: string | undefined;
+        let pageCount = 0;
+        do {
+          const page = await readEvents(pool, {
+            ...filters,
+            runId: filterRunId,
+            limit: 2,
+            ...(before ? { before } : {}),
+          });
+          events.push(...page.events);
+          before = page.nextCursor || undefined;
+          pageCount += 1;
+          assert.ok(pageCount <= interleavedCategories.length, 'cursor pagination must terminate');
+        } while (before);
+        return { events, pageCount };
+      };
+
+      const [pagedOperations, pagedMl, pagedSystem] = await Promise.all([
+        readAllPages({ scope: 'OPERATIONS' }),
+        readAllPages({ category: 'ML' }),
+        readAllPages({ category: 'SYSTEM' }),
+      ]);
+      const categoryCounts = (categories: readonly string[]) =>
+        interleavedCategories.filter((category) => categories.includes(category)).length;
+      assert.ok(pagedOperations.pageCount > 1);
+      assert.ok(pagedMl.pageCount > 1);
+      assert.ok(pagedSystem.pageCount > 1);
+      assert.equal(pagedOperations.events.length, categoryCounts(['PIPELINE', 'ISSUE']));
+      assert.ok(pagedOperations.events.every((event) => !['ML', 'SYSTEM'].includes(event.category)));
+      assert.equal(pagedMl.events.length, categoryCounts(['ML']));
+      assert.ok(pagedMl.events.every((event) => event.category === 'ML'));
+      assert.equal(pagedSystem.events.length, categoryCounts(['SYSTEM']));
+      assert.ok(pagedSystem.events.every((event) => event.category === 'SYSTEM'));
+      assert.ok(
+        [...pagedOperations.events, ...pagedMl.events, ...pagedSystem.events].every(
+          (event) => event.runId === filterRunId,
+        ),
+      );
       await assert.rejects(readEvents(pool, { before: '9999999999999999999' }));
     } finally {
       await pool.end();

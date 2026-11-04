@@ -254,9 +254,9 @@ const recommendedFeedEntries = [
     type: 'RSS_ATOM' as const,
     // X (formerly Twitter) no longer publishes a public RSS/Atom feed for
     // security announcements. blog.twitter.com/engineering/en_us.atom redirects
-    // to blog.x.com which returns HTTP 404 (verified 2026-11). No machine-readable
+    // to blog.x.com, which rejects automated requests. No usable public
     // security feed is currently available from X.
-    url: 'https://blog.twitter.com/engineering/en_us.atom', authType: 'NONE' as const, rateLimitPerMin: 10, enabled: false, vendorSeed: true, healthStatus: 'DOWN' as const, errorLog: 'X/Twitter no longer provides a public RSS/Atom security feed; endpoint returns 404.' },
+    url: 'https://blog.twitter.com/engineering/en_us.atom', authType: 'NONE' as const, rateLimitPerMin: 10, enabled: false, vendorSeed: true, healthStatus: 'DOWN' as const, errorLog: 'X/Twitter security feed is unavailable: blog.twitter.com redirects to blog.x.com, which rejects automated requests. Feed disabled.' },
   {
     id: 'feed-github-security-advisories',
     name: 'GitHub Security Blog',

@@ -105,6 +105,7 @@ export const ActionCenter: React.FC = () => {
   const [recipientMode, setRecipientMode] = useState<RecipientMode>('SECURITY_TEAM');
   const [customEmail, setCustomEmail] = useState('');
   const [reason, setReason] = useState('');
+  const [auditReasonError, setAuditReasonError] = useState<string | null>(null);
   const [previewHtml, setPreviewHtml] = useState<string>('');
   // The preview renders server-authored email HTML via dangerouslySetInnerHTML.
   // The body embeds feed-controlled advisory text, so it passes through a
@@ -119,7 +120,7 @@ export const ActionCenter: React.FC = () => {
   const [editBusy, setEditBusy] = useState(false);
   const editDialogRef = useDialogFocus(() => {
     if (!editBusy) setEditing(null);
-  });
+  }, !!editing);
   const [livePreviewDebounce, setLivePreviewDebounce] = useState<ReturnType<typeof setTimeout> | null>(null);
   const pdfUrlRef = useRef<string | null>(null);
   const [resending, setResending] = useState<{ id: string; advisoryId: string; mode: RecipientMode; email: string; reason: string } | null>(null);
@@ -249,8 +250,19 @@ export const ActionCenter: React.FC = () => {
     [edits, subjectDraft, recipientMode, customEmail],
   );
 
+  const validateAuditReason = useCallback(() => {
+    if (reason.trim()) {
+      setAuditReasonError(null);
+      return true;
+    }
+    setAuditReasonError('Enter a reason for this update before saving or sending.');
+    document.getElementById('update-reason')?.focus();
+    return false;
+  }, [reason]);
+
   const saveEdit = useCallback(async () => {
     if (!editing) return;
+    if (!validateAuditReason()) return;
     setEditBusy(true);
     try {
       const result = await editEmailReview(editing.id, buildEdits());
@@ -261,13 +273,14 @@ export const ActionCenter: React.FC = () => {
     } finally {
       setEditBusy(false);
     }
-  }, [editing, buildEdits, editEmailReview, reload]);
+  }, [editing, validateAuditReason, buildEdits, editEmailReview, reload]);
 
   /** Approve a held review job, or dispatch an updated copy of a delivered one. */
   const sendUpdated = useCallback(async () => {
     if (!editing) return;
+    if (!validateAuditReason()) return;
     setConfirmSend({ id: editing.id, action: editing.status === 'REVIEW_REQUIRED' ? 'approve' : 'update-send', label: editing.subject });
-  }, [editing]);
+  }, [editing, validateAuditReason]);
 
   /** Execute a previously confirmed email-send action. */
   const handleConfirmedSend = useCallback(async () => {
@@ -309,6 +322,7 @@ export const ActionCenter: React.FC = () => {
         return;
       }
       if ((action === 'approve' || action === 'update-send') && editing) {
+        if (!validateAuditReason()) return;
         setEditBusy(true);
         try {
           if (editing.status === 'REVIEW_REQUIRED') {
@@ -359,6 +373,7 @@ export const ActionCenter: React.FC = () => {
     recipientMode,
     customEmail,
     reason,
+    validateAuditReason,
     selectedLogs,
     retryEmailDelivery,
     deleteEmailQueueItem,
@@ -473,6 +488,7 @@ export const ActionCenter: React.FC = () => {
       setEdits({});
       setSubjectDraft(log.subject);
       setReason('');
+      setAuditReasonError(null);
       setRecipientMode('SECURITY_TEAM');
       setCustomEmail(log.recipientEmail);
       setPreviewTab('email');
@@ -1134,7 +1150,7 @@ export const ActionCenter: React.FC = () => {
               </div>
 
               <div className="min-h-0 flex-1 overflow-y-auto xl:overflow-hidden">
-                <div className="grid grid-cols-1 gap-7 p-6 xl:h-full xl:min-h-0 xl:grid-cols-[minmax(0,0.88fr)_minmax(0,1.12fr)]">
+                <div className="grid grid-cols-1 gap-7 p-6 xl:h-full xl:min-h-0 xl:grid-cols-[minmax(0,0.88fr)_minmax(0,1.12fr)] xl:grid-rows-[minmax(0,1fr)]">
                   <div className="min-w-0 xl:min-h-0 xl:overflow-y-auto xl:overscroll-contain xl:border-r xl:border-zinc-800/80 xl:pr-7 light:xl:border-zinc-200">
                     <div className="space-y-6">
                       <section aria-labelledby="email-content-heading" className="space-y-4">
@@ -1350,18 +1366,30 @@ export const ActionCenter: React.FC = () => {
                             htmlFor="update-reason"
                             className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
                           >
-                            Reason for update
+                            Reason for update <span className="text-rose-400">(required)</span>
                           </label>
                           <input
                             id="update-reason"
                             type="text"
                             maxLength={240}
+                            required
+                            aria-required="true"
+                            aria-invalid={!!auditReasonError}
+                            aria-describedby={auditReasonError ? 'update-reason-error' : undefined}
                             placeholder="Recorded in the delivery audit trail"
                             value={reason}
-                            onChange={(e) => setReason(e.target.value)}
+                            onChange={(e) => {
+                              setReason(e.target.value);
+                              if (e.target.value.trim()) setAuditReasonError(null);
+                            }}
                             className="mt-1 w-full text-xs"
                           />
                           <p className="mt-1 text-right text-[10px] text-zinc-500">{reason.length}/240</p>
+                          {auditReasonError && (
+                            <p id="update-reason-error" role="alert" className="mt-1 text-xs text-rose-400">
+                              {auditReasonError}
+                            </p>
+                          )}
                         </div>
                       </section>
                     </div>
@@ -1464,7 +1492,7 @@ export const ActionCenter: React.FC = () => {
                       aria-label="Email preview"
                       hidden={previewTab !== 'email'}
                     >
-                      {previewTab === 'email' ? (
+                      {previewTab === 'email' && (
                         previewLoading ? (
                           <div className="flex h-[480px] flex-col items-center justify-center gap-3 rounded-xl border border-zinc-800/80 bg-zinc-900/50 text-xs text-zinc-400 light:border-zinc-200 light:bg-zinc-50 light:text-zinc-600">
                             <RefreshCw className="h-5 w-5 animate-spin text-sky-400" />
@@ -1477,13 +1505,13 @@ export const ActionCenter: React.FC = () => {
                           />
                         )
                       )}
-                      </div>
-                      <div
-                        role="tabpanel"
-                        id="pdf-preview-panel"
-                        aria-label="PDF preview"
-                        hidden={previewTab !== 'pdf'}
-                      >
+                    </div>
+                    <div
+                      role="tabpanel"
+                      id="pdf-preview-panel"
+                      aria-label="PDF preview"
+                      hidden={previewTab !== 'pdf'}
+                    >
                       {previewTab === 'pdf' && (
                         <div className="h-[480px] w-full overflow-hidden rounded-xl border border-zinc-800/80 light:border-zinc-200">
                           {pdfLoading ? (
@@ -1516,8 +1544,7 @@ export const ActionCenter: React.FC = () => {
                           )}
                         </div>
                       )}
-                      )}
-                      </div>
+                    </div>
                     <p className="mt-2 text-[11px] text-zinc-500">
                       The PDF attachment is generated from this same edited body, so both stay in sync.
                     </p>

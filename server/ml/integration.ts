@@ -21,6 +21,7 @@ import type { AppSettings, Advisory, RemediationPlaybook, Finding } from '../../
 import type { MetricFeatures as TelemetryMetric } from './models/metricAnomalyDetector.ts';
 import { extractMetricFeatures } from './models/metricAnomalyDetector.ts';
 import { extractFindingFeatures } from './models/reviewRanker.ts';
+import { findingFeatures } from './findingFeatures.ts';
 import type { RemediationFeatures, RemediationPrediction } from './models/advisoryRemediationHelper.ts';
 import { DEFAULT_AUTO_DISPATCH_THRESHOLD, DEFAULT_MAX_ZERO_DAYS_PER_RUN, DEFAULT_FEED_RECOVERY_INITIAL_DELAY_MINUTES, DEFAULT_FEED_RECOVERY_BACKOFF_MULTIPLIER, DEFAULT_FEED_RECOVERY_MAX_DELAY_MINUTES, DEFAULT_FEED_RECOVERY_MAX_STEPS, DEFAULT_FEED_CREDIBILITY_WEIGHT, DEFAULT_KEYWORD_CREDIBILITY_WEIGHT } from './defaults.ts';
 import { extractExploitRiskFeatures, type ExploitRiskLevel } from './models/exploitRiskModel.ts';
@@ -47,7 +48,9 @@ export async function initMlRuntime(pool: Db, options: ModelStorageOptions): Pro
   ctx.pool = pool;
   ctx.storage = options;
   const startAt = Date.now();
-  ctx.runtime = await createMlRuntime(options);
+  const runtime = await createMlRuntime(options);
+  if (ctx.runtime) Object.assign(ctx.runtime, runtime);
+  else ctx.runtime = runtime;
   const loadedModels = ctx.runtime.registry.list().map((e) => e.metadata.id);
   const loadMs = Date.now() - startAt;
   await writeEvent(pool, {
@@ -163,23 +166,7 @@ export function rankReviewFindings(findings: Finding[]): Finding[] {
     return [...findings].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
   }
 
-  const features = findings.map((f) =>
-    extractFindingFeatures({
-      matchConfidence: f.confidence ?? 0,
-      cvssScore: f.cve?.cvss?.score ?? 0,
-      epssScore: f.cve?.epss?.score ?? 0,
-      cisaKev: false,
-      exploitStatus: 0,
-      cweRiskLevel: 0,
-      signalDensity: 0,
-      matchMethod: f.matchingMethod ?? 'UNKNOWN',
-      sourceFeedWeight: 0,
-      assetCriticality: 0,
-      hasVersionEvidence: Boolean(f.matchedAssetPurls?.length),
-      daysSincePublished: 0,
-      negated: false,
-    }),
-  );
+  const features = findings.map((f) => extractFindingFeatures(findingFeatures(f)));
 
   const predictions = model.predictBatch(features);
   void logMlEvent('ml.review_rank', 'Review findings ranked by true-positive probability', {
@@ -322,13 +309,13 @@ export function predictMatchConfidence(f: {
   return model.predictConfidence({
     matchMethod: f.matchMethod,
     hasVersionEvidence: f.hasVersionEvidence,
-    versionVerifiedInRange: f.hasVersionEvidence,
+    versionVerifiedInRange: f.hasVersionEvidence && f.matchMethod === 'STRICT_CPE_INTERVAL',
     cvssScore: f.cvssScore,
     epssScore: f.epssScore,
     cisaKev: f.cisaKev,
     sourceFeedWeight: f.sourceFeedWeight,
     daysSincePublished: f.daysSincePublished,
-    negated: false,
+    negated: f.negated,
   });
 }
 
@@ -760,7 +747,7 @@ async function logMlEvent(
       level: context.level === 'WARNING' ? 'WARNING' : context.level === 'ERROR' ? 'ERROR' : 'INFO',
       context,
     });
-  } catch {
-    /* ML logging never blocks the pipeline */
+  } catch (error) {
+    console.error('ML event persistence failed', { code, error: error instanceof Error ? error.message : String(error) });
   }
 }

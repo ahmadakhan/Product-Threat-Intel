@@ -5,17 +5,15 @@ import { FEED_WEIGHTS } from '../../../src/utils/intelligenceMatcher.ts';
 import type { FindingFeatures } from '../models/reviewRanker.ts';
 import type { CronTrainingData } from './cron.ts';
 import type { TrainingDataSources } from './orchestrator.ts';
+import { appendMlFeedback, mlDeliveryErrorSchema, mlDeliveryOutcomeSchema, mlTelemetrySchema } from '../feedback.ts';
+import { findingFeatures } from '../findingFeatures.ts';
 
 const finite = (value: unknown, fallback = 0) =>
   typeof value === 'number' && Number.isFinite(value) ? value : fallback;
-const daysSince = (value: string | undefined) => {
-  const time = Date.parse(value || '');
-  return Number.isFinite(time) ? Math.max(0, (Date.now() - time) / 86_400_000) : 0;
-};
-
 /** Read the application schema, not the separate native text-correlation tables. */
 export class CronDataProvider {
   private snapshot?: Promise<Finding[]>;
+  private feedbackSnapshot?: Promise<TrainingDataSources>;
   constructor(readonly lookbackDays = 30) {}
   private cutoff() {
     return new Date(Date.now() - this.lookbackDays * 86_400_000).toISOString();
@@ -35,26 +33,7 @@ export class CronDataProvider {
   }
 
   private features(f: Finding): FindingFeatures {
-    const version = parseCPE23(f.matchedCpe || '');
-    const exploitStatus = ['None', 'Reported In Wild', 'POC Available', 'Active Weaponized'].indexOf(
-      f.cve.exploitStatus,
-    );
-    return {
-      matchConfidence: finite(f.confidence),
-      cvssScore: finite(f.cve.cvss?.score),
-      epssScore: finite(f.cve.epss?.score),
-      cisaKev: f.cve.cisaKev?.isKev === true,
-      exploitStatus: Math.max(0, exploitStatus),
-      cweRiskLevel: 0,
-      signalDensity: 0,
-      matchMethod: f.matchingMethod,
-      sourceFeedWeight: 0,
-      assetCriticality: 0,
-      hasVersionEvidence:
-        version.isValid && !['*', '-'].includes(version.version) && !/[?*]/.test(version.version),
-      daysSincePublished: daysSince(f.cve.publishedDate),
-      negated: false,
-    };
+    return findingFeatures(f);
   }
   // A delivered email or an unresolved finding is not an analyst relevance label.
   private adjudicated(f: Finding) {
@@ -155,12 +134,28 @@ export class CronDataProvider {
       )
     ).rows;
   }
-  async collectDeliveryOutcomes(_db: Db): Promise<CronTrainingData['deliveryOutcomes']> {
-    // Per-attempt elapsed times are not persisted. Final outbox rows cannot
-    // reconstruct retry performance, so leave the optimizer on its default policy.
-    return [];
+  private async eventContexts(db: Db, code: string): Promise<unknown[]> {
+    const result = await db.query<{ context: unknown }>(
+      'SELECT context FROM operational_events WHERE code=$1 AND occurred_at >= $2 ORDER BY occurred_at,id LIMIT 5000',
+      [code, this.cutoff()],
+    );
+    return result.rows.map((row) => row.context);
+  }
+  private feedback(db: Db): Promise<TrainingDataSources> {
+    const collect = async () => {
+      const data: TrainingDataSources = {};
+      for (const context of await this.eventContexts(db, 'ml.training.feedback')) appendMlFeedback(data, context);
+      return data;
+    };
+    return this.feedbackSnapshot ?? collect();
+  }
+  async collectDeliveryOutcomes(db: Db): Promise<CronTrainingData['deliveryOutcomes']> {
+    return (await this.eventContexts(db, 'ml.delivery.outcome')).map((context) =>
+      mlDeliveryOutcomeSchema.parse(context)).filter((sample) => sample.delayObserved !== false);
   }
   async collectDeliveryErrorSamples(db: Db): Promise<CronTrainingData['deliveryErrorSamples']> {
+    const observed = await this.eventContexts(db, 'ml.delivery.error');
+    if (observed.length) return observed.map((context) => mlDeliveryErrorSchema.parse(context));
     return (await this.deliveryRows(db))
       .filter((row) => row.channel === 'email' && row.error)
       .map((row) => {
@@ -173,23 +168,19 @@ export class CronDataProvider {
           hourOfDay: new Date(row.updated_at).getUTCHours(),
           isPermanent: statusCode >= 400 && statusCode < 500 && ![408, 429].includes(statusCode),
         };
-      });
+      }).filter((sample) => sample.statusCode >= 400 && sample.statusCode <= 599);
   }
 
-  // These histories/labels are not stored by this application. Empty samples
-  // make the orchestrator skip their models rather than invent training data
-  // or query tables that migrations never created.
-  async collectTelemetry(_db: Db): Promise<CronTrainingData['telemetryHistory']> {
-    return [];
+  async collectTelemetry(db: Db): Promise<CronTrainingData['telemetryHistory']> {
+    return (await this.eventContexts(db, 'ml.telemetry.sample')).map((context) => mlTelemetrySchema.parse(context));
   }
-  async collectCalibrationPairs(_db: Db): Promise<CronTrainingData['calibrationPairs']> {
-    return [];
+  async collectCalibrationPairs(db: Db): Promise<CronTrainingData['calibrationPairs']> {
+    return (await this.feedback(db)).calibrationPairs ?? [];
   }
-  async collectExploitRiskSamples(_db: Db): Promise<CronTrainingData['exploitRiskSamples']> {
-    return [];
+  async collectExploitRiskSamples(db: Db): Promise<CronTrainingData['exploitRiskSamples']> {
+    return (await this.feedback(db)).exploitRiskSamples ?? [];
   }
   async collectCredibilityWeightSamples(db: Db): Promise<CronTrainingData['credibilityWeightSamples']> {
-    try {
       const [matchRows, articleRows, findings] = await Promise.all([
         db.query<{ id: string; data: IntelligenceMatch; updated_at: string }>(
           "SELECT id,data,updated_at FROM records WHERE kind='intelligenceMatches' AND updated_at >= $1 ORDER BY updated_at ASC,id LIMIT 5000",
@@ -239,22 +230,20 @@ export class CronDataProvider {
         });
       }
       return samples.slice(-5000);
-    } catch {
-      // Training collections are optional; schema/query failures must not poison the pipeline.
-      return [];
-    }
   }
-  async collectZeroDayRateLimitSamples(_db: Db): Promise<CronTrainingData['zeroDayRateLimitSamples']> {
-    return [];
+  async collectZeroDayRateLimitSamples(db: Db): Promise<CronTrainingData['zeroDayRateLimitSamples']> {
+    return (await this.feedback(db)).zeroDayRateLimitSamples ?? [];
   }
-  async collectDigestSelectionSamples(_db: Db): Promise<CronTrainingData['digestSelectionSamples']> {
-    return [];
+  async collectDigestSelectionSamples(db: Db): Promise<CronTrainingData['digestSelectionSamples']> {
+    return (await this.feedback(db)).digestSelectionSamples ?? [];
   }
-  async collectSeverityTierSamples(_db: Db): Promise<CronTrainingData['severityTierSamples']> {
-    return [];
+  async collectSeverityTierSamples(db: Db): Promise<CronTrainingData['severityTierSamples']> {
+    return (await this.feedback(db)).severityTierSamples ?? [];
+  }
+  async collectEmailCompositionSamples(db: Db): Promise<CronTrainingData['emailCompositionSamples']> {
+    return (await this.feedback(db)).emailCompositionSamples ?? [];
   }
   async collectFeedRecoverySamples(db: Db): Promise<CronTrainingData['feedRecoverySamples']> {
-    try {
       const result = await db.query<{
         occurred_at: string;
         context: Record<string, unknown> | null;
@@ -266,7 +255,7 @@ export class CronDataProvider {
          ORDER BY occurred_at ASC`,
         [this.cutoff()],
       );
-      const lastDown = new Map<string, { at: number; failureCount: number; delayMinutes: number }>();
+      const lastDown = new Map<string, { at: number; failureCount: number }>();
       const samples: Array<{
         feedType: string;
         provider: string;
@@ -284,48 +273,40 @@ export class CronDataProvider {
         const observedAtMs = Date.parse(row.occurred_at);
         if (!Number.isFinite(observedAtMs)) continue;
         const status = typeof context.healthStatus === 'string' ? context.healthStatus : '';
-        if (status === 'DOWN') {
+        if (!['DOWN', 'HEALTHY', 'DEGRADED'].includes(status)) continue;
+        const down = lastDown.get(feedId);
+        const recovered = status === 'HEALTHY' ||
+          (status === 'DEGRADED' && context.consecutiveFailures === 0);
+        if (down && observedAtMs > down.at) {
+          const delayMinutes = (observedAtMs - down.at) / 60_000;
+          samples.push({
+            feedType: typeof context.feedType === 'string' ? context.feedType : 'UNKNOWN',
+            provider: typeof context.provider === 'string' ? context.provider : feedId,
+            timeOfDay: new Date(down.at).getUTCHours(),
+            failureCount: down.failureCount,
+            delayMinutes,
+            recovered,
+            recoveryLatencyMinutes: delayMinutes,
+            observedAt: new Date(observedAtMs).toISOString(),
+          });
+        }
+        if (!recovered) {
           const failureCount = typeof context.consecutiveFailures === 'number'
             ? Math.max(1, Math.floor(context.consecutiveFailures))
             : 1;
-          lastDown.set(feedId, { at: observedAtMs, failureCount, delayMinutes: 0 });
-          continue;
-        }
-        if (status !== 'HEALTHY' && status !== 'DEGRADED') continue;
-        const down = lastDown.get(feedId);
-        if (!down) continue;
-        const recoveryLatencyMinutes = Math.max(0, (observedAtMs - down.at) / 60_000);
-        const delayMinutes = typeof context.circuitOpenUntil === 'string'
-          ? 0
-          : recoveryLatencyMinutes;
-        // A health transition supplies an observed recovery outcome. For DEGRADED,
-        // require it to carry a successful sync before counting a recovery.
-        const recovered = status === 'HEALTHY' || status === 'DEGRADED';
-        samples.push({
-          feedType: typeof context.feedType === 'string' ? context.feedType : 'UNKNOWN',
-          provider: typeof context.provider === 'string' ? context.provider : feedId,
-          timeOfDay: new Date(down.at).getUTCHours(),
-          failureCount: down.failureCount,
-          delayMinutes: delayMinutes > 0 ? delayMinutes : 5,
-          recovered,
-          recoveryLatencyMinutes,
-          observedAt: new Date(observedAtMs).toISOString(),
-        });
-        lastDown.delete(feedId);
+          lastDown.set(feedId, { at: observedAtMs, failureCount });
+        } else lastDown.delete(feedId);
       }
       return samples;
-    } catch {
-      // Training collections are optional; missing history must never block workers.
-      return [];
-    }
   }
 
   async collectAll(db: Db): Promise<TrainingDataSources> {
     // Reuse one finding snapshot within this cycle; later cycles always refresh.
     this.snapshot = this.loadFindings(db);
+    this.feedbackSnapshot = this.feedback(db);
     try {
-      await this.snapshot;
-      return {
+      await Promise.all([this.snapshot, this.feedbackSnapshot]);
+      const data: TrainingDataSources = {
         cpeStrings: await this.collectCpeStrings(db),
         telemetryHistory: await this.collectTelemetry(db),
         dispatchOutcomes: await this.collectDispatchOutcomes(db),
@@ -343,10 +324,12 @@ export class CronDataProvider {
         severityTierSamples: await this.collectSeverityTierSamples(db),
         feedRecoverySamples: await this.collectFeedRecoverySamples(db),
         aliasConfidenceSamples: await this.collectAliasConfidenceSamples(db),
-        emailCompositionSamples: [],
+        emailCompositionSamples: await this.collectEmailCompositionSamples(db),
       };
+      return data;
     } finally {
       this.snapshot = undefined;
+      this.feedbackSnapshot = undefined;
     }
   }
 }

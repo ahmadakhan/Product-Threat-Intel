@@ -316,7 +316,7 @@ describe('AdvisoryRemediationHelper', () => {
       exploitStatus: 3,
     });
     assert.ok(result.overall >= 0 && result.overall <= 1);
-    assert.ok(result.generatedContent.patchUrl !== undefined);
+    assert.equal(result.generatedContent.patchUrl, undefined);
     assert.ok(result.generatedContent.stepByStep !== undefined);
     assert.equal(result.recommendation !== undefined, true);
   });
@@ -334,7 +334,7 @@ describe('AdvisoryRemediationHelper', () => {
       exploitStatus: 0,
     });
     assert.equal(result.recommendation, 'sparse');
-    assert.ok(result.generatedContent.patchUrl !== undefined);
+    assert.equal(result.generatedContent.patchUrl, undefined);
     assert.ok(result.generatedContent.immediateActions !== undefined);
     assert.ok(result.generatedContent.immediateActions!.length > 0);
   });

@@ -1,5 +1,6 @@
 import { validateNativeDelivery, type NativeDelivery } from './correlation/notificationEvidence.ts';
 import { describeError, writeEvent } from './events';
+import { classifyDeliveryError, computeRetryDelay, getMlRuntime } from './ml/integration.ts';
 import { advisoryEmail } from './advisoryEmail';
 import { advisoryFilename, renderAdvisoryPdf, unverifiableMatchFilename } from './pdf';
 import type pg from 'pg';
@@ -1486,6 +1487,15 @@ export async function deliverNext(
     return claimed.rows[0] as Job | undefined;
   });
   if (!job) return false;
+  const attemptStartedAt = Date.now();
+  const priorAttempt = job.channel === 'email' && job.attempts > 1
+    ? (await pool.query<{ occurred_at: Date }>(
+      "SELECT occurred_at FROM operational_events WHERE code='ml.delivery.outcome' AND context->>'jobId'=$1 ORDER BY id DESC LIMIT 1",
+      [job.id],
+    )).rows[0]
+    : undefined;
+  const retryDelayObserved = priorAttempt ? Math.max(0, attemptStartedAt - new Date(priorAttempt.occurred_at).getTime()) : 0;
+  let transportAttempted = false;
   // Email retries follow the operator policy; webhooks retain the historical
   // six-attempt policy because their budget is not exposed as an email setting.
   const retryPolicy = emailRetryPolicy(job.channel === 'email' ? settings : DEFAULT_SETTINGS);
@@ -1841,6 +1851,7 @@ export async function deliverNext(
       // Apply operator edits exactly once, before the transport sees the job.
       // The PDF attachment is built from `payload.html` inside the sender, so
       // this same value drives both the emailed body and the attachment.
+      transportAttempted = true;
       const result = await sendMail(applyJobEdits(job));
       providerId = typeof result === 'string' ? result : result.id;
       if (typeof result !== 'string') emailProvider = result.provider;
@@ -1945,7 +1956,10 @@ export async function deliverNext(
         !!error &&
         !routeToReview &&
         (permanent || !retryPolicy.enabled || job.attempts >= retryPolicy.maxAttempts),
-      next = new Date(Math.max(retryNotBefore, Date.now() + emailRetryDelayMs(job.attempts, retryPolicy)));
+      next = new Date(Math.max(retryNotBefore, Date.now() + Math.max(
+        emailRetryDelayMs(job.attempts, retryPolicy),
+        getMlRuntime()?.deliveryOptimizer.isTrained() ? computeRetryDelay(job.attempts) : 0,
+      )));
     await db.query(
       'UPDATE outbox SET status=$2,next_attempt=$3,error=$4,provider_id=$5,locked_at=NULL,lock_token=NULL,updated_at=now() WHERE id=$1',
       [
@@ -2190,6 +2204,33 @@ export async function deliverNext(
         ...(error ? errorInfo : {}),
       },
     });
+    if (job.channel === 'email' && transportAttempted && !routeToReview && !staleAdvisory && !holdGated && !unconfirmedError) {
+      const observedStatus = Number(/HTTP\s+(\d{3})\b/i.exec(error)?.[1] ?? statusCode);
+      const classification = classifyDeliveryError({
+        provider: emailProvider ?? 'unknown', statusCode: observedStatus,
+        errorMessage: error, attemptNumber: job.attempts, hourOfDay: new Date().getUTCHours(),
+      });
+      await writeEvent(db, {
+        category: 'ML', code: 'ml.delivery.outcome', message: 'Observed delivery attempt outcome',
+        context: {
+          jobId: job.id, provider: emailProvider ?? 'unknown', attempt: job.attempts, delayMs: retryDelayObserved,
+          delayObserved: job.attempts === 1 || Boolean(priorAttempt),
+          succeeded: !error, isRateLimited: observedStatus === 429, isPermanentFailure: permanent,
+        },
+      });
+      if (error) await writeEvent(db, {
+        category: 'ML', code: 'ml.delivery.classification', message: 'Delivery classification recommendation',
+        context: { ...classification, jobId: job.id, authoritativePermanent: permanent },
+      });
+      if (error) await writeEvent(db, {
+        category: 'ML', code: 'ml.delivery.error', message: 'Observed transport error classification',
+        context: {
+          provider: emailProvider ?? 'unknown', statusCode: observedStatus,
+          errorMessage: error.slice(0, 1000), attemptNumber: job.attempts,
+          hourOfDay: new Date().getUTCHours(), isPermanent: permanent,
+        },
+      });
+    }
     if (failed && error) {
       await writeEvent(db, {
         category: job.channel === 'email' ? 'EMAIL' : 'EVENT',

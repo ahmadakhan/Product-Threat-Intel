@@ -90,7 +90,7 @@ export const TopHeader: React.FC = () => {
                 className={`w-1.5 h-1.5 rounded-full ${feeds.some((feed) => feed.enabled) ? 'bg-emerald-500' : 'bg-zinc-500'}`}
               />
               <span className="text-[11px] font-mono">
-                {feeds.filter((f) => f.enabled).length} Feeds Enabled
+                {feeds.length}/{feeds.filter((f) => f.enabled).length} Feeds Enabled
               </span>
             </div>
 
@@ -109,8 +109,10 @@ export const TopHeader: React.FC = () => {
             </div>
 
             <div className="flex items-center space-x-1.5 bg-zinc-900/60 dark:bg-zinc-900/60 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 px-2.5 py-1 rounded-full text-zinc-400 dark:text-zinc-400 light:text-zinc-600">
-              <div className="w-3 h-3 rounded-full bg-emerald-500" />
-              <span className="font-mono text-[11px]">{systemUptime?.upSince || 'unknown'}</span>
+              <div className={`w-3 h-3 rounded-full ${systemUptime.uptime === 'unknown' ? 'bg-zinc-500' : 'bg-emerald-500'}`} />
+              <span className="font-mono text-[11px]" title="Current API process uptime; resets when the API restarts">
+                {systemUptime.uptime === 'unknown' ? 'Uptime unavailable' : `Online for ${systemUptime.uptime}`}
+              </span>
             </div>
           </div>
 
@@ -168,7 +170,7 @@ export const TopHeader: React.FC = () => {
             aria-label={`Renew session, ${sessionMins} minutes and ${sessionSecs} seconds remaining${sessionWarning ? '. Session expiring soon' : ''}`}
           >
             <KeyRound className={`w-3 h-3 ${sessionWarning ? 'text-amber-400' : 'text-zinc-500'}`} />
-            <span>
+            <span className="hidden sm:inline">
               Session: {String(sessionMins).padStart(2, '0')}:{String(sessionSecs).padStart(2, '0')}
             </span>
           </button>

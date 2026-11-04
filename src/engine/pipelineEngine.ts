@@ -159,11 +159,14 @@ function assetIdentity(assetName: string): { vendor: string; product: string; ta
 export function rankAndRateLimitZeroDays(
   findings: Finding[],
   matches: IntelligenceMatch[],
+  cap = MAX_ZERO_DAYS_PER_RUN,
 ): { findings: Finding[]; matches: IntelligenceMatch[]; digests: ZeroDayDigest[] } {
+  if (!Number.isInteger(cap) || cap < 1 || cap > MAX_ZERO_DAYS_PER_RUN)
+    throw new Error('Zero-day cap must be an integer within the configured maximum');
   const isZeroDayEvidence = (m: IntelligenceMatch) =>
     Boolean(m.zeroDay) || (!m.cveId && m.status === 'REVIEW_REQUIRED');
   const zeroDayMatches = matches.filter(isZeroDayEvidence);
-  if (zeroDayMatches.length <= MAX_ZERO_DAYS_PER_RUN) {
+  if (zeroDayMatches.length <= cap) {
     return { findings, matches, digests: [] };
   }
   // Rank by credibility. Ties break on corroboration depth and then on the
@@ -176,7 +179,7 @@ export function rankAndRateLimitZeroDays(
       b.articleIds.length - a.articleIds.length ||
       a.id.localeCompare(b.id),
   );
-  const dropped = ranked.slice(MAX_ZERO_DAYS_PER_RUN);
+  const dropped = ranked.slice(cap);
   if (!dropped.length) return { findings, matches, digests: [] };
   const byProduct = new Map<string, { vendor: string; product: string; matches: IntelligenceMatch[] }>();
   for (const match of dropped) {

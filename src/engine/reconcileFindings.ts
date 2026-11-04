@@ -92,6 +92,7 @@ export function reconcileFindings(
        confidence: candidate.confidence,
        exposure: candidate.exposure,
       exploitRisk: candidate.exploitRisk,
+      mlAssessment: candidate.mlAssessment,
       notificationStatus,
       timeline: changed
         ? [

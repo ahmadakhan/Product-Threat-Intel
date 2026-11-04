@@ -176,6 +176,7 @@ export const WatchListView: React.FC = () => {
   const [simVersion, setSimVersion] = useState('10.2.3');
   const [simHw, setSimHw] = useState('any');
   const [simPurl, setSimPurl] = useState('');
+  const [simRunning, setSimRunning] = useState(false);
   const [simResults, setSimResults] = useState<{
     testedAt: string;
     matchedCves: Array<{
@@ -813,49 +814,64 @@ export const WatchListView: React.FC = () => {
   // carries a capped recent slice, so evaluating it locally would silently miss
   // matches on a large installation.
   const runSimulation = async () => {
-    const generatedCpe = generateCPE23(
-      simPart,
-      simVendor,
-      simProduct,
-      simVersion,
-      simHw === 'any' ? '*' : simHw,
-    );
-    const result = await simulateCorrelation({
-      vendor: simVendor,
-      product: simProduct,
-      version: simVersion,
-      cpes: [generatedCpe],
-      purls: simPurl ? [simPurl] : undefined,
-      targetHw: simHw !== 'any' ? simHw : undefined,
-      assetTag: 'SIM-PROD-01',
-    });
-    if (!result) return; // The context banner reports the request failure.
-    const testedAt = new Date(result.testedAt);
-    setSimResults({
-      testedAt: Number.isNaN(testedAt.getTime()) ? result.testedAt : testedAt.toLocaleTimeString(),
-      matchedCves: result.matchedCves,
-      totalScanned: result.totalScanned,
-      ruleSummary: {
-        cpeGenerated: generatedCpe,
-        aliasExpanded: result.aliasExpanded,
-        intervalEvaluated: result.intervalEvaluated,
-        architectureFiltered: simHw !== 'any',
-      },
-    });
+    setSimRunning(true);
+    try {
+      const generatedCpe = generateCPE23(
+        simPart,
+        simVendor,
+        simProduct,
+        simVersion,
+        simHw === 'any' ? '*' : simHw,
+      );
+      const result = await simulateCorrelation({
+        vendor: simVendor,
+        product: simProduct,
+        version: simVersion,
+        cpes: [generatedCpe],
+        purls: simPurl ? [simPurl] : undefined,
+        targetHw: simHw !== 'any' ? simHw : undefined,
+        assetTag: 'SIM-PROD-01',
+      });
+      if (!result) return; // The context banner reports the request failure.
+      const testedAt = new Date(result.testedAt);
+      setSimResults({
+        testedAt: Number.isNaN(testedAt.getTime()) ? result.testedAt : testedAt.toLocaleTimeString(),
+        matchedCves: result.matchedCves,
+        totalScanned: result.totalScanned,
+        ruleSummary: {
+          cpeGenerated: generatedCpe,
+          aliasExpanded: result.aliasExpanded,
+          intervalEvaluated: result.intervalEvaluated,
+          architectureFiltered: simHw !== 'any',
+        },
+      });
+    } finally {
+      setSimRunning(false);
+    }
   };
 
   return (
     <div className="space-y-6">
       {/* Header and View Mode Switcher */}
       <div className="ui-page-header">
-        <PageHeading page="watchlist">
-          Enterprise products tracked with automated strict CPE 2.3 expressions and supply-chain PURLs. All
-          assets are protected with uniform autonomous detection.
+        <PageHeading
+          page="watchlist"
+          title={viewMode === 'simulator' ? 'Matching Simulator' : 'Monitored Products'}
+        >
+          {viewMode === 'simulator'
+            ? 'Preview how a product identity matches against the current vulnerability cache. Runs are read-only and do not save findings or send notifications.'
+            : 'Track enterprise products with automated CPE 2.3 expressions and supply-chain PURLs.'}
         </PageHeading>
 
         {/* Dual Tab Mode Switcher */}
-        <div className="ui-segmented flex items-center space-x-1 bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-200 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 p-1 rounded-xl shadow-sm">
+        <div
+          role="group"
+          aria-label="Watchlist view"
+          className="ui-segmented flex items-center space-x-1 bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-200 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 p-1 rounded-xl shadow-sm"
+        >
           <button
+            type="button"
+            aria-pressed={viewMode === 'inventory'}
             onClick={() => setViewMode('inventory')}
             className={`px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center space-x-1.5 ${
               viewMode === 'inventory'
@@ -867,6 +883,8 @@ export const WatchListView: React.FC = () => {
             <span>Monitored Products ({watchlist.length})</span>
           </button>
           <button
+            type="button"
+            aria-pressed={viewMode === 'simulator'}
             onClick={() => {
               setViewMode('simulator');
               if (!simResults) void runSimulation();
@@ -885,78 +903,248 @@ export const WatchListView: React.FC = () => {
 
       {/* VIEW 1: Monitored Products Table */}
       {viewMode === 'simulator' && (
-        <section className="rounded-xl border border-zinc-700 p-5 space-y-4">
-          <h2 className="text-lg font-semibold">Matching Simulator</h2>
-          <p className="text-sm text-zinc-400 dark:text-zinc-400 light:text-zinc-600">
-            Uses the same correlation engine as the server against the current threat cache, across all dates.
-            This preview does not save findings or send notifications.
-          </p>
+        <section
+          aria-labelledby="matching-simulator-heading"
+          className="ui-panel min-w-0 space-y-6 rounded-2xl border border-zinc-700/80 p-4 shadow-sm transition-colors sm:p-6 dark:border-zinc-700/80 light:border-zinc-200"
+        >
+          <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex min-w-0 items-start gap-3">
+              <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-blue-400/20 bg-blue-500/10 text-blue-300 light:border-blue-200 light:bg-blue-50 light:text-blue-700">
+                <FlaskConical className="h-5 w-5" aria-hidden="true" />
+              </span>
+              <div className="min-w-0">
+                <h2 id="matching-simulator-heading" className="text-lg font-semibold tracking-tight">
+                  Matching Simulator
+                </h2>
+                <p
+                  id="matching-simulator-description"
+                  className="mt-1 max-w-2xl text-sm leading-6 text-zinc-400 dark:text-zinc-400 light:text-zinc-600"
+                >
+                  Validate a product identity against the current threat cache using the server’s correlation engine.
+                </p>
+              </div>
+            </div>
+            <span className="inline-flex w-fit shrink-0 items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900/70 px-2.5 py-1.5 text-xs font-medium text-zinc-300 dark:border-zinc-700 dark:bg-zinc-900/70 dark:text-zinc-300 light:border-zinc-200 light:bg-zinc-50 light:text-zinc-700">
+              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+              Read-only · no notifications
+            </span>
+          </header>
+
           <form
-            className="grid gap-3 md:grid-cols-3"
+            aria-describedby="matching-simulator-description"
+            className="space-y-4"
             onSubmit={(e) => {
               e.preventDefault();
               void runSimulation();
             }}
           >
-            <label className="text-sm">
-              CPE part
-              <select
-                className="block w-full border border-zinc-600 rounded p-2 mt-1"
-                value={simPart}
-                onChange={(e) => setSimPart(e.target.value as 'a' | 'o' | 'h')}
-              >
-                <option value="a">Application</option>
-                <option value="o">Operating system</option>
-                <option value="h">Hardware</option>
-              </select>
-            </label>
-            {(
-              [
-                ['Vendor', simVendor, setSimVendor],
-                ['Product', simProduct, setSimProduct],
-                ['Installed version', simVersion, setSimVersion],
-                ['Architecture', simHw, setSimHw],
-                ['Package URL (optional)', simPurl, setSimPurl],
-              ] as const
-            ).map(([label, value, setter]) => (
-              <label key={label} className="text-sm">
-                {label}
-                <input
-                  className="block w-full border border-zinc-600 rounded p-2 mt-1"
-                  value={value}
-                  onChange={(e) => setter(e.target.value)}
-                  required={label !== 'Package URL (optional)'}
-                />
-              </label>
-            ))}
-            <button type="submit" className="rounded bg-blue-600 px-4 py-2 self-end">
-              Check matches
-            </button>
-          </form>
-          {simResults && (
-            <div className="space-y-3" aria-live="polite">
-              <p>
-                {simResults.matchedCves.length} matches from {simResults.totalScanned} cached vulnerabilities
-              </p>
-              <code className="block break-all text-xs">{simResults.ruleSummary.cpeGenerated}</code>
-              {simResults.matchedCves.length === 0 && (
-                <p>No matching vulnerabilities in the current cache.</p>
-              )}
-              {simResults.matchedCves.map((result) => (
-                <article key={result.cve.cveId} className="border border-zinc-700 rounded p-3">
-                  <h3 className="font-semibold">
-                    <CveLink cveId={result.cve.cveId} /> — {result.cve.title}
-                  </h3>
-                  <p>
-                    {result.autoAction} · {result.method}
-                  </p>
-                  <p className="text-sm text-zinc-400 dark:text-zinc-400 light:text-zinc-600">
-                    {result.evidence}
-                  </p>
-                </article>
-              ))}
+            <div className="grid min-w-0 gap-4 lg:grid-cols-[1.3fr_0.9fr]">
+              <fieldset className="min-w-0 rounded-xl border border-zinc-800 p-4 dark:border-zinc-800 light:border-zinc-200">
+                <legend className="px-1 text-xs font-semibold uppercase tracking-[0.12em] text-zinc-400 dark:text-zinc-400 light:text-zinc-600">
+                  Product identity
+                </legend>
+                <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  <label className="min-w-0 text-xs font-medium text-zinc-300 dark:text-zinc-300 light:text-zinc-700">
+                    CPE part
+                    <select
+                      className="mt-1.5 block w-full"
+                      value={simPart}
+                      onChange={(e) => setSimPart(e.target.value as 'a' | 'o' | 'h')}
+                    >
+                      <option value="a">Application</option>
+                      <option value="o">Operating system</option>
+                      <option value="h">Hardware</option>
+                    </select>
+                  </label>
+                  <label className="min-w-0 text-xs font-medium text-zinc-300 dark:text-zinc-300 light:text-zinc-700">
+                    Vendor
+                    <input
+                      className="mt-1.5 block w-full"
+                      value={simVendor}
+                      onChange={(e) => setSimVendor(e.target.value)}
+                      required
+                    />
+                  </label>
+                  <label className="min-w-0 text-xs font-medium text-zinc-300 dark:text-zinc-300 light:text-zinc-700 sm:col-span-2 xl:col-span-1">
+                    Product
+                    <input
+                      className="mt-1.5 block w-full"
+                      value={simProduct}
+                      onChange={(e) => setSimProduct(e.target.value)}
+                      required
+                    />
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset className="min-w-0 rounded-xl border border-zinc-800 p-4 dark:border-zinc-800 light:border-zinc-200">
+                <legend className="px-1 text-xs font-semibold uppercase tracking-[0.12em] text-zinc-400 dark:text-zinc-400 light:text-zinc-600">
+                  Version and platform
+                </legend>
+                <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+                  <label className="min-w-0 text-xs font-medium text-zinc-300 dark:text-zinc-300 light:text-zinc-700">
+                    Installed version
+                    <input
+                      className="mt-1.5 block w-full"
+                      value={simVersion}
+                      onChange={(e) => setSimVersion(e.target.value)}
+                      required
+                    />
+                  </label>
+                  <label className="min-w-0 text-xs font-medium text-zinc-300 dark:text-zinc-300 light:text-zinc-700">
+                    Architecture
+                    <input
+                      className="mt-1.5 block w-full"
+                      value={simHw}
+                      onChange={(e) => setSimHw(e.target.value)}
+                      required
+                    />
+                  </label>
+                  <label className="min-w-0 text-xs font-medium text-zinc-300 dark:text-zinc-300 light:text-zinc-700 sm:col-span-2">
+                    Package URL <span className="font-normal text-zinc-500">(optional)</span>
+                    <input
+                      className="mt-1.5 block w-full"
+                      value={simPurl}
+                      onChange={(e) => setSimPurl(e.target.value)}
+                    />
+                  </label>
+                </div>
+              </fieldset>
             </div>
-          )}
+            <div className="flex flex-col gap-3 border-t border-zinc-800 pt-4 sm:flex-row sm:items-center sm:justify-between dark:border-zinc-800 light:border-zinc-200">
+              <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-500 light:text-zinc-600">
+                Results are a preview only. Findings are not saved and no notifications are sent.
+              </p>
+              <button
+                type="submit"
+                disabled={simRunning}
+                aria-busy={simRunning}
+                className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-blue-400/30 bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 disabled:cursor-wait disabled:opacity-70 light:border-blue-700 light:bg-blue-700 light:hover:bg-blue-600 light:focus-visible:ring-offset-white"
+              >
+                {simRunning ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Search className="h-4 w-4" aria-hidden="true" />
+                )}
+                {simRunning ? 'Checking…' : 'Check matches'}
+              </button>
+            </div>
+          </form>
+
+          <div
+            className="min-w-0 border-t border-zinc-800 pt-5 dark:border-zinc-800 light:border-zinc-200"
+            aria-live="polite"
+            aria-busy={simRunning}
+          >
+            {simRunning && (
+              <p className="mb-4 flex items-center gap-2 text-sm text-blue-300 dark:text-blue-300 light:text-blue-700">
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                Checking the vulnerability cache…
+              </p>
+            )}
+            {!simResults && !simRunning && (
+              <p className="text-sm text-zinc-400 dark:text-zinc-400 light:text-zinc-600">
+                Run a check to see matching advisories and the generated CPE evidence.
+              </p>
+            )}
+            {simResults && (
+              <div className="min-w-0 space-y-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-500 light:text-zinc-600">
+                      Run results
+                    </p>
+                    <h3 className="mt-1 text-base font-semibold">
+                      {simResults.matchedCves.length} matches
+                      <span className="ml-2 text-sm font-normal text-zinc-400 dark:text-zinc-400 light:text-zinc-600">
+                        of {simResults.totalScanned.toLocaleString()} vulnerabilities scanned
+                      </span>
+                    </h3>
+                  </div>
+                  <span className="inline-flex shrink-0 items-center gap-1.5 text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600">
+                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+                    Completed {simResults.testedAt}
+                  </span>
+                </div>
+
+                <div className="min-w-0 rounded-xl border border-zinc-700/80 bg-zinc-950/60 p-3 dark:border-zinc-700/80 dark:bg-zinc-950/60 light:border-zinc-200 light:bg-zinc-50">
+                  <div className="mb-2 flex items-center gap-2 text-xs font-medium text-zinc-400 dark:text-zinc-400 light:text-zinc-600">
+                    <Code className="h-3.5 w-3.5 text-blue-400" aria-hidden="true" />
+                    Generated CPE 2.3
+                  </div>
+                  <code className="block min-w-0 break-all font-mono text-xs leading-5 text-blue-200 dark:text-blue-200 light:text-blue-800">
+                    {simResults.ruleSummary.cpeGenerated}
+                  </code>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <span className="rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 dark:border-zinc-700 dark:text-zinc-300 light:border-zinc-200 light:text-zinc-700">
+                    {simResults.ruleSummary.aliasExpanded ? 'Alias expansion applied' : 'No alias expansion'}
+                  </span>
+                  <span className="rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 dark:border-zinc-700 dark:text-zinc-300 light:border-zinc-200 light:text-zinc-700">
+                    {simResults.ruleSummary.intervalEvaluated ? 'Version interval evaluated' : 'No version interval'}
+                  </span>
+                  <span className="rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 dark:border-zinc-700 dark:text-zinc-300 light:border-zinc-200 light:text-zinc-700">
+                    {simResults.ruleSummary.architectureFiltered ? `Architecture: ${simHw}` : 'Any architecture'}
+                  </span>
+                </div>
+
+                {simResults.matchedCves.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-zinc-700 px-4 py-6 text-center dark:border-zinc-700 light:border-zinc-300">
+                    <CheckCircle2 className="mx-auto h-5 w-5 text-emerald-400" aria-hidden="true" />
+                    <p className="mt-2 text-sm font-medium">No matching vulnerabilities found</p>
+                    <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600">
+                      No advisories in the current cache matched this product identity.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {simResults.matchedCves.map((result) => (
+                      <article
+                        key={result.cve.cveId}
+                        className="min-w-0 rounded-xl border border-zinc-700/80 bg-zinc-900/40 p-4 dark:border-zinc-700/80 dark:bg-zinc-900/40 light:border-zinc-200 light:bg-white"
+                      >
+                        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                          <div className="min-w-0">
+                            <h4 className="break-words text-sm font-semibold leading-6">
+                              <CveLink cveId={result.cve.cveId} />
+                              <span className="text-zinc-500"> · </span>
+                              <span>{result.cve.title}</span>
+                            </h4>
+                            <p className="mt-2 break-words text-xs leading-5 text-zinc-400 dark:text-zinc-400 light:text-zinc-600">
+                              {result.evidence}
+                            </p>
+                          </div>
+                          {result.suppressed && (
+                            <span className="inline-flex w-fit shrink-0 items-center gap-1.5 rounded-lg border border-amber-400/25 bg-amber-400/10 px-2 py-1 text-xs font-medium text-amber-300 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-300 light:border-amber-300 light:bg-amber-50 light:text-amber-800">
+                              <AlertCircle className="h-3.5 w-3.5" aria-hidden="true" />
+                              Suppressed
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-zinc-800 pt-3 dark:border-zinc-800 light:border-zinc-200">
+                          <span className="rounded-lg bg-blue-500/10 px-2.5 py-1 text-xs font-medium text-blue-300 dark:bg-blue-500/10 dark:text-blue-300 light:bg-blue-50 light:text-blue-800">
+                            {result.autoAction}
+                          </span>
+                          <span className="rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 dark:border-zinc-700 dark:text-zinc-300 light:border-zinc-200 light:text-zinc-700">
+                            {result.method}
+                          </span>
+                          <span className="rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 dark:border-zinc-700 dark:text-zinc-300 light:border-zinc-200 light:text-zinc-700">
+                            {result.confidence}% confidence
+                          </span>
+                          {result.suppressionReason && (
+                            <span className="min-w-0 break-words text-xs text-amber-300 dark:text-amber-300 light:text-amber-800">
+                              {result.suppressionReason}
+                            </span>
+                          )}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </section>
       )}
 

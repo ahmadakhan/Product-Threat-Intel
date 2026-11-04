@@ -136,6 +136,8 @@ export async function writeEvent(
   );
 }
 const querySchema = z.object({
+  // The operations scope excludes categories that have dedicated log views.
+  scope: z.enum(['OPERATIONS']).optional(),
   category: z.enum(EVENT_CATEGORIES).optional(),
   level: z.enum(['INFO', 'WARNING', 'ERROR']).optional(),
   runId: z.uuid().optional(),
@@ -161,6 +163,7 @@ export async function readEvents(
     values.push(value);
     clauses.push(sql.replace('?', `$${values.length}`));
   };
+  if (query.scope === 'OPERATIONS') clauses.push("category NOT IN ('ML', 'SYSTEM')");
   if (query.category) where('category=?', query.category);
   if (query.level) where('level=?', query.level);
   if (query.runId) where('run_id=?', query.runId);
