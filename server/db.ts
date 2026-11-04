@@ -120,7 +120,7 @@ export const schemaLockKey = 'hashtext(COALESCE(current_schema(), current_databa
  * it matches the highest `NNN_*.sql` file, so a forgotten bump fails the suite
  * rather than shipping a build that boots against an un-migrated database.
  */
-export const REQUIRED_SCHEMA_VERSION = 34;
+export const REQUIRED_SCHEMA_VERSION = 35;
 
 /**
  * Migration files sorted by numeric prefix. Only plain `NNN_name.sql` entries

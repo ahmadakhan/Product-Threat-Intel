@@ -35,9 +35,14 @@ export const RECOMMENDED_FEEDS = [
     vendorSeed: true,
   },
   { id: 'feed-cisa-alerts', name: 'CISA Cybersecurity Advisories', type: 'RSS_ATOM' as const,
-    url: 'https://www.cisa.gov/news-events/cybersecurity-advisories/all.xml', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: true, vendorSeed: true },
+    // /news-events/cybersecurity-advisories/all.xml returns HTTP 404 (verified
+    // 2026-11); the live feed moved to /cybersecurity-advisories/all.xml (200,
+    // 5.8 MB XML).
+    url: 'https://www.cisa.gov/cybersecurity-advisories/all.xml', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: true, vendorSeed: true },
   { id: 'feed-certcc-vulns', name: 'CERT/CC Vulnerability Notes', type: 'RSS_ATOM' as const,
     // Atom is the only syndication endpoint CERT/CC publishes; /vuls/rss 404s.
+    // kb.cert.org/vuls/feed/ returns HTTP 404 (verified 2026-11). The live Atom
+    // endpoint is /vuls/atomfeed/ (200, valid XML).
     url: 'https://www.kb.cert.org/vuls/atomfeed/', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: true, vendorSeed: true },
   { id: 'feed-hackernews', name: 'The Hacker News', type: 'RSS_ATOM' as const,
     url: 'https://thehackernews.com/feeds/posts/default', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: false, vendorSeed: true },
@@ -50,7 +55,13 @@ export const RECOMMENDED_FEEDS = [
   { id: 'feed-krebs', name: 'Krebs on Security', type: 'RSS_ATOM' as const,
     url: 'https://krebsonsecurity.com/feed/', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: false, vendorSeed: true },
   { id: 'feed-cisco-psirt', name: 'Cisco Security Advisories', type: 'RSS_ATOM' as const,
-    url: 'https://tools.cisco.com/security/center/psirtRSS20.xml', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: false, vendorSeed: true },
+    // The historical endpoints are dead (tools.cisco.com 404) and the
+    // "rss.xml" served by sec.cloudapps.cisco.com is an HTML page wearing an
+    // .xml extension (verified 2026-11): Cisco publishes advisories through an
+    // API, not a syndication feed. Disabled rather than seeded broken; an
+    // operator who needs Cisco data can add an NVD_API feed filtered to Cisco
+    // instead.
+    url: 'https://sec.cloudapps.cisco.com/security/center/rss.xml', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: false, vendorSeed: false },
   { id: 'feed-paloalto-psirt', name: 'Palo Alto Networks Security Advisories', type: 'RSS_ATOM' as const,
     url: 'https://security.paloaltonetworks.com/rss.xml', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: false, vendorSeed: true },
   {
@@ -65,9 +76,13 @@ export const RECOMMENDED_FEEDS = [
   },
   {
     id: 'feed-talos',
-    name: 'Cisco Talos Vulnerability Reports',
+    name: 'Cisco Talos Intelligence Blog',
     type: 'RSS_ATOM' as const,
-    url: 'https://www.talosintelligence.com/vulnerability_reports/feed',
+    // www.talosintelligence.com/vulnerability_reports/feed (and /rss/feed/)
+    // return HTTP 404 HTML (verified 2026-11). The live syndication feed is the
+    // blog host: blog.talosintelligence.com/rss/ (200, 1 MB valid XML, 15
+    // articles) — the host was added to the default egress allowlist.
+    url: 'https://blog.talosintelligence.com/rss/',
     authType: 'NONE' as const,
     rateLimitPerMin: 3,
     enabled: false,
@@ -227,7 +242,10 @@ export const RECOMMENDED_FEEDS = [
     id: 'feed-github-security-advisories',
     name: 'GitHub Security Advisories',
     type: 'RSS_ATOM' as const,
-    url: 'https://github.com/advisories.atom',
+    // github.com/advisories.atom answers HTTP 406 to non-browser user agents
+    // (verified 2026-11). github.blog/feed/ serves the same advisories as valid
+    // RSS and accepts the service user agent; github.blog is allowlisted.
+    url: 'https://github.blog/feed/',
     authType: 'NONE' as const,
     rateLimitPerMin: 5,
     enabled: false,
@@ -247,20 +265,22 @@ export const RECOMMENDED_FEEDS = [
     id: 'feed-forbes-cybersecurity',
     name: 'Forbes Cybersecurity News',
     type: 'RSS_ATOM' as const,
-    url: 'https://www.forbes.com/cybersecurity/rss.xml',
+    // Forbes serves 403 to every non-interactive user agent (verified
+    // 2026-11, both the service UA and a browser UA), so no machine feed can
+    // ever fetch it. Disabled rather than seeded broken.
+    url: 'https://www.forbes.com/sites/cybersecurity/feed/',
     authType: 'NONE' as const,
     rateLimitPerMin: 5,
     enabled: false,
-    vendorSeed: true,
+    vendorSeed: false,
   },
   {
     id: 'feed-the-registrar-security',
     name: 'The Register Security',
     type: 'RSS_ATOM' as const,
-    // /security/feed/ returns HTTP 404 (verified 2026-11). /security/headlines.atom
-    // 302-redirects to api.theregister.com, which serves valid RSS (verified 200 +
-    // application/xml); api.theregister.com is allowlisted in config.ts.
-    url: 'https://api.theregister.com/security/headlines.atom',
+    // api.theregister.com/security/headlines.atom returns HTTP 404 (verified
+    // 2026-11). The live endpoint is the www host spelling (200, valid RSS).
+    url: 'https://www.theregister.com/security/headlines.atom',
     authType: 'NONE' as const,
     rateLimitPerMin: 5,
     enabled: false,
@@ -337,3 +357,16 @@ export const RECOMMENDED_FEEDS = [
     vendorSeed: true,
   },
 ] as const;
+/**
+ * The catalog keyed by feed id.
+ *
+ * Existing installations only ever receive *new* seeded feeds — the bootstrap
+ * skips an id that already exists — so a corrected URL in this file never
+ * reached a database that had seeded the earlier, broken address. The feed then
+ * failed on every run with an operator-visible error while the source said it
+ * was fine. Exposing the catalog lets the bootstrap reconcile the URL (and only
+ * the URL) of feeds it did not create this run.
+ */
+export const RECOMMENDED_FEED_URLS: ReadonlyMap<string, string> = new Map(
+  RECOMMENDED_FEEDS.map((feed) => [feed.id, feed.url]),
+);

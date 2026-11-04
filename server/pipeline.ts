@@ -179,7 +179,9 @@ function cveContentView(cve: NormalizedCVE): string {
     cpeMatchDetails: cve.cpeMatchDetails,
     versionRange: cve.versionRange,
     purls: cve.purls,
+    sourceApplicability: cve.sourceApplicability,
     applicabilityRequiresReview: cve.applicabilityRequiresReview,
+    applicabilityPolicy: cve.applicabilityPolicy,
     // Risk metadata is written by the enrichment pass below, so it must be part
     // of the change comparison or a KEV/EPSS update is never persisted.
     cisaKev: cve.cisaKev,
@@ -223,9 +225,14 @@ const DEFERRED_BIND_MAX_ATTEMPTS = 5;
   return transaction(
     pool,
     async (db) => {
-      const existing = (await list<PipelineExecution>(db, 'executions')).find((e) =>
-        ['QUEUED', 'RUNNING'].includes(e.status),
+      // Only the active execution matters here. `list('executions')` loaded
+      // every run ever recorded and de-serialised it in JavaScript, which on a
+      // long-lived installation grew past the 15 s pool statement timeout and
+      // turned "queue a run" into a 500. The JSONB status is indexed.
+      const active = await db.query<{ data: PipelineExecution }>(
+        "SELECT data FROM records WHERE kind='executions' AND data->>'status' IN ('QUEUED','RUNNING') ORDER BY updated_at DESC LIMIT 1",
       );
+      const existing = active.rows[0]?.data;
       if (existing) return existing;
       const settings = (await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
       const id = randomUUID();
@@ -659,7 +666,12 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     locked = (await lock.query(`SELECT pg_try_advisory_lock(800003, ${schemaLockKey}) AS locked`)).rows[0]
       .locked;
     if (!locked) return false;
-    const runs = await list<PipelineExecution>(pool, 'executions');
+    // Only RUNNING executions can be recovered; the bounded query replaces a
+    // load of every historical run on each tick.
+    const running = await pool.query<{ data: PipelineExecution }>(
+      "SELECT data FROM records WHERE kind='executions' AND data->>'status'='RUNNING' ORDER BY updated_at DESC",
+    );
+    const runs = running.rows.map((row) => row.data);
     // Owning the advisory lock proves no other live worker owns a run. Recovery
     // is safe because records, advisories and outbox are committed atomically.
     await lockedTransaction(async (db) => {
@@ -741,9 +753,13 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         }
       }
     });
-    execution = (await list<PipelineExecution>(pool, 'executions'))
-      .reverse()
-      .find((e) => e.status === 'QUEUED');
+    // Same bounded query as queueRun: only active executions matter. Loading
+    // the whole executions table on every worker tick was both an unbounded
+    // read and a statement-timeout risk.
+    const queued = await pool.query<{ data: PipelineExecution }>(
+      "SELECT data FROM records WHERE kind='executions' AND data->>'status'='QUEUED' ORDER BY updated_at DESC LIMIT 1",
+    );
+    execution = queued.rows[0]?.data;
     if (!execution) {
       const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
       const last = (await pool.query('SELECT last_run, next_catchup_run FROM scheduler_state WHERE id=1'))
@@ -1522,7 +1538,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         await db.query("DELETE FROM records WHERE kind='cveData' AND id = ANY($1::text[])", [staleIds]);
       // Applicability matching is time-bounded to the run window so only CVEs
       // published or modified within scopeHours are matched.
-      const settings = { ...snapshot.settings };
+      const settings = { ...snapshot.settings, scopeHours: execution!.scopeHours };
       execution!.logs.push(
         `Applicability matching is time-bounded to the run window (scopeHours=${execution!.scopeHours})`,
       );

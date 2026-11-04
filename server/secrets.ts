@@ -72,9 +72,16 @@ export function encrypt(value: string, keys: string[], context: string): string 
 export function decrypt(value: string, keys: string[], context: string): string {
   if (!value) return '';
   const parts = value.split('.');
-  const [version, keyIndex, iv, tag, body] = parts;
+  // Legacy envelope (pre key-rotation): `v1.<iv>.<tag>.<body>` — four segments,
+  // encrypted under the single configured key. Secrets written before the
+  // key-index segment was introduced stayed in this shape in the database, and
+  // every decrypt of them threw "Invalid encrypted secret encoding", breaking
+  // feed authentication, webhook URLs and provider tokens wholesale. Normalise
+  // to the current shape by inserting index 0; the AAD context is identical, so
+  // the ciphertext verifies exactly as before.
+  const [version, keyIndex, iv, tag, body] =
+    parts.length === 4 && parts[0] === 'v1' ? ['v1', '0', parts[1], parts[2], parts[3]] : (parts as [string, string, string, string, string]);
   if (
-    parts.length !== 5 ||
     version !== 'v1' ||
     !iv || !tag || !body ||
     !/^[A-Za-z0-9+/]+={0,2}$/.test(iv) ||

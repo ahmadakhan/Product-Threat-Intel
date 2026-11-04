@@ -31,16 +31,12 @@ export function canonicalArticleUrl(value: string): string | null {
 }
 const array = (value: any): any[] => (value == null ? [] : Array.isArray(value) ? value : [value]);
 /**
- * Remove every character reference so `&lt;!DOCTYPE html&gt;` no longer
- * contains the literal sequence `<!DOCTYPE`.
+ * Remove every character reference so escaped markup cannot masquerade as
+ * structure when a caller needs the text form of the document.
  *
- * RSS bodies routinely embed rendered HTML as escaped text. Sites built on
- * Squarespace (the Zero Day Initiative blog, for example) put a complete
- * `<html>` document with its own `<!DOCTYPE html>` inside `<description>` as
- * `&lt;!DOCTYPE html&gt;`. That is data: no parser acts on it, so it cannot
- * expand entities. The replacement is a single pass, so `&amp;lt;` becomes the
- * literal text `&lt;` and is not decoded a second time, exactly as a parser
- * treats it.
+ * Retained for callers that must see decoded text; the XXE guard deliberately
+ * does NOT decode before checking — see `hasDeclaration` for why that produced
+ * false rejections of safe feeds whose bodies embed HTML documents.
  */
 const stripCharacterReferences = (xml: string): string =>
   xml.replace(/&(?:#[0-9]{1,7}|#x[0-9a-f]{1,6}|[a-z][a-z0-9]{0,30});/gi, ' ');
@@ -57,18 +53,21 @@ const stripCharacterReferences = (xml: string): string =>
 const stripCdata = (xml: string): string => xml.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, ' ');
 /**
  * Whether a declaration that a parser could act on survives outside escaped
- * text and CDATA. Escaped declarations are data, as they are to any parser.
- * <!ENTITY declarations are the XXE vector; <!DOCTYPE with SYSTEM/PUBLIC
- * references an external DTD. A bare <!DOCTYPE html> (no external reference)
- * is only a content marker and is permitted.
+ * text and CDATA.
+ *
+ * The check runs on the RAW document: character references are NOT decoded
+ * first. `<!DOCTYPE …>` inside a `<description>` is data — the configured
+ * parser runs with `processEntities: false`, so it reaches the application as
+ * the literal string `<!DOCTYPE …`, which no XML processor expands. Decoding
+ * references before this check made the guard see markup the parser itself
+ * never would, and the Google Workspace/Cloud feeds (which embed a full HTML
+ * doctype in every entry body) were rejected as XXE vectors despite being safe.
+ * `<!ENTITY` in live markup and `<!DOCTYPE … SYSTEM/PUBLIC` in live markup are
+ * still refused.
  */
-const hasDeclaration = (xml: string): boolean => {
-  const stripped = stripCharacterReferences(stripCdata(xml));
-  return (
-    /<!\s*ENTITY/i.test(stripped) ||
-    /<!\s*DOCTYPE(?=[\s\S]*\b(?:SYSTEM|PUBLIC)\b)/i.test(stripped)
-  );
-};
+const hasDeclaration = (xml: string): boolean =>
+  /<!\s*ENTITY/i.test(stripCdata(xml)) ||
+  /<!\s*DOCTYPE(?=[\s\S]*\b(?:SYSTEM|PUBLIC)\b)/i.test(stripCdata(xml));
 /**
  * Entries whose body lists more distinct CVEs than this are monthly round-up
  * posts ("The October 2026 Security Update Review") whose embedded tables

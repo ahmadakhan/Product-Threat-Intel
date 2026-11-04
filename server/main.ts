@@ -39,7 +39,7 @@ import { runSelfHealCheck } from './selfHealing';
 import { runRetention } from './retention';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
 import type { AppSettings } from '../src/types/index.ts';
-import { RECOMMENDED_FEEDS } from './recommendedFeeds.js';
+import { RECOMMENDED_FEEDS, RECOMMENDED_FEED_URLS } from './recommendedFeeds.js';
 
 const config = loadConfig(),
   pool = createPool(config.DATABASE_URL);
@@ -86,6 +86,16 @@ await transaction(
         itemCountLastRun: 0,
         ssrfValidated: false,
       });
+    }
+    // A seeded feed whose source URL has been corrected since it was first
+    // created keeps failing with its old address: the skip above only ever
+    // adds new ids. Repair the URL of known feeds, leaving everything else
+    // (credentials, health history, operator state) untouched.
+    for (const stored of existing) {
+      const current = RECOMMENDED_FEED_URLS.get(stored.id);
+      if (current && stored.url && stored.url !== current) {
+        await put(db, 'feeds', stored.id, { ...stored, url: current, ssrfValidated: false });
+      }
     }
   },
   undefined,
@@ -485,24 +495,29 @@ const mlTrainingTick = () => {
   trainingStartedAt = Date.now();
   const generation = ++trainingGeneration;
   trainingRunning = (async () => {
-    const row = await pool.query("SELECT data FROM records WHERE kind='systemState' AND id=$1", [
-      ML_TRAINING_SCHEDULE_ID,
-    ]);
-    const data = row.rows[0]?.data ?? {};
-    const now = Date.now();
-    const lastRun = typeof data.lastRun === 'string' ? Date.parse(data.lastRun) : NaN;
-    if (Number.isFinite(lastRun) && now - lastRun < ML_TRAINING_INTERVAL_MS) return;
-    // The claim row is this job's cross-replica mutex. A claim that is still
-    // fresh means another replica is training right now; a claim older than the
-    // run ceiling is a dead claim (crashed trainer) and is taken over. Without
-    // this check two replicas (or a released stuck guard) could run concurrent
-    // trainings racing the same model registry directory.
-    const claimedAt = typeof data.claimedAt === 'string' ? Date.parse(data.claimedAt) : NaN;
-    if (Number.isFinite(claimedAt) && now - claimedAt < 2 * STUCK_PROMISE_MS) return;
-    await put(pool, 'systemState', ML_TRAINING_SCHEDULE_ID, {
-      ...data,
-      claimedAt: new Date(now).toISOString(),
-    });
+    const claimed = await transaction(
+      pool,
+      async (db) => {
+        const row = await db.query("SELECT data FROM records WHERE kind='systemState' AND id=$1 FOR UPDATE", [
+          ML_TRAINING_SCHEDULE_ID,
+        ]);
+        const data = row.rows[0]?.data ?? {};
+        const now = Date.now();
+        const lastRun = typeof data.lastRun === 'string' ? Date.parse(data.lastRun) : NaN;
+        if (Number.isFinite(lastRun) && now - lastRun < ML_TRAINING_INTERVAL_MS) return false;
+        // The advisory lock also serializes the first claim before its row exists.
+        const claimedAt = typeof data.claimedAt === 'string' ? Date.parse(data.claimedAt) : NaN;
+        if (Number.isFinite(claimedAt) && now - claimedAt < 2 * STUCK_PROMISE_MS) return false;
+        await put(db, 'systemState', ML_TRAINING_SCHEDULE_ID, {
+          ...data,
+          claimedAt: new Date(now).toISOString(),
+        });
+        return true;
+      },
+      undefined,
+      { locks: ['ml-training-claim'] },
+    );
+    if (!claimed) return;
     verboseLog('ml.training.start');
     const summary = await runScheduledTraining(pool, {
       directory: config.ML_DIRECTORY,

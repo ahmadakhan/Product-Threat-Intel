@@ -80,6 +80,7 @@ const DEFAULT_EGRESS_HOSTS = [
   'security.paloaltonetworks.com',
   'labs.watchtowr.com',
   'www.talosintelligence.com',
+  'blog.talosintelligence.com', // the www host has no live feed; the blog serves rss/
   'www.thezdi.com',
   'www.exploit-db.com',
   'www.debian.org',
