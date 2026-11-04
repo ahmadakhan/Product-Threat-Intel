@@ -892,6 +892,12 @@ export const formatExecutiveSummary = (total: number, counts: Record<string, num
   return `A total of <strong>${total} ${total === 1 ? 'vulnerability' : 'vulnerabilities'}</strong> were identified during the latest monitoring cycle, including ${summary} severity findings across monitored assets. Immediate remediation of critical findings is recommended while medium and low severity items should be addressed according to established risk treatment and vulnerability management procedures.`;
 }
 
+export const formatExecutiveSummaryText = (total: number, counts: Record<string, number>): string =>
+  formatExecutiveSummary(total, counts).replace(/<\/?strong>/g, '');
+
+export const stripGeneratedExecutiveSummaryMarkup = (value: string): string =>
+  value.replace(/<\/?strong>/gi, '');
+
 /**
  * The daily digest's executive summary is trusted HTML only when it is exactly
  * the sentence this module generates. Anything else is data and is escaped.

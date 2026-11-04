@@ -1079,6 +1079,12 @@ export interface AppSettings {
   emailRetryInitialDelayMinutes: number;
   /** Upper bound for the exponential backoff delay. */
   emailRetryMaxDelayMinutes: number;
+  /**
+   * Master switch for all outbound email. When false, no advisory, digest,
+   * news, self-healing, or test email is generated or sent by the delivery
+   * worker. Provider configuration is left intact; only transport is blocked.
+   */
+  emailEnabled: boolean;
   webhookSigningSecret: string;
   authorityPrecedence: ('VENDOR_PSIRT' | 'CISA_KEV' | 'FIRST_EPSS' | 'NVD_BATCH')[];
   ssrfProtection: {

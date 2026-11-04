@@ -1,5 +1,6 @@
 import type { Advisory, Finding, ReviewEdits } from '../src/types/index.ts';
 import { parseCPE23 } from '../src/utils/cpeMatcher.ts';
+import { stripGeneratedExecutiveSummaryMarkup } from '../src/utils/templateCompiler.ts';
 import { mlComposeAdvisoryEmail } from './ml/integration';
 
 const SEVERITY_COLORS: Record<string, string> = {
@@ -228,7 +229,7 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
       hour: '2-digit',
       minute: '2-digit',
     }),
-    executive_summary: escape(composedSummary),
+    executive_summary: escape(stripGeneratedExecutiveSummaryMarkup(composedSummary)),
     cve_ids: advisory.cveIds.join(', '),
     affected_systems: advisory.affectedSystems.join('\n'),
     affected_systems_html: advisory.affectedSystems

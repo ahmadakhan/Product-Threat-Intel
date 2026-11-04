@@ -782,6 +782,7 @@ export const INITIAL_SETTINGS: AppSettings = {
   schedulerIntervalMinutes: 60,
   schedulerEnabled: true,
   advisoryPrefix: 'ADV-2026-',
+  emailEnabled: true,
    autoDispatchEnabled: true,
   autoDispatchConfidenceThreshold: 0,
   autoDispatchUnverifiableMatches: false,

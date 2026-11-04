@@ -1,4 +1,5 @@
 import type { Advisory, Finding } from '../src/types/index.ts';
+import { stripGeneratedExecutiveSummaryMarkup } from '../src/utils/templateCompiler.ts';
 
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, ch =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
@@ -49,7 +50,7 @@ CVE IDs:
 ${advisory.cveIds.join('\n')}
 
 Executive Summary:
-${advisory.executiveSummary}
+${stripGeneratedExecutiveSummaryMarkup(advisory.executiveSummary)}
 
 Affected Systems:${findingsSection}
 ${advisory.affectedSystems.join('\n')}

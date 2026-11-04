@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createPool, migrate, put, transaction } from '../server/db';
 import { computeThreatAnalytics, buildDateClause, computeTimelineBucket } from '../server/analytics';
+import { niceTicks } from '../src/utils/chartTicks';
 import { INITIAL_NORMALIZED_CVES } from './fixtures/seedData';
 import type { NormalizedCVE } from '../src/types/index.ts';
 
@@ -33,6 +34,12 @@ test('computeTimelineBucket maps ranges to correct bucket types', () => {
   assert.equal(computeTimelineBucket('90d'), 'week');
   assert.equal(computeTimelineBucket('365d'), 'month');
   assert.equal(computeTimelineBucket('all'), 'month');
+});
+
+test('niceTicks preserves fractional values without duplicate axis keys', () => {
+  const ticks = niceTicks(1);
+  assert.deepEqual(ticks, [0, 0.2, 0.4, 0.6, 0.8, 1]);
+  assert.equal(new Set(ticks).size, ticks.length);
 });
 
 test('computeThreatAnalytics aggregates CVE data correctly', { skip: !database }, async () => {

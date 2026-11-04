@@ -18,6 +18,7 @@ import {
   digestSeveritySummary,
   digestSeverityKpi,
   formatExecutiveSummary,
+  formatExecutiveSummaryText,
   type DigestFinding,
 } from '../src/utils/templateCompiler';
 import type {
@@ -162,7 +163,7 @@ const buildDailyDigestAdvisory = (findings: Finding[], settings: AppSettings, da
     createdDate: new Date().toISOString(),
     deliveryStatus: 'PENDING',
     recipientCount: 0,
-    executiveSummary: formatExecutiveSummary(findings.length, severityCounts),
+    executiveSummary: formatExecutiveSummaryText(findings.length, severityCounts),
     remediationInstructions: buildRemediationInstructions(findings),
     vendorLink:
       Array.from(

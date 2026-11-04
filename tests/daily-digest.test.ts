@@ -8,6 +8,8 @@ import {
   digestSeveritySummary,
   digestSeverityKpi,
   formatExecutiveSummary,
+  formatExecutiveSummaryText,
+  stripGeneratedExecutiveSummaryMarkup,
 } from '../src/utils/templateCompiler.ts';
 import type { DailyDigestParts, DigestFinding, DigestHealth } from '../src/utils/templateCompiler.ts';
 
@@ -198,6 +200,20 @@ test('formatExecutiveSummary produces "no" when all severity counts are zero', (
   assert.ok(summary.includes('<strong>0 vulnerabilities</strong>'));
   assert.ok(summary.includes('including no severity findings'));
   assert.ok(!summary.includes('undefined'));
+});
+
+test('formatExecutiveSummaryText emits plain text for advisory records', () => {
+  const summary = formatExecutiveSummaryText(1, { CRITICAL: 1, HIGH: 0, MEDIUM: 0, LOW: 0, UNKNOWN: 0 });
+  assert.ok(!summary.includes('<strong>'));
+  assert.ok(summary.includes('1 vulnerability'));
+  assert.ok(summary.includes('1 Critical'));
+});
+
+test('stripGeneratedExecutiveSummaryMarkup cleans legacy summary tags', () => {
+  assert.equal(
+    stripGeneratedExecutiveSummaryMarkup('A total of <strong>2 vulnerabilities</strong> were found.'),
+    'A total of 2 vulnerabilities were found.',
+  );
 });
 
 test('formatExecutiveSummary lists each nonzero severity', () => {

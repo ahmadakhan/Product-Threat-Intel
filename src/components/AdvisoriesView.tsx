@@ -7,6 +7,7 @@ import { useCollection } from '../hooks/useCollection';
 import { copyText } from '../utils/clipboard';
 import { CveLink } from './CveLink';
 import { formatDate as fmtDate } from '../utils/dateTime';
+import { stripGeneratedExecutiveSummaryMarkup } from '../utils/templateCompiler';
 import { useApp } from '../context/AppContext';
 
 export const AdvisoriesView: React.FC = () => {
@@ -32,7 +33,7 @@ export const AdvisoriesView: React.FC = () => {
 **Status:** ${adv.deliveryStatus} (${adv.recipientCount} Recipients)
 
 ## Summary
-${adv.executiveSummary}
+${stripGeneratedExecutiveSummaryMarkup(adv.executiveSummary)}
 
 ## Affected Vulnerabilities
 ${adv.cveIds.map((c) => `- [${c}](https://nvd.nist.gov/vuln/detail/${encodeURIComponent(c)})`).join('\n')}
@@ -62,7 +63,7 @@ ${adv.remediationInstructions}
       ...original,
       id: escape(original.id),
       title: escape(original.title),
-      executiveSummary: escape(original.executiveSummary),
+      executiveSummary: escape(stripGeneratedExecutiveSummaryMarkup(original.executiveSummary)),
       remediationInstructions: escape(original.remediationInstructions),
       cveIds: original.cveIds.map(escape),
       affectedSystems: original.affectedSystems.map(escape),
@@ -179,7 +180,7 @@ ${adv.remediationInstructions}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
               <div className="md:col-span-2 space-y-2">
                 <div className="text-zinc-300 dark:text-zinc-300 light:text-zinc-700 leading-relaxed">
-                  {adv.executiveSummary}
+                  {stripGeneratedExecutiveSummaryMarkup(adv.executiveSummary)}
                 </div>
                 <div className="text-[11px] font-mono text-zinc-400 dark:text-zinc-400 light:text-zinc-500">
                   <span>Impacted Systems: </span>
@@ -287,7 +288,7 @@ ${adv.remediationInstructions}
                   1. Summary
                 </h4>
                 <p className="text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed bg-zinc-950/60 dark:bg-zinc-950/60 light:bg-zinc-50 p-3 rounded-xl border border-zinc-800 dark:border-zinc-800 light:border-zinc-200">
-                  {activeModalAdvisory.executiveSummary}
+                  {stripGeneratedExecutiveSummaryMarkup(activeModalAdvisory.executiveSummary)}
                 </p>
               </div>
 

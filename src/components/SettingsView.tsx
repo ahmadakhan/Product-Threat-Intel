@@ -31,6 +31,7 @@ const field = 'ui-field';
 /** Older persisted settings may predate the retry policy fields. */
 const withEmailRetryDefaults = (value: AppSettings): AppSettings => ({
   ...value,
+  emailEnabled: value.emailEnabled ?? true,
   emailRetryEnabled: value.emailRetryEnabled ?? true,
   emailRetryMaxAttempts: value.emailRetryMaxAttempts ?? 6,
   emailRetryInitialDelayMinutes: value.emailRetryInitialDelayMinutes ?? 1,
@@ -49,7 +50,7 @@ const findingDispatchSettings = (value: AppSettings) => ({
   reviewUnverifiableMatches: value.reviewUnverifiableMatches ?? false,
 });
 
-export const TIMEZONES: string[] = [
+export const TIMEZONES: string[] = [...new Set([
   ...(DEFAULT_TIMEZONE === 'UTC' ? [] : [DEFAULT_TIMEZONE]),
   'UTC',
   'Europe/London',
@@ -73,7 +74,7 @@ export const TIMEZONES: string[] = [
   'Australia/Melbourne',
   'Pacific/Auckland',
   'Pacific/Honolulu',
-];
+])];
 
 function SectionHeading({
   icon: Icon,
@@ -281,6 +282,7 @@ export function SettingsView() {
     (form.emailRetryMaxAttempts ?? 6) !== (settings.emailRetryMaxAttempts ?? 6) ||
     (form.emailRetryInitialDelayMinutes ?? 1) !== (settings.emailRetryInitialDelayMinutes ?? 1) ||
     (form.emailRetryMaxDelayMinutes ?? 60) !== (settings.emailRetryMaxDelayMinutes ?? 60) ||
+    form.emailEnabled !== settings.emailEnabled ||
     form.timezone !== settings.timezone ||
     (form.dailyDigest?.enabled ?? false) !== (settings.dailyDigest?.enabled ?? false) ||
     (form.dailyDigest?.time ?? '09:00') !== (settings.dailyDigest?.time ?? '09:00') ||
@@ -455,6 +457,7 @@ export function SettingsView() {
                 />
                 <div
                   className="settings-configuration-summary processing-summary"
+                  role="region"
                   aria-label="Processing configuration summary"
                 >
                   <div>
@@ -777,6 +780,13 @@ export function SettingsView() {
                     title="Email retry policy"
                     description="Recover from transient provider or network failures with exponential backoff."
                   >
+                    <ProcessingToggle
+                      id="processing-email-enabled"
+                      title="Enable email delivery"
+                      description="Master switch for all outbound email. When off, no advisory, digest, news, self-healing, or test email is generated or sent."
+                      checked={form.emailEnabled ?? true}
+                      onChange={(checked) => setForm({ ...form, emailEnabled: checked })}
+                    />
                     <ProcessingToggle
                       id="processing-retry-enabled"
                       title="Enable automatic email retry"

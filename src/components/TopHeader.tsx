@@ -84,7 +84,7 @@ export const TopHeader: React.FC = () => {
         {/* Center / Right Telemetry & Actions */}
         <div className="flex items-center gap-2 sm:gap-3 shrink-0">
           {/* Status chips */}
-          <div className="hidden xl:flex items-center space-x-2 text-xs">
+          <div className="hidden min-[1360px]:flex items-center space-x-2 text-xs">
             <div className="flex items-center space-x-1.5 bg-zinc-900/60 dark:bg-zinc-900/60 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 px-2.5 py-1 rounded-full text-zinc-300 dark:text-zinc-300 light:text-zinc-700">
               <span
                 className={`w-1.5 h-1.5 rounded-full ${feeds.some((feed) => feed.enabled) ? 'bg-emerald-500' : 'bg-zinc-500'}`}

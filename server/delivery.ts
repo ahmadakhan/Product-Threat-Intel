@@ -601,6 +601,10 @@ export function createMailSender(
   return async (job) => {
     const saved = (db && (await get<EmailConfiguration>(db, 'emailConfig', 'main'))) || DEFAULT_EMAIL_CONFIG;
     if (!emailIsConfigured(saved, config)) throw new Error('Email provider is not configured');
+    if (job.channel === 'email') {
+      const settings = (db && (await get<AppSettings>(db, 'settings', 'main'))) || DEFAULT_SETTINGS;
+      if (!settings.emailEnabled) throw new Error('Email delivery is disabled by settings');
+    }
     const attachment = await buildPdfAttachment(job, config, db);
     if (!isSmtpEmailProvider(saved.provider)) {
       const token = decrypt(saved.apiKey, encryptionKeys(config), `email-provider:${saved.provider}`);
@@ -692,6 +696,12 @@ export async function enqueue(
   priority = 0,
   edits: ReviewEdits = {},
 ) {
+  // Master switch: when email delivery is disabled, no email job is queued at
+  // all. Provider configuration is left intact; only transport is blocked.
+  if (channel === 'email') {
+    const settings = (await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
+    if (!settings.emailEnabled) return null;
+  }
   const id = randomUUID();
   // A content revision that already exists is normally a duplicate. The one
   // safe exception is a bundle that was terminally failed because its findings
@@ -1495,11 +1505,18 @@ export async function deliverNext(
   // six-attempt policy because their budget is not exposed as an email setting.
   const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
   const retryPolicy = emailRetryPolicy(job.channel === 'email' ? settings : DEFAULT_SETTINGS);
+  // Master switch: when email delivery is disabled, no outbound email is
+  // generated or sent. Provider configuration is left intact; only transport
+  // is blocked. Fail closed so a disabled setting can never leak an email.
+  let permanent = false;
+  if (job.channel === 'email' && !settings.emailEnabled) {
+    permanent = true;
+    throw new Error('Email delivery is disabled by settings');
+  }
   let providerId = '',
     statusCode = 0,
     signature = '',
     error = '',
-    permanent = false,
     retryNotBefore = 0;
   // Structured transport failure for the event log; `error` stays the short
   // message used by retry policy and the outbox row.

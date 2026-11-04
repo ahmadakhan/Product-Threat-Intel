@@ -136,7 +136,10 @@ const AppShell: React.FC = () => {
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 min-h-screen">
         <TopHeader />
-        <div className="ui-session-bar flex items-center justify-between gap-3 border-b border-zinc-800/80 dark:border-zinc-800/80 light:border-zinc-200 bg-zinc-900/30 dark:bg-zinc-900/30 light:bg-white/70 px-4 sm:px-6 py-2.5 text-xs">
+        <section
+          aria-label="Current operator session"
+          className="ui-session-bar flex items-center justify-between gap-3 border-b border-zinc-800/80 dark:border-zinc-800/80 light:border-zinc-200 bg-zinc-900/30 dark:bg-zinc-900/30 light:bg-white/70 px-4 sm:px-6 py-2.5 text-xs"
+        >
           <div className="flex min-w-0 items-center gap-2.5">
             <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full border border-zinc-700/70 dark:border-zinc-700/70 light:border-zinc-300 bg-zinc-800/70 dark:bg-zinc-800/70 light:bg-zinc-100 font-semibold text-zinc-200 dark:text-zinc-200 light:text-zinc-700">
               {session.username.slice(0, 1).toUpperCase()}
@@ -161,7 +164,7 @@ const AppShell: React.FC = () => {
             <LogOut className="h-3.5 w-3.5" />
             <span>Sign out</span>
           </button>
-        </div>
+        </section>
         {error && (
           <div
             role="alert"

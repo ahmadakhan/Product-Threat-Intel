@@ -16,6 +16,7 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { copyText } from '../utils/clipboard';
+import { niceTicks } from '../utils/chartTicks';
 
 import { formatDate as fmtDate } from '../utils/dateTime';
 
@@ -45,38 +46,6 @@ function fmtNum(value: number) {
 
 function truncateLabel(label: string, maxChars: number) {
   return label.length > maxChars ? `${label.slice(0, maxChars)}…` : label;
-}
-
-function niceTicks(maxValue: number, count = 5): number[] {
-  if (maxValue <= 0) return [0];
-  const niceNum = (n: number, round: boolean): number => {
-    const exp = Math.floor(Math.log10(n));
-    const f = n / Math.pow(10, exp);
-    let nf: number;
-    if (round) {
-      if (f < 1.5) nf = 1;
-      else if (f < 3) nf = 2;
-      else if (f < 7) nf = 5;
-      else nf = 10;
-    } else {
-      if (f <= 1) nf = 1;
-      else if (f <= 2) nf = 2;
-      else if (f <= 5) nf = 5;
-      else nf = 10;
-    }
-    return nf * Math.pow(10, exp);
-  };
-  const range = niceNum(maxValue, false);
-  const step = niceNum(range / Math.max(count - 1, 1), true);
-  const ticks: number[] = [];
-  const stop = Math.ceil(maxValue / step) * step;
-  for (let v = 0; v <= stop + step * 0.5; v += step) {
-    ticks.push(Math.round(v));
-  }
-  if (ticks.length === 0) ticks.push(0);
-  // Guarantee the last tick reaches at least the observed maximum.
-  if (ticks[ticks.length - 1] < maxValue) ticks.push(Math.ceil(ticks[ticks.length - 1] + step));
-  return ticks;
 }
 
 function Axis({
@@ -735,7 +704,7 @@ export const ThreatAnalyticsView: React.FC = () => {
       />
 
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Calendar className="h-4 w-4 text-zinc-500" />
           <span className="text-sm text-zinc-400 light:text-zinc-600">Timeline:</span>
           {TIMELINE_OPTIONS.map((opt) => (
@@ -933,7 +902,7 @@ function ChartCard({
   return (
     <div className="rounded-lg border border-zinc-800/80 dark:border-zinc-800 light:border-zinc-200 bg-zinc-900/50 dark:bg-zinc-900 light:bg-zinc-50 p-4">
       <div className="mb-3">
-        <h3 className="text-sm font-medium text-zinc-300 light:text-zinc-800">{title}</h3>
+        <h2 className="text-sm font-medium text-zinc-300 light:text-zinc-800">{title}</h2>
         {subtitle && <p className="text-xs text-zinc-500 light:text-zinc-600">{subtitle}</p>}
       </div>
       {children}
