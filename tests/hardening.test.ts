@@ -310,6 +310,21 @@ test('enterprise hardening invariants', { skip: !database }, async (t) => {
         hook.secretToken,
         'a blank secret edit must not silently rotate the stored credential',
       );
+      // The blank-keeps rule applies to an existing row only. A brand-new
+      // Generic HMAC endpoint with no secret, or one switched to Generic HMAC
+      // without supplying a secret, would be stored unsigned while creation
+      // reported success, so it must be refused.
+      await assert.rejects(
+        transaction(pool, (db) =>
+          applyCommand(db, config, {
+            action: 'webhook.save',
+            data: { ...webhookInput, provider: 'GENERIC_HMAC' as const },
+            actor: 'test',
+          }),
+        ),
+        /shared secret/i,
+        'a new Generic HMAC webhook requires an explicit secret',
+      );
     });
 
     await t.test('concurrent recipient creates cannot both pass the uniqueness check', async () => {

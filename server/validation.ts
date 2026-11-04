@@ -155,9 +155,17 @@ export const webhookSchema = z
       .min(1)
       .max(3),
   })
+  // A blank secret on an edit keeps the stored credential (see
+  // commands.ts `webhook.save`), so it is only invalid when there is nothing to
+  // keep: a brand-new Generic HMAC endpoint with no secret, or a secret too
+  // short to sign with. `hasStoredSecret` is supplied by the caller that knows
+  // whether a row already exists; validation alone cannot.
   .refine(
-    (value) => value.provider !== 'GENERIC_HMAC' || value.secretToken.length >= 32,
-    'Generic HMAC webhooks require a shared secret of at least 32 characters',
+    (value) =>
+      value.provider !== 'GENERIC_HMAC' ||
+      value.secretToken.length === 0 ||
+      value.secretToken.length >= 32,
+    'Generic HMAC webhook secrets must be at least 32 characters',
   );
 export const rangeSchema = z.object({
   versionStartIncluding: z.string().max(100).optional(),

@@ -626,6 +626,15 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
   } else if (action === 'webhook.save') {
     const input = webhookSchema.parse(data);
     const old = await checkExisting('webhooks');
+    // Blank-keeps applies only when there is something to keep. A new Generic
+    // HMAC endpoint (or a provider switched to GENERIC_HMAC) without a secret
+    // would otherwise be stored unsigned and every delivery would fail at the
+    // receiver while creation reported success.
+    if (input.provider === 'GENERIC_HMAC' && !input.secretToken && !old?.secretToken)
+      throw new HttpError(
+        400,
+        'Generic HMAC webhooks require a shared secret of at least 32 characters',
+      );
     await put(db, 'webhooks', newId, {
       ...input,
       id: newId,
