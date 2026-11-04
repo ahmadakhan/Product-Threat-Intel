@@ -1415,6 +1415,8 @@ export function createApp(
   );
   app.get(
     '/api/state',
+    requireAuth(pool, config),
+    requireRole('ADMIN', 'OPERATOR', 'VIEWER'),
     asyncRoute(async (_req, res) =>
       res.json(publicState(await state(pool, { limits: STATE_COLLECTION_LIMITS }))),
     ),
@@ -1610,7 +1612,7 @@ export function createApp(
       const start = performance.now();
       await pool.query('SELECT 1');
       const dbMs = Math.round(performance.now() - start);
-      const worker = (await pool.query('SELECT last_run,heartbeat FROM scheduler_state WHERE id=1')).rows[0];
+      const worker = (await pool.query('SELECT last_run,heartbeat FROM scheduler_state WHERE id=1')).rows[0] ?? {};
       const appSettings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
       const backlog = (await pool.query('SELECT status,count(*)::int AS count FROM outbox GROUP BY status'))
         .rows;
@@ -2615,6 +2617,18 @@ export function createApp(
         }
         if (!selectedRecipients.length)
           throw new HttpError(400, 'No eligible recipients for the selected delivery group');
+        // Resend must honour the same subscription governance as a first send:
+        // a recipient whose tier excludes any finding in this advisory must not
+        // receive it merely because an operator clicked resend.
+        const permitted = selectedRecipients.filter((recipient) =>
+          findings.every((finding) => recipientAllows(recipient, finding)),
+        );
+        if (!permitted.length)
+          throw new HttpError(
+            400,
+            'The selected audience is not subscribed to every finding in this advisory. Adjust the recipient subscription or choose a different audience.',
+          );
+        selectedRecipients = permitted;
         const html = renderAdvisory(snapshot.advisoryTemplate, advisory, findings);
         // A resend to EVERYONE re-opens review for that group, so the audience
         // decision from the original send must not be carried over blindly.
@@ -2785,7 +2799,7 @@ export function createApp(
         const recipients = await list<EmailRecipient>(db, 'recipients');
         let selectedRecipients: EmailRecipient[];
         if (data.recipientMode === 'SINGLE_EMAIL' && data.customEmail) {
-          selectedRecipients = recipients.filter((r) => r.email.toLowerCase() === data.customEmail!.toLowerCase());
+          selectedRecipients = recipients.filter((r) => r.enabled && r.email.toLowerCase() === data.customEmail!.toLowerCase());
         } else if (data.recipientMode === 'EVERYONE') {
           selectedRecipients = recipients.filter((r) => r.enabled && r.deliveryGroup === 'EVERYONE');
         } else {
@@ -2794,6 +2808,18 @@ export function createApp(
           );
         }
         if (!selectedRecipients.length) throw new HttpError(400, 'No eligible recipients for the selected delivery group');
+        // Resend must honour the same subscription governance as a first send:
+        // a recipient whose tier excludes any finding in this advisory must not
+        // receive it merely because an operator clicked resend.
+        const permitted = selectedRecipients.filter((recipient) =>
+          findings.every((finding) => recipientAllows(recipient, finding)),
+        );
+        if (!permitted.length)
+          throw new HttpError(
+            400,
+            'The selected audience is not subscribed to every finding in this advisory. Adjust the recipient subscription or choose a different audience.',
+          );
+        selectedRecipients = permitted;
         const advisory: Advisory = {
           id: formatAdvisoryId(snapshot.settings.advisoryPrefix),
           title: `Vulnerability notice: ${vulnerabilitySeveritySummary}`,

@@ -55,6 +55,8 @@ const DEFAULT_EGRESS_HOSTS = [
   'api.postmarkapp.com',
   'smtp.maileroo.com',
   'smtp.lettr.com',
+  'api.mailgun.net',
+  'api.eu.mailgun.net',
   'in-v3.mailjet.com',
   'api.mailjet.com',
   'smtp.gmail.com',

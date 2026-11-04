@@ -337,7 +337,11 @@ tick();
 const RETENTION_SCHEDULE_ID = 'retention-schedule';
 /** A retention sweep is abandoned (and its claim released) after this long. */
 const RETENTION_RUN_LIMIT_MS = 10 * 60_000;
-const RETENTION_CLAIM_TTL_MS = 5 * 60_000;
+/** The claim must outlive the run limit, or a second replica steals the claim
+ * from a legitimately slow sweep and runs a concurrent cleanup under the same
+ * schedule row. It is 2x the run limit so a run that finishes near its deadline
+ * is never raced. */
+const RETENTION_CLAIM_TTL_MS = 2 * RETENTION_RUN_LIMIT_MS;
 async function claimRetention(policy: AppSettings['retentionConfig']): Promise<boolean> {
   return transaction(
     pool,
@@ -488,6 +492,13 @@ const mlTrainingTick = () => {
     const now = Date.now();
     const lastRun = typeof data.lastRun === 'string' ? Date.parse(data.lastRun) : NaN;
     if (Number.isFinite(lastRun) && now - lastRun < ML_TRAINING_INTERVAL_MS) return;
+    // The claim row is this job's cross-replica mutex. A claim that is still
+    // fresh means another replica is training right now; a claim older than the
+    // run ceiling is a dead claim (crashed trainer) and is taken over. Without
+    // this check two replicas (or a released stuck guard) could run concurrent
+    // trainings racing the same model registry directory.
+    const claimedAt = typeof data.claimedAt === 'string' ? Date.parse(data.claimedAt) : NaN;
+    if (Number.isFinite(claimedAt) && now - claimedAt < 2 * STUCK_PROMISE_MS) return;
     await put(pool, 'systemState', ML_TRAINING_SCHEDULE_ID, {
       ...data,
       claimedAt: new Date(now).toISOString(),
@@ -496,9 +507,21 @@ const mlTrainingTick = () => {
     const summary = await runScheduledTraining(pool, {
       directory: config.ML_DIRECTORY,
       lookbackDays: config.ML_LOOKBACK_DAYS,
+    }).catch((error) => {
+      // Release the claim on failure so the next tick (or another replica) can
+      // retry immediately instead of waiting out the claim TTL.
+      return pool
+        .query(
+          "UPDATE records SET data=jsonb_set(data,'{\"claimedAt\"}','null'::jsonb) WHERE kind='systemState' AND id=$1",
+          [ML_TRAINING_SCHEDULE_ID],
+        )
+        .catch(() => undefined)
+        .then(() => {
+          throw error;
+        });
     });
     await pool.query(
-      "UPDATE records SET data=jsonb_set(data,'{\"lastRun\"}',to_jsonb(now())) WHERE kind='systemState' AND id=$1",
+      "UPDATE records SET data=jsonb_set(data,'{\"lastRun\"}',to_jsonb(now())) || jsonb_build_object('claimedAt', NULL) WHERE kind='systemState' AND id=$1",
       [ML_TRAINING_SCHEDULE_ID],
     );
     void logMlTrainingResult(pool, summary);

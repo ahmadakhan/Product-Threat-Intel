@@ -20,6 +20,7 @@ import {
   Eye,
 } from 'lucide-react';
 import { Pagination } from './Pagination';
+import { sanitizeEmailHtml } from '../utils/sanitizeEmailHtml';
 import { formatDateTime as fmtDateTime } from '../utils/dateTime';
 import type { EmailDeliveryLog, ReviewEdits } from '../types';
 import { PageHeading } from './PageHeading';
@@ -104,6 +105,11 @@ export const ActionCenter: React.FC = () => {
   const [customEmail, setCustomEmail] = useState('');
   const [reason, setReason] = useState('');
   const [previewHtml, setPreviewHtml] = useState<string>('');
+  // The preview renders server-authored email HTML via dangerouslySetInnerHTML.
+  // The body embeds feed-controlled advisory text, so it passes through a
+  // sanitizer that strips script/iframe/event-handler vectors before render;
+  // the backend already escapes untrusted values, this is defence in depth.
+  const sanitizedPreviewHtml = useMemo(() => sanitizeEmailHtml(previewHtml), [previewHtml]);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewTab, setPreviewTab] = useState<'email' | 'pdf'>('email');
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
@@ -1258,7 +1264,7 @@ export const ActionCenter: React.FC = () => {
                       ) : (
                         <div
                           className="h-[480px] w-full overflow-auto rounded-xl border border-zinc-800/80 light:border-zinc-200 bg-white p-4"
-                          dangerouslySetInnerHTML={{ __html: previewHtml }}
+                          dangerouslySetInnerHTML={{ __html: sanitizedPreviewHtml }}
                         />
                       )
                     ) : (

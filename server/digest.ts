@@ -180,6 +180,7 @@ async function readSettingsAndTemplate(db: Db): Promise<{ settings: AppSettings;
 export async function flushDueDigest(pool: pg.Pool): Promise<number> {
   const client = await pool.connect();
   let locked = false;
+  let failed = false;
   try {
     locked =
       (
@@ -332,9 +333,15 @@ export async function flushDueDigest(pool: pg.Pool): Promise<number> {
       },
       client,
     );
+  } catch (error) {
+    // A transport-level failure can leave the connection in an unusable state;
+    // release with the failure flag so the pool destroys it instead of handing
+    // a wedged socket to the next caller.
+    failed = true;
+    throw error;
   } finally {
     if (locked)
       await client.query(`SELECT pg_advisory_unlock(800003, ${schemaLockKey})`).catch(() => {});
-    client.release();
+    client.release(failed);
   }
 }

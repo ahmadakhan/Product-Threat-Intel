@@ -326,32 +326,33 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
 
   const client = await pool.connect();
   let locked = false;
+  let failed = false;
   try {
+    // Cheap pre-check without the advisory lock: every tick after the send time
+    // (and after today's digest already ran) would otherwise take the session
+    // lock and write two INFO events per replica per minute — thousands of
+    // no-op events per day. The locked path re-checks the claim row, so a stale
+    // pre-check can only cause one extra serialized read, never a duplicate
+    // send.
+    const precheck = (
+      await pool.query<{ data: { lastKey?: string } | null }>(
+        "SELECT data FROM records WHERE kind='systemState' AND id=$1",
+        [DAILY_SCHEDULE_ID],
+      )
+    ).rows[0]?.data;
+    if (precheck?.lastKey === todayKey) return 0;
+
     // ATOMIC: Use try_advisory_lock to prevent race conditions
     const lockResult = await client.query<{ locked: boolean }>(`
       SELECT pg_try_advisory_lock(${DAILY_LOCK_CLASS}, ${schemaLockKey}) AS locked
     `);
-    
+
     locked = lockResult.rows[0]?.locked === true;
     if (!locked) {
-      await writeEvent(client, {
-        category: 'EMAIL',
-        level: 'INFO',
-        code: 'digest.daily.lock_failed',
-        message: 'Daily digest skipped - lock already held',
-        context: { date: todayKey, time: daily.time, timezone },
-      });
+      // A peer holding the lock is normal multi-replica behaviour, not an
+      // operational event worth a log row per minute.
       return 0;
     }
-    
-    // Log lock acquisition for audit trail
-    await writeEvent(client, {
-      category: 'EMAIL',
-      level: 'INFO',
-      code: 'digest.daily.lock_acquired',
-      message: 'Daily digest acquired lock successfully',
-      context: { date: todayKey, time: daily.time, timezone },
-    });
     
   return await transaction(
         pool,
@@ -628,11 +629,16 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
       },
       client,
     );
+  } catch (error) {
+    // A transport-level failure can leave the connection unusable; release with
+    // the failure flag so the pool destroys it instead of recycling it.
+    failed = true;
+    throw error;
   } finally {
     if (locked)
       await client
         .query(`SELECT pg_advisory_unlock(${DAILY_LOCK_CLASS}, ${schemaLockKey}) AS locked`)
         .catch(() => {});
-    client.release();
+    client.release(failed);
   }
 }
