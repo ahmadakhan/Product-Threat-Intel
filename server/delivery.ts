@@ -65,7 +65,7 @@ export interface UnverifiableMatchPayload {
   /** CVE identifiers referenced across the batch, de-duplicated and sorted. */
   cveIds: string[];
 }
-import { buildAliasMap } from '../src/utils/cpeMatcher';
+import { buildAliasMap, parseCPE23 } from '../src/utils/cpeMatcher';
 import { randomUUID, createHmac, createHash } from 'node:crypto';
 import { stableJson } from '../src/utils/deduplicator';
 import nodemailer from 'nodemailer';
@@ -562,7 +562,8 @@ async function confirmPriorDelivery(
   // did not deliver. The HTTP API providers return before the message may still
   // be queued or delivered, so their failed attempts stay unconfirmed.
   const saved = (await get<EmailConfiguration>(db, 'emailConfig', 'main')) || DEFAULT_EMAIL_CONFIG;
-  if (isSmtpEmailProvider(saved.provider)) return 'not-delivered';
+  if (log?.provider === 'SMTP_Relay' || (!log?.provider && isSmtpEmailProvider(saved.provider)))
+    return 'not-delivered';
   // The HTTP API providers are addressed by a stored endpoint/domain, which is
   // the only case where an accepted-but-unrecorded send is a duplicate risk.
   // A custom `API` endpoint without a configured domain is the self-hosted
@@ -603,7 +604,7 @@ export function createMailSender(
     if (!emailIsConfigured(saved, config)) throw new Error('Email provider is not configured');
     if (job.channel === 'email') {
       const settings = (db && (await get<AppSettings>(db, 'settings', 'main'))) || DEFAULT_SETTINGS;
-      if (!settings.emailEnabled) throw new Error('Email delivery is disabled by settings');
+      if (settings.emailEnabled === false) throw new Error('Email delivery is disabled by settings');
     }
     const attachment = await buildPdfAttachment(job, config, db);
     if (!isSmtpEmailProvider(saved.provider)) {
@@ -700,7 +701,7 @@ export async function enqueue(
   // all. Provider configuration is left intact; only transport is blocked.
   if (channel === 'email') {
     const settings = (await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
-    if (!settings.emailEnabled) return null;
+    if (settings.emailEnabled === false) return null;
   }
   const id = randomUUID();
   // A content revision that already exists is normally a duplicate. The one
@@ -1159,10 +1160,23 @@ export async function queueUnverifiableMatchNotification(
       const severity = finding.cve.cvss.severity;
       const cvssScore = finding.cve.cvss.score;
       const severityColor = SEVERITY_COLORS[severity] || SEVERITY_COLORS.UNKNOWN;
+      const parsedAssetCpe = parseCPE23(finding.matchedCpe);
+      const assetVersion = parsedAssetCpe.isValid && parsedAssetCpe.version !== '*'
+        ? parsedAssetCpe.version
+        : undefined;
+      const vulnRange = finding.cve.versionRange;
+      const vulnVersionRange = vulnRange
+        ? [
+            vulnRange.versionStartIncluding ? `>=${vulnRange.versionStartIncluding}` : vulnRange.versionStartExcluding ? `>${vulnRange.versionStartExcluding}` : undefined,
+            vulnRange.versionEndIncluding ? `<=${vulnRange.versionEndIncluding}` : vulnRange.versionEndExcluding ? `<${vulnRange.versionEndExcluding}` : undefined,
+          ].filter(Boolean).join(' to ') || '*'
+        : undefined;
       return {
         asset,
         vendor,
         product,
+        assetVersion,
+        vulnVersionRange,
         evidence,
         cveId,
         severity,
@@ -1184,6 +1198,8 @@ export async function queueUnverifiableMatchNotification(
       `   Asset: ${f.asset}`,
       f.vendor ? `   Vendor: ${f.vendor}` : '',
       f.product ? `   Product: ${f.product}` : '',
+      f.assetVersion ? `   Asset version: ${f.assetVersion}` : '',
+      f.vulnVersionRange ? `   Vulnerable range: ${f.vulnVersionRange}` : '',
       `   Severity: ${f.severity}`,
       `   CVSS score: ${f.cvssScore}`,
       `   Evidence: ${f.evidence}`,
@@ -1208,6 +1224,12 @@ export async function queueUnverifiableMatchNotification(
           : '') +
         (f.product
           ? `<tr><td style="padding:4px 8px;font-weight:bold;">Product</td><td style="padding:4px 8px;">${escapeHtml(f.product)}</td></tr>`
+          : '') +
+        (f.assetVersion
+          ? `<tr><td style="padding:4px 8px;font-weight:bold;">Asset version</td><td style="padding:4px 8px;">${escapeHtml(f.assetVersion)}</td></tr>`
+          : '') +
+        (f.vulnVersionRange
+          ? `<tr><td style="padding:4px 8px;font-weight:bold;">Vulnerable range</td><td style="padding:4px 8px;">${escapeHtml(f.vulnVersionRange)}</td></tr>`
           : '') +
         `<tr><td style="padding:4px 8px;font-weight:bold;">Severity</td><td style="padding:4px 8px;"><span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${f.severityColor};color:#ffffff;font-size:11px;font-weight:bold;">${escapeHtml(f.severity)}</span></td></tr>` +
         `<tr><td style="padding:4px 8px;font-weight:bold;">CVSS score</td><td style="padding:4px 8px;">${f.cvssScore}</td></tr>` +
@@ -1493,26 +1515,22 @@ export async function deliverNext(
   request: Requester,
   sendMail: MailSender,
 ): Promise<boolean> {
+  const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
   const job = await transaction(pool, async (db) => {
     const claimed = await db.query(
-      `WITH candidate AS (SELECT id FROM outbox WHERE (status='QUEUED' AND next_attempt<=now()) OR (status='SENDING' AND locked_at<now()-interval '2 minutes') ORDER BY priority DESC, next_attempt FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE outbox SET status='SENDING',locked_at=now(),lock_token=$1,attempts=attempts+1,updated_at=now() WHERE id IN (SELECT id FROM candidate) RETURNING *`,
-      [randomUUID()],
+      `WITH candidate AS (SELECT id FROM outbox WHERE ((status='QUEUED' AND next_attempt<=now()) OR (status='SENDING' AND locked_at<now()-interval '2 minutes')) AND (channel<>'email' OR $2::boolean) ORDER BY priority DESC, next_attempt FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE outbox SET status='SENDING',locked_at=now(),lock_token=$1,attempts=attempts+1,updated_at=now() WHERE id IN (SELECT id FROM candidate) RETURNING *`,
+      [randomUUID(), settings.emailEnabled !== false],
     );
     return claimed.rows[0] as Job | undefined;
   });
   if (!job) return false;
   // Email retries follow the operator policy; webhooks retain the historical
   // six-attempt policy because their budget is not exposed as an email setting.
-  const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
   const retryPolicy = emailRetryPolicy(job.channel === 'email' ? settings : DEFAULT_SETTINGS);
   // Master switch: when email delivery is disabled, no outbound email is
   // generated or sent. Provider configuration is left intact; only transport
   // is blocked. Fail closed so a disabled setting can never leak an email.
   let permanent = false;
-  if (job.channel === 'email' && !settings.emailEnabled) {
-    permanent = true;
-    throw new Error('Email delivery is disabled by settings');
-  }
   let providerId = '',
     statusCode = 0,
     signature = '',
