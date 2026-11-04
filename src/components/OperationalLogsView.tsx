@@ -27,7 +27,7 @@ import { LogDetailModal } from './LogDetailModal';
 import { EventDetailPanel } from './EventDetailPanel';
 import { formatEventContext } from '../utils/eventText';
 import { SecondaryButton } from './SecondaryButton';
-import { formatDateTime as fmtDateTime, formatDate, timezoneLabel } from '../utils/dateTime';
+import { formatDateTime as fmtDateTime, formatDate, timezoneLabel, resolveTimezone, utcOffsetLabel } from '../utils/dateTime';
 import './investigation-pages.css';
 import './audit-trail.css';
 import './logs-view.css';
@@ -51,7 +51,7 @@ const auditLevel = (level: AuditLog['level']) => (
 );
 
 const AuditTrailView: React.FC = () => {
-  const { fetchCollection, refreshVersion, verifyAuditChainRemote, settings } = useApp();
+  const { fetchCollection, verifyAuditChainRemote, settings } = useApp();
   const [searchTerm, setSearchTerm] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [categoryFilter, setCategoryFilter] = useState<string>('ALL');
@@ -59,10 +59,44 @@ const AuditTrailView: React.FC = () => {
   const [selectedLog, setSelectedLog] = useState<AuditLog | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState('');
+  const displayTimezone = timezoneLabel(settings.timezone);
+  const timestampFormatter = new Intl.DateTimeFormat('en-GB', {
+    timeZone: resolveTimezone(settings.timezone),
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  });
+  const formatAuditTimestamp = (value: string) => {
+    const date = new Date(value);
+    if (!value || Number.isNaN(date.getTime())) return 'Not recorded';
+    return `${timestampFormatter.format(date)} ${utcOffsetLabel(date, settings.timezone)}`;
+  };
+  const outcomeLabel = (log: AuditLog) => {
+    switch (log.context?.outcome) {
+      case 'SUCCESS': return 'Success';
+      case 'FAILURE': return 'Failure';
+      case 'DENIED': return 'Denied';
+      case 'RECORDED': return 'Recorded';
+      default: return 'Not recorded';
+    }
+  };
+  const resourceLabel = (log: AuditLog) =>
+    [log.context?.resourceType, log.context?.resourceId].filter(Boolean).join(' / ');
+  const compactDetails = (log: AuditLog) => {
+    const resourcePrefix = log.context?.resourceId ? `Resource: ${log.context.resourceId}.` : '';
+    return resourcePrefix && log.details?.startsWith(resourcePrefix)
+      ? log.details.slice(resourcePrefix.length).trim()
+      : log.details;
+  };
+  const renderOutcome = (log: AuditLog) => (
+    <span className={`audit-outcome outcome-${(log.context?.outcome || 'unknown').toLowerCase()}`}>
+      {outcomeLabel(log)}
+    </span>
+  );
 
   // Cryptographic Chain Verification State
   const [verifyingChain, setVerifyingChain] = useState(false);
   const [chainVerified, setChainVerified] = useState<boolean | null>(null);
+  const [verificationSnapshot, setVerificationSnapshot] = useState<{ logCount: number; checkedAt: string; root: string } | null>(null);
   const [verificationError, setVerificationError] = useState('');
   const hasFilters = Boolean(searchTerm || categoryFilter !== 'ALL' || levelFilter !== 'ALL');
   const clearFilters = () => {
@@ -74,15 +108,18 @@ const AuditTrailView: React.FC = () => {
 
   // Verification always runs against the full server-side chain; the snapshot
   // only contains the newest capped slice and cannot prove global integrity.
-  useEffect(() => setChainVerified(null), [refreshVersion]);
 
   const handleVerifyChain = async () => {
     setVerifyingChain(true);
     setChainVerified(null);
+    setVerificationSnapshot(null);
     setVerificationError('');
     try {
       const result = await verifyAuditChainRemote();
-      if (result) setChainVerified(result.verified);
+      if (result) {
+        setChainVerified(result.verified);
+        setVerificationSnapshot({ logCount: result.logCount, checkedAt: new Date().toISOString(), root: result.merkleRoot });
+      }
       else
         setVerificationError('Verification could not be completed. Try again when the server is available.');
     } catch {
@@ -137,18 +174,29 @@ const AuditTrailView: React.FC = () => {
     return all;
   };
 
+  const downloadExport = (content: string, format: 'json' | 'csv') => {
+    const url = URL.createObjectURL(new Blob([content], {
+      type: format === 'json' ? 'application/json;charset=utf-8' : 'text/csv;charset=utf-8',
+    }));
+    const anchor = document.createElement('a');
+    try {
+      anchor.href = url;
+      anchor.download = `audit-trail-${new Date().toISOString().split('T')[0]}.${format}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+    } finally {
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  };
+
   const handleExportJson = async () => {
+    if (total === 0 || logsLoading || exporting) return;
     setExporting(true);
     setExportError('');
     try {
       const logs = await loadAllLogs();
-      const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(logs, null, 2));
-      const downloadAnchor = document.createElement('a');
-      downloadAnchor.setAttribute('href', dataStr);
-      downloadAnchor.setAttribute('download', `audit-trail-${new Date().toISOString().split('T')[0]}.json`);
-      document.body.appendChild(downloadAnchor);
-      downloadAnchor.click();
-      downloadAnchor.remove();
+      downloadExport(JSON.stringify(logs, null, 2), 'json');
     } catch {
       setExportError('Could not export the audit trail. Please retry.');
     } finally {
@@ -157,11 +205,16 @@ const AuditTrailView: React.FC = () => {
   };
 
   const handleExportCsv = async () => {
+    if (total === 0 || logsLoading || exporting) return;
     setExporting(true);
     setExportError('');
     try {
       const logs = await loadAllLogs();
-      const headers = ['ID', 'Timestamp', 'Category', 'Level', 'Event', 'Details', 'Actor', 'IP'];
+      const headers = [
+        'ID', 'Timestamp (ISO 8601)', 'Category', 'Level', 'Event', 'Details', 'Actor', 'IP',
+        'Action', 'Resource type', 'Resource ID', 'Request ID', 'Outcome', 'Fields supplied (JSON)',
+        'Entry hash', 'Previous entry hash',
+      ];
       const rows = logs.map((l) => [
         l.id,
         l.timestamp,
@@ -171,14 +224,17 @@ const AuditTrailView: React.FC = () => {
         l.details,
         l.actor,
         l.ipAddress,
+        l.context?.action || '',
+        l.context?.resourceType || '',
+        l.context?.resourceId || '',
+        l.context?.requestId || '',
+        l.context?.outcome || '',
+        l.context?.fields ? JSON.stringify(l.context.fields) : '',
+        l.hash || '',
+        l.prevHash || '',
       ]);
       const csvContent = [headers.join(','), ...rows.map((e) => e.map(csvCell).join(','))].join('\n');
-      const downloadAnchor = document.createElement('a');
-      downloadAnchor.setAttribute('href', 'data:text/csv;charset=utf-8,' + encodeURIComponent(csvContent));
-      downloadAnchor.setAttribute('download', `audit-trail-${new Date().toISOString().split('T')[0]}.csv`);
-      document.body.appendChild(downloadAnchor);
-      downloadAnchor.click();
-      downloadAnchor.remove();
+      downloadExport(csvContent, 'csv');
     } catch {
       setExportError('Could not export the audit trail. Please retry.');
     } finally {
@@ -202,7 +258,7 @@ const AuditTrailView: React.FC = () => {
           <div>
             <h2 className="investigation-section-title">Administrative actions</h2>
             <p className="investigation-section-description">
-              Review who changed your workspace, when it happened, and where the request originated.
+              Review workspace activity, actors and request outcomes. Times in {displayTimezone}.
             </p>
           </div>
         </div>
@@ -212,10 +268,12 @@ const AuditTrailView: React.FC = () => {
           role="group"
           aria-label="Audit trail actions"
         >
-          <SecondaryButton icon={<RotateCw size={14} />} loading={logsLoading} onClick={reload}>
+          <SecondaryButton title="Refresh audit entries" icon={<RotateCw size={14} />} loading={logsLoading} onClick={reload}>
             Refresh
           </SecondaryButton>
           <SecondaryButton
+            title={total === 0 ? 'No matching entries' : 'Export all matching entries as CSV'}
+            disabled={total === 0 || logsLoading}
             icon={<Download className="h-3.5 w-3.5" />}
             loading={exporting}
             onClick={() => void handleExportCsv()}
@@ -223,6 +281,8 @@ const AuditTrailView: React.FC = () => {
             Export CSV
           </SecondaryButton>
           <SecondaryButton
+            title={total === 0 ? 'No matching entries' : 'Export all matching entries as JSON'}
+            disabled={total === 0 || logsLoading}
             icon={<Download className="h-3.5 w-3.5" />}
             loading={exporting}
             onClick={() => void handleExportJson()}
@@ -240,33 +300,38 @@ const AuditTrailView: React.FC = () => {
         <span className="investigation-icon">
           <ShieldCheck size={23} aria-hidden="true" />
         </span>
-        <div>
+        <div aria-live="polite" aria-atomic="true">
           <h3>
             {verifyingChain
               ? 'Checking audit integrity…'
               : chainVerified === true
-                ? 'Retained audit chain verified'
+                ? 'Last retained-chain check passed'
                 : chainVerified === false
-                  ? 'Audit chain verification failed'
-                  : 'Verify the integrity of your audit trail'}
+                  ? 'Last retained-chain check failed'
+                  : 'Retained chain integrity'}
           </h3>
           <p>
             {chainVerified === false
               ? 'The retained records did not pass verification. Review the audit chain before relying on this export.'
-              : 'Verification checks every entry in the retained server-side chain, including records outside this page.'}
+              : 'Checks the full retained server-side chain, not just this page. External anchoring is not checked.'}
           </p>
+          {verificationSnapshot && (
+            <>
+              <p>
+                {verificationSnapshot.logCount.toLocaleString()} retained entries checked at{' '}
+                {formatAuditTimestamp(verificationSnapshot.checkedAt)}.
+                {' '}Later entries are not covered by this check.
+              </p>
+              <details className="audit-integrity-proof">
+                <summary>Verification fingerprint</summary>
+                <code aria-label="Audit Merkle root">{verificationSnapshot.root}</code>
+              </details>
+            </>
+          )}
         </div>
         <div className="audit-integrity-actions">
-          <span className="audit-integrity-state">
-            {verifyingChain
-              ? 'Checking'
-              : chainVerified === true
-                ? 'Verified'
-                : chainVerified === false
-                  ? 'Review required'
-                  : 'Not checked'}
-          </span>
           <SecondaryButton
+            title="Verify the full retained server-side audit chain"
             icon={
               verifyingChain ? (
                 <RotateCw className="h-3.5 w-3.5 animate-spin text-zinc-400" />
@@ -318,7 +383,8 @@ const AuditTrailView: React.FC = () => {
                 type="search"
                 id="audit-query"
                 aria-label="Search audit trail"
-                placeholder="Event, actor, details, or IP address"
+                title="Search event, details, actor, IP, entry ID, action, resource, request ID or outcome"
+                placeholder="Search event, actor, resource"
                 value={searchTerm}
                 onChange={(e) => {
                   setSearchTerm(e.target.value);
@@ -331,6 +397,7 @@ const AuditTrailView: React.FC = () => {
                   type="button"
                   className="audit-query-clear"
                   aria-label="Clear audit search"
+                  title="Clear audit search"
                   onClick={() => {
                     setSearchTerm('');
                     setCurrentPage(1);
@@ -357,7 +424,7 @@ const AuditTrailView: React.FC = () => {
               <option value="ALL">All categories</option>
               <option value="PIPELINE">Pipeline</option>
               <option value="SECURITY">Security</option>
-              <option value="FEED">Feed Ingestion</option>
+              <option value="FEED">Feed ingestion</option>
               <option value="WATCHLIST">Monitored products</option>
               <option value="EMAIL">Email dispatch</option>
               <option value="WEBHOOK">Webhooks</option>
@@ -390,7 +457,7 @@ const AuditTrailView: React.FC = () => {
               : 'Search all retained entries. Exports include every matching record.'}
           </p>
           {hasFilters && (
-            <button type="button" className="audit-clear-filters" onClick={clearFilters}>
+            <button type="button" title="Reset all audit filters" className="audit-clear-filters" onClick={clearFilters}>
               <RotateCw size={13} aria-hidden="true" /> Clear filters
             </button>
           )}
@@ -402,7 +469,7 @@ const AuditTrailView: React.FC = () => {
         <div className="audit-entries-heading flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/70 px-4 py-3.5 light:border-zinc-200 sm:px-5">
           <div>
             <h2 className="text-sm font-semibold">Retained entries</h2>
-            <p className="mt-0.5 text-[11px] text-zinc-500">Newest records first · All times in UTC</p>
+            <p className="mt-0.5 text-[11px] text-zinc-500">Most recently retained first · Times in {displayTimezone}</p>
           </div>
           <span className="rounded-full border border-zinc-700/80 bg-zinc-950/60 px-2.5 py-1 text-[11px] tabular-nums text-zinc-400 light:border-zinc-200 light:bg-zinc-50 light:text-zinc-600">
             {logsLoading ? 'Updating…' : `${total.toLocaleString()} ${total === 1 ? 'entry' : 'entries'}`}
@@ -411,14 +478,14 @@ const AuditTrailView: React.FC = () => {
         <div className="audit-desktop-table overflow-x-auto" aria-busy={logsLoading}>
           <table className="audit-actions-table w-full text-left text-xs">
             <caption className="sr-only">
-              Administrative actions, newest first. All timestamps are UTC.
+              Administrative actions. Most recently retained first. All timestamps in {displayTimezone}.
             </caption>
             <thead>
               <tr>
-                <th scope="col">Action &amp; details</th>
-                <th scope="col">Classification</th>
+                <th scope="col">Action &amp; resource</th>
+                <th scope="col">Outcome &amp; level</th>
                 <th scope="col">Actor &amp; source</th>
-                <th scope="col">Timestamp (UTC)</th>
+                <th scope="col">Timestamp ({displayTimezone})</th>
               </tr>
             </thead>
                     <tbody>
@@ -458,18 +525,27 @@ const AuditTrailView: React.FC = () => {
                       <button
                         type="button"
                         className="audit-event-link"
+                        title={`View audit details: ${log.event}`}
                         onClick={() => setSelectedLog(log)}
                         aria-label={`View audit details: ${log.event}`}
                       >
                         <span>{log.event}</span>
                         <ChevronRight size={14} aria-hidden="true" />
                       </button>
-                      <p className="audit-event-description" title={log.details}>
-                        {log.details || 'No additional details recorded.'}
-                      </p>
+                      {(compactDetails(log) || !resourceLabel(log)) && (
+                        <p className="audit-event-description" title={log.details}>
+                          {compactDetails(log) || 'No additional details recorded.'}
+                        </p>
+                      )}
+                      {resourceLabel(log) && (
+                        <p className="audit-resource" title={resourceLabel(log)}>
+                          <span>Resource</span> <code>{resourceLabel(log)}</code>
+                        </p>
+                      )}
                     </td>
                     <td>
                       <div className="audit-classification">
+                        {renderOutcome(log)}
                         <span className="audit-category">{auditCategory(log.category)}</span>
                         {auditLevel(log.level)}
                       </div>
@@ -484,8 +560,8 @@ const AuditTrailView: React.FC = () => {
                       </p>
                     </td>
                     <td>
-                      <time dateTime={log.timestamp} className="audit-timestamp">
-                        {fmtDateTime(log.timestamp, settings.timezone)}
+                      <time dateTime={log.timestamp} title={log.timestamp} className="audit-timestamp">
+                        {formatAuditTimestamp(log.timestamp)}
                       </time>
                     </td>
                   </tr>
@@ -502,26 +578,37 @@ const AuditTrailView: React.FC = () => {
                 <div>
                   {auditLevel(log.level)}
                   <span className="audit-category">{auditCategory(log.category)}</span>
+                  {renderOutcome(log)}
                 </div>
                 <button
                   type="button"
                   className="audit-event-link"
+                  title={`View audit details: ${log.event}`}
                   onClick={() => setSelectedLog(log)}
                   aria-label={`View audit details: ${log.event}`}
                 >
                   <span>{log.event}</span>
                   <ChevronRight size={14} aria-hidden="true" />
                 </button>
-                <p className="audit-event-description">{log.details || 'No additional details recorded.'}</p>
+                {(compactDetails(log) || !resourceLabel(log)) && (
+                  <p className="audit-event-description" title={log.details}>
+                    {compactDetails(log) || 'No additional details recorded.'}
+                  </p>
+                )}
+                {resourceLabel(log) && (
+                  <p className="audit-resource" title={resourceLabel(log)}>
+                    <span>Resource</span> <code>{resourceLabel(log)}</code>
+                  </p>
+                )}
                 <footer>
                   <span className="audit-actor">
                     <UserRound size={13} aria-hidden="true" />
                     {log.actor || 'System'}
                   </span>
                   <span className="audit-source-ip">Source: {log.ipAddress || 'Not recorded'}</span>
-                  <time dateTime={log.timestamp}>
+                  <time dateTime={log.timestamp} title={log.timestamp}>
                     <Clock3 size={13} aria-hidden="true" />
-                    {fmtDateTime(log.timestamp, settings.timezone)} {timezoneLabel(settings.timezone)}
+                    {formatAuditTimestamp(log.timestamp)}
                   </time>
                 </footer>
               </article>
@@ -544,7 +631,8 @@ const AuditTrailView: React.FC = () => {
           )}
         </div>
 
-        <div className="border-t border-zinc-800/70 light:border-zinc-200">
+        {total > 0 && (
+          <div className="border-t border-zinc-800/70 light:border-zinc-200">
           <Pagination
             currentPage={currentPage}
             totalItems={total}
@@ -556,30 +644,45 @@ const AuditTrailView: React.FC = () => {
             }}
             pageSizeOptions={[10, 25, 50]}
           />
-        </div>
+          </div>
+        )}
       </div>
 
       {selectedLog && (
         <LogDetailModal
           icon={<FileCode2 className="h-4 w-4" />}
-          eyebrow={selectedLog.category}
+          eyebrow={auditCategory(selectedLog.category)}
           title={selectedLog.event}
           level={selectedLog.level}
           timestamp={selectedLog.timestamp}
+          timestampDisplay={formatAuditTimestamp(selectedLog.timestamp)}
           timezone={settings.timezone}
           onClose={() => setSelectedLog(null)}
           fields={[
-            { label: 'Category', value: selectedLog.category, mono: true },
-            { label: 'Actor', value: selectedLog.actor, mono: true },
-            { label: 'Source IP', value: selectedLog.ipAddress, mono: true },
+            { label: 'Category', value: auditCategory(selectedLog.category) },
+            { label: `Timestamp (${displayTimezone})`, value: formatAuditTimestamp(selectedLog.timestamp) },
+            { label: 'Outcome', value: renderOutcome(selectedLog) },
+            { label: 'Action code', value: selectedLog.context?.action, mono: true, hidden: !selectedLog.context?.action },
+            { label: 'Resource type', value: selectedLog.context?.resourceType, mono: true, hidden: !selectedLog.context?.resourceType },
+            { label: 'Resource ID', value: selectedLog.context?.resourceId, mono: true, hidden: !selectedLog.context?.resourceId },
+            { label: 'Request reference', value: selectedLog.context?.requestId, mono: true, hidden: !selectedLog.context?.requestId },
+            {
+              label: 'Fields supplied',
+              value: selectedLog.context?.fields?.length ? selectedLog.context.fields.join('\n') : 'None supplied',
+              mono: true,
+              block: true,
+              hidden: !selectedLog.context?.fields,
+            },
+            { label: 'Actor', value: selectedLog.actor || 'System', mono: true },
+            { label: 'Source IP', value: selectedLog.ipAddress || 'Not recorded', mono: true },
             { label: 'Entry ID', value: selectedLog.id, mono: true },
             {
               label: 'Details',
               value: selectedLog.details || 'No additional details recorded.',
               block: true,
             },
-            { label: 'Entry hash', value: selectedLog.hash, mono: true, block: true },
-            { label: 'Previous entry hash', value: selectedLog.prevHash, mono: true, block: true },
+            { label: 'Entry hash (not a verification result)', value: selectedLog.hash || 'Not recorded', mono: true, block: true },
+            { label: 'Previous entry hash', value: selectedLog.prevHash || 'Not recorded', mono: true, block: true },
           ]}
         />
       )}

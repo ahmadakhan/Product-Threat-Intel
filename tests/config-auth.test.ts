@@ -109,16 +109,12 @@ test('EGRESS_ALLOWED_HOSTS_EXTRA appends to the default allowlist instead of rep
   assert.ok(merged.includes('www.cisecurity.org'), 'defaults survive when only extra hosts are configured');
 });
 
-test('setting EGRESS_ALLOWED_HOSTS explicitly still retains the recommended-feed baseline', () => {
+test('an explicit egress allowlist replaces defaults and extras only add declared hosts', () => {
   const merged = loadConfig({
     ...baseEnv,
-    EGRESS_ALLOWED_HOSTS: 'api.sendgrid.com,smtp.gmail.com',
+    EGRESS_ALLOWED_HOSTS: ' API.SENDGRID.COM ,smtp.gmail.com',
+    EGRESS_ALLOWED_HOSTS_EXTRA: 'api.sendgrid.com,example.test',
   }).EGRESS_ALLOWED_HOSTS.split(',');
-  // The operator's mail hosts are admitted...
-  assert.ok(merged.includes('api.sendgrid.com'));
-  assert.ok(merged.includes('smtp.gmail.com'));
-  // ...but the default feed/API hosts are never dropped, so feeds keep working.
-  assert.ok(merged.includes('www.darkreading.com'), 'darkreading must stay allowlisted');
-  assert.ok(merged.includes('services.nvd.nist.gov'), 'nvd must stay allowlisted');
-  assert.ok(merged.includes('www.googleapis.com'), 'googleapis must stay allowlisted');
+  assert.deepEqual(merged, ['api.sendgrid.com', 'smtp.gmail.com', 'example.test']);
+  assert.equal(loadConfig({ ...baseEnv, EGRESS_ALLOWED_HOSTS: '' }).EGRESS_ALLOWED_HOSTS, '');
 });

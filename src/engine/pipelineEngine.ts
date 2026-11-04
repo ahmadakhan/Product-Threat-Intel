@@ -496,12 +496,13 @@ export function runVulnerabilityPipeline(
       const cveReviewOverride = cve.applicabilityRequiresReview && !advisoryLacksApplicabilityData;
       const sourceRequiresReview = cve.applicabilityPolicy === 'REVIEW_ONLY';
       const unverifiableMatch = sourceRequiresReview || cveReviewOverride || result.applicabilityRequiresReview;
-      if (unverifiableMatch) result.confidence = 0;
+      if (sourceRequiresReview || cveReviewOverride) result.confidence = 0;
       const threshold = settings.autoDispatchConfidenceThreshold ?? 90;
       (result as MatchResult & { contradicted?: true }).contradicted = packageRejected || undefined;
       const confirmed =
         !packageRejected &&
         !sourceRequiresReview &&
+        !cveReviewOverride &&
         (!unverifiableMatch || settings.autoDispatchUnverifiableMatches) &&
         shouldAutoDispatch(result.confidence, settings);
       // Say *why* a match is held. A held finding is re-derived before every

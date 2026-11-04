@@ -1,3 +1,160 @@
+.audit-integrity-proof {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.audit-integrity-proof summary {
+  cursor: pointer;
+  width: fit-content;
+  padding: 4px 0;
+}
+
+.audit-integrity-proof summary:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}
+
+.audit-integrity-proof code {
+  display: block;
+  margin-top: 6px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  line-height: 1.6;
+  user-select: text;
+}
+
+@media (max-width: 640px) {
+  #logs-audit-panel.audit-trail-panel .audit-header-actions button,
+  #logs-audit-panel.audit-trail-panel .audit-integrity-actions button {
+    min-height: 44px;
+  }
+}
+#logs-audit-panel {
+  min-width: 0;
+  --audit-success: #6ee7b7;
+  --audit-failure: #fda4af;
+  --audit-denied: #fcd34d;
+}
+.light #logs-audit-panel {
+  --audit-success: #047857;
+  --audit-failure: #be123c;
+  --audit-denied: #92400e;
+}
+#logs-audit-panel :is(.audit-filter-panel, .audit-entries-panel) {
+  border-radius: 8px;
+  box-shadow: none;
+}
+#logs-audit-panel :is(.audit-page-icon, .audit-header-actions button, .audit-integrity button, input, select) {
+  border-radius: 8px;
+}
+#logs-audit-panel .audit-filter-panel {
+  padding: 16px 18px 0;
+}
+#logs-audit-panel .audit-filter-grid {
+  gap: 12px;
+}
+#logs-audit-panel .audit-filter-summary {
+  min-height: 42px;
+  margin-top: 12px;
+}
+#logs-audit-panel .audit-entries-heading {
+  padding: 14px 18px;
+}
+#logs-audit-panel .audit-actions-table {
+  table-layout: fixed;
+}
+#logs-audit-panel .audit-actions-table :is(th, td) {
+  padding: 12px 16px;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+#logs-audit-panel .audit-classification {
+  gap: 5px;
+}
+#logs-audit-panel .audit-event-description {
+  margin-top: 4px;
+  line-height: 1.6;
+}
+#logs-audit-panel .audit-resource {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  margin-top: 7px;
+  color: var(--ui-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+#logs-audit-panel .audit-resource > span {
+  flex-shrink: 0;
+}
+#logs-audit-panel .audit-resource code {
+  min-width: 0;
+  color: var(--ui-text);
+  overflow-wrap: anywhere;
+}
+.audit-outcome {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  gap: 6px;
+  padding: 2px 6px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  color: var(--ui-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.audit-outcome.outcome-success {
+  color: var(--audit-success, #6ee7b7);
+}
+.audit-outcome.outcome-failure {
+  color: var(--audit-failure, #fda4af);
+}
+.audit-outcome.outcome-denied {
+  color: var(--audit-denied, #fcd34d);
+}
+.light .audit-outcome.outcome-success {
+  color: #047857;
+}
+.light .audit-outcome.outcome-failure {
+  color: #be123c;
+}
+.light .audit-outcome.outcome-denied {
+  color: #92400e;
+}
+#logs-audit-panel .audit-mobile-entry {
+  padding: 16px 18px;
+}
+#logs-audit-panel .audit-mobile-entry > div {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 6px 10px;
+}
+#logs-audit-panel .audit-mobile-entry > .audit-event-link {
+  margin-block: 10px 4px;
+  min-height: 44px;
+  padding-block: 8px;
+}
+#logs-audit-panel .audit-mobile-entry footer {
+  margin-top: 12px;
+  padding-top: 10px;
+}
+#logs-audit-panel .audit-mobile-entry time {
+  overflow-wrap: anywhere;
+}
+#logs-audit-panel .audit-mobile-entry time svg {
+  flex-shrink: 0;
+}
+#logs-audit-panel .audit-header-actions button > span {
+  min-width: 0;
+  white-space: normal;
+}
+#logs-audit-panel .audit-header-actions button > svg {
+  flex-shrink: 0;
+}
 .audit-trail-panel .audit-page-header {
   padding-bottom: 0;
   border-bottom: 0;

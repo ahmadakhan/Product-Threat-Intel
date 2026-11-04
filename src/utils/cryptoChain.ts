@@ -29,6 +29,7 @@ export function hashAuditLog(log: AuditLog): string {
       log.details,
       log.actor,
       log.ipAddress,
+      ...(log.context === undefined ? [] : [log.context]),
     ]),
   );
 }
@@ -77,4 +78,40 @@ export function merkleRoot(hashes: string[]): string {
     level = next;
   }
   return level[0];
+}
+
+export class SortedMerkleAccumulator {
+  private readonly levels: (string | undefined)[] = [];
+
+  add(hash: string): void {
+    let node = hash;
+    let height = 0;
+    while (this.levels[height] !== undefined) {
+      node = quickHash(this.levels[height]! + node);
+      this.levels[height] = undefined;
+      height++;
+    }
+    this.levels[height] = node;
+  }
+
+  root(): string {
+    let node: string | undefined;
+    let height = 0;
+    for (let level = 0; level < this.levels.length; level++) {
+      const left = this.levels[level];
+      if (left === undefined) continue;
+      if (node === undefined) {
+        node = left;
+        height = level;
+        continue;
+      }
+      while (height < level) {
+        node = quickHash(node + node);
+        height++;
+      }
+      node = quickHash(left + node);
+      height++;
+    }
+    return node ?? '0'.repeat(64);
+  }
 }

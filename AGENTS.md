@@ -9,12 +9,13 @@ npm run lint           # tsc --noEmit — run before every commit
 Tests:
 ```
 npm test                # node --import tsx --test (all tests)
-npm run test:unit       # vitest run (all tests under Vitest)
+npm run test:unit       # supported node:test suite (alias of npm test)
+npm run test:ci         # requires TEST_DATABASE_URL; use a disposable database
 ```
 
 ML subsystem only:
 ```
-npx vitest run tests/ml-*.test.ts --no-coverage --reporter=verbose
+node --import tsx --test --test-concurrency=1 tests/ml-*.test.ts
 ```
 
 ML training cron (standalone):

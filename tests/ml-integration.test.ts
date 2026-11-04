@@ -77,6 +77,19 @@ describe('ML pipeline integration', () => {
       assert.equal(shouldAutoDispatch(85, { autoDispatchConfidenceThreshold: 50 }), true);
       assert.equal(shouldAutoDispatch(49, { autoDispatchConfidenceThreshold: 50 }), false);
     });
+    it('a trained model cannot override the configured threshold', (t) => {
+      const model = getMlRuntime()?.autoDispatchThreshold;
+      assert.ok(model);
+      let recommendation = 10;
+      t.mock.method(model, 'isTrained', () => true);
+      t.mock.method(model, 'getThreshold', () => recommendation);
+      assert.equal(shouldAutoDispatch(80, { autoDispatchConfidenceThreshold: 90 }), false);
+      recommendation = 99;
+      assert.equal(shouldAutoDispatch(80, { autoDispatchConfidenceThreshold: 70 }), true);
+      assert.equal(shouldAutoDispatch(70, { autoDispatchConfidenceThreshold: 70 }), true);
+      for (const confidence of [NaN, Infinity, -1, 101])
+        assert.equal(shouldAutoDispatch(confidence, { autoDispatchConfidenceThreshold: 0 }), false);
+    });
   });
 
   describe('rankReviewFindings', () => {
@@ -213,7 +226,7 @@ describe('ML pipeline integration', () => {
       const validCpe = cpePreFilter('cpe:2.3:a:vendor:product:1.0:*:*:*:*:*:*:*');
       assert.equal(validCpe, true);
 
-      // Auto-dispatch should use learned threshold
+      // Trained recommendations must not replace the configured dispatch policy.
       const dispatchResult = shouldAutoDispatch(95, { autoDispatchConfidenceThreshold: 90 });
       assert.ok(typeof dispatchResult === 'boolean');
 

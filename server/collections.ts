@@ -283,7 +283,13 @@ function auditConditions(query: CollectionQuery) {
       `(lower(data->>'event') LIKE ${param(like)} ESCAPE '!'
         OR lower(COALESCE(data->>'details','')) LIKE ${param(like)} ESCAPE '!'
         OR lower(COALESCE(data->>'actor','')) LIKE ${param(like)} ESCAPE '!'
-        OR lower(COALESCE(data->>'ipAddress','')) LIKE ${param(like)} ESCAPE '!')`,
+        OR lower(COALESCE(data->>'ipAddress','')) LIKE ${param(like)} ESCAPE '!'
+        OR lower(COALESCE(data->>'id','')) LIKE ${param(like)} ESCAPE '!'
+        OR lower(COALESCE(data->'context'->>'action','')) LIKE ${param(like)} ESCAPE '!'
+        OR lower(COALESCE(data->'context'->>'resourceType','')) LIKE ${param(like)} ESCAPE '!'
+        OR lower(COALESCE(data->'context'->>'resourceId','')) LIKE ${param(like)} ESCAPE '!'
+        OR lower(COALESCE(data->'context'->>'requestId','')) LIKE ${param(like)} ESCAPE '!'
+        OR lower(COALESCE(data->'context'->>'outcome','')) LIKE ${param(like)} ESCAPE '!')`,
     );
   if (filters.category && filters.category !== 'ALL')
     clauses.push(`data->>'category' = ${param(String(filters.category))}`);

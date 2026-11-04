@@ -1,3 +1,5 @@
+import type { AppSettings, Finding } from '../types/index.ts';
+
 /**
  * Identifies deliveries that represent a vulnerability advisory bundle.
  *
@@ -16,4 +18,18 @@ export function isFindingDelivery(advisoryId: string | null | undefined): boolea
   if (!advisoryId || advisoryId === 'TEST') return false;
   if (NON_ADVISORY_PREFIXES.some((prefix) => advisoryId.startsWith(prefix))) return false;
   return !/DAILY[_-]/i.test(advisoryId);
+}
+
+export function eligibleForReviewNotification(
+  finding: Finding,
+  settings: Pick<AppSettings, 'reviewUnverifiableMatches' | 'reviewConfidenceThreshold'>,
+): boolean {
+  const confidence = finding.confidence ?? 0;
+  const minimum = settings.reviewConfidenceThreshold ?? 0;
+  return settings.reviewUnverifiableMatches === true &&
+    finding.notificationStatus === 'REVIEW_REQUIRED' &&
+    !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) &&
+    Number.isFinite(confidence) &&
+    confidence >= 0 && confidence <= 100 && Number.isFinite(minimum) &&
+    minimum >= 0 && minimum <= 100 && confidence >= minimum;
 }

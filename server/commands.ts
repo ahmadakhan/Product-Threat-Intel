@@ -1,4 +1,5 @@
 import { productWildcardCpe } from '../src/utils/registrationCpe.ts';
+import { commandAudit } from './audit.ts';
 import { watchlistIdentity, watchlistDuplicateErrors } from '../shared/watchlistIdentity.ts';
 import { syncCorrelationAsset } from './correlation/inventory.ts';
 import { randomUUID } from 'node:crypto';
@@ -155,7 +156,7 @@ export const OPERATOR_COMMAND_ACTIONS: ReadonlySet<string> = new Set([
  * dedicated field and must accept an absent `data`.
  */
 const ACTION_REQUIRES_DATA =
-  /^(feed|asset|recipient|webhook|cve|alias|template|dailyDigestTemplate)\.save$|^(alias|watchlist|asset|feed)\.(import|promote|revoke)$|^(settings|email)\.(save|configure)$|^finding\.status$/;
+  /^(feed|asset|recipient|webhook|cve|alias|template|dailyDigestTemplate)\.save$|^(alias|watchlist|asset|feed)\.import$|^(settings|email)\.(save|configure)$|^finding\.status$/;
 
 /**
  * Fail closed: an action that is not recognised at all is rejected here before
@@ -836,14 +837,16 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
         [entity === 'asset' ? 'active' : 'enabled']: !old[entity === 'asset' ? 'active' : 'enabled'],
       });
   } else throw new HttpError(400, 'Unknown command');
+  const audit = commandAudit(action, ['settings', 'email', 'template', 'dailyDigestTemplate'].includes(action.split('.')[0]) ? 'main' : id || newId, data);
   await appendAudit(
     db,
-    action,
-    `Record ${id || newId}`,
+    audit.event,
+    audit.details,
     actor,
-    action.startsWith('asset') ? 'WATCHLIST' : 'SECURITY',
+    audit.category,
     'INFO',
     ipAddress,
+    audit.context,
   );
   return { success: true };
 }

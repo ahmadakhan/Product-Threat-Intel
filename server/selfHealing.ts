@@ -1,4 +1,7 @@
-import { get, list, put, transaction } from './db';
+import { get, getForUpdate, list, put, transaction } from './db';
+import { getHeapStatistics } from 'node:v8';
+import { totalmem } from 'node:os';
+import type { Db } from './db';
 import { writeEvent } from './events';
 import { enqueue } from './delivery';
 
@@ -73,38 +76,31 @@ const safeLine = (value: unknown): string =>
  * news even during the previous cooldown); a repeated fault is suppressed.
  */
 async function claimAlertSlot(
-  pool: Pool,
+  db: Db,
   component: Component,
   incident: string,
   cooldown: number,
 ): Promise<boolean> {
   const now = Date.now();
-  return transaction(
-    pool,
-    async (db) => {
-      const row = await db.query<{ data: AlertState | null }>(
-        `SELECT data FROM records WHERE kind='systemState' AND id='selfHealing' FOR UPDATE`,
-      );
-      const state: AlertState = row.rows[0]?.data ?? {};
-      const stored = state[component];
-      if (stored?.lastAlertAt && stored.incident === incident) {
-        const last = Date.parse(stored.lastAlertAt);
-        if (Number.isFinite(last) && now - last < cooldown) return false;
-      }
-      const next: AlertState = {
-        ...state,
-        [component]: { ...stored, lastAlertAt: new Date(now).toISOString(), incident },
-      };
-      await db.query(
-        `INSERT INTO records(kind,id,data) VALUES('systemState','selfHealing',$1::jsonb)
-         ON CONFLICT(kind,id) DO UPDATE SET data=$1::jsonb, updated_at=now()`,
-        [JSON.stringify(next)],
-      );
-      return true;
-    },
-    undefined,
-    { locks: ['self-healing-alert'] },
+  const row = await db.query<{ data: AlertState | null }>(
+    `SELECT data FROM records WHERE kind='systemState' AND id='selfHealing' FOR UPDATE`,
   );
+  const state: AlertState = row.rows[0]?.data ?? {};
+  const stored = state[component];
+  if (stored?.lastAlertAt && stored.incident === incident) {
+    const last = Date.parse(stored.lastAlertAt);
+    if (Number.isFinite(last) && now - last < cooldown) return false;
+  }
+  const next: AlertState = {
+    ...state,
+    [component]: { ...stored, lastAlertAt: new Date(now).toISOString(), incident },
+  };
+  await db.query(
+    `INSERT INTO records(kind,id,data) VALUES('systemState','selfHealing',$1::jsonb)
+         ON CONFLICT(kind,id) DO UPDATE SET data=$1::jsonb, updated_at=now()`,
+    [JSON.stringify(next)],
+  );
+  return true;
 }
 
 /**
@@ -112,11 +108,7 @@ async function claimAlertSlot(
  * recovery attempt is allowed now. Separate from the alert cooldown: recovery
  * must be possible even when the alert is suppressed.
  */
-async function claimRecoverySlot(
-  pool: Pool,
-  component: Component,
-  retryMs: number,
-): Promise<boolean> {
+async function claimRecoverySlot(pool: Pool, component: Component, retryMs: number): Promise<boolean> {
   return transaction(
     pool,
     async (db) => {
@@ -133,7 +125,8 @@ async function claimRecoverySlot(
         [component]: { ...stored, lastRecoveryAt: new Date(now).toISOString() },
       };
       await db.query(
-        `UPDATE records SET data=$1::jsonb, updated_at=now() WHERE kind='systemState' AND id='selfHealing'`,
+        `INSERT INTO records(kind,id,data) VALUES('systemState','selfHealing',$1::jsonb)
+         ON CONFLICT(kind,id) DO UPDATE SET data=EXCLUDED.data,updated_at=now()`,
         [JSON.stringify(next)],
       );
       return true;
@@ -144,8 +137,8 @@ async function claimRecoverySlot(
 }
 
 /** Security-team recipients (an unset group is the legacy security-team default). */
-async function getSecurityRecipients(pool: Pool): Promise<EmailRecipient[]> {
-  return (await list<EmailRecipient>(pool, 'recipients')).filter(
+async function getSecurityRecipients(db: Db): Promise<EmailRecipient[]> {
+  return (await list<EmailRecipient>(db, 'recipients')).filter(
     (r) => r.enabled && (r.deliveryGroup === 'SECURITY_TEAM' || r.deliveryGroup === undefined),
   );
 }
@@ -166,63 +159,75 @@ async function queueSecurityAlert(
   cooldown: number,
   emailNotifications: boolean,
 ): Promise<number> {
-  const recipients = await getSecurityRecipients(pool);
-  if (!recipients.length) {
-    await writeEvent(pool, {
-      category: 'SYSTEM',
-      level: 'WARNING',
-      code: 'selfHealing.no_recipients',
-      message: `Self-healing alert for ${component} suppressed: no enabled Security-team recipient`,
-      context: { component, incident: safeLine(incident) },
-    }).catch(() => undefined);
-    return 0;
-  }
-  if (!(await claimAlertSlot(pool, component, incident, cooldown))) return 0;
-  if (!emailNotifications) {
-    await writeEvent(pool, {
-      category: 'SYSTEM',
-      level: 'INFO',
-      code: 'selfHealing.alert_suppressed',
-      message: `Self-healing alert for ${component} suppressed: email notifications disabled`,
-      context: { component, incident: safeLine(incident), recipients: recipients.length },
-    }).catch(() => undefined);
-    return 0;
-  }
-
-  const recipientEmails = recipients.map((r) => r.email).join(', ');
-  const body =
-    `${subject}\n\n${text}\n\nComponent: ${component}\n` +
-    `Incident: ${safeLine(incident)}\nDetected at: ${new Date().toISOString()}\n` +
-    'This alert was generated automatically by the VulnStream self-healing watchdog.';
-  const escape = (value: string) =>
-    value.replace(/[&<>]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[ch]!);
-  const id = await enqueue(
+  return transaction(
     pool,
-    'email',
-    'selfheal',
-    `SELFHEAL:${component}`,
-    {
-      subject: `[SECURITY ALERT] ${subject}`,
-      text: body,
-      // Plain markup on purpose: an infra alert must not depend on templating.
-      html: `<pre style="font-family:ui-monospace,monospace;white-space:pre-wrap">${escape(body)}</pre>`,
-      cveIds: [],
-      recipientEmail: recipientEmails,
+    async (db) => {
+      const settings = await get<AppSettings>(db, 'settings', 'main');
+      const recipients = await getSecurityRecipients(db);
+      if (!recipients.length) {
+        if (!(await claimAlertSlot(db, component, `${incident}:no-recipients`, cooldown))) return 0;
+        await writeEvent(db, {
+          category: 'SYSTEM',
+          level: 'WARNING',
+          code: 'selfHealing.no_recipients',
+          message: `Self-healing alert for ${component} suppressed: no enabled Security-team recipient`,
+          context: { component, incident: safeLine(incident) },
+        }).catch(() => undefined);
+        return 0;
+      }
+      if (!emailNotifications || settings?.emailEnabled === false) {
+        if (!(await claimAlertSlot(db, component, `${incident}:email-disabled`, cooldown))) return 0;
+        await writeEvent(db, {
+          category: 'SYSTEM',
+          level: 'INFO',
+          code: 'selfHealing.alert_suppressed',
+          message: `Self-healing alert for ${component} suppressed: email disabled`,
+          context: { component, incident: safeLine(incident), recipients: recipients.length },
+        }).catch(() => undefined);
+        return 0;
+      }
+      if (!(await claimAlertSlot(db, component, incident, cooldown))) return 0;
+
+      const body =
+        `${subject}\n\n${text}\n\nComponent: ${component}\n` +
+        `Incident: ${safeLine(incident)}\nDetected at: ${new Date().toISOString()}\n` +
+        'This alert was generated automatically by the VulnStream self-healing watchdog.';
+      const escape = (value: string) =>
+        value.replace(/[&<>]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[ch]!);
+      let queued = 0;
+      for (const recipient of recipients) {
+        const id = await enqueue(
+          db,
+          'email',
+          recipient.id,
+          `SELFHEAL:${component}:${incident}`,
+          {
+            subject: `[SECURITY ALERT] ${subject}`,
+            text: body,
+            // Plain markup on purpose: an infra alert must not depend on templating.
+            html: `<pre style="font-family:ui-monospace,monospace;white-space:pre-wrap">${escape(body)}</pre>`,
+            cveIds: [],
+            recipientEmail: recipient.email,
+          },
+          `selfheal:${component}:${incident}:email:${recipient.id}`,
+          'QUEUED',
+          // Outage alerts must not sit behind a backlog of advisory deliveries.
+          10,
+        );
+        if (id) queued++;
+      }
+      await writeEvent(db, {
+        category: 'SYSTEM',
+        level: 'ERROR',
+        code: 'selfHealing.alert_queued',
+        message: `Self-healing alert queued for ${queued} Security-team recipient(s)`,
+        context: { component, incident: safeLine(incident), recipients: queued },
+      });
+      return queued;
     },
-    `selfheal:${component}:${incident}`,
-    'QUEUED',
-    // Outage alerts must not sit behind a backlog of advisory deliveries.
-    10,
+    undefined,
+    { locks: ['self-healing-alert'] },
   );
-  if (!id) return 0;
-  await writeEvent(pool, {
-    category: 'SYSTEM',
-    level: 'ERROR',
-    code: 'selfHealing.alert_queued',
-    message: `Self-healing alert queued for ${recipients.length} Security-team recipient(s) in one email`,
-    context: { component, incident: safeLine(incident), recipients: recipients.length, recipientEmails },
-  }).catch(() => undefined);
-  return recipients.length;
 }
 
 export async function runSelfHealCheck(pool: Pool): Promise<void> {
@@ -237,25 +242,42 @@ export async function runSelfHealCheck(pool: Pool): Promise<void> {
   // at most once per recovery window (queueRun dedupes too, but this keeps the
   // audit trail honest), then alert.
   const { queueRun } = await import('./pipeline');
-  const executions = await list<PipelineExecution>(pool, 'executions');
+  const cutoff = new Date(now - RECENT_FAILURE_MS).toISOString();
+  const executions = (
+    await pool.query<{ data: PipelineExecution }>(
+      `SELECT data FROM records WHERE kind='executions' AND data->>'status' IN ('QUEUED','RUNNING')
+     UNION ALL
+     SELECT data FROM records WHERE kind='executions' AND data->>'status'='FAILED'
+       AND updated_at >= $1::timestamptz AND safe_timestamptz(data->>'endTime') >= $1::timestamptz`,
+      [cutoff],
+    )
+  ).rows.map((row) => row.data);
+  const alertState = await get<AlertState>(pool, 'systemState', 'selfHealing');
   const unresolvedFailures = executions.filter(
     (execution) =>
       execution.status === 'FAILED' &&
       execution.endTime &&
+      Date.parse(execution.endTime) <= now &&
       now - Date.parse(execution.endTime) < RECENT_FAILURE_MS &&
       // A run queued after the failure means recovery already happened: only
       // alert when nothing newer is pending or in flight.
-      !executions.some(
+      (!executions.some(
         (other) =>
           ['QUEUED', 'RUNNING'].includes(other.status) &&
           Date.parse(other.startTime) > Date.parse(execution.endTime!),
-      ),
+      ) ||
+        alertState?.PIPELINE?.incident !== `pipeline:${execution.id}`),
   );
   if (unresolvedFailures.length) {
     const latest = unresolvedFailures.reduce((a, b) =>
       Date.parse(a.endTime!) > Date.parse(b.endTime!) ? a : b,
     );
-    if (await claimRecoverySlot(pool, 'PIPELINE', RECOVERY_RETRY_MS)) {
+    const recoveryPending = executions.some(
+      (other) =>
+        ['QUEUED', 'RUNNING'].includes(other.status) &&
+        Date.parse(other.startTime) > Date.parse(latest.endTime!),
+    );
+    if (!recoveryPending && (await claimRecoverySlot(pool, 'PIPELINE', RECOVERY_RETRY_MS))) {
       await queueRun(pool, undefined, 'auto-recovery');
       await writeEvent(pool, {
         category: 'PIPELINE',
@@ -272,7 +294,7 @@ export async function runSelfHealCheck(pool: Pool): Promise<void> {
       'Pipeline failure auto-recovery triggered',
       `Pipeline execution ${latest.id} failed at ${latest.endTime}` +
         `${latest.logs.length ? `: ${safeLine(latest.logs[latest.logs.length - 1])}` : ''}. ` +
-        `${unresolvedFailures.length} recent failed run(s); a fresh run has been queued automatically.`,
+        `${unresolvedFailures.length} recent failed run(s). Automatic recovery is monitored by the watchdog.`,
       cooldown,
       emailNotifications,
     );
@@ -291,23 +313,28 @@ export async function runSelfHealCheck(pool: Pool): Promise<void> {
   // retry schedule and clearing it every tick would defeat the breaker.
   const recoverableFeeds = feeds.filter(
     (feed) =>
-      feed.enabled &&
-      feed.healthStatus === 'DOWN' &&
-      !(Date.parse(feed.circuitOpenUntil || '') > now),
+      feed.enabled && feed.healthStatus === 'DOWN' && !(Date.parse(feed.circuitOpenUntil || '') > now),
   );
-  if (recoverableFeeds.length && (await claimRecoverySlot(pool, 'FEED', RECOVERY_RETRY_MS))) {
-    for (const feed of recoverableFeeds) {
-      await transaction(pool, async (db) => {
-        const current = await get<ThreatFeed>(db, 'feeds', feed.id);
-        if (!current?.enabled || current.healthStatus !== 'DOWN') return;
-        await put(db, 'feeds', feed.id, {
-          ...current,
-          // Preserve the cumulative failure counter: the breaker must still
-          // escalate if the recovery probe fails again.
-          circuitOpenUntil: null,
-          ssrfValidated: false,
+  if (recoverableFeeds.length) {
+    if (await claimRecoverySlot(pool, 'FEED', RECOVERY_RETRY_MS)) {
+      for (const feed of recoverableFeeds) {
+        await transaction(pool, async (db) => {
+          const current = await getForUpdate<ThreatFeed>(db, 'feeds', feed.id);
+          if (
+            !current?.enabled ||
+            current.healthStatus !== 'DOWN' ||
+            Date.parse(current.circuitOpenUntil || '') > Date.now()
+          )
+            return;
+          await put(db, 'feeds', feed.id, {
+            ...current,
+            // Preserve the cumulative failure counter: the breaker must still
+            // escalate if the recovery probe fails again.
+            circuitOpenUntil: null,
+            ssrfValidated: false,
+          });
         });
-      });
+      }
     }
     await queueSecurityAlert(
       pool,
@@ -343,7 +370,10 @@ export async function runSelfHealCheck(pool: Pool): Promise<void> {
     issues.push(`database unreachable (${(error as Error).message.slice(0, 200)})`);
   }
   const mem = process.memoryUsage();
-  const heapPct = mem.heapTotal > 0 ? (mem.heapUsed / mem.heapTotal) * 100 : 0;
+  const heapLimit = getHeapStatistics().heap_size_limit;
+  const memoryLimit = process.constrainedMemory?.() || totalmem();
+  const heapPct =
+    Math.max(heapLimit > 0 ? mem.heapUsed / heapLimit : 0, memoryLimit > 0 ? mem.rss / memoryLimit : 0) * 100;
   if (heapPct >= SYSTEM_HEAP_PCT_THRESHOLD) issues.push(`heap at ${heapPct.toFixed(0)}%`);
   if (issues.length) {
     await queueSecurityAlert(
@@ -371,10 +401,13 @@ export async function runSelfHealCheck(pool: Pool): Promise<void> {
   // means no worker has ticked for longer than the cutoff. Queue a catch-up so
   // a skipped schedule does not silently stop monitoring.
   const scheduler = (await pool.query('SELECT heartbeat FROM scheduler_state WHERE id=1')).rows[0] as
-    | { heartbeat: Date | string | null }
-    | undefined;
+    { heartbeat: Date | string | null } | undefined;
   const heartbeat = scheduler?.heartbeat ? new Date(scheduler.heartbeat).getTime() : NaN;
-  if (Number.isFinite(heartbeat) && now - heartbeat > SCHEDULER_STALE_MS) {
+  if (
+    settings?.schedulerEnabled !== false &&
+    Number.isFinite(heartbeat) &&
+    now - heartbeat > SCHEDULER_STALE_MS
+  ) {
     if (await claimRecoverySlot(pool, 'SCHEDULER', RECOVERY_RETRY_MS)) {
       await queueRun(pool, undefined, 'scheduler');
     }

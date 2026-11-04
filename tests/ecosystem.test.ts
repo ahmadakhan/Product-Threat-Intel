@@ -71,7 +71,10 @@ const asset: WatchListItem = {
 };
 
 test('unknown constrained inventory fields require review; later confirmed evidence wins', () => {
-  for (const criteria of [cpe('1.0'), cpe('*').replace(':*:*:*:*:*:*:*', ':*:*:*:*:windows:*:*')]) {
+  for (const [criteria, expected] of [
+    [cpe('1.0'), 'QUEUED_FOR_DISPATCH'],
+    [cpe('*').replace(':*:*:*:*:*:*:*', ':*:*:*:*:windows:*:*'), 'REVIEW_REQUIRED'],
+  ] as const) {
     const finding = runVulnerabilityPipeline(
       [],
       [{ ...cve(), cpeMatches: [criteria], cpeMatchDetails: undefined }],
@@ -80,7 +83,7 @@ test('unknown constrained inventory fields require review; later confirmed evide
       [],
       { ...DEFAULT_SETTINGS, scopeHours: 0 },
     ).newFindings[0];
-    assert.equal(finding?.notificationStatus, 'REVIEW_REQUIRED');
+    assert.equal(finding?.notificationStatus, expected);
   }
   const direct = matchesWatchlistItem([cpe('*'), cpe('1.0')], 'example', 'widget', [cpe('1.0')], '', '');
   assert.equal(direct.confidence, 90);

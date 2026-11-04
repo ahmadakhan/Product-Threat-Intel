@@ -121,6 +121,7 @@ export async function createUser(
   role: Role,
   ipAddress = '',
   email: string | null = null,
+  actor = 'system',
 ) {
   // Usernames may contain '@' (they were historically used as addresses),
   // but a login name is not proof of ownership of a mailbox, so it is never
@@ -136,8 +137,9 @@ export async function createUser(
     throw new HttpError(400, 'Password does not meet configured minimum');
   const hash = await passwordHash(password);
   await transaction(pool, async (db) => {
+    const userId = randomUUID();
     await db.query('INSERT INTO users(id,username,password_hash,role,email) VALUES($1,$2,$3,$4,$5)', [
-      randomUUID(),
+      userId,
       username.toLowerCase(),
       hash,
       role,
@@ -146,11 +148,12 @@ export async function createUser(
     await appendAudit(
       db,
       'Operator created',
-      `Role ${role}; reset email ${address ? 'set' : 'not set'}`,
-      username.toLowerCase(),
+      `Operator ${username.toLowerCase()}; role ${role}; reset email ${address ? 'set' : 'not set'}`,
+      actor,
       'SECURITY',
       'INFO',
       ipAddress,
+      { action: 'operator.create', resourceType: 'operator', resourceId: userId, outcome: 'SUCCESS', fields: ['username', 'role', 'email'] },
     );
   });
 }
@@ -190,6 +193,7 @@ export async function updateUser(
       'SECURITY',
       'INFO',
       ipAddress,
+      { action: 'operator.update', resourceType: 'operator', resourceId: userId, outcome: 'SUCCESS', fields: Object.keys(change).filter((key) => change[key as keyof typeof change] !== undefined) },
     );
     return account;
   });
@@ -208,6 +212,7 @@ export async function deleteUser(pool: pg.Pool, userId: string, actor: string, i
       'SECURITY',
       'INFO',
       ipAddress,
+      { action: 'operator.delete', resourceType: 'operator', resourceId: userId, outcome: 'SUCCESS' },
     );
   });
 }
@@ -271,7 +276,8 @@ export function loginHandler(pool: pg.Pool, config: Config) {
         "INSERT INTO sessions(token_hash,user_id,csrf,expires_at,absolute_expires_at) VALUES($1,$2,$3,$4,now()+interval '12 hours')",
         [tokenHash(token), user.id, csrf, expires],
       );
-      await appendAudit(db, 'Login succeeded', 'Operator session established', username, 'SECURITY', 'INFO', req.ip || '');
+      await appendAudit(db, 'Login succeeded', 'Operator session established', username, 'SECURITY', 'INFO', req.ip || '',
+        { action: 'session.create', resourceType: 'operator', resourceId: user.id, outcome: 'SUCCESS' });
     });
     res.cookie(cookieName(config), token, {
       ...sessionCookieOptions(config),

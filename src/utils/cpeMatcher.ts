@@ -903,15 +903,8 @@ export function matchesWatchlistItem(
       assetCpe,
       genericIdentity,
       parsed,
-      // An inventory CPE with a missing or fully-wildcard version (`-`) asserts
-      // nothing about the release, so a version-constrained advisory criterion
-      // can only be a review candidate, never a confirmed match. The
-      // unverifiedVersion bypass must not apply to partial wildcards like
-      // `2.*` versus a concrete `1.5` — those describe different releases and
-      // matchComponent already rejects them, preventing false-positive
-      // REVIEW_REQUIRED findings that surface as duplicate CVEs on the
-      // Vulnerabilities page. Partial wildcards still reach the normal
-      // contextNeedsReview path via hasUnescapedCpeWildcard below.
+      // Product-level registrations cover all versions. Partial patterns still
+      // require intersection checks; unknown concrete versions stay review-gated.
       versionUnasserted: parsed.isValid && (!parsed.version || parsed.version === '*'),
     };
   });
@@ -939,7 +932,7 @@ export function matchesWatchlistItem(
         const rangeHasBounds = Boolean(versionRange && Object.values(versionRange).some(Boolean));
         const rangeNeedsReview = Boolean(
           rangeHasBounds &&
-          (!asset.version || asset.version === '*' || !canCompareRange(asset.version, versionRange!)),
+          !versionUnasserted && !canCompareRange(asset.version, versionRange!),
         );
         if (matchRes.viaAlias) {
           // A structured CPE pair resolved only through the thesaurus is a
@@ -958,41 +951,33 @@ export function matchesWatchlistItem(
         }
         // An unknown inventory component cannot prove a constrained criterion,
         // including explicit versions, editions, target OS, language or updates.
+        // All-version registration does not waive platform or identity constraints.
+        const contextFields = [
+          'part',
+          'vendor',
+          'product',
+          ...(versionUnasserted ? [] : ['version'] as const),
+          'update',
+          'edition',
+          'language',
+          'swEdition',
+          'targetSw',
+          'targetHw',
+          'other',
+        ] as const;
         const contextNeedsReview =
-          (
-            [
-              'part',
-              'vendor',
-              'product',
-              'version',
-              'update',
-              'edition',
-              'language',
-              'swEdition',
-              'targetSw',
-              'targetHw',
-              'other',
-            ] as const
-          ).some((field) => asset[field] === '*' && vuln[field] !== '*') ||
-          (
-            [
-              'part',
-              'vendor',
-              'product',
-              'version',
-              'update',
-              'edition',
-              'language',
-              'swEdition',
-              'targetSw',
-              'targetHw',
-              'other',
-            ] as const
-          ).some(
-            (field) => hasUnescapedCpeWildcard(asset[field]) || hasUnescapedCpeWildcard(vuln[field]),
+          contextFields.some(
+            (field) =>
+              (asset[field as keyof ParsedCPE] as string) === '*' &&
+              (vuln[field as keyof ParsedCPE] as string) !== '*',
+          ) ||
+          contextFields.some(
+            (field) =>
+              hasUnescapedCpeWildcard(asset[field as keyof ParsedCPE] as string) ||
+              hasUnescapedCpeWildcard(vuln[field as keyof ParsedCPE] as string),
           );
-        const requiresReview =
-          rangeNeedsReview || contextNeedsReview || genericIdentity || Boolean(matchRes.unverifiedVersion);
+        const requiresReview = rangeNeedsReview || contextNeedsReview || genericIdentity ||
+          (Boolean(matchRes.unverifiedVersion) && !versionUnasserted);
         retain({
           matched: true,
           method: versionRange ? 'STRICT_CPE_INTERVAL' : 'STRICT_CPE',

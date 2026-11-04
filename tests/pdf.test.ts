@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveChromeExecutablePath, renderAdvisoryPdf, closePdfRenderer } from '../server/pdf.ts';
+import { createServer } from 'node:http';
+import { resolveChromeExecutablePath, renderAdvisoryPdf, closePdfRenderer, securePdfPage } from '../server/pdf.ts';
+import type { Page, HTTPRequest } from 'puppeteer-core';
 import { renderAdvisory } from '../server/advisoryRender.ts';
 import { advisoryFilename, unverifiableMatchFilename } from '../server/pdf.ts';
 import { compileCustomizedTemplate, DEFAULT_TEMPLATE_CUSTOMIZATION } from '../src/utils/templateCompiler.ts';
@@ -10,6 +12,34 @@ import type { Advisory, EmailConfiguration } from '../src/types/index.ts';
 import { applyJobEdits, type Job } from '../server/delivery.ts';
 
 const chrome = resolveChromeExecutablePath();
+
+test('PDF pages disable script execution and block every external resource scheme', async () => {
+  const settings: Record<string, boolean> = {};
+  let handler: ((request: HTTPRequest) => void) | undefined;
+  const page = {
+    async setJavaScriptEnabled(value: boolean) { settings.javascript = value; },
+    async setBypassServiceWorker(value: boolean) { settings.bypassServiceWorker = value; },
+    async setRequestInterception(value: boolean) { settings.interception = value; },
+    on(_event: string, listener: (request: HTTPRequest) => void) { handler = listener; },
+  } as unknown as Page;
+  await securePdfPage(page);
+  assert.deepEqual(settings, { javascript: false, bypassServiceWorker: true, interception: true });
+  for (const url of [
+    'https://api.sendgrid.com/private', 'http://127.0.0.1/',
+    'http://169.254.169.254/latest/meta-data/', 'file:///etc/passwd',
+    'ftp://example.com/image', 'blob:https://example.com/id',
+    'data:image/png;base64,AA==', 'about:blank',
+  ]) {
+    let outcome = '';
+    handler!({
+      isInterceptResolutionHandled: () => false,
+      url: () => url,
+      async continue() { outcome = 'allowed'; },
+      async abort() { outcome = 'blocked'; },
+    } as unknown as HTTPRequest);
+    assert.equal(outcome, url.startsWith('data:') || url === 'about:blank' ? 'allowed' : 'blocked', url);
+  }
+});
 
 test('advisoryFilename is a ddMMMyyyyHHMM timestamp in the workspace timezone', () => {
   const at = new Date('2026-10-05T13:42:00Z');
@@ -49,6 +79,28 @@ test('renderAdvisoryPdf renders the compiled advisory HTML to a PDF', { skip: !c
     assert.ok(pdf.length > 2000, 'PDF should contain rendered content');
   } finally {
     await closePdfRenderer();
+  }
+});
+
+test('real PDF rendering cannot fetch remote images, styles or script resources', { skip: !chrome }, async () => {
+  let requests = 0;
+  const server = createServer((_request, response) => {
+    requests++;
+    response.end('external content');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+  const remote = `http://127.0.0.1:${port}`;
+  try {
+    const pdf = await renderAdvisoryPdf(`<html><head><link rel="stylesheet" href="${remote}/style.css"></head>
+      <body><h1>Isolated advisory</h1><img src="${remote}/image.png">
+      <script src="${remote}/script.js"></script><iframe src="file:///etc/passwd"></iframe></body></html>`);
+    assert.equal(Buffer.from(pdf).subarray(0, 5).toString(), '%PDF-');
+    assert.equal(requests, 0);
+  } finally {
+    await closePdfRenderer();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 

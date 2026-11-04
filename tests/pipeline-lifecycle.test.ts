@@ -259,7 +259,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       assert.equal(failed.healthStatus, 'DOWN');
       assert.ok(Date.parse(failed.circuitOpenUntil) > Date.now());
       assert.equal(await processPipeline(pool, config, request), false);
-      await save('feeds', failed.id, { ...failed, circuitOpenUntil: new Date(Date.now() - 1000).toISOString() });
+      await save('feeds', failed.id, { ...failed, circuitOpenUntil: new Date(Date.now() - 1000).toISOString(), lastRecoveryAttemptAt: new Date(Date.now() - 60000).toISOString() });
       assert.equal(await processPipeline(pool, config, async () => ({ status: 200, body: '[]', headers: {} })), true);
       const recovered = await get<any>(pool, 'feeds', failed.id);
       assert.equal(recovered.healthStatus, 'HEALTHY');
@@ -427,6 +427,15 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       await save('watchlist', 'asset', asset());
       await run();
       assert.equal((await list(pool, 'findings')).length, 1);
+      const older = { ...cve, cveId: 'CVE-2020-98002' };
+      await save('cveData', older.cveId, older);
+      await run();
+      const retained = await list<Finding>(pool, 'findings');
+      assert.equal(retained.length, 1, 'unchanged inventory must not discover unrelated historical CVEs');
+      assert.notEqual(retained[0].notificationStatus, 'NOT_APPLICABLE', 'age alone must not invalidate an existing match');
+      await save('watchlist', 'asset', asset('1.4'));
+      await run();
+      assert.equal((await list(pool, 'findings')).length, 2, 'changed inventory must rematch the historical cache once');
     });
     await t.test('repeated bulk inventory imports preserve asset and finding identities', async () => {
       await reset();
@@ -451,7 +460,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       await reset();
       const cve = vulnerability();
       await save('cveData', cve.cveId, cve);
-      await save('watchlist', 'asset', asset('*'));
+      await save('watchlist', 'asset', asset('1.*'));
       await run();
       const first = (await list<Finding>(pool, 'findings'))[0];
       assert.equal(first.notificationStatus, 'REVIEW_REQUIRED');
@@ -1160,7 +1169,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         // it and not create a second copy.
         assert.equal(
           await deliverNext(pool, config, request, async () => {
-            throw new Error('temporary transport outage');
+            throw Object.assign(new Error('temporary transport outage'), { code: 'ECONNRESET', command: 'CONN' });
           }),
           true,
         );

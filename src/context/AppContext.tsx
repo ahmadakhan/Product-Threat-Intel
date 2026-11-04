@@ -470,7 +470,7 @@ function useApplication() {
       maxArchivedRecords: number;
       retentionMode: 'strict' | 'rolling' | 'checkpoints';
     }) => safely(() => request<RetentionPreview>('/retention/preview', policy)),
-    verifyAuditChainRemote: () => safely(() => request<{ verified: boolean }>('/audit/verify')),
+    verifyAuditChainRemote: () => safely(() => request<{ verified: boolean; logCount: number; merkleRoot: string }>('/audit/verify')),
     simulateCorrelation: (asset: {
       vendor: string;
       product: string;

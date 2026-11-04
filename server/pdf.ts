@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { existsSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import puppeteer from 'puppeteer-core';
-import type { Browser, Page } from 'puppeteer-core';
+import type { Browser, BrowserContext, Page } from 'puppeteer-core';
 import type { Config } from './config';
 import { resolveTimezone } from '../src/utils/dateTime.ts';
 
@@ -26,7 +27,7 @@ export function resolveChromeExecutablePath(config?: Config): string | undefined
   // path to an existing executable file; a directory, a relative name resolved
   // through PATH, or an empty string is treated as "no Chrome configured".
   const executable = (candidate: string | undefined) => {
-    if (!candidate || !candidate.startsWith('/')) return undefined;
+    if (!candidate || !isAbsolute(candidate)) return undefined;
     try {
       // realpathSync throws for a missing path and resolves a symlink to its
       // target, so a directory can be rejected by asking for its stats here.
@@ -110,17 +111,23 @@ export async function renderAdvisoryPdf(html: string, config?: Config): Promise<
       timeout: 15000,
     });
     browserCache.set(launchKey, browserPromise);
+    void browserPromise.catch(() => {
+      if (browserCache.get(launchKey) === browserPromise) browserCache.delete(launchKey);
+    });
   }
 
   const browser = await browserPromise;
-  let page: Page | undefined;
+  let context: BrowserContext | undefined;
   try {
-    page = await browser.newPage();
+    context = await browser.createBrowserContext();
+    const page = await context.newPage();
+    await securePdfPage(page);
     await page.setViewport({ width: 1280, height: 800 });
-    await page.setContent(html, { waitUntil: 'load' });
+    await page.setContent(html, { waitUntil: 'load', timeout: 15000 });
     const pdf = await page.pdf({
       format: 'A4',
       printBackground: true,
+      timeout: 15000,
       margin: { top: '12mm', right: '8mm', bottom: '12mm', left: '8mm' },
     });
     const content = Buffer.isBuffer(pdf) ? new Uint8Array(pdf) : new Uint8Array(pdf);
@@ -129,11 +136,25 @@ export async function renderAdvisoryPdf(html: string, config?: Config): Promise<
     return content;
   } finally {
     try {
-      if (page) await page.close();
+      if (context) await context.close();
     } catch {
       void 0;
     }
   }
+}
+
+export async function securePdfPage(page: Page): Promise<void> {
+  await page.setJavaScriptEnabled(false);
+  await page.setBypassServiceWorker(true);
+  page.on('request', (request) => {
+    if (request.isInterceptResolutionHandled()) return;
+    const url = request.url();
+    const action = url === 'about:blank' || url.startsWith('data:')
+      ? request.continue()
+      : request.abort('blockedbyclient');
+    void action.catch(() => undefined);
+  });
+  await page.setRequestInterception(true);
 }
 
 function evictPdfCache(): void {
@@ -150,7 +171,7 @@ function evictPdfCache(): void {
 export async function closePdfRenderer(): Promise<void> {
   for (const promise of browserCache.values()) {
     try {
-      (await promise).close();
+      await (await promise).close();
     } catch {
       void 0;
     }

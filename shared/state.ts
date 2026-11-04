@@ -69,6 +69,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   advisoryPrefix: 'ADV-',
   autoDispatchEnabled: false,
   autoDispatchConfidenceThreshold: 90,
+  reviewConfidenceThreshold: 0,
   autoDispatchUnverifiableMatches: false,
   autoDispatchNewsToSecurityTeam: false,
   reviewUnverifiableMatches: false,

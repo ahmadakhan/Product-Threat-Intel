@@ -114,6 +114,52 @@ test('H-3: campaign (KEV) enrichment is persisted even when applicability is unc
   }
 });
 
+test('aborting a stuck pipeline releases its lock and prevents late response persistence', { skip: !database, timeout: 15000 }, async () => {
+  const base = createPool(database!);
+  const schema = 'abort_' + randomUUID().replaceAll('-', '');
+  await base.query(`CREATE SCHEMA ${schema}`);
+  const url = new URL(database!);
+  url.searchParams.set('options', `-c search_path=${schema}`);
+  const pool = createPool(url.href);
+  const config = loadConfig({
+    NODE_ENV: 'test', DATABASE_URL: url.href, APP_ORIGIN: 'http://localhost',
+    ENCRYPTION_KEY: randomBytes(32).toString('base64'),
+  });
+  const controller = new AbortController();
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  let finishRequest!: (response: { status: number; body: string; headers: Record<string, string> }) => void;
+  try {
+    await migrate(pool);
+    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, autoDispatchEnabled: false, schedulerEnabled: false });
+    await put(pool, 'feeds', 'stuck', {
+      id: 'stuck', name: 'Stuck source', type: 'JSON_SEARCH_API',
+      url: 'https://example.com/feed', enabled: true, authType: 'NONE', rateLimitPerMin: 60,
+    });
+    const queued = await queueRun(pool, 24, 'test');
+    const pending = processPipeline(pool, config, async (_url, options) => {
+      assert.equal(options?.signal, controller.signal);
+      markStarted();
+      return new Promise((resolve) => { finishRequest = resolve; });
+    }, controller.signal);
+    const rejected = assert.rejects(pending, /watchdog cancellation/);
+    await started;
+    controller.abort(new Error('watchdog cancellation'));
+    await rejected;
+    assert.equal(await processPipeline(pool, config, async () => ({ status: 200, body: '[]', headers: {} })), true);
+    assert.equal((await get<{ status: string }>(pool, 'executions', queued.id))?.status, 'COMPLETED');
+    finishRequest({ status: 200, body: JSON.stringify([vulnerability()]), headers: {} });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal((await list(pool, 'cveData')).length, 0);
+    await assert.rejects(processPipeline(pool, config, async () => ({ status: 200, body: '[]', headers: {} }), controller.signal), /watchdog cancellation/);
+  } finally {
+    controller.abort();
+    await pool.end();
+    await base.query(`DROP SCHEMA ${schema} CASCADE`);
+    await base.end();
+  }
+});
+
 test('H-4: a lost worker lock requeues the run instead of wedging it in RUNNING', { skip: !database }, async () => {
   const base = createPool(database!);
   const schema = 'h4_' + randomUUID().replaceAll('-', '');

@@ -27,6 +27,7 @@ interface LogDetailModalProps {
   title: string;
   level: 'INFO' | 'WARNING' | 'ERROR';
   timestamp: string;
+  timestampDisplay?: string;
   fields: LogDetailField[];
   /** Operator-configured timezone (`settings.timezone`); local when unset. */
   timezone?: string;
@@ -39,6 +40,7 @@ export const LogDetailModal: React.FC<LogDetailModalProps> = ({
   title,
   level,
   timestamp,
+  timestampDisplay,
   fields,
   timezone,
   onClose,
@@ -90,7 +92,7 @@ export const LogDetailModal: React.FC<LogDetailModalProps> = ({
               {level}
             </span>
             <span className="text-[11px] text-zinc-500">
-              {fmtDateTime(timestamp, timezone)} {timezoneLabel(timezone)}
+              {timestampDisplay ?? `${fmtDateTime(timestamp, timezone)} ${timezoneLabel(timezone)}`}
             </span>
           </div>
         </div>

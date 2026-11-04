@@ -70,10 +70,11 @@ import { randomUUID, createHmac, createHash } from 'node:crypto';
 import { stableJson } from '../src/utils/deduplicator';
 import nodemailer from 'nodemailer';
 import type { Config } from './config';
-import { transaction, get, getMany, list, put, appendAudit } from './db';
+import { transaction, get, getMany, list, put, appendAudit, schemaLockKey } from './db';
 import type { Db } from './db';
 import { createRequester, type Requester } from './network';
-import { isFindingDelivery } from '../src/utils/findingDelivery.ts';
+import { isFindingDelivery, eligibleForReviewNotification } from '../src/utils/findingDelivery.ts';
+import { renderUnverifiableReviewEmail } from './reviewEmail.ts';
 import {
   effectiveSubject,
   normalizeEmailSubject,
@@ -529,9 +530,8 @@ export type DeliveryConfirmation = 'delivered' | 'not-delivered' | 'unknown';
  * evidence is inconclusive. Only when that lookup cannot answer is the job
  * withheld rather than resent.
  *
- * SMTP is confirmed by the server's 250 reply before the send returns, so a
- * failed SMTP attempt provably did not hand the message over. That path keeps
- * ordinary retry behaviour and is never deferred.
+ * SMTP failures before submission can be retried. Losing the connection after
+ * DATA may hide acceptance, so an ambiguous outcome is not blindly resent.
  */
 async function confirmPriorDelivery(
   db: Db,
@@ -557,19 +557,7 @@ async function confirmPriorDelivery(
     /HTTP \d{3}\b|did not accept the recipient|not configured|is missing/i.test(log.errorMessage)
   )
     return 'not-delivered';
-  // SMTP hands the message over synchronously and fails the send when the
-  // server does not accept the recipient, so an SMTP attempt that threw provably
-  // did not deliver. The HTTP API providers return before the message may still
-  // be queued or delivered, so their failed attempts stay unconfirmed.
   const saved = (await get<EmailConfiguration>(db, 'emailConfig', 'main')) || DEFAULT_EMAIL_CONFIG;
-  if (log?.provider === 'SMTP_Relay' || (!log?.provider && isSmtpEmailProvider(saved.provider)))
-    return 'not-delivered';
-  // The HTTP API providers are addressed by a stored endpoint/domain, which is
-  // the only case where an accepted-but-unrecorded send is a duplicate risk.
-  // A custom `API` endpoint without a configured domain is the self-hosted
-  // relay shape used by the test-email path; there the channel is an SMTP
-  // relay, so a failed attempt did not hand the message over.
-  if (saved.provider === 'API' && !saved.apiSourceDomain) return 'not-delivered';
   // The local evidence is inconclusive, so ask the provider. This is the only
   // way to tell an attempt that delivered and lost its receipt from one that
   // never left, and it is what lets those jobs be recovered instead of held.
@@ -727,7 +715,8 @@ export async function enqueue(
        lock_token=NULL,
        updated_at=now()
      WHERE outbox.status='FAILED'
-       AND COALESCE(outbox.error,'') LIKE '%no longer applicable%'
+       AND (COALESCE(outbox.error,'') LIKE '%no longer applicable%'
+         OR (outbox.advisory_id LIKE 'UNVERIFIABLE:%' AND COALESCE(outbox.error,'') LIKE 'Review notification%'))
      RETURNING id`,
     [
       id,
@@ -1144,12 +1133,38 @@ export async function queueUnverifiableMatchNotification(
   findings: Finding[],
   recipients: EmailRecipient[],
 ): Promise<number> {
+  if (!('release' in db)) {
+    return transaction(db, (client) => queueUnverifiableMatchNotification(client, findings, recipients),
+      undefined, { locks: ['review-notifications'] });
+  }
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1), ${schemaLockKey})`, ['review-notifications']);
+  const settings = { ...DEFAULT_SETTINGS, ...await get<AppSettings>(db, 'settings', 'main') };
+  const eligible = findings.filter((finding) => eligibleForReviewNotification(finding, settings) && !finding.reviewNotifiedAt);
   const selected = recipients.filter(
     (r) => r.enabled && (r.deliveryGroup === 'SECURITY_TEAM' || r.deliveryGroup === undefined),
   );
-  if (findings.length === 0 || selected.length === 0) return 0;
+  if (eligible.length === 0 || selected.length === 0) return 0;
+  const pending = await db.query<{ target_id: string; finding_id: string }>(
+    `SELECT target_id,entry->>'findingId' AS finding_id FROM outbox
+     CROSS JOIN LATERAL jsonb_array_elements(CASE
+       WHEN jsonb_typeof(payload->'unverifiableMatch'->'findings')='array'
+       THEN payload->'unverifiableMatch'->'findings' ELSE '[]'::jsonb END) entry
+     WHERE channel='email' AND status=ANY($1::text[]) AND target_id=ANY($2::text[])
+       AND entry->>'findingId'=ANY($3::text[])
+     UNION ALL
+     SELECT target.id,records.id FROM records CROSS JOIN unnest($2::text[]) target(id)
+     WHERE kind='findings' AND records.id=ANY($3::text[])
+       AND COALESCE(data->>'reviewNotifiedAt','')<>''`,
+    [['QUEUED', 'SENDING'], selected.map((recipient) => recipient.id), eligible.map((finding) => finding.id)],
+  );
+  const reserved = new Map<string, Set<string>>();
+  for (const row of pending.rows) {
+    const ids = reserved.get(row.target_id) ?? new Set<string>();
+    ids.add(row.finding_id);
+    reserved.set(row.target_id, ids);
+  }
   // Sort findingLines by severity in descending order: CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN
-  const findingLines = findings
+  const findingLines = eligible
     .map((finding) => {
       const asset =
         finding.matchedAssetName || finding.matchedAssetVendor || finding.matchedAssetProduct || 'unknown asset';
@@ -1187,68 +1202,6 @@ export async function queueUnverifiableMatchNotification(
       };
     })
     .sort((a, b) => SEVERITY_ORDER.indexOf(b.severity) - SEVERITY_ORDER.indexOf(a.severity));
-  const cveIds = Array.from(new Set(findings.map((f) => f.cveId).filter(Boolean))).sort();
-  const subject = `[Threat intelligence] for Review - Unverifiable matches (${findings.length} findings)`.replace(
-    /[\r\n]/g,
-    ' ',
-  );
-  const textBlocks = findingLines.map((f, i) => {
-    const lines = [
-      `${i + 1}. CVE: ${f.cveId}`,
-      `   Asset: ${f.asset}`,
-      f.vendor ? `   Vendor: ${f.vendor}` : '',
-      f.product ? `   Product: ${f.product}` : '',
-      f.assetVersion ? `   Asset version: ${f.assetVersion}` : '',
-      f.vulnVersionRange ? `   Vulnerable range: ${f.vulnVersionRange}` : '',
-      `   Severity: ${f.severity}`,
-      `   CVSS score: ${f.cvssScore}`,
-      `   Evidence: ${f.evidence}`,
-    ].filter(Boolean);
-    return lines.join('\n');
-  });
-  const text =
-    `for Review - Unverifiable matches\n\n` +
-    `The following ${findings.length} product-identity correlation(s) matched inventory ` +
-    `but could not verify the version range. Confirm applicability with the vendor advisory before remediation.\n\n` +
-    `${textBlocks.join('\n\n')}\n\n` +
-    `This finding matched inventory but could not verify the version range. ` +
-    `Confirm applicability with the vendor advisory before remediation.`;
-  const htmlBlocks = findingLines
-    .map(
-      (f) =>
-        `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:14px;">` +
-        `<tr><td style="padding:4px 8px;font-weight:bold;">CVE</td><td style="padding:4px 8px;"><code>${escapeHtml(f.cveId)}</code></td></tr>` +
-        `<tr><td style="padding:4px 8px;font-weight:bold;">Asset</td><td style="padding:4px 8px;">${escapeHtml(f.asset)}</td></tr>` +
-        (f.vendor
-          ? `<tr><td style="padding:4px 8px;font-weight:bold;">Vendor</td><td style="padding:4px 8px;">${escapeHtml(f.vendor)}</td></tr>`
-          : '') +
-        (f.product
-          ? `<tr><td style="padding:4px 8px;font-weight:bold;">Product</td><td style="padding:4px 8px;">${escapeHtml(f.product)}</td></tr>`
-          : '') +
-        (f.assetVersion
-          ? `<tr><td style="padding:4px 8px;font-weight:bold;">Asset version</td><td style="padding:4px 8px;">${escapeHtml(f.assetVersion)}</td></tr>`
-          : '') +
-        (f.vulnVersionRange
-          ? `<tr><td style="padding:4px 8px;font-weight:bold;">Vulnerable range</td><td style="padding:4px 8px;">${escapeHtml(f.vulnVersionRange)}</td></tr>`
-          : '') +
-        `<tr><td style="padding:4px 8px;font-weight:bold;">Severity</td><td style="padding:4px 8px;"><span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${f.severityColor};color:#ffffff;font-size:11px;font-weight:bold;">${escapeHtml(f.severity)}</span></td></tr>` +
-        `<tr><td style="padding:4px 8px;font-weight:bold;">CVSS score</td><td style="padding:4px 8px;">${f.cvssScore}</td></tr>` +
-        (f.cveDescription
-          ? `<tr><td style="padding:4px 8px;font-weight:bold;">Description</td><td style="padding:4px 8px;">${escapeHtml(f.cveDescription)}</td></tr>`
-          : '') +
-        `</table>` +
-        `<p style="margin-top:8px;">${escapeHtml(f.evidence).replace(/\n/g, '<br>')}</p>`,
-    )
-    .join('<hr style="border:none;border-top:1px solid #ccc;margin:16px 0;">');
-  const html =
-    `<html><body>` +
-    `<p><strong>for Review - Unverifiable matches</strong></p>` +
-    `<p>The following ${findings.length} product-identity correlation(s) matched inventory ` +
-    `but could not verify the version range. Confirm applicability with the vendor advisory before remediation.</p>` +
-    htmlBlocks +
-    `<p style="margin-top:16px;">This finding matched inventory but could not verify the version range. ` +
-    `Confirm applicability with the vendor advisory before remediation.</p>` +
-    `</body></html>`;
   const unverifiableMatch: UnverifiableMatchPayload = {
     findings: findingLines.map((f) => ({
       findingId: f.findingId,
@@ -1258,15 +1211,23 @@ export async function queueUnverifiableMatchNotification(
       severity: f.severity,
       cvssScore: f.cvssScore,
     })),
-    cveIds,
+    cveIds: [...new Set(eligible.map((finding) => finding.cveId))].sort(),
   };
-  const findingRevisions = Object.fromEntries(findings.map((f) => [f.id, findingRevision(f)]));
-  const findingIds = findings.map((f) => f.id).sort();
-  const batchRevision = createHash('sha256').update(stableJson(findingRevisions)).digest('hex');
-  const contentRevision = `${findingIds.join(',')}:${batchRevision}`;
-  const identity = `unverifiable:${findingIds.join(',')}:${contentRevision}`;
   let queued = 0;
   for (const recipient of selected) {
+    const ownFindings = eligible.filter((finding) => recipientAllows(recipient, finding) &&
+      !reserved.get(recipient.id)?.has(finding.id));
+    if (!ownFindings.length) continue;
+    const ownIds = new Set(ownFindings.map((finding) => finding.id));
+    const ownLines = unverifiableMatch.findings.filter((finding) => ownIds.has(finding.findingId));
+    const cveIds = [...new Set(ownFindings.map((finding) => finding.cveId))].sort();
+    const findingIds = [...ownIds].sort();
+    const findingRevisions = Object.fromEntries(ownFindings.map((finding) => [finding.id, findingRevision(finding)]));
+    const cveRevisions = Object.fromEntries(ownFindings.map((finding) => [finding.cveId, revision(finding.cve)]));
+    const { subject, text, html } = renderUnverifiableReviewEmail(ownFindings);
+    const batchRevision = createHash('sha256').update(stableJson({ findingRevisions, cveRevisions, html })).digest('hex');
+    const contentRevision = `${findingIds.join(',')}:${batchRevision}`;
+    const identity = `unverifiable:${findingIds.join(',')}:${contentRevision}`;
     if (
       await enqueue(
         db,
@@ -1279,13 +1240,14 @@ export async function queueUnverifiableMatchNotification(
           html,
           cveIds,
           findingRevisions,
+          cveRevisions,
           contentRevision,
-          unverifiableMatch,
+          unverifiableMatch: { findings: ownLines, cveIds },
           recipientEmail: recipient.email,
         },
         `${identity}:email:${recipient.id}`,
         'QUEUED',
-        advisoryPriority(findings),
+        advisoryPriority(ownFindings),
       )
     )
       queued++;
@@ -1568,6 +1530,53 @@ export async function deliverNext(
   // log so confirmPriorDelivery does not have to re-infer it from error text.
   let transportRejected = false;
   try {
+    if (job.payload.unverifiableMatch) {
+      const currentSettings = { ...DEFAULT_SETTINGS, ...await get<AppSettings>(pool, 'settings', 'main') };
+      const ids = job.payload.unverifiableMatch.findings.map((finding) => finding.findingId);
+      const [recipient, stored, aliases] = await Promise.all([
+        get<EmailRecipient>(pool, 'recipients', job.target_id),
+        getMany<Finding>(pool, 'findings', ids),
+        list<import('../src/types/index.ts').AliasEntry>(pool, 'aliases'),
+      ]);
+      if (!recipient?.enabled ||
+          ![undefined, 'SECURITY_TEAM'].includes(recipient.deliveryGroup) ||
+          recipient.email !== job.payload.recipientEmail || !ids.length) {
+        permanent = true;
+        throw new Error('Review notification recipient is no longer eligible');
+      }
+      const [assets, cves, withdrawals] = await Promise.all([
+        getMany<WatchListItem>(pool, 'watchlist', [...stored.values()].map((finding) => finding.matchedAssetId)),
+        getMany<NormalizedCVE>(pool, 'cveData', [...stored.values()].map((finding) => finding.cveId)),
+        getMany<{ modifiedDate: string }>(pool, 'cveWithdrawals', [...stored.values()].map((finding) => finding.cveId)),
+      ]);
+      const fresh: Finding[] = [];
+      const vendorAliases = buildAliasMap(aliases, 'VENDOR');
+      const productAliases = buildAliasMap(aliases, 'PRODUCT');
+      for (const id of ids) {
+        const finding = stored.get(id);
+        const asset = finding && assets.get(finding.matchedAssetId);
+        const cve = finding && (cves.get(finding.cveId) ?? finding.cve);
+        const withdrawal = finding && withdrawals.get(finding.cveId);
+        const withdrawn = withdrawal && (!Number.isFinite(Date.parse(cve?.modifiedDate ?? '')) ||
+          !Number.isFinite(Date.parse(withdrawal.modifiedDate)) || Date.parse(cve!.modifiedDate) <= Date.parse(withdrawal.modifiedDate));
+        const current = finding && asset?.active && cve && !withdrawn
+          ? runVulnerabilityPipeline([], [cve], [asset], [], [], { ...currentSettings, scopeHours: 0 },
+              'Review revalidation', false, vendorAliases, productAliases, undefined, aliases).newFindings[0]
+          : undefined;
+        if (!finding || !current || !eligibleForReviewNotification(finding, currentSettings) ||
+            !eligibleForReviewNotification(current, currentSettings) || !recipientAllows(recipient, current) ||
+            job.payload.findingRevisions?.[id] !== findingRevision(current) ||
+            job.payload.cveRevisions?.[current.cveId] !== revision(current.cve)) {
+          permanent = true;
+          throw new Error('Review notification no longer matches current inventory, evidence or confidence policy');
+        }
+        fresh.push({ ...current, id });
+      }
+      if (renderUnverifiableReviewEmail(fresh).html !== job.payload.html) {
+        permanent = true;
+        throw new Error('Review notification content changed; a refreshed review is required');
+      }
+    }
     if (!retryPolicy.enabled && job.attempts > 1 && job.channel === 'email') {
       permanent = true;
       throw new Error('Automatic email retry is disabled by the current settings');
@@ -1904,10 +1913,15 @@ export async function deliverNext(
     // message — retrying cannot duplicate it. Everything else (timeout, socket
     // reset, dropped connection) leaves the outcome unknown, and only a
     // provider lookup can then decide whether a resend is safe.
+    const smtpFailure = e as { command?: unknown; responseCode?: unknown };
+    const beforeSubmission = typeof smtpFailure?.command === 'string' &&
+      /^(CONN|AUTH(?: .*)?|EHLO|HELO|STARTTLS|MAIL FROM|RCPT TO)$/i.test(smtpFailure.command);
+    const rejectedData = smtpFailure?.command === 'DATA' && typeof smtpFailure.responseCode === 'number' &&
+      smtpFailure.responseCode >= 400 && smtpFailure.responseCode < 600;
     transportRejected =
       e instanceof EmailProviderError
         ? e.status >= 400 && e.status < 500
-        : /HTTP \d{3}\b|did not accept the recipient|not configured|is missing/i.test(error);
+        : beforeSubmission || rejectedData || /HTTP \d{3}\b|did not accept the recipient|not configured|is missing/i.test(error);
     if (e instanceof EmailProviderError) {
       permanent = e.status >= 400 && e.status < 500 && ![408, 429].includes(e.status);
       retryNotBefore = e.retryAt;
@@ -2151,16 +2165,9 @@ export async function deliverNext(
     // is sent at most once.
     if (job.payload.unverifiableMatch && !error && !routeToReview) {
       const notifiedIds = job.payload.unverifiableMatch.findings.map((f) => f.findingId);
-      const findingMap = await getMany<Finding>(db, 'findings', notifiedIds);
       const now = new Date().toISOString();
-      for (const findingId of notifiedIds) {
-        const finding = findingMap.get(findingId);
-        if (!finding || finding.reviewNotifiedAt) continue;
-        await put(db, 'findings', findingId, {
-          ...finding,
-          reviewNotifiedAt: now,
-        });
-      }
+      await db.query(`UPDATE records SET data=jsonb_set(data,'{reviewNotifiedAt}',to_jsonb($2::text)),updated_at=now()
+        WHERE kind='findings' AND id=ANY($1::text[]) AND COALESCE(data->>'reviewNotifiedAt','')=''`, [notifiedIds, now]);
     }
     // After a Security-team delivery is confirmed ACCEPTED, queue the same
     // email for Everyone-group recipients in REVIEW status so an operator can

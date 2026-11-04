@@ -92,6 +92,19 @@ export const MATCHING_CORPUS: MatchingCase[] = [
     expected: { matched: true, methods: ['STRICT_CPE'], confidence: 90 },
   },
   {
+    id: 'registered-all-versions',
+    description: 'A registered all-version product intentionally covers concrete vulnerable versions',
+    tags: ['strict', 'wildcard', 'positive'],
+    input: {
+      assetCpes: [cpe({ vendor: 'example', product: 'widget', version: '*' })],
+      assetVendor: 'example', assetProduct: 'widget',
+      vulnCpes: [cpe({ vendor: 'example', product: 'widget', version: '1.5' })],
+      versionRange: { versionEndExcluding: '2.0' },
+      ...benignText,
+    },
+    expected: { matched: true, methods: ['STRICT_CPE_INTERVAL'], confidence: 100, requiresReview: false },
+  },
+  {
     id: 'generic-cpe-resolved',
     description: 'A wildcard inventory CPE is anchored to the inventory product and stays review-only',
     tags: ['generic', 'positive'],

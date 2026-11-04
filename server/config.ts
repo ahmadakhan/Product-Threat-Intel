@@ -124,6 +124,10 @@ const schema = z.object({
   DATABASE_URL: databaseUrl,
   APP_ORIGIN: z.url(),
   ENCRYPTION_KEY: z.string().regex(/^[A-Za-z0-9+/]{43}=$/, 'Must be a base64 encoded 32-byte key'),
+  ENCRYPTION_KEYS: z.string().max(2048).default('').refine((value) => {
+    const keys = value.split(',').map((key) => key.trim()).filter(Boolean);
+    return keys.length <= 16 && keys.every((key) => /^[A-Za-z0-9+/]{43}=$/.test(key) && Buffer.from(key, 'base64').length === 32);
+  }, 'ENCRYPTION_KEYS must contain at most 16 comma-separated base64 32-byte keys'),
   EGRESS_ALLOWED_HOSTS: z
     .string()
     .default(DEFAULT_EGRESS_HOSTS),
@@ -203,11 +207,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = schema.parse(env);
   const config = {
     ...parsed,
-    // The recommended-feed/API baseline is always part of the effective
-    // allowlist. Setting EGRESS_ALLOWED_HOSTS explicitly (for example to add a
-    // mail relay) must not drop the feed hosts the product depends on.
     EGRESS_ALLOWED_HOSTS: mergeAllowedHosts(
-      DEFAULT_EGRESS_HOSTS,
       parsed.EGRESS_ALLOWED_HOSTS,
       parsed.EGRESS_ALLOWED_HOSTS_EXTRA,
     ),

@@ -39,7 +39,8 @@ import {
   reconcileAutoAliases,
 } from '../src/utils/aliasLifecycle';
 import { mergeCveRecords, normalizeCveId, stableJson } from '../src/utils/deduplicator';
-import { countNewFindings, reconcileFindings } from '../src/engine/reconcileFindings';
+import { countNewFindings, findingIdentity, reconcileFindings } from '../src/engine/reconcileFindings';
+import { eligibleForReviewNotification } from '../src/utils/findingDelivery.ts';
 import {
   applyVexSuppression,
   determineExploitRisk,
@@ -65,6 +66,7 @@ import { refreshCandidatePairs } from './versionIndex';
 import { recoveryDue, recoveryAt, isPermanentFeedFailure, shouldStartAutomaticRun } from './feedRecovery';
 import { ingestionWindow, type FeedCursor, OPENCVE_MAX_WINDOW_HOURS } from './ingestionState';
 import type { Requester } from './network';
+import { withAbortSignal } from './network';
 import type { Config } from './config';
 import {
   enqueue,
@@ -545,12 +547,8 @@ export async function stopRun(pool: pg.Pool, id: string, actor: string): Promise
 }
 
 /**
- * `stopRun` with the connection that already holds `pipeline-queue`.
- *
- * The lock is session-scoped, so the transaction that writes the stop has to
- * run on the same connection: `lockAcquired` tells `transaction()` not to
- * re-acquire it (which would deadlock against this very session). `lockClient`
- * is left open for the caller — `processPipeline` owns it for the whole run.
+ * Record a stop in a queue-serialized transaction, optionally reusing the
+ * worker's connection. Network ingestion never holds the queue-admission lock.
  */
 export async function stopRunWithClient(
   pool: pg.Pool,
@@ -558,34 +556,7 @@ export async function stopRunWithClient(
   actor: string,
   lockClient?: pg.PoolClient,
 ): Promise<PipelineExecution> {
-  const lockKey = 'pipeline-queue';
-  // Lock bidirectionally: the running worker holds this lock for the whole of a
-  // locked transaction, so stopRun must wait for a live worker's checkpoint
-  // window. It is therefore taken on its OWN connection first (never inside the
-  // transaction), and only then is the transaction opened with `lockAcquired`.
-  // Acquiring it inside the transaction deadlocks against the running worker:
-  // stopRun's transaction pins the execution row and waits for the worker's
-  // advisory lock while the worker holds that lock and waits for the same row.
-  const ownClient = lockClient ? undefined : await pool.connect();
-  const client = lockClient ?? ownClient!;
-  let lockHeld = Boolean(lockClient);
-  try {
-    if (!client) throw new HttpError(404, 'Execution not found');
-    // Validate the target before contending for the run lock: an unknown id is a
-    // 404 regardless of whether a worker currently holds the lock, and it must
-    // not surface as a lock-contention 503.
-    if (!(await get<PipelineExecution>(client, 'executions', id)))
-      throw new HttpError(404, 'Execution not found');
-    if (ownClient) {
-      lockHeld = (
-        await ownClient.query<{ locked: boolean }>(
-          `SELECT pg_advisory_lock(hashtext($1), ${schemaLockKey}) AS locked`,
-          [lockKey],
-        )
-      ).rows[0]?.locked === true;
-      if (!lockHeld) throw new HttpError(503, 'Pipeline lock unavailable');
-    }
-    return await transaction(
+    return transaction(
       pool,
       async (db) => {
         const run = await getForUpdate<PipelineExecution>(db, 'executions', id);
@@ -611,58 +582,40 @@ export async function stopRunWithClient(
         await appendAudit(db, 'Pipeline stop requested', `Execution ${id}`, actor, 'PIPELINE');
         return run;
       },
-      client,
-      { lockAcquired: [lockKey] },
+      lockClient,
+      { locks: ['pipeline-queue'] },
     );
-  } finally {
-    if (ownClient) {
-      if (lockHeld)
-        await ownClient
-          .query(`SELECT pg_advisory_unlock(hashtext($1), ${schemaLockKey})`, [lockKey])
-          .catch(() => undefined);
-      // Destroy rather than reuse: a session that still owns an advisory lock
-      // must never go back to the pool, even if the unlock above failed.
-      ownClient.release(!lockHeld);
-    }
-  }
 }
-export async function processPipeline(pool: pg.Pool, config: Config, request: Requester): Promise<boolean> {
+export async function processPipeline(pool: pg.Pool, config: Config, request: Requester, signal?: AbortSignal, onProgress?: () => void): Promise<boolean> {
+  signal?.throwIfAborted();
   const lock = await pool.connect();
-  // The run lock is taken *before* any other pooled checkout, and every
-  // transaction below reuses it (`lockAcquired`). Two invariants depend on the
-  // id being known up front:
-  //  - Only one `run` transaction can exist at a time: PostgreSQL re-enters an
-  //    advisory lock on the session that already holds it, so a concurrent
-  //    transaction on another connection would self-grant and break the
-  //    intended one-transaction-per-run barrier.
-  //  - That transaction must not block behind its own lock (it would time out
-  //    with no diagnostic) and must not hold the lock client's BEGIN open.
-  const runLockKey = 'pipeline-queue';
-  const runLockSql = `SELECT pg_try_advisory_lock(hashtext($1), ${schemaLockKey}) AS locked`;
-  let runLockHeld = false;
   let connectionLost = false;
   const onError = () => {
     connectionLost = true;
   };
   lock.on('error', onError);
-  // `pipeline-queue` is held on `lock` for the whole run. Every transaction
-  // here therefore declares it as already acquired: re-acquiring it on the
-  // pooled connection would block behind the worker's own lock and deadlock
-  // against stopRun() (which takes the same lock on its own connection).
   const lockedTransaction = <T>(fn: (db: pg.PoolClient) => Promise<T>) => transaction(pool, fn, lock, {
     locks: ['pipeline-queue'],
-    lockAcquired: ['pipeline-queue'],
+    signal,
   });
   let locked = false,
     execution: PipelineExecution | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let released = false;
+  const onAbort = () => {
+    connectionLost = true;
+    if (heartbeat) clearInterval(heartbeat);
+    if (!released) {
+      released = true;
+      lock.release(true);
+    }
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
   try {
-    // Acquire the run lock before any other pooled connection can, then keep it
-    // for the whole run. Ordering matters: the reads below (schema migrations,
-    // execution list) can take the migration serialization lock, which lives in
-    // the same (namespace, schema) key.
-    runLockHeld = (await lock.query<{ locked: boolean }>(runLockSql, [runLockKey])).rows[0]?.locked === true;
-    if (!runLockHeld) return false;
+    if (signal?.aborted) {
+      onAbort();
+      signal.throwIfAborted();
+    }
     locked = (await lock.query(`SELECT pg_try_advisory_lock(800003, ${schemaLockKey}) AS locked`)).rows[0]
       .locked;
     if (!locked) return false;
@@ -802,10 +755,13 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     await pool.query('UPDATE scheduler_state SET heartbeat=now() WHERE id=1');
     if (!execution) return false;
     const checkpoint = async (db: pg.Pool | pg.PoolClient = pool) => {
+      signal?.throwIfAborted();
       if (connectionLost) throw new Error('Pipeline worker lost its database lock connection');
       const current = await get<PipelineExecution>(db, 'executions', execution!.id);
       if (!current) throw new Error('Pipeline execution no longer exists');
       if (current?.stopRequestedAt || current?.status === 'CANCELLED') throw new PipelineStopped();
+      signal?.throwIfAborted();
+      onProgress?.();
     };
     await checkpoint();
     execution.status = 'RUNNING';
@@ -906,11 +862,14 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             const checkedRequest: Requester = async (url, options) => {
               await sourceCheckpoint();
               const remaining = Math.max(1, deadline - Date.now());
-              const response = await request(url, {
+              const requestSignal = signal && options?.signal
+                ? AbortSignal.any([signal, options.signal]) : signal ?? options?.signal;
+              const response = await withAbortSignal(request(url, {
                 ...options,
+                signal: requestSignal,
                 timeoutMs: Math.min(options?.timeoutMs ?? 20000, remaining),
                 socketTimeoutMs: Math.min(options?.socketTimeoutMs ?? 15000, remaining),
-              });
+              }), requestSignal);
               await sourceCheckpoint();
               return response;
             };
@@ -961,7 +920,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
                       execution!.phases[0].details = `NVD: ${offset.toLocaleString()} of ${total.toLocaleString()} records in incremental sync; ${records.toLocaleString()} retrieved`;
                       execution!.stats.rawIngested = rawCount + records;
                       await saveActiveExecution(db, execution!);
-                    });
+                    }, undefined, { signal });
                   }
                 : undefined,
               context,
@@ -999,6 +958,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
               circuitOpenUntil: null,
             });
           } catch (e) {
+            signal?.throwIfAborted();
             if (e instanceof PipelineStopped || connectionLost) throw e;
             const message = e instanceof Error ? e.message : 'Ingestion failed';
             // Audit H-5: a configuration fault (SSRF-rejected destination,
@@ -1576,6 +1536,27 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         finalPairs.size ? finalPairs : undefined,
         aliasEntries,
       );
+      const previousInventory = await get<Record<string, string>>(db, 'systemState', 'matched-inventory-v1');
+      const inventoryFingerprints: Record<string, string> = Object.create(null);
+      const changedInventory = snapshot.watchlist.filter((asset) => {
+        const fingerprint = createHash('sha256').update(JSON.stringify({
+          vendor: asset.vendor, product: asset.product, version: asset.version,
+          cpes: [...asset.cpes].sort(), purls: [...(asset.purls ?? [])].sort(),
+          active: asset.active, assetTag: asset.assetTag,
+        })).digest('hex');
+        inventoryFingerprints[asset.id] = fingerprint;
+        return asset.active && previousInventory?.[asset.id] !== fingerprint;
+      });
+      if (changedInventory.length) {
+        const historical = runVulnerabilityPipeline(
+          feeds, finalCves, changedInventory, snapshot.alertedCves, snapshot.findings,
+          { ...settings, scopeHours: 0 }, 'Inventory registration', true,
+          finalVendorAliases, finalProductAliases, finalPairs.size ? finalPairs : undefined, aliasEntries,
+        );
+        const known = new Set(correlated.newFindings.map(findingIdentity));
+        correlated.newFindings.push(...historical.newFindings.filter((finding) => !known.has(findingIdentity(finding))));
+      }
+      await put(db, 'systemState', 'matched-inventory-v1', inventoryFingerprints);
       // `correlated.newFindings` is every current match because the server asks
       // for existing candidates so it can refresh applicability. The execution
       // metric must only count identities that did not exist before this run;
@@ -1860,14 +1841,6 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           });
         }
       }
-      // Precedence (see autoDispatchUnverifiableMatches in src/engine/pipelineEngine.ts):
-      // At threshold 0 the flag releases unverifiable matches to QUEUED_FOR_DISPATCH, so the
-      // REVIEW_REQUIRED && confidence===0 filter below never sees them — enabling both toggles
-      // is harmless. At threshold > 0 the confidence pin (0) below the threshold holds the finding,
-      // so it stays REVIEW_REQUIRED and this notification still fires. The flag therefore cannot
-      // silence security-team notifications except at threshold 0, where the finding is no longer
-      // in review to notify about.
-      //
       // The filter runs against vexEnforced (the reconciled set) rather than
       // survivingNewFindings so that findings already notified on a prior run are
       // excluded: deliverNext stamps reviewNotifiedAt on transport acceptance, and
@@ -1881,7 +1854,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         if (securityRecipients.length) {
           const unverifiableFindings = vexEnforced.filter(
             (f) =>
-              f.notificationStatus === 'REVIEW_REQUIRED' && f.confidence === 0 && !f.reviewNotifiedAt,
+              eligibleForReviewNotification(f, settings) && !f.reviewNotifiedAt,
           );
           if (unverifiableFindings.length) {
             unverifiableNotificationsQueued += await queueUnverifiableMatchNotification(
@@ -2118,6 +2091,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     });
     return true;
   } catch (e) {
+    signal?.throwIfAborted();
     // Audit H-4: losing the advisory-lock connection does not mean the run can
     // be abandoned silently. Previously this threw before recording anything,
     // leaving the execution wedged in RUNNING until another worker's recovery
@@ -2274,8 +2248,9 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     } else throw e;
     return true;
   } finally {
+    signal?.removeEventListener('abort', onAbort);
     if (heartbeat) clearInterval(heartbeat);
-    if (locked) {
+    if (locked && !released) {
       try {
         await lock.query(`SELECT pg_advisory_unlock(800003, ${schemaLockKey})`);
         await writeEvent(lock, {
@@ -2313,6 +2288,6 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       }
     }
     lock.removeListener('error', onError);
-    lock.release(connectionLost);
+    if (!released) lock.release(connectionLost);
   }
 }

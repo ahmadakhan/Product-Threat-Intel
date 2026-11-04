@@ -36,7 +36,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { connect } from 'node:tls';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createRequester } from '../server/network.ts';
+import { createRequester, withAbortSignal } from '../server/network.ts';
 import { loadConfig } from '../server/config.ts';
 
 const fixtures = join(import.meta.dirname, 'fixtures/tls');
@@ -76,6 +76,23 @@ async function serve(handler: Handler) {
       }),
   };
 }
+
+test('outbound requests and non-cooperative operations reject promptly when aborted', async () => {
+  const controller = new AbortController();
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const { close } = await serve(() => { markStarted(); });
+  try {
+    const pending = createRequester(config, hooks)('https://feed.example.test/blocked', { signal: controller.signal });
+    const rejected = assert.rejects(pending, /aborted/);
+    await started;
+    controller.abort(new Error('request aborted'));
+    await rejected;
+    await assert.rejects(withAbortSignal(new Promise(() => {}), controller.signal), /aborted/);
+  } finally {
+    await close();
+  }
+});
 
 test('redirects are followed for allowlisted hosts and keep the ETag/304 contract', async () => {
   const { requests, close } = await serve((req, res) => {

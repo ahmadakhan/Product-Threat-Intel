@@ -1,6 +1,6 @@
 import { generateCPE23 } from '../src/utils/cpeMatcher.ts';
 import { buildStrictCpe23 } from '../src/data/vendorCatalog.ts';
-import type { NormalizedCVE, WatchListItem } from '../src/types/index.ts';
+import type { AuditLog, NormalizedCVE, WatchListItem } from '../src/types/index.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createHmac } from 'node:crypto';
@@ -14,8 +14,9 @@ import {
   parseCPE23,
 } from '../src/utils/cpeMatcher.ts';
 import { compareVersions } from '../src/utils/versionComparator.ts';
-import { mergeCveRecords, isWithinTimelineScope } from '../src/utils/deduplicator';
-import { quickHash, generateHmacSignature } from '../src/utils/cryptoChain';
+import { mergeCveRecords, isWithinTimelineScope, stableJson } from '../src/utils/deduplicator';
+import { quickHash, generateHmacSignature, SortedMerkleAccumulator, merkleRoot, chainAuditLogs, verifyAuditChain } from '../src/utils/cryptoChain';
+import { auditContext, auditText, commandAudit } from '../server/audit.ts';
 import { runVulnerabilityPipeline, validateSsrfSafety } from '../src/engine/pipelineEngine';
 import { reconcileFindings } from '../src/engine/reconcileFindings';
 import {
@@ -26,6 +27,53 @@ import {
 } from './fixtures/seedData';
 
 const cpe = (version: string, product = 'widget') => `cpe:2.3:a:vendor:${product}:${version}:*:*:*:*:*:*:*`;
+test('audit formatting redacts credentials, bounds data and describes commands without values', () => {
+  const text = auditText('password=hunter2 token="private-token" smtpPassword=hidden-value {"authSecretKey":"json-secret"} Bearer abc.xyz https://user:pass@example.com/path?api_key=secret&view=logs\u0000\r\nforged', 4000);
+  for (const secret of ['hunter2', 'private-token', 'hidden-value', 'json-secret', 'abc.xyz', 'user:pass', 'api_key=secret']) assert.ok(!text.includes(secret));
+  assert.ok(text.includes('view=logs'));
+  assert.ok(!/[\u0000-\u001f]/.test(text));
+  assert.equal(auditText('x'.repeat(500), 100).length, 100);
+  assert.equal(auditText('x\ud83d\ude00', 2), 'x\ufffd');
+  assert.ok(!auditText('operator\u202eforged', 100).includes('\u202e'));
+  const context = auditContext({ action: 'settings.save', fields: ['reviewConfidenceThreshold', 'password', 'bad\nfield', 'password'] }, 'INFO');
+  assert.deepEqual(context.fields, ['password', 'reviewConfidenceThreshold']);
+  assert.equal(context.outcome, 'RECORDED');
+  const command = commandAudit('email.configure', 'main', { smtpPassword: 'do-not-log', fromEmail: 'private@example.com' });
+  assert.equal(command.category, 'EMAIL');
+  assert.equal(command.event, 'Email provider configuration updated');
+  assert.equal(command.context.outcome, 'SUCCESS');
+  assert.ok(!JSON.stringify(command).includes('do-not-log'));
+  assert.ok(!JSON.stringify(command).includes('private@example.com'));
+});
+test('audit context is tamper-evident without changing historical hashes', () => {
+  const legacy = chainAuditLogs([{
+    id: 'legacy', timestamp: '2026-11-04T00:00:00Z', category: 'SECURITY', level: 'INFO',
+    event: 'Settings updated', details: 'Workspace policy updated', actor: 'operator', ipAddress: '127.0.0.1',
+    hash: '', prevHash: '',
+  } satisfies AuditLog])[0];
+  assert.equal(legacy.hash, quickHash(stableJson([
+    legacy.prevHash, legacy.id, legacy.timestamp, legacy.category, legacy.level,
+    legacy.event, legacy.details, legacy.actor, legacy.ipAddress,
+  ])));
+  assert.equal(verifyAuditChain([legacy]), true);
+  const modern = chainAuditLogs([{ ...legacy, id: 'modern', context: {
+    action: 'settings.save', resourceType: 'settings', resourceId: 'main', outcome: 'SUCCESS',
+    fields: ['reviewConfidenceThreshold'],
+  } }], legacy.hash)[0];
+  assert.equal(verifyAuditChain([modern, legacy]), true);
+  assert.equal(verifyAuditChain([{ ...modern, context: { ...modern.context!, resourceId: 'other' } }, legacy]), false);
+  const { context: removed, ...withoutContext } = modern;
+  assert.equal(verifyAuditChain([withoutContext, legacy]), false);
+});
+test('incremental Merkle roots preserve the existing sorted odd-leaf convention', () => {
+  for (const size of [0, 1, 2, 3, 5, 6, 7, 8, 17, 255, 256, 257, 513]) {
+    const hashes = Array.from({ length: size }, (_, index) => quickHash(String(index % 113))).sort();
+    const accumulator = new SortedMerkleAccumulator();
+    for (const hash of hashes) accumulator.add(hash);
+    assert.equal(accumulator.root(), merkleRoot(hashes), `size ${size}`);
+    assert.equal(accumulator.root(), merkleRoot(hashes), 'root reads must not mutate the accumulator');
+  }
+});
 test('CPE rejects malformed names and substring component matches', () => {
   assert.equal(parseCPE23('cpe:2.3:a:vendor').isValid, false);
   assert.equal(matchCPE(cpe('1.2'), cpe('1.20')).matched, false);
@@ -71,7 +119,7 @@ test('one conflicting CPE does not suppress a compatible CPE of the same identit
     'd',
   );
   assert.equal(result.matched, true);
-  assert.equal(result.applicabilityRequiresReview, true);
+  assert.equal(result.applicabilityRequiresReview, false);
 });
 test('text fallback evaluates every known inventory version', () => {
   const pattern = (version: string, vendor = 'vendor', product = 'widget') =>
@@ -107,12 +155,11 @@ test('non-intersecting wildcard asset version does not match a concrete vuln ver
     matchesWatchlistItem([pattern('2.*')], 'vendor', 'widget', [pattern('1.5')], 't', 'd').matched,
     false,
   );
-  // A literal-wildcard version still reaches review, as the asset version is
-  // genuinely unasserted rather than a non-intersecting partial wildcard.
+  // An all-version registration intentionally covers concrete vulnerable releases.
   const wildcardStar = matchesWatchlistItem([cpe('*')], 'vendor', 'widget', [cpe('1.5')], 't', 'd');
   assert.equal(wildcardStar.matched, true);
-  assert.equal(wildcardStar.confidence, 70);
-  assert.equal(wildcardStar.applicabilityRequiresReview, true);
+  assert.equal(wildcardStar.confidence, 90);
+  assert.equal(wildcardStar.applicabilityRequiresReview, false);
 });
 test('non-intersecting wildcard assets do not produce duplicate CVE findings', () => {
   // Multiple assets whose wildcard CPE versions cannot overlap the vuln
@@ -133,7 +180,7 @@ test('pipeline correctly distinguishes non-intersecting, intersecting, and exact
   // Behavior matrix at the pipeline level:
   //   2.* vs 1.5  → no finding (non-intersecting wildcard)
   //   1.* vs 1.5  → REVIEW_REQUIRED (intersecting wildcard, version uncertain)
-  //   *   vs 1.5  → REVIEW_REQUIRED (literal star, version unasserted)
+  //   *   vs 1.5  → CONFIRMED (registered all-version product)
   //   1.5 vs 1.5  → CONFIRMED (exact token match, auto-dispatch eligible)
   const { cve, settings } = fixture();
   cve.cpeMatches = [cpe('1.5')];
@@ -149,7 +196,7 @@ test('pipeline correctly distinguishes non-intersecting, intersecting, and exact
   for (const { version, expected, expectedStatus } of [
     { version: '2.*', expected: 0, expectedStatus: undefined },
     { version: '1.*', expected: 1, expectedStatus: 'REVIEW_REQUIRED' },
-    { version: '*', expected: 1, expectedStatus: 'REVIEW_REQUIRED' },
+    { version: '*', expected: 1, expectedStatus: undefined },
     { version: '1.5', expected: 1, expectedStatus: undefined },
   ]) {
     const asset = makeAsset(version);
@@ -169,12 +216,26 @@ test('pipeline correctly distinguishes non-intersecting, intersecting, and exact
       );
   }
 });
+test('all-version product registration is dispatchable without the unverifiable override', () => {
+  const { cve, asset, settings } = fixture();
+  cve.cpeMatches = [cpe('1.5')];
+  cve.cpeMatchDetails = [];
+  cve.versionRange = { versionEndExcluding: '2.0' };
+  const product = { ...asset, cpes: [cpe('*')] };
+  const policy = { ...settings, autoDispatchConfidenceThreshold: 90, autoDispatchUnverifiableMatches: false };
+  const findings = runVulnerabilityPipeline([], [cve], [product], [], [], policy).newFindings;
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
+  const held = runVulnerabilityPipeline([], [{ ...cve, applicabilityPolicy: 'REVIEW_ONLY' }], [product], [], [], policy).newFindings;
+  assert.equal(held[0].notificationStatus, 'REVIEW_REQUIRED');
+});
+
 test('autoDispatchUnverifiableMatches releases the version-uncertain hold at threshold 0', () => {
   const { cve, asset, settings } = fixture();
   cve.cpeMatches = [cpe('1.5')];
   cve.cpeMatchDetails = [];
   cve.versionRange = undefined;
-  const wildcardAsset = { ...asset, id: 'asset-star', assetTag: 'asset-star', cpes: [cpe('*')] };
+  const wildcardAsset = { ...asset, id: 'asset-pattern', assetTag: 'asset-pattern', cpes: [cpe('1.*')] };
   const held = runVulnerabilityPipeline([], [cve], [wildcardAsset], [], [], settings);
   assert.equal(held.newFindings.length, 1);
   assert.equal(
@@ -193,23 +254,28 @@ test('autoDispatchUnverifiableMatches releases the version-uncertain hold at thr
     'opt-in flag releases the unverifiable hold at threshold 0',
   );
 });
-test('autoDispatchUnverifiableMatches cannot override a non-zero confidence threshold', () => {
+test('autoDispatchUnverifiableMatches still respects the configured confidence threshold', () => {
   const { cve, asset, settings } = fixture();
   cve.cpeMatches = [cpe('1.5')];
   cve.cpeMatchDetails = [];
   cve.versionRange = undefined;
-  const wildcardAsset = { ...asset, id: 'asset-star', assetTag: 'asset-star', cpes: [cpe('*')] };
+  const wildcardAsset = { ...asset, id: 'asset-pattern', assetTag: 'asset-pattern', cpes: [cpe('1.*')] };
   const held = runVulnerabilityPipeline([], [cve], [wildcardAsset], [], [], {
     ...settings,
-    autoDispatchConfidenceThreshold: 50,
+    autoDispatchConfidenceThreshold: 80,
     autoDispatchUnverifiableMatches: true,
   });
   assert.equal(held.newFindings.length, 1);
+  assert.equal(held.newFindings[0].confidence, 70);
   assert.equal(
     held.newFindings[0].notificationStatus,
     'REVIEW_REQUIRED',
-    'unverifiable match (confidence pinned to 0) stays held above threshold 0 even with the flag on',
+    'a version-uncertain match below the configured minimum stays held even with the flag on',
   );
+  const eligible = runVulnerabilityPipeline([], [cve], [wildcardAsset], [], [], {
+    ...settings, autoDispatchConfidenceThreshold: 70, autoDispatchUnverifiableMatches: true,
+  });
+  assert.equal(eligible.newFindings[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
 });
 test('fallback cannot override a known version exclusion', () => {
   assert.equal(
@@ -307,7 +373,6 @@ test('correlation canonicalizes output without fabricating delivery or mutating 
   assert.equal(result.newEmailLogs.length, 0);
 });
 
-import { chainAuditLogs, verifyAuditChain } from '../src/utils/cryptoChain';
 import { INITIAL_AUDIT_LOGS } from './fixtures/seedData';
 import { compileCustomizedTemplate, DEFAULT_TEMPLATE_CUSTOMIZATION } from '../src/utils/templateCompiler.ts';
 test('audit verification detects changed content and reordered records', () => {

@@ -13,9 +13,10 @@ import {
   type HeavyCollectionKind,
   COLLECTION_KINDS,
 } from '../shared/state.ts';
-import { chainAuditLogs } from '../src/utils/cryptoChain.ts';
+import { chainAuditLogs, hashAuditLog, SortedMerkleAccumulator } from '../src/utils/cryptoChain.ts';
 import type { AuditLog } from '../src/types/index.ts';
 import { orderWatchlist } from '../src/utils/watchlist.ts';
+import { auditContext, auditText } from './audit.ts';
 export type Db = pg.Pool | PoolClient;
 
 /**
@@ -120,7 +121,7 @@ export const schemaLockKey = 'hashtext(COALESCE(current_schema(), current_databa
  * it matches the highest `NNN_*.sql` file, so a forgotten bump fails the suite
  * rather than shipping a build that boots against an un-migrated database.
  */
-export const REQUIRED_SCHEMA_VERSION = 35;
+export const REQUIRED_SCHEMA_VERSION = 36;
 
 /**
  * Migration files sorted by numeric prefix. Only plain `NNN_name.sql` entries
@@ -685,11 +686,12 @@ export async function appendAudit(
   category: AuditLog['category'] = 'SECURITY',
   level: AuditLog['level'] = 'INFO',
   ipAddress: string = '',
+  context?: Partial<NonNullable<AuditLog['context']>>,
 ): Promise<void> {
   // Outside a transaction, wrap the read/insert pair so the audit lock is held
   // for the whole operation instead of being released after the lock statement.
   if (db instanceof pg.Pool)
-    return transaction(db, (tx) => appendAudit(tx, event, details, actor, category, level, ipAddress));
+    return transaction(db, (tx) => appendAudit(tx, event, details, actor, category, level, ipAddress, context));
   // The audit chain is a single linked list; a dedicated named lock serializes
   // only audit appends instead of every state mutation in the installation.
   await db.query(`SELECT pg_advisory_xact_lock(hashtext($1), ${schemaLockKey})`, ['audit-chain']);
@@ -705,10 +707,11 @@ export async function appendAudit(
         timestamp: new Date().toISOString(),
         category,
         level,
-        event,
-        details,
-        actor,
-        ipAddress,
+        event: auditText(event, 200),
+        details: auditText(details, 12000),
+        actor: auditText(actor, 160) || 'system',
+        ipAddress: auditText(ipAddress, 128),
+        context: auditContext(context, level),
         prevHash: '',
         hash: '',
       },
@@ -723,6 +726,40 @@ export interface StateOptions {
    * its rows (internal callers only). `/api/state` always supplies limits.
    */
   limits?: Partial<Record<HeavyCollectionKind, number>>;
+}
+
+export async function verifyStoredAudit(pool: pg.Pool, signal?: AbortSignal) {
+  return transaction(pool, async (db) => {
+    await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    await db.query('DECLARE audit_chain_cursor NO SCROLL CURSOR FOR SELECT data FROM audit ORDER BY seq ASC');
+    let previousHash: string | undefined;
+    let verified = true;
+    let logCount = 0;
+    while (true) {
+      signal?.throwIfAborted();
+      const batch = await db.query<{ data: AuditLog }>('FETCH FORWARD 256 FROM audit_chain_cursor');
+      if (!batch.rowCount) break;
+      for (const { data: log } of batch.rows) {
+        verified = /^[a-f0-9]{64}$/.test(log.hash) &&
+          log.hash === hashAuditLog(log) &&
+          (previousHash === undefined || log.prevHash === previousHash) && verified;
+        previousHash = log.hash;
+        logCount++;
+      }
+    }
+    await db.query('CLOSE audit_chain_cursor');
+    await db.query(`DECLARE audit_hash_cursor NO SCROLL CURSOR FOR
+      SELECT data->>'hash' AS hash FROM audit ORDER BY (data->>'hash') COLLATE "C",seq`);
+    const root = new SortedMerkleAccumulator();
+    while (true) {
+      signal?.throwIfAborted();
+      const batch = await db.query<{ hash: string }>('FETCH FORWARD 256 FROM audit_hash_cursor');
+      if (!batch.rowCount) break;
+      for (const row of batch.rows) root.add(String(row.hash ?? ''));
+    }
+    await db.query('CLOSE audit_hash_cursor');
+    return { verified, merkleRoot: root.root(), logCount };
+  }, undefined, { signal });
 }
 
 const recordOrder = "ORDER BY CASE WHEN kind='feeds' THEN created_at ELSE updated_at END DESC,id";
@@ -770,7 +807,7 @@ export async function state(db: Db, options: StateOptions = {}): Promise<AppStat
   }
   // Audit rows live in their own append-only table. Keep the historical 500-row
   // default for internal snapshots; the browser always supplies an explicit limit.
-  const auditLimit = boundedSet.has('auditLogs') ? Math.max(0, Math.floor(limits.auditLogs!)) : 500;
+  const auditLimit = limits.auditLogs === undefined ? 500 : Math.max(0, Math.floor(limits.auditLogs));
   if (auditLimit)
     rows.push(
       ...(await db.query('SELECT data FROM audit ORDER BY seq DESC LIMIT $1', [auditLimit])).rows.map(
@@ -809,41 +846,14 @@ export async function state(db: Db, options: StateOptions = {}): Promise<AppStat
  * the bounded arrays so a large installation still shows truthful totals.
  */
 async function attachCounts(db: Db, snapshot: AppState) {
-  const recordKinds = COLLECTION_KINDS.filter((kind) => kind !== 'auditLogs');
-  const counts = (
-    await db.query<{ kind: CollectionKind; count: number }>(
-      'SELECT kind, count(*)::int AS count FROM records WHERE kind=ANY($1::text[]) GROUP BY kind',
-      [recordKinds],
-    )
-  ).rows;
-  for (const row of counts) snapshot.counts[row.kind] = Number(row.count);
-  snapshot.counts.auditLogs = Number(
-    (await db.query('SELECT count(*)::int AS count FROM audit')).rows[0].count,
-  );
-  const summary = (
-    await db.query(
-      `SELECT
-        (SELECT count(*) FROM records WHERE kind='findings'
-          AND COALESCE(data->>'status','') NOT IN ('RESOLVED','FALSE_POSITIVE','PATCH_APPLIED')
-          AND COALESCE(data->>'notificationStatus','') <> 'NOT_APPLICABLE')::int AS "activeFindings",
-        (SELECT count(*) FROM records WHERE kind='findings'
-          AND COALESCE(data->>'status','') NOT IN ('RESOLVED','FALSE_POSITIVE','PATCH_APPLIED')
-          AND COALESCE(data->>'notificationStatus','') <> 'NOT_APPLICABLE'
-          AND data->'cve'->'cvss'->>'severity'='CRITICAL')::int AS "criticalFindings",
-        (SELECT count(*) FROM records WHERE kind='findings'
-          AND COALESCE(data->>'status','') NOT IN ('RESOLVED','FALSE_POSITIVE','PATCH_APPLIED')
-          AND COALESCE(data->>'notificationStatus','') <> 'NOT_APPLICABLE'
-          AND COALESCE(data->'cve'->'cisaKev'->>'isKev', 'false') = 'true')::int AS "kevFindings",
-        (SELECT count(*) FROM records WHERE kind='emailLogs'
-          AND data->>'status' = ANY($1::text[]))::int AS "deliveredEmails"`,
-      [['ACCEPTED', 'DELIVERED']],
-    )
-  ).rows[0];
+  const rows = await db.query<{ name: string; value: string }>('SELECT name,value FROM state_metrics');
+  const metrics = new Map(rows.rows.map((row) => [row.name, Number(row.value)]));
+  for (const kind of COLLECTION_KINDS) snapshot.counts[kind] = metrics.get(`collection:${kind}`) ?? 0;
   snapshot.summary = {
-    activeFindings: Number(summary.activeFindings),
-    criticalFindings: Number(summary.criticalFindings),
-    kevFindings: Number(summary.kevFindings),
-    deliveredEmails: Number(summary.deliveredEmails),
+    activeFindings: metrics.get('summary:activeFindings') ?? 0,
+    criticalFindings: metrics.get('summary:criticalFindings') ?? 0,
+    kevFindings: metrics.get('summary:kevFindings') ?? 0,
+    deliveredEmails: metrics.get('summary:deliveredEmails') ?? 0,
   };
 }
 

@@ -39,7 +39,7 @@ import { runSelfHealCheck } from './selfHealing';
 import { runRetention } from './retention';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
 import type { AppSettings } from '../src/types/index.ts';
-import { RECOMMENDED_FEEDS, RECOMMENDED_FEED_URLS } from './recommendedFeeds.js';
+import { reconcileRecommendedFeeds } from './feedBootstrap.ts';
 
 const config = loadConfig(),
   pool = createPool(config.DATABASE_URL);
@@ -74,29 +74,7 @@ await transaction(
 await transaction(
   pool,
   async (db) => {
-    const existing = await list<any>(db, 'feeds');
-    const existingIds = new Set(existing.map((f: any) => f.id));
-    for (const feed of RECOMMENDED_FEEDS) {
-      if (existingIds.has(feed.id)) continue;
-      await put(db, 'feeds', feed.id, {
-        ...feed,
-        healthStatus: 'UNTESTED',
-        lastSync: null,
-        latencyMs: 0,
-        itemCountLastRun: 0,
-        ssrfValidated: false,
-      });
-    }
-    // A seeded feed whose source URL has been corrected since it was first
-    // created keeps failing with its old address: the skip above only ever
-    // adds new ids. Repair the URL of known feeds, leaving everything else
-    // (credentials, health history, operator state) untouched.
-    for (const stored of existing) {
-      const current = RECOMMENDED_FEED_URLS.get(stored.id);
-      if (current && stored.url && stored.url !== current) {
-        await put(db, 'feeds', stored.id, { ...stored, url: current, ssrfValidated: false });
-      }
-    }
+    await reconcileRecommendedFeeds(db, config.BOOTSTRAP_RECOMMENDED_FEEDS === 'true');
   },
   undefined,
   { locks: ['native-inventory-bootstrap'] },
@@ -116,7 +94,7 @@ const request = createRequester(config),
   // to keep the 60-minute scheduler aligned with the pipeline's interval.
   const correlation = new CorrelationRuntime(
     pool,
-    [config.ENCRYPTION_KEY],
+    encryptionKeys(config),
     config.CORRELATION_DLQ_DIRECTORY,
     {
       url: config.HEARTBEAT_URL,
@@ -249,29 +227,35 @@ let digestStartedAt = 0;
 let pipelineStartedAt = 0;
 let outboxStartedAt = 0;
 let digestGeneration = 0;
-let pipelineGeneration = 0;
+let pipelineController: AbortController | undefined;
 let outboxGeneration = 0;
 /** In-flight self-healing check; prevents overlapping watchdog runs per tick. */
 let selfHealRunning: Promise<void> | null = null;
 const tick = () => {
   if (stopping || config.WORKER_ENABLED !== 'true') return;
   verboseLog('worker.tick');
-  if (pipeline && Date.now() - pipelineStartedAt > STUCK_PROMISE_MS) {
-    void report('pipeline')(new Error('Previous pipeline promise is still running; starting a fresh attempt'));
-    pipelineGeneration++;
-    pipeline = null;
+  if (pipeline && !pipelineController?.signal.aborted && Date.now() - pipelineStartedAt > STUCK_PROMISE_MS) {
+    const reason = new Error('Pipeline stopped making progress; cancelling the current attempt');
+    void report('pipeline')(reason);
+    pipelineController?.abort(reason);
   }
   if (!pipeline) {
     pipelineStartedAt = Date.now();
-    const generation = ++pipelineGeneration;
-    pipeline = processPipeline(pool, config, request)
+    const controller = new AbortController();
+    pipelineController = controller;
+    pipeline = processPipeline(pool, config, request, controller.signal, () => {
+      if (pipelineController === controller) pipelineStartedAt = Date.now();
+    })
       .then((result) => {
         verboseLog('pipeline.completed', { processed: result });
         return result;
       })
       .catch(report('pipeline'))
       .finally(() => {
-        if (pipelineGeneration === generation) pipeline = null;
+        if (pipelineController === controller) {
+          pipeline = null;
+          pipelineController = undefined;
+        }
       });
   }
   if (outbox && Date.now() - outboxStartedAt > STUCK_PROMISE_MS) {
@@ -569,6 +553,7 @@ const cleanup = setInterval(() => {
 async function shutdown() {
   if (stopping) return;
   stopping = true;
+  pipelineController?.abort(new Error('Pipeline cancelled during shutdown'));
   clearInterval(timer);
   clearInterval(retentionTimer);
   clearInterval(dailyDigestTimer);

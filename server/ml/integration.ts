@@ -131,26 +131,19 @@ export function calibrateCredibilityScore(rawScore: number): {
 /**
  * 3. Auto-Dispatch Threshold — replaces the hardcoded 90% gate.
  *
- * Uses the learned threshold when trained, falls back to the configured
- * settings.autoDispatchConfidenceThreshold (default 90) when untrained.
+ * The configured threshold is authoritative; trained models only recommend.
  */
 export function shouldAutoDispatch(confidence: number, settings: Pick<AppSettings, 'autoDispatchConfidenceThreshold'>): boolean {
   const model = ctx.runtime?.autoDispatchThreshold;
-  if (!model?.isTrained()) {
-    const threshold = settings.autoDispatchConfidenceThreshold ?? DEFAULT_AUTO_DISPATCH_THRESHOLD;
-    const result = confidence >= threshold;
-    void logMlEvent('ml.auto_dispatch.fallback', result ? 'Auto-dispatched (fallback)' : 'Held for review (fallback)', {
-      confidence,
-      threshold,
-      modelTrained: false,
-    });
-    return result;
-  }
-  const result = model.shouldDispatch(confidence);
-  void logMlEvent('ml.auto_dispatch', result ? 'Auto-dispatched (ML)' : 'Held for review (ML)', {
+  const threshold = settings.autoDispatchConfidenceThreshold ?? DEFAULT_AUTO_DISPATCH_THRESHOLD;
+  const result = Number.isFinite(confidence) && confidence >= 0 && confidence <= 100 &&
+    Number.isFinite(threshold) && threshold >= 0 && threshold <= 100 && confidence >= threshold;
+  const trained = model?.isTrained() === true;
+  void logMlEvent('ml.auto_dispatch', result ? 'Eligible under configured policy' : 'Held under configured policy', {
     confidence,
-    threshold: model.getThreshold(),
-    modelVersion: model.getMetadata().version,
+    threshold,
+    modelTrained: trained,
+    recommendedThreshold: trained ? model?.getThreshold() : undefined,
   });
   return result;
 }

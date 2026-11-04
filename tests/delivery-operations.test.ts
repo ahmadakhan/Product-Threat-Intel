@@ -122,6 +122,9 @@ test(
         });
       assert.equal(created.status, 201);
       const viewer = (await pool.query("SELECT id FROM users WHERE username='viewer-one'")).rows[0];
+      const creation = (await pool.query("SELECT data FROM audit WHERE data->'context'->>'action'='operator.create' AND data->'context'->>'resourceId'=$1", [viewer.id])).rows[0].data;
+      assert.equal(creation.actor, 'delivery-admin');
+      assert.equal(creation.context.outcome, 'SUCCESS');
       const updated = await agent
         .patch(`/api/users/${viewer.id}`)
         .set('Origin', origin)

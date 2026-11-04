@@ -106,6 +106,97 @@ test(
     };
     try {
       await migrate(pool);
+      await t.test('legacy settings without emailEnabled still enqueue and deliver email', async () => {
+        await reset();
+        const { emailEnabled: legacyFlag, ...legacySettings } = settings;
+        await put(pool, 'settings', 'main', legacySettings);
+        const id = await enqueue(pool, 'email', 'test', 'TEST', {
+          subject: 'Legacy settings', text: 'Test', cveIds: [],
+        }, 'legacy-email-enabled');
+        assert.ok(id);
+        let sent = 0;
+        assert.equal(await deliverNext(pool, config, noNetwork, async () => {
+          sent++;
+          return 'legacy-receipt';
+        }), true);
+        assert.equal(sent, 1);
+        assert.equal((await pool.query('SELECT status FROM outbox WHERE id=$1', [id])).rows[0].status, 'ACCEPTED');
+      });
+      await t.test('disabled email remains unclaimed and resumes when enabled', async () => {
+        await reset();
+        const id = await enqueue(pool, 'email', 'test', 'TEST', {
+          subject: 'Paused email', text: 'Test', cveIds: [],
+        }, 'paused-email');
+        await put(pool, 'settings', 'main', { ...settings, emailEnabled: false });
+        const sender = async () => 'resumed-receipt';
+        assert.equal(await deliverNext(pool, config, noNetwork, sender), false);
+        const paused = (await pool.query('SELECT status,attempts,locked_at FROM outbox WHERE id=$1', [id])).rows[0];
+        assert.equal(paused.status, 'QUEUED');
+        assert.equal(paused.attempts, 0);
+        assert.equal(paused.locked_at, null);
+        assert.equal(await enqueue(pool, 'email', 'test', 'TEST', {
+          subject: 'Disabled email', text: 'Test', cveIds: [],
+        }, 'disabled-email'), null);
+        await put(pool, 'settings', 'main', { ...settings, emailEnabled: true });
+        assert.equal(await deliverNext(pool, config, noNetwork, sender), true);
+        assert.equal((await pool.query('SELECT status FROM outbox WHERE id=$1', [id])).rows[0].status, 'ACCEPTED');
+      });
+      await t.test('an SMTP retry remains recoverable after switching to HTTPS', async () => {
+        await reset();
+        const id = await enqueue(pool, 'email', 'test', 'TEST', {
+          subject: 'Transport recovery', text: 'Test', cveIds: [],
+        }, 'smtp-to-https');
+        await deliverNext(pool, config, noNetwork, async () => {
+          throw Object.assign(new Error('read ECONNRESET'), { code: 'ESOCKET', command: 'CONN' });
+        });
+        const log = await get(pool, 'emailLogs', id!);
+        await put(pool, 'emailLogs', id!, { ...log!, provider: 'SMTP_Relay' });
+        await put(pool, 'emailConfig', 'main', { provider: 'SENDGRID' });
+        await pool.query('UPDATE outbox SET next_attempt=now() WHERE id=$1', [id]);
+        let sent = 0;
+        await deliverNext(pool, config, noNetwork, async () => {
+          sent++;
+          return { id: 'https-receipt', provider: 'SendGrid' };
+        });
+        assert.equal(sent, 1);
+        assert.equal((await pool.query('SELECT status FROM outbox WHERE id=$1', [id])).rows[0].status, 'ACCEPTED');
+      });
+      await t.test('an ambiguous SMTP DATA outcome is never blindly resent', async () => {
+        await reset();
+        const id = await enqueue(pool, 'email', 'test', 'TEST', {
+          subject: 'Unknown SMTP result', text: 'Test', cveIds: [],
+        }, 'smtp-data-ambiguous');
+        await deliverNext(pool, config, noNetwork, async () => {
+          throw Object.assign(new Error('read ECONNRESET'), { code: 'ESOCKET', command: 'DATA' });
+        });
+        const previous = await get<{ transportRejected?: boolean }>(pool, 'emailLogs', id!);
+        assert.equal(previous?.transportRejected, false);
+        await pool.query('UPDATE outbox SET next_attempt=now() WHERE id=$1', [id]);
+        let sent = 0;
+        await deliverNext(pool, config, noNetwork, async () => { sent++; return 'duplicate'; });
+        assert.equal(sent, 0);
+        assert.equal((await pool.query('SELECT status FROM outbox WHERE id=$1', [id])).rows[0].status, 'QUEUED');
+      });
+      await t.test('switching to SMTP cannot bypass confirmation of an ambiguous HTTP attempt', async () => {
+        await reset();
+        const id = await enqueue(pool, 'email', 'test', 'TEST', {
+          subject: 'Unknown HTTP result', text: 'Test', cveIds: [],
+        }, 'https-to-smtp');
+        await deliverNext(pool, config, noNetwork, async () => {
+          throw new Error('read ECONNRESET');
+        });
+        const log = await get(pool, 'emailLogs', id!);
+        await put(pool, 'emailLogs', id!, { ...log!, provider: 'SendGrid' });
+        await put(pool, 'emailConfig', 'main', { provider: 'SMTP_CUSTOM' });
+        await pool.query('UPDATE outbox SET next_attempt=now() WHERE id=$1', [id]);
+        let sent = 0;
+        await deliverNext(pool, config, noNetwork, async () => {
+          sent++;
+          return 'must-not-send';
+        });
+        assert.equal(sent, 0);
+        assert.match((await get<{ errorMessage: string }>(pool, 'emailLogs', id!))!.errorMessage, /could not be confirmed/);
+      });
       await t.test('daily digests render and deliver only the findings each subscriber permits', async () => {
         await reset();
         const high = makeCve('CVE-2026-98101'),

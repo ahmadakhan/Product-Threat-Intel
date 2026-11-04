@@ -16,7 +16,6 @@ import { describeAdvisoryError } from './correlation/validation.ts';
 import { Readable } from 'node:stream';
 import { randomInt } from 'node:crypto';
 import express from 'express';
-import nodemailer from 'nodemailer';
 import { WorkCapacityError } from './workLimiter.ts';
 import compression from 'compression';
 import helmet from 'helmet';
@@ -37,10 +36,9 @@ import {
   sessionCookieOptions,
   updateUser,
 } from './auth';
-import { transaction, state, get, getForUpdate, getMany, put, appendAudit, list } from './db';
+import { transaction, state, get, getForUpdate, getMany, put, appendAudit, list, verifyStoredAudit } from './db';
 import { queryCollection } from './collections';
 import { runRetention, previewRetention } from './retention';
-import { merkleRoot, verifyAuditChain } from '../src/utils/cryptoChain.ts';
 import { buildAliasMap } from '../src/utils/cpeMatcher.ts';
 import { runCpeSimulation } from '../src/utils/cpeSimulation.ts';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine.ts';
@@ -59,6 +57,7 @@ import {
   queueAdvisory,
   queueBulkNotificationAdvisory,
   recipientAllows,
+  createMailSender,
 } from './delivery';
 import { createHash } from 'node:crypto';
 import { stableJson } from '../src/utils/deduplicator.ts';
@@ -556,7 +555,10 @@ export function createApp(
         .parse(req.body);
       // Only automated tests may inspect a reset code without mailbox access.
       // Check deployment readiness before lookup so this error cannot reveal users.
-      if (config.NODE_ENV !== 'test' && (!config.SMTP_HOST || !config.SMTP_FROM))
+      const email = (await get<EmailConfiguration>(pool, 'emailConfig', 'main')) || DEFAULT_EMAIL_CONFIG;
+      const policy = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
+      const configured = emailIsConfigured(email, config) && policy.emailEnabled !== false;
+      if (config.NODE_ENV !== 'test' && !configured)
         throw new HttpError(503, 'Password reset email is not configured for this deployment');
       const user = (
         await pool.query('SELECT id,email FROM users WHERE username=$1 AND disabled=false', [username])
@@ -585,25 +587,16 @@ export function createApp(
           expiresAt,
         ]);
       });
-      if (config.SMTP_HOST && config.SMTP_FROM) {
-        const transporter = nodemailer.createTransport({
-          host: config.SMTP_HOST,
-          port: config.SMTP_PORT,
-          secure: config.SMTP_PORT === 465,
-          requireTLS: true,
-          auth: config.SMTP_USER ? { user: config.SMTP_USER, pass: config.SMTP_PASSWORD } : undefined,
-          // These limits are the nodemailer defaults but stated explicitly so a
-          // misconfigured transport cannot hang the request indefinitely.
-          connectionTimeout: 10000,
-          greetingTimeout: 10000,
-          socketTimeout: 20000,
-        });
-        await transporter.sendMail({
-          from: config.SMTP_FROM,
-          to: user.email,
-          subject: 'Your password reset code',
-          text: `Your password reset code is: ${code}\n\nThis code expires in 10 minutes.\nIf you did not request this reset, you can safely ignore this email.`,
-          html: `<p>Your password reset code is: <strong>${code}</strong></p><p>This code expires in 10 minutes. If you did not request this reset, you can safely ignore this email.</p>`,
+      if (configured && config.NODE_ENV !== 'test') {
+        await createMailSender({ ...config, ATTACH_ADVISORY_PDF: 'false' }, pool, request)({
+          id: randomUUID(), dedupe_key: `password-reset:${username}`, channel: 'email',
+          target_id: 'password-reset', advisory_id: 'TEST', attempts: 1, lock_token: randomUUID(),
+          review_approved: false, priority: 0,
+          payload: {
+            recipientEmail: user.email, cveIds: [], subject: 'Your password reset code',
+            text: `Your password reset code is: ${code}\n\nThis code expires in 10 minutes.\nIf you did not request this reset, you can safely ignore this email.`,
+            html: `<p>Your password reset code is: <strong>${code}</strong></p><p>This code expires in 10 minutes. If you did not request this reset, you can safely ignore this email.</p>`,
+          },
         });
       }
       const response: { success: true; code?: string } = { success: true };
@@ -1327,7 +1320,7 @@ export function createApp(
           email: accountEmail,
         })
         .parse(req.body);
-      await createUser(pool, data.username, data.password, data.role, req.ip || '', data.email);
+      await createUser(pool, data.username, data.password, data.role, req.ip || '', data.email, req.operator!.username);
       res.status(201).json({ success: true });
     }),
   );
@@ -1492,16 +1485,21 @@ export function createApp(
     '/api/audit/verify',
     requireRole('ADMIN', 'OPERATOR', 'VIEWER'),
     asyncRoute(async (req, res) => {
-      const rows = await pool.query('SELECT data FROM audit ORDER BY seq ASC');
-      const logs = rows.rows.map((row) => row.data);
-      const verified = verifyAuditChain(logs.reverse());
-      const root = merkleRoot(logs.map((log: any) => log.hash));
+      const controller = new AbortController();
+      const onClose = () => controller.abort();
+      res.once('close', onClose);
+      let result: Awaited<ReturnType<typeof verifyStoredAudit>>;
+      try {
+        result = await verifyStoredAudit(pool, AbortSignal.any([
+          controller.signal, AbortSignal.timeout(60000),
+        ]));
+      } finally {
+        res.removeListener('close', onClose);
+      }
       const externalRoot = typeof req.query.externalRoot === 'string' ? req.query.externalRoot : undefined;
-      const externalMatch = externalRoot ? externalRoot === root : undefined;
+      const externalMatch = externalRoot ? externalRoot === result.merkleRoot : undefined;
       res.json({
-        verified,
-        merkleRoot: root,
-        logCount: logs.length,
+        ...result,
         externalRoot: externalRoot || null,
         externalMatch,
       });

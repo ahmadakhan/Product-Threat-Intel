@@ -897,6 +897,14 @@ export interface AuditLog {
   details: string;
   actor: string;
   ipAddress: string;
+  context?: {
+    action?: string;
+    resourceType?: string;
+    resourceId?: string;
+    requestId?: string;
+    outcome: 'SUCCESS' | 'FAILURE' | 'DENIED' | 'RECORDED';
+    fields?: string[];
+  };
   prevHash: string;
   hash: string;
 }
@@ -1035,6 +1043,7 @@ export interface AppSettings {
    * The default (90) matches the previous hardcoded threshold.
    */
   autoDispatchConfidenceThreshold: number;
+  reviewConfidenceThreshold?: number;
   /**
    * When true, unverifiable matches (whose version range cannot be confirmed)
    * participate in the confidence threshold instead of being held for review

@@ -46,9 +46,18 @@ const withEmailRetryDefaults = (value: AppSettings): AppSettings => ({
 const findingDispatchSettings = (value: AppSettings) => ({
   autoDispatchEnabled: value.autoDispatchEnabled,
   autoDispatchConfidenceThreshold: value.autoDispatchConfidenceThreshold ?? 90,
+  reviewConfidenceThreshold: value.reviewConfidenceThreshold ?? 0,
   autoDispatchUnverifiableMatches: value.autoDispatchUnverifiableMatches ?? false,
   reviewUnverifiableMatches: value.reviewUnverifiableMatches ?? false,
 });
+
+const confidenceInputError = (value: string): string => {
+  if (!value.trim()) return 'Enter a whole number from 0 to 100.';
+  const confidence = Number(value);
+  return Number.isInteger(confidence) && confidence >= 0 && confidence <= 100
+    ? ''
+    : 'Enter a whole number from 0 to 100.';
+};
 
 export const TIMEZONES: string[] = [...new Set([
   ...(DEFAULT_TIMEZONE === 'UTC' ? [] : [DEFAULT_TIMEZONE]),
@@ -196,12 +205,14 @@ function ProcessingField({
   id,
   label,
   hint,
+  error,
   unit,
   children,
 }: {
   id: string;
   label: string;
   hint: string;
+  error?: string;
   unit?: string;
   children: React.ReactNode;
 }) {
@@ -217,6 +228,7 @@ function ProcessingField({
         )}
       </div>
       <p id={`${id}-hint`}>{hint}</p>
+      {error && <p id={`${id}-error`} role="alert" className="processing-save-error">{error}</p>}
     </div>
   );
 }
@@ -240,6 +252,10 @@ export function SettingsView() {
   const [processingSaveError, setProcessingSaveError] = useState(false);
   const [securityMessage, setSecurityMessage] = useState('');
   const [findingForm, setFindingForm] = useState(() => findingDispatchSettings(settings));
+  const [confidenceDrafts, setConfidenceDrafts] = useState(() => ({
+    queued: String(settings.autoDispatchConfidenceThreshold ?? 90),
+    review: String(settings.reviewConfidenceThreshold ?? 0),
+  }));
   const [findingMessage, setFindingMessage] = useState('');
   const [findingSaveError, setFindingSaveError] = useState(false);
   const [selfHealingForm, setSelfHealingForm] = useState<AppSettings['selfHealing']>(settings.selfHealing ?? {
@@ -288,7 +304,12 @@ export function SettingsView() {
     (form.dailyDigest?.time ?? '09:00') !== (settings.dailyDigest?.time ?? '09:00') ||
     (form.dailyDigest?.includeHealthReport ?? true) !== (settings.dailyDigest?.includeHealthReport ?? true) ||
     selfHealingForm.emailNotifications !== (settings.selfHealing?.emailNotifications ?? true);
-  const findingDirty = JSON.stringify(findingForm) !== JSON.stringify(findingDispatchSettings(settings));
+  const queuedConfidenceError = confidenceInputError(confidenceDrafts.queued);
+  const reviewConfidenceError = confidenceInputError(confidenceDrafts.review);
+  const findingInvalid = Boolean(queuedConfidenceError || reviewConfidenceError);
+  const findingDirty = JSON.stringify(findingForm) !== JSON.stringify(findingDispatchSettings(settings)) ||
+    confidenceDrafts.queued !== String(settings.autoDispatchConfidenceThreshold ?? 90) ||
+    confidenceDrafts.review !== String(settings.reviewConfidenceThreshold ?? 0);
   const securityDirty =
     securityForm.sessionTimeoutMins !== settings.securityPolicy.sessionTimeoutMins ||
     securityForm.minPasswordLen !== settings.securityPolicy.minPasswordLen ||
@@ -408,7 +429,7 @@ export function SettingsView() {
                         ? 'finding-dispatch-form'
                         : 'security-policy-form'
                   }
-                  disabled={pending > 0}
+                  disabled={pending > 0 || (activeSection === 'finding-dispatch' && findingInvalid)}
                   className="ui-primary"
                 >
                   <Save size={14} aria-hidden="true" />
@@ -1014,10 +1035,22 @@ export function SettingsView() {
                 onChangeCapture={() => setFindingMessage('')}
                 onSubmit={async (event) => {
                   event.preventDefault();
-                  if (pending > 0 || !findingDirty) return;
+                  if (pending > 0 || !findingDirty || findingInvalid) return;
                   setFindingMessage('');
                   setFindingSaveError(false);
-                  const saved = await updateSettings(findingForm);
+                  const nextFindingForm = {
+                    ...findingForm,
+                    autoDispatchConfidenceThreshold: Number(confidenceDrafts.queued),
+                    reviewConfidenceThreshold: Number(confidenceDrafts.review),
+                  };
+                  const saved = await updateSettings(nextFindingForm);
+                  if (saved) {
+                    setFindingForm(nextFindingForm);
+                    setConfidenceDrafts({
+                      queued: String(nextFindingForm.autoDispatchConfidenceThreshold),
+                      review: String(nextFindingForm.reviewConfidenceThreshold),
+                    });
+                  }
                   setFindingSaveError(!saved);
                   setFindingMessage(
                     saved
@@ -1043,43 +1076,73 @@ export function SettingsView() {
                     <ProcessingToggle
                       id="processing-auto-dispatch"
                       title="Send confirmed findings automatically"
-                      description="Queue eligible findings for Security-team recipients according to the configured confidence minimum."
+                      description="Send queued findings automatically to eligible Security-team recipients. When off, eligible findings stay queued."
                       checked={findingForm.autoDispatchEnabled}
                       onChange={(checked) => setFindingForm({ ...findingForm, autoDispatchEnabled: checked })}
                     />
                     <div className="processing-field-grid">
                       <ProcessingField
                         id="processing-confidence"
-                        label="Minimum match confidence"
+                        label="Queued email minimum confidence"
                         unit="/ 100"
-                        hint="Findings below this confidence require review. Set to 0 to remove the confidence minimum."
+                        hint="Eligible matches at or above this minimum receive QUEUED_FOR_DISPATCH. The saved minimum applies even with trained ML."
+                        error={queuedConfidenceError}
                       >
                         <input
                           id="processing-confidence"
                           type="number"
                           min={0}
                           max={100}
-                          disabled={!findingForm.autoDispatchEnabled}
-                          aria-describedby="processing-confidence-hint"
+                          step={1}
+                          required
+                          aria-invalid={Boolean(queuedConfidenceError)}
+                          aria-describedby={`processing-confidence-hint${queuedConfidenceError ? ' processing-confidence-error' : ''}`}
                           className={field}
-                          value={findingForm.autoDispatchConfidenceThreshold ?? 90}
+                          value={confidenceDrafts.queued}
                           onChange={(event) =>
-                            setFindingForm({
-                              ...findingForm,
-                              autoDispatchConfidenceThreshold: parseInt(event.target.value) || 0,
+                            setConfidenceDrafts({
+                              ...confidenceDrafts,
+                              queued: event.target.value,
                             })
                           }
                         />
                       </ProcessingField>
-                      <div className="processing-context">
-                        <ShieldCheck size={17} aria-hidden="true" />
-                        <div>
-                          <strong>Recipient policies apply</strong>
-                          <p>
-                            Subscription tiers and approval requirements determine who receives each
-                            notification.
-                          </p>
-                        </div>
+                      <ProcessingField
+                        id="processing-review-confidence"
+                        label="Review email minimum confidence"
+                        unit="/ 100"
+                        hint={`Findings held for review at or above this minimum can generate notices when review notifications are enabled. Lower-confidence findings remain visible without automatic review email.${!findingForm.reviewUnverifiableMatches ? " Turn on 'Notify the Security team for review' to edit." : ''}`}
+                        error={reviewConfidenceError}
+                      >
+                        <input
+                          id="processing-review-confidence"
+                          type="number"
+                          min={0}
+                          max={100}
+                          step={1}
+                          required
+                          disabled={!findingForm.reviewUnverifiableMatches}
+                          aria-invalid={Boolean(reviewConfidenceError)}
+                          aria-describedby={`processing-review-confidence-hint${reviewConfidenceError ? ' processing-review-confidence-error' : ''}`}
+                          className={field}
+                          value={confidenceDrafts.review}
+                          onChange={(event) =>
+                            setConfidenceDrafts({
+                              ...confidenceDrafts,
+                              review: event.target.value,
+                            })
+                          }
+                        />
+                      </ProcessingField>
+                    </div>
+                    <div className="processing-context">
+                      <ShieldCheck size={17} aria-hidden="true" />
+                      <div>
+                        <strong>Recipient policies apply</strong>
+                        <p>
+                          Subscription tiers and approval requirements determine who receives each
+                          notification.
+                        </p>
                       </div>
                     </div>
                     <div className="processing-policy-group">
@@ -1094,7 +1157,7 @@ export function SettingsView() {
                         <ProcessingToggle
                           id="processing-unverifiable"
                           title="Notify the Security team for review"
-                          description="Send a review notice when a product match has an unverified affected-version range."
+                          description="Send notices for findings held for review that meet the review email minimum confidence."
                           checked={findingForm.reviewUnverifiableMatches ?? false}
                           onChange={(checked) =>
                             setFindingForm({ ...findingForm, reviewUnverifiableMatches: checked })
@@ -1103,7 +1166,7 @@ export function SettingsView() {
                         <ProcessingToggle
                           id="processing-auto-unverifiable"
                           title="Allow version-uncertain findings to dispatch"
-                          description="Permit these findings to pass the review gate when the confidence minimum is 0. Automatic dispatch must also be enabled to send them."
+                          description="Compare measured confidence with the queue minimum for version-uncertain matches. Automatic sending still requires automatic dispatch to be enabled."
                           checked={findingForm.autoDispatchUnverifiableMatches ?? false}
                           onChange={(checked) =>
                             setFindingForm({ ...findingForm, autoDispatchUnverifiableMatches: checked })
@@ -1113,13 +1176,9 @@ export function SettingsView() {
                       <p className="processing-policy-note">
                         <AlertCircle size={14} aria-hidden="true" />
                         <span>
-                          {findingForm.autoDispatchUnverifiableMatches
-                            ? (findingForm.autoDispatchConfidenceThreshold ?? 90) > 0
-                              ? 'Unverifiable auto-dispatch is enabled, but these findings remain in review while the confidence minimum is above 0.'
-                              : findingForm.autoDispatchEnabled
-                                ? 'Version-uncertain findings can be dispatched automatically. Security review notifications apply to findings that remain in review.'
-                                : 'Automatic dispatch is off. Eligible findings stay queued until dispatch is enabled.'
-                            : 'Version-uncertain findings remain in review. Enable Security-team notifications to send a separate review notice.'}
+                          Hard source, complex applicability, and contradicting identifier holds cannot be
+                          bypassed by confidence thresholds or the version-uncertain dispatch toggle.
+                          No findings are deleted by these thresholds.
                         </span>
                       </p>
                     </div>
@@ -1152,6 +1211,10 @@ export function SettingsView() {
                         disabled={pending > 0}
                         onClick={() => {
                           setFindingForm(findingDispatchSettings(settings));
+                          setConfidenceDrafts({
+                            queued: String(settings.autoDispatchConfidenceThreshold ?? 90),
+                            review: String(settings.reviewConfidenceThreshold ?? 0),
+                          });
                           setFindingMessage('');
                           setFindingSaveError(false);
                         }}
@@ -1160,7 +1223,7 @@ export function SettingsView() {
                         Reset changes
                       </button>
                     )}
-                    <button type="submit" disabled={pending > 0 || !findingDirty} className="ui-primary">
+                    <button type="submit" disabled={pending > 0 || !findingDirty || findingInvalid} className="ui-primary">
                       {pending > 0 ? (
                         <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
                       ) : (

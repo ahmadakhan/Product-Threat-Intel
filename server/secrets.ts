@@ -11,15 +11,18 @@ import { WorkLimiter } from './workLimiter.ts';
 // concurrency can exceed the entire application container's memory allowance.
 const passwordWork = new WorkLimiter(1, 8, 5000);
 const scrypt = (password: string, salt: string, length: number) =>
-  passwordWork.run(() => new Promise<Buffer>((resolve, reject) =>
-    scryptCallback(
-      password,
-      salt,
-      length,
-      { N: 131072, r: 8, p: 1, maxmem: 256 * 1024 * 1024 },
-      (error, result) => (error ? reject(error) : resolve(result)),
-    ),
-  ));
+  passwordWork.run(
+    () =>
+      new Promise<Buffer>((resolve, reject) =>
+        scryptCallback(
+          password,
+          salt,
+          length,
+          { N: 131072, r: 8, p: 1, maxmem: 256 * 1024 * 1024 },
+          (error, result) => (error ? reject(error) : resolve(result)),
+        ),
+      ),
+  );
 export const tokenHash = (value: string) => createHash('sha256').update(value).digest('hex');
 export const randomToken = () => randomBytes(32).toString('base64url');
 export async function passwordHash(password: string) {
@@ -29,7 +32,12 @@ export async function passwordHash(password: string) {
 }
 export async function checkPassword(password: string, stored: string) {
   const [algorithm, salt, expected] = stored.split('$');
-  if (algorithm !== 'scrypt131072' || !/^[0-9a-f]{32}$/.test(salt || '') || !/^[0-9a-f]{128}$/.test(expected || '')) return false;
+  if (
+    algorithm !== 'scrypt131072' ||
+    !/^[0-9a-f]{32}$/.test(salt || '') ||
+    !/^[0-9a-f]{128}$/.test(expected || '')
+  )
+    return false;
   const result = (await scrypt(password, salt, 64)) as Buffer;
   return timingSafeEqual(result, Buffer.from(expected, 'hex'));
 }
@@ -49,7 +57,11 @@ export function encryptionKeys(config: { ENCRYPTION_KEY?: string; ENCRYPTION_KEY
       if (key && !keys.includes(key)) keys.push(key);
     }
   }
-  if (config.ENCRYPTION_KEY && !keys.includes(config.ENCRYPTION_KEY)) keys.unshift(config.ENCRYPTION_KEY);
+  if (config.ENCRYPTION_KEY) {
+    const current = keys.indexOf(config.ENCRYPTION_KEY);
+    if (current >= 0) keys.splice(current, 1);
+    keys.unshift(config.ENCRYPTION_KEY);
+  }
   if (!keys.length) throw new Error('No encryption keys configured');
   return keys;
 }
@@ -72,6 +84,7 @@ export function encrypt(value: string, keys: string[], context: string): string 
 export function decrypt(value: string, keys: string[], context: string): string {
   if (!value) return '';
   const parts = value.split('.');
+  if (parts.length !== 4 && parts.length !== 5) throw new Error('Invalid encrypted secret encoding');
   // Legacy envelope (pre key-rotation): `v1.<iv>.<tag>.<body>` — four segments,
   // encrypted under the single configured key. Secrets written before the
   // key-index segment was introduced stayed in this shape in the database, and
@@ -80,10 +93,14 @@ export function decrypt(value: string, keys: string[], context: string): string 
   // to the current shape by inserting index 0; the AAD context is identical, so
   // the ciphertext verifies exactly as before.
   const [version, keyIndex, iv, tag, body] =
-    parts.length === 4 && parts[0] === 'v1' ? ['v1', '0', parts[1], parts[2], parts[3]] : (parts as [string, string, string, string, string]);
+    parts.length === 4 && parts[0] === 'v1'
+      ? ['v1', '0', parts[1], parts[2], parts[3]]
+      : (parts as [string, string, string, string, string]);
   if (
     version !== 'v1' ||
-    !iv || !tag || !body ||
+    !iv ||
+    !tag ||
+    !body ||
     !/^[A-Za-z0-9+/]+={0,2}$/.test(iv) ||
     !/^[A-Za-z0-9+/]+={0,2}$/.test(tag) ||
     !/^[A-Za-z0-9+/]+={0,2}$/.test(body) ||
@@ -92,33 +109,25 @@ export function decrypt(value: string, keys: string[], context: string): string 
   )
     throw new Error('Invalid encrypted secret encoding');
   const index = Number(keyIndex);
-  if (!Number.isInteger(index) || index < 0 || index >= keys.length)
+  if (!/^\d+$/.test(keyIndex) || !Number.isInteger(index) || index < 0 || index >= keys.length)
     throw new Error('Invalid encrypted secret key index');
-  const key = Buffer.from(keys[index], 'base64');
-  if (key.length !== 32) throw new Error('Invalid encryption key: must be 32 bytes');
-  try {
-    const cipher = createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64'));
-    cipher.setAAD(Buffer.from(context));
-    cipher.setAuthTag(Buffer.from(tag, 'base64'));
-    return Buffer.concat([cipher.update(Buffer.from(body, 'base64')), cipher.final()]).toString('utf8');
-  } catch (e) {
-    // Try older keys for backward compatibility during rotation.
-    if (index > 0) {
-      for (let i = index - 1; i >= 0; i--) {
-        const olderKey = Buffer.from(keys[i], 'base64');
-        if (olderKey.length !== 32) continue;
-        try {
-          const cipher = createDecipheriv('aes-256-gcm', olderKey, Buffer.from(iv, 'base64'));
-          cipher.setAAD(Buffer.from(context));
-          cipher.setAuthTag(Buffer.from(tag, 'base64'));
-          return Buffer.concat([cipher.update(Buffer.from(body, 'base64')), cipher.final()]).toString('utf8');
-        } catch {
-          // Continue trying older keys.
-        }
-      }
+  const candidates = [
+    index,
+    ...keys.map((_key, position) => position).filter((position) => position !== index),
+  ];
+  for (const candidate of candidates) {
+    const key = Buffer.from(keys[candidate], 'base64');
+    if (key.length !== 32) continue;
+    try {
+      const cipher = createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64'));
+      cipher.setAAD(Buffer.from(context));
+      cipher.setAuthTag(Buffer.from(tag, 'base64'));
+      return Buffer.concat([cipher.update(Buffer.from(body, 'base64')), cipher.final()]).toString('utf8');
+    } catch {
+      continue;
     }
-    throw new Error('Failed to decrypt secret: invalid key or corrupted ciphertext');
   }
+  throw new Error('Failed to decrypt secret: invalid key or corrupted ciphertext');
 }
 export function secureEqual(a: string, b: string) {
   const MAX_COMPARE_LENGTH = 1024;

@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
-import { migrate, put, list } from '../server/db.ts';
+import { migrate, put, list, get } from '../server/db.ts';
+import { DEFAULT_SETTINGS } from '../shared/state.ts';
 import { runSelfHealCheck } from '../server/selfHealing.ts';
 import type { EmailRecipient, PipelineExecution, ThreatFeed } from '../src/types/index.ts';
 
@@ -85,6 +86,66 @@ const feed = (id: string, overrides: Partial<ThreatFeed> = {}): ThreatFeed =>
     errorLog: 'Configuration error (not retryable): bad url',
     ...overrides,
   }) as ThreatFeed;
+
+test('concurrent self-healing ticks queue one job per recipient and one recovery', { skip: !process.env.TEST_DATABASE_URL }, async () =>
+  withDatabase(async (pool) => {
+    await put(pool, 'recipients', 'r1', recipient('r1', 'sec1@example.com', 'SECURITY_TEAM'));
+    await put(pool, 'recipients', 'r2', recipient('r2', 'sec2@example.com', 'SECURITY_TEAM'));
+    await put(pool, 'executions', 'incident', failedExecution('incident', 60000));
+    await Promise.all(Array.from({ length: 4 }, () => runSelfHealCheck(pool)));
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, 2);
+    assert.equal((await list<PipelineExecution>(pool, 'executions')).filter((run) => run.status === 'QUEUED').length, 1);
+    assert.ok((await get<Record<string, { lastRecoveryAt?: string }>>(pool, 'systemState', 'selfHealing'))?.PIPELINE.lastRecoveryAt);
+  }));
+
+test('self-healing queue failures roll back alert claims and retry after recovery is queued', { skip: !process.env.TEST_DATABASE_URL }, async () =>
+  withDatabase(async (pool) => {
+    await put(pool, 'recipients', 'r1', recipient('r1', 'sec@example.com', 'SECURITY_TEAM'));
+    await put(pool, 'executions', 'incident', failedExecution('incident', 60000));
+    await pool.query(`CREATE FUNCTION reject_alert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected queue failure'; END $$;
+      CREATE TRIGGER reject_alert BEFORE INSERT ON outbox FOR EACH STATEMENT EXECUTE FUNCTION reject_alert()`);
+    await assert.rejects(runSelfHealCheck(pool), /injected queue failure/);
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, 0);
+    assert.equal((await get<Record<string, { lastAlertAt?: string }>>(pool, 'systemState', 'selfHealing'))?.PIPELINE.lastAlertAt, undefined);
+    await pool.query('DROP TRIGGER reject_alert ON outbox');
+    await runSelfHealCheck(pool);
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, 1);
+    assert.equal((await list<PipelineExecution>(pool, 'executions')).filter((run) => run.status === 'QUEUED').length, 1);
+  }));
+
+test('disabled email suppression is bounded and re-enabling does not lose the alert', { skip: !process.env.TEST_DATABASE_URL }, async () =>
+  withDatabase(async (pool) => {
+    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, emailEnabled: false });
+    await put(pool, 'recipients', 'r1', recipient('r1', 'sec@example.com', 'SECURITY_TEAM'));
+    await put(pool, 'executions', 'incident', failedExecution('incident', 60000));
+    await runSelfHealCheck(pool);
+    await runSelfHealCheck(pool);
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, 0);
+    assert.equal((await pool.query("SELECT count(*)::int AS count FROM operational_events WHERE code='selfHealing.alert_suppressed'")).rows[0].count, 1);
+    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, emailEnabled: true });
+    await runSelfHealCheck(pool);
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, 1);
+  }));
+
+test('a stale heartbeat cannot restart an explicitly disabled scheduler', { skip: !process.env.TEST_DATABASE_URL }, async () =>
+  withDatabase(async (pool) => {
+    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: false });
+    await put(pool, 'recipients', 'r1', recipient('r1', 'sec@example.com', 'SECURITY_TEAM'));
+    await pool.query("UPDATE scheduler_state SET heartbeat=now()-interval '10 minutes' WHERE id=1");
+    await runSelfHealCheck(pool);
+    assert.equal((await list<PipelineExecution>(pool, 'executions')).length, 0);
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, 0);
+  }));
+
+test('historical failed runs do not trigger recovery or alerts', { skip: !process.env.TEST_DATABASE_URL }, async () =>
+  withDatabase(async (pool) => {
+    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: false });
+    await put(pool, 'recipients', 'r1', recipient('r1', 'sec@example.com', 'SECURITY_TEAM'));
+    for (let index = 0; index < 20; index++) await put(pool, 'executions', `old-${index}`, failedExecution(`old-${index}`, 86400000));
+    await runSelfHealCheck(pool);
+    assert.equal((await list<PipelineExecution>(pool, 'executions')).filter((run) => run.status === 'QUEUED').length, 0);
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, 0);
+  }));
 
 test(
   'self-healing alerts every security-team recipient once through the durable outbox',

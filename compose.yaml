@@ -43,6 +43,7 @@ services:
       DATABASE_URL: postgresql://vulnstream_app:${APP_DB_PASSWORD:?Set runtime password}@db:5432/vulnstream
       APP_ORIGIN: https://${APP_HOST:?Set public hostname}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set a base64 32-byte encryption key}
+      ENCRYPTION_KEYS: ${ENCRYPTION_KEYS:-}
       EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS:-raw.githubusercontent.com,services.nvd.nist.gov,www.cisa.gov,cisa.gov,api.first.org,app.opencve.io,api.vulncheck.com,www.bleepingcomputer.com,isc.sans.edu,api.msrc.microsoft.com,api.mailgun.net,api.eu.mailgun.net,send.api.mailtrap.io,sandbox.api.mailtrap.io,api.sendgrid.com,smtp.sendgrid.net,api.postmarkapp.com,smtp.maileroo.com,smtp.lettr.com,in-v3.mailjet.com,api.mailjet.com,smtp.gmail.com,www.fortiguard.com,filestore.fortinet.com,www.kb.cert.org,kb.cert.org,thehackernews.com,www.securityweek.com,www.rapid7.com,googleprojectzero.blogspot.com,projectzero.google,krebsonsecurity.com,tools.cisco.com,sec.cloudapps.cisco.com,security.paloaltonetworks.com,labs.watchtowr.com,www.talosintelligence.com,www.thezdi.com,www.exploit-db.com,www.debian.org,www.cisecurity.com,cisecurity.com,cisecurity.org,www.cisecurity.org,seclists.org,blog.sucuri.net,www.welivesecurity.com,wordpress.org,www.darkreading.com,blog.google,www.greynoise.io,www.malwarebytes.com,cloudblog.withgoogle.com,cloud.google.com,workspace.google.com,blog.twitter.com,github.com,www.pentestpartners.com,www.forbes.com,www.theregister.com,news.google.com,www.sophos.com,api.osv.dev,therecord.media,www.googleapis.com}
       # Redirect targets of the feeds above (for example www.cisecurity.com ->
       # cisecurity.org -> www.cisecurity.org). Each hop is re-validated against
@@ -58,8 +59,10 @@ services:
       METRICS_TOKEN: ${METRICS_TOKEN:-}
       WORKER_ENABLED: 'true'
       CORRELATION_DLQ_DIRECTORY: /var/lib/vulnstream/deadletters
+      ML_DIRECTORY: /var/lib/vulnstream/ml
     volumes:
       - correlation-deadletters:/var/lib/vulnstream/deadletters
+      - ml-models:/var/lib/vulnstream/ml
     deploy:
       replicas: 2
       resources:
@@ -120,6 +123,7 @@ volumes:
   postgres-data:
   prometheus-data:
   correlation-deadletters:
+  ml-models:
   caddy-data:
   caddy-config:
 networks:

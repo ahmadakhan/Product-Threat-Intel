@@ -86,6 +86,7 @@ export interface ResponseData {
   headers: Record<string, string | string[] | undefined>;
 }
 export interface RequestOptions {
+  signal?: AbortSignal;
   method?: 'GET' | 'POST';
   headers?: Record<string, string>;
   body?: string;
@@ -180,6 +181,7 @@ export function createRequester(config: Config, hooks: RequesterHooks = {}) {
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
   return async (value: string, options: RequestOptions = {}): Promise<ResponseData> => {
+    options.signal?.throwIfAborted();
     const opts: RedirectOptions = {
       allowRedirects: options.allowRedirects ?? true,
       maxRedirects: options.maxRedirects ?? 5,
@@ -187,8 +189,24 @@ export function createRequester(config: Config, hooks: RequesterHooks = {}) {
       sameHostRedirects: options.sameHostRedirects ?? false,
       sameSiteRedirects: options.sameSiteRedirects ?? false,
     };
-    return doRequest(value, options, opts, allowlist, hooks, hooks.allowedPorts ?? ['443']);
+    return withAbortSignal(doRequest(value, options, opts, allowlist, hooks, hooks.allowedPorts ?? ['443']), options.signal);
   };
+}
+
+export function withAbortSignal<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return operation;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener('abort', onAbort);
+      reject(signal.reason ?? new Error('Operation aborted'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    operation.then(
+      (value) => { signal.removeEventListener('abort', onAbort); resolve(value); },
+      (error) => { signal.removeEventListener('abort', onAbort); reject(error); },
+    );
+    if (signal.aborted) onAbort();
+  });
 }
 
 type RedirectOptions = Required<
@@ -343,6 +361,7 @@ async function doRequest(
 ): Promise<ResponseData> {
   const url = new URL(value),
     selected = await resolvePublic(url, allowlist, hooks.resolver, allowedPorts);
+  options.signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     let deadline: ReturnType<typeof setTimeout>;
     const clearDeadline = () => clearTimeout(deadline);
@@ -351,6 +370,7 @@ async function doRequest(
       url,
       {
         ...hooks.tls,
+        signal: options.signal,
         method: options.method || 'GET',
         headers: { 'user-agent': 'BA-Threat-Intel/1.0', accept: 'application/json', 'accept-encoding': 'gzip', ...options.headers },
         // Pin every connection to the validated address. A per-request agent
@@ -379,7 +399,8 @@ async function doRequest(
           response.resume();
           void redirectTarget(status, response.headers.location, url, options, opts, allowlist, hooks, allowedPorts)
             .then((hop) => doRequest(hop.href, hop.options, hop.opts, hop.allowlist, hooks, allowedPorts))
-            .then(resolve, reject);
+            .then(resolve, reject)
+            .finally(clearDeadline);
           return;
         }
         const maxResponseBytes = options.maxResponseBytes ?? 8 * 1024 * 1024;

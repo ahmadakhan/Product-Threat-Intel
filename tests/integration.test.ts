@@ -830,7 +830,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       'failed transport retries durably, acceptance is recorded without claiming inbox delivery',
       async () => {
         await deliverNext(pool, config, requester, async () => {
-          throw new Error('temporary transport outage');
+          throw Object.assign(new Error('temporary transport outage'), { code: 'ECONNRESET', command: 'CONN' });
         });
         assert.equal((await list<any>(pool, 'emailLogs'))[0].status, 'RETRYING');
         await pool.query("UPDATE outbox SET next_attempt=now() WHERE status='QUEUED'");

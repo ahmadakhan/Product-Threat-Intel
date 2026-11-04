@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import {
   createPool,
   get,
@@ -8,9 +9,13 @@ import {
   list,
   migrate,
   put,
+  putMany,
   state,
   transaction,
+  verifyStoredAudit,
+  appendAudit,
 } from '../server/db.ts';
+import { chainAuditLogs, merkleRoot } from '../src/utils/cryptoChain.ts';
 import { applyCommand } from '../server/commands.ts';
 import { loadConfig } from '../server/config.ts';
 import { queryCollection } from '../server/collections.ts';
@@ -22,6 +27,7 @@ import {
 } from '../server/versionIndex.ts';
 import type {
   Advisory,
+  AuditLog,
   Finding,
   NormalizedCVE,
   WatchListItem,
@@ -533,6 +539,86 @@ test('enterprise hardening invariants', { skip: !database }, async (t) => {
       assert.equal(snapshot.counts.findings, 3);
       assert.equal(snapshot.summary.activeFindings, 2);
       assert.equal(snapshot.summary.criticalFindings, 1);
+      assert.equal(snapshot.auditLogs.length, 0);
+    });
+
+    await t.test('state counters follow bulk writes, updates, deletes, rollback and truncate', async () => {
+      await reset();
+      const value = cve('CVE-2026-82010', {
+        cvss: { ...INITIAL_NORMALIZED_CVES[0].cvss, severity: 'CRITICAL' },
+        cisaKev: { ...INITIAL_NORMALIZED_CVES[0].cisaKev, isKev: true },
+      });
+      await putMany(pool, 'findings', [
+        { id: 'active', data: finding(value) },
+        { id: 'resolved', data: finding(value, { status: 'RESOLVED' }) },
+        { id: 'excluded', data: finding(value, { notificationStatus: 'NOT_APPLICABLE' }) },
+      ]);
+      await put(pool, 'emailLogs', 'accepted', { status: 'ACCEPTED' });
+      let snapshot = await state(pool, { limits: { findings: 0, auditLogs: 0 } });
+      assert.equal(snapshot.counts.findings, 3);
+      assert.deepEqual(snapshot.summary, { activeFindings: 1, criticalFindings: 1, kevFindings: 1, deliveredEmails: 1 });
+      const migration = await readFile(new URL('../server/migrations/036_state_metrics.sql', import.meta.url), 'utf8');
+      await transaction(pool, async (db) => { await db.query(migration); });
+      assert.deepEqual((await state(pool)).summary, snapshot.summary);
+      assert.equal((await state(pool)).counts.findings, 3);
+      await assert.rejects(transaction(pool, async (db) => {
+        await put(db, 'findings', 'rollback', finding(value));
+        throw new Error('rollback counter update');
+      }), /rollback counter update/);
+      await put(pool, 'findings', 'active', finding(value, { status: 'PATCH_APPLIED' }));
+      await put(pool, 'emailLogs', 'accepted', { status: 'FAILED' });
+      await pool.query("DELETE FROM records WHERE kind='findings' AND id='resolved'");
+      snapshot = await state(pool, { limits: { findings: 0, auditLogs: 0 } });
+      assert.equal(snapshot.counts.findings, 2);
+      assert.deepEqual(snapshot.summary, { activeFindings: 0, criticalFindings: 0, kevFindings: 0, deliveredEmails: 0 });
+      await pool.query('TRUNCATE records');
+      assert.equal((await state(pool)).counts.findings, 0);
+    });
+
+    await t.test('structured audit entries are searchable, redacted and safe under concurrent appends', async () => {
+      await reset();
+      const config = loadConfig({ NODE_ENV: 'test', DATABASE_URL: url.href,
+        APP_ORIGIN: 'http://localhost', ENCRYPTION_KEY: randomBytes(32).toString('base64') });
+      await transaction(pool, (db) => applyCommand(db, config, {
+        action: 'settings.save', data: { reviewConfidenceThreshold: 65, emailEnabled: false }, actor: 'audit-operator', ipAddress: '192.0.2.12',
+      }));
+      const settings = await queryCollection<AuditLog>(pool, 'auditLogs', { limit: 10, offset: 0, search: 'settings.save' });
+      const saved = settings.items.find((log) => log.actor === 'audit-operator');
+      assert.equal(saved?.event, 'Workspace settings updated');
+      assert.equal(saved?.context?.resourceId, 'main');
+      assert.equal(saved?.context?.outcome, 'SUCCESS');
+      assert.deepEqual(saved?.context?.fields, ['emailEnabled', 'reviewConfidenceThreshold']);
+      await Promise.all(Array.from({ length: 12 }, (_, index) => appendAudit(pool,
+        'Feed credentials updated', `password=private-value; feed ${index}`, 'audit-operator', 'FEED', 'INFO', '192.0.2.12',
+        { action: 'feed.save', resourceType: 'feed', resourceId: `source-${index}`, requestId: `request-audit-${index}`, outcome: 'SUCCESS' },
+      )));
+      const result = await queryCollection<AuditLog>(pool, 'auditLogs', { limit: 50, offset: 0, search: 'request-audit-' });
+      assert.equal(result.total, 12);
+      assert.ok(result.items.every((log) => !log.details.includes('private-value')));
+      assert.equal(new Set(result.items.map((log) => log.hash)).size, 12);
+      assert.equal((await queryCollection(pool, 'auditLogs', { limit: 10, offset: 0, search: 'source-11' })).total, 1);
+      assert.equal((await verifyStoredAudit(pool)).verified, true);
+    });
+
+    await t.test('streamed audit verification preserves roots and detects tampering across batches', async () => {
+      const before = (await pool.query<{ data: AuditLog }>('SELECT data FROM audit ORDER BY seq DESC')).rows.map((row) => row.data);
+      assert.deepEqual(await verifyStoredAudit(pool), { verified: true, logCount: before.length, merkleRoot: merkleRoot(before.map((log) => log.hash)) });
+      const logs = chainAuditLogs(Array.from({ length: 600 }, (_, index) => ({
+        id: `audit-${index}`, timestamp: new Date(index * 1000).toISOString(),
+        category: 'SECURITY', level: 'INFO', event: 'Verification fixture',
+        details: String(index), actor: 'test', ipAddress: '', prevHash: '', hash: '',
+      } as AuditLog)), before[0]?.hash);
+      await pool.query('INSERT INTO audit(data) SELECT value FROM jsonb_array_elements($1::jsonb)', [JSON.stringify([...logs].reverse())]);
+      assert.deepEqual(await verifyStoredAudit(pool), { verified: true, logCount: before.length + 600, merkleRoot: merkleRoot([...logs, ...before].map((log) => log.hash)) });
+      assert.equal((await state(pool, { limits: { auditLogs: 0 } })).counts.auditLogs, before.length + 600);
+      await pool.query('ALTER TABLE audit DISABLE TRIGGER audit_immutable');
+      try {
+        await pool.query("UPDATE audit SET data=jsonb_set(data,'{details}','\"tampered\"') WHERE data->>'id'='audit-300'");
+        assert.equal((await verifyStoredAudit(pool)).verified, false);
+      } finally {
+        await pool.query('ALTER TABLE audit ENABLE TRIGGER audit_immutable');
+      }
+      await assert.rejects(verifyStoredAudit(pool, AbortSignal.abort()), /cancelled/);
     });
 
     await t.test('named transaction locks are scoped: unrelated domains proceed, same domain serializes', async () => {

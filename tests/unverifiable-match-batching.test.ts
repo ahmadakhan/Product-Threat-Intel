@@ -13,6 +13,11 @@ import { DEFAULT_SETTINGS } from '../shared/state.ts';
 import { loadConfig } from '../server/config.ts';
 import type { Requester } from '../server/network.ts';
 import type { Finding, EmailRecipient } from '../src/types/index.ts';
+import { eligibleForReviewNotification } from '../src/utils/findingDelivery.ts';
+import { renderUnverifiableReviewEmail } from '../server/reviewEmail.ts';
+import { settingsSchema } from '../server/validation.ts';
+import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine.ts';
+import type { AppSettings, WatchListItem } from '../src/types/index.ts';
 
 interface OutboxRow {
   id: string;
@@ -85,8 +90,27 @@ const recipient = (id: string, email: string, group: 'SECURITY_TEAM' | 'EVERYONE
   deliverySuccessRate: 1,
 });
 
+async function saveReviewFinding(pool: pg.Pool, value: Finding): Promise<Finding> {
+  const asset: WatchListItem = {
+    id: value.matchedAssetId, vendor: value.matchedAssetVendor || 'acme',
+    product: value.matchedAssetProduct || 'widget', assetTag: value.matchedAssetName,
+    version: '1.*', cpes: [], active: true, ownerGroup: 'SOC', createdAt: new Date().toISOString(),
+  };
+  asset.cpes = [`cpe:2.3:a:${asset.vendor}:${asset.product}:1.*:*:*:*:*:*:*:*`];
+  const cve = { ...value.cve, cpeMatches: [`cpe:2.3:a:${asset.vendor}:${asset.product}:1.5:*:*:*:*:*:*:*`] };
+  const policy = { ...DEFAULT_SETTINGS, ...await get<AppSettings>(pool, 'settings', 'main'), scopeHours: 0 };
+  const matched = runVulnerabilityPipeline([], [cve], [asset], [], [], policy).newFindings[0];
+  assert.ok(matched);
+  const result = { ...matched, id: value.id };
+  await put(pool, 'watchlist', asset.id, asset);
+  await put(pool, 'cveData', cve.cveId, cve);
+  await put(pool, 'findings', result.id, result);
+  return result;
+}
+
 test('unverifiable matches are batched into a single combined email per recipient', { skip: !process.env.TEST_DATABASE_URL }, async () => {
   const outcome = await withDatabase(async (pool) => {
+    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: true });
     const findings: Finding[] = [
       finding('CVE-2026-10001', 'f1', 'server-1', 'acme', 'widget'),
       finding('CVE-2026-10002', 'f2', 'server-2', 'acme', 'gadget'),
@@ -132,6 +156,80 @@ test('unverifiable matches are batched into a single combined email per recipien
     return true;
   });
   assert.ok(outcome, 'database-backed test ran');
+});
+
+test('review thresholds retain boundaries and reject invalid settings', () => {
+  const policy = { reviewUnverifiableMatches: true, reviewConfidenceThreshold: 70 };
+  for (const [confidence, expected] of [[69, false], [70, true], [90, true], [100, true], [NaN, false], [101, false]] as const) {
+    assert.equal(eligibleForReviewNotification({ ...finding('CVE-2026-10001', 'f1', 'asset'), confidence }, policy), expected);
+  }
+  const candidate = { ...finding('CVE-2026-10001', 'f1', 'asset'), confidence: 80 };
+  assert.equal(eligibleForReviewNotification({ ...candidate, notificationStatus: 'QUEUED_FOR_DISPATCH' }, policy), false);
+  assert.equal(eligibleForReviewNotification({ ...candidate, status: 'FALSE_POSITIVE' }, policy), false);
+  assert.equal(eligibleForReviewNotification(candidate, { ...policy, reviewUnverifiableMatches: false }), false);
+  for (const value of [-1, 101, 70.5, NaN]) assert.equal(settingsSchema.safeParse({ ...DEFAULT_SETTINGS, reviewConfidenceThreshold: value }).success, false);
+  assert.equal(settingsSchema.parse(DEFAULT_SETTINGS).reviewConfidenceThreshold, 0);
+  assert.equal(settingsSchema.parse({ ...DEFAULT_SETTINGS, emailEnabled: false }).emailEnabled, false);
+  assert.equal(settingsSchema.safeParse({ ...DEFAULT_SETTINGS, emailEnabled: 'false' }).success, false);
+});
+
+test('overlapping review batches reserve each finding once per recipient', { skip: !url }, async () => {
+  await withDatabase(async (pool) => {
+    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: true });
+    const first = finding('CVE-2026-10101', 'f1', 'first');
+    const second = finding('CVE-2026-10102', 'f2', 'second');
+    const target = recipient('r1', 'sec@example.invalid', 'SECURITY_TEAM');
+    await Promise.all([
+      queueUnverifiableMatchNotification(pool, [first], [target]),
+      queueUnverifiableMatchNotification(pool, [first, second], [target]),
+    ]);
+    const rows = (await pool.query('SELECT payload FROM outbox')).rows;
+    const ids = rows.flatMap((row) => row.payload.unverifiableMatch.findings.map((item: { findingId: string }) => item.findingId)).sort();
+    assert.deepEqual(ids, ['f1', 'f2']);
+    assert.equal(await queueUnverifiableMatchNotification(pool, [first, second], [target]), 0);
+  });
+});
+
+test('review email links sources safely and escapes evidence', () => {
+  const candidate = finding('CVE-2026-10001', 'f1', '<img src=x onerror=alert(1)>');
+  candidate.matchingEvidence = '<script>alert(1)</script>';
+  candidate.cve.remediation.vendorAdvisoryRef = 'javascript:alert(1)';
+  const rendered = renderUnverifiableReviewEmail([candidate]);
+  assert.ok(rendered.html.includes('href="https://nvd.nist.gov/vuln/detail/CVE-2026-10001"'));
+  assert.ok(rendered.text.includes('https://nvd.nist.gov/vuln/detail/CVE-2026-10001'));
+  assert.ok(!rendered.html.includes('<script>'));
+  assert.ok(!rendered.html.includes('<img src=x'));
+  candidate.cve.remediation.vendorAdvisoryRef = 'https://vendor.example/security/CVE-2026-10001?a=1&b=2';
+  assert.ok(renderUnverifiableReviewEmail([candidate]).html.includes('href="https://vendor.example/security/CVE-2026-10001?a=1&amp;b=2"'));
+  candidate.cve.remediation.vendorAdvisoryRef = 'https://user:secret@vendor.example/advisory';
+  assert.ok(!renderUnverifiableReviewEmail([candidate]).html.includes('user:secret'));
+  candidate.cve.versionRange = { versionEndExcluding: '1.0' };
+  candidate.cve.cpeMatchDetails = [{ criteria: candidate.matchedCpe }];
+  const criterion = renderUnverifiableReviewEmail([candidate]);
+  assert.ok(criterion.html.includes('No version bounds specified for the matched criterion'));
+  assert.ok(!criterion.html.includes('&lt; 1.0'));
+});
+
+test('review batches honor confidence and each recipient subscription', { skip: !url }, async () => {
+  await withDatabase(async (pool) => {
+    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: true, reviewConfidenceThreshold: 70 });
+    const low = { ...finding('CVE-2026-10010', 'low', 'low asset'), confidence: 70 };
+    low.cve.cvss.severity = 'LOW';
+    const high = { ...finding('CVE-2026-10011', 'high', 'high asset'), confidence: 85 };
+    high.cve.cisaKev = { ...high.cve.cisaKev, isKev: true };
+    const below = { ...finding('CVE-2026-10012', 'below', 'below asset'), confidence: 69 };
+    const queued = await queueUnverifiableMatchNotification(pool, [low, high, below], [
+      recipient('all', 'all@example.invalid', 'SECURITY_TEAM'),
+      { ...recipient('high', 'high@example.invalid', 'SECURITY_TEAM'), subscriptionTier: 'CRITICAL_HIGH_ONLY' },
+      { ...recipient('kev', 'kev@example.invalid', 'SECURITY_TEAM'), subscriptionTier: 'CISA_KEV_ONLY' },
+      recipient('everyone', 'everyone@example.invalid', 'EVERYONE'),
+    ]);
+    assert.equal(queued, 3);
+    const rows = (await pool.query('SELECT target_id,payload FROM outbox ORDER BY target_id')).rows;
+    assert.deepEqual(rows[0].payload.cveIds, [low.cveId, high.cveId]);
+    for (const row of rows.slice(1)) assert.deepEqual(row.payload.cveIds, [high.cveId]);
+    for (const row of rows) assert.ok(!row.payload.html.includes(below.cveId));
+  });
 });
 
 const digest = (overrides: Partial<ZeroDayDigestPayload> = {}): ZeroDayDigestPayload => ({
@@ -248,11 +346,12 @@ test('unverifiable match email is stamped reviewNotifiedAt on transport acceptan
       recipient('r2', 'sec-2@example.com', 'SECURITY_TEAM'),
     ];
     for (const r of recipients) await put(pool, 'recipients', r.id, r);
-    const findings: Finding[] = [
+    const candidates: Finding[] = [
       finding('CVE-2026-20001', 'f1', 'server-1', 'acme', 'widget'),
       finding('CVE-2026-20002', 'f2', 'server-2', 'acme', 'gadget'),
     ];
-    for (const f of findings) await put(pool, 'findings', f.id, f);
+    const findings: Finding[] = [];
+    for (const candidate of candidates) findings.push(await saveReviewFinding(pool, candidate));
 
     const queued = await queueUnverifiableMatchNotification(pool, findings, recipients);
     assert.equal(queued, 2, 'one notification per recipient');
@@ -312,4 +411,62 @@ test('unverifiable match email is stamped reviewNotifiedAt on transport acceptan
     return true;
   });
   assert.ok(outcome, 'database-backed test ran');
+});
+
+test('review delivery rechecks current policy and evidence before sending', { skip: !url }, async (t) => {
+  await withDatabase(async (pool) => {
+    const config = loadConfig({ NODE_ENV: 'test', DATABASE_URL: url, APP_ORIGIN: 'http://localhost', ENCRYPTION_KEY: randomBytes(32).toString('base64') });
+    const request: Requester = async () => { throw new Error('No network expected'); };
+    const mutations: [string, (entry: Finding) => Promise<unknown>][] = [
+      ['review confidence raised', async () => put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: true, reviewConfidenceThreshold: 80 })],
+      ['review notices disabled', async () => put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: false })],
+      ['finding promoted', async (entry) => put(pool, 'findings', entry.id, { ...entry, notificationStatus: 'QUEUED_FOR_DISPATCH' })],
+      ['recipient changed', async () => put(pool, 'recipients', 'r1', recipient('r1', 'new@example.invalid', 'SECURITY_TEAM'))],
+      ['subscription narrowed', async () => put(pool, 'recipients', 'r1', { ...recipient('r1', 'sec@example.invalid', 'SECURITY_TEAM'), subscriptionTier: 'CISA_KEV_ONLY' })],
+      ['product removed', async () => pool.query("DELETE FROM records WHERE kind='watchlist'")],
+      ['CVE withdrawn', async (entry) => put(pool, 'cveWithdrawals', entry.cveId, { modifiedDate: '2027-01-01T00:00:00Z' })],
+      ['source evidence changed', async (entry) => put(pool, 'cveData', entry.cveId, { ...entry.cve, description: 'Updated source evidence' })],
+    ];
+    for (const [name, mutate] of mutations) await t.test(name, async () => {
+      await pool.query('DELETE FROM records; DELETE FROM outbox');
+      await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: true });
+      const target = recipient('r1', 'sec@example.invalid', 'SECURITY_TEAM');
+      await put(pool, 'recipients', target.id, target);
+      const entry = await saveReviewFinding(pool, finding('CVE-2026-20011', 'f1', 'server', 'acme', 'widget'));
+      assert.equal(await queueUnverifiableMatchNotification(pool, [entry], [target]), 1);
+      await mutate(entry);
+      let sent = 0;
+      await deliverNext(pool, config, request, async () => { sent++; return 'must-not-send'; });
+      assert.equal(sent, 0);
+      assert.equal((await pool.query('SELECT status FROM outbox')).rows[0].status, 'FAILED');
+      assert.equal((await get<Finding>(pool, 'findings', entry.id))?.reviewNotifiedAt, null);
+      if (name === 'review confidence raised') {
+        await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: true });
+        assert.equal(await queueUnverifiableMatchNotification(pool, [entry], [target]), 1);
+        await deliverNext(pool, config, request, async () => { sent++; return 'policy-restored'; });
+        assert.equal(sent, 1);
+        assert.equal((await pool.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, 1);
+        assert.equal((await pool.query('SELECT status FROM outbox')).rows[0].status, 'ACCEPTED');
+      }
+    });
+    await t.test('two workers send once and acceptance preserves concurrent operator changes', async () => {
+      await pool.query('DELETE FROM records; DELETE FROM outbox');
+      await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: true });
+      const target = recipient('r1', 'sec@example.invalid', 'SECURITY_TEAM');
+      await put(pool, 'recipients', target.id, target);
+      const entry = await saveReviewFinding(pool, finding('CVE-2026-20012', 'f1', 'server', 'acme', 'widget'));
+      await queueUnverifiableMatchNotification(pool, [entry], [target]);
+      let sent = 0;
+      const sender = async () => {
+        sent++;
+        await put(pool, 'findings', entry.id, { ...entry, status: 'FALSE_POSITIVE' });
+        return 'accepted-once';
+      };
+      await Promise.all([deliverNext(pool, config, request, sender), deliverNext(pool, config, request, sender)]);
+      assert.equal(sent, 1);
+      const saved = await get<Finding>(pool, 'findings', entry.id);
+      assert.equal(saved?.status, 'FALSE_POSITIVE');
+      assert.ok(saved?.reviewNotifiedAt);
+    });
+  });
 });

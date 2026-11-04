@@ -36,9 +36,10 @@ const HARD_MEMORY_CEILING_PERCENT = 95;
  */
 function isConnectivityFailure(code: string, error: unknown): boolean {
   if (/^(08[A-Z0-9]{3}|57P0[123]|53300)$/.test(code)) return true;
+  if (/^(ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|EAI_AGAIN)$/.test(code)) return true;
   return (
     error instanceof Error &&
-    /connection terminated|connection timeout|timeout exceeded when trying to connect|client has encountered a connection error|server closed the connection/i.test(
+    /connection terminated|connection timeout|timeout exceeded when trying to connect|client has encountered a connection error|server closed the connection|connection ended|query read timeout/i.test(
       error.message,
     )
   );
@@ -534,9 +535,6 @@ export class PipelineSupervisor {
    * non-database issues like missing directories, permission errors, or auxiliary
    * step failures.
    */
-  private readonly connectionLossMessage =
-    /connection terminated|connection timeout|timeout exceeded when trying to connect|client has encountered a connection error|server closed the connection|connection ended/i;
-
   private readonly refineConnectivityFailure = (error: unknown): boolean => {
     // Direct database error codes that indicate connection/separation issues
     const errorCode = error && typeof error === 'object' && 'code' in error 
@@ -546,17 +544,13 @@ export class PipelineSupervisor {
     // Only treat specific SQLSTATE classes as database outages. '08' is
     // connection_exception, '57P01-03' is an administrative shutdown and 53300
     // is too_many_connections; each means the data path is unusable right now.
-    const isRealConnectivityFailure = /^(08[A-Z0-9]{3}|57P0[123]|53300)$/.test(errorCode);
-
-    if (isRealConnectivityFailure) return true;
-
     // A severed socket is reported by node-postgres without any SQLSTATE: a
     // client whose TCP connection ends produces plain Error('Connection
     // terminated unexpectedly'), and the pool produces 'timeout exceeded when
     // trying to connect' when it cannot get a usable connection. Both are
     // exactly the outage this detector exists for; requiring a SQLSTATE missed
     // them and left the supervisor reporting HEALTHY against a dead database.
-    return error instanceof Error && this.connectionLossMessage.test(error.message);
+    return isConnectivityFailure(errorCode, error);
   };
 
   async acquire(
