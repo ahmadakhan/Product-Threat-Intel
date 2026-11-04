@@ -415,9 +415,11 @@ export function createApp(
   app.use(express.json({ limit: '2mb', strict: true }));
   app.use('/api', (req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && req.headers.origin !== config.APP_ORIGIN)
+    const isMutation = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
+    const requestOrigin = `${req.protocol}://${req.get('host')}`;
+    if (isMutation && req.headers.origin !== config.APP_ORIGIN && req.headers.origin !== requestOrigin)
       return next(new HttpError(403, 'Origin not allowed'));
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !req.is('application/json'))
+    if (isMutation && !req.is('application/json'))
       return next(new HttpError(415, 'JSON body required'));
     next();
   });
@@ -2134,6 +2136,13 @@ export function createApp(
       const record = row.rows[0];
       const edits: ReviewEdits = record.edits || {};
       const content = editedJobContent(record, edits);
+      // Normalize HTML preview so text (audience notice, reviewer comment) remains visible.
+      if (!content.html || !content.html.includes('<body')) {
+        const bodyWrap = content.html && content.html.length > 0
+          ? `<html><head><meta charset="utf-8"><title>Email Preview</title></head><body>${content.html}</body></html>`
+          : '<html><head><meta charset="utf-8"><title>Email Preview</title></head><body></body></html>';
+        content.html = bodyWrap;
+      }
       res.json({
         html: content.html,
         text: content.text,
@@ -2158,17 +2167,24 @@ export function createApp(
            customFields: z.record(z.string(), z.string().max(2000)).optional(),
          })
          .parse(req.body);
-       const row = await pool.query(
-         `SELECT o.payload->>'html' AS "html", o.payload->>'text' AS "text",
-                 o.payload->>'subject' AS "subject", o.edits
-           FROM outbox o
-          WHERE o.id=$1 AND o.channel='email' AND ${editableJobStatusSql('o.status')}`,
-         [id],
-       );
-       if (!row.rowCount) throw new HttpError(404, 'Email job not found or not in a previewable state');
-       const record = row.rows[0];
-       const mergedEdits: ReviewEdits = { ...(record.edits || {}), ...proposedEdits };
-       const content = editedJobContent(record, mergedEdits);
+        const row = await pool.query(
+          `SELECT o.payload->>'html' AS "html", o.payload->>'text' AS "text",
+                  o.payload->>'subject' AS "subject", o.edits
+            FROM outbox o
+           WHERE o.id=$1 AND o.channel='email' AND ${editableJobStatusSql('o.status')}`,
+          [id],
+        );
+        if (!row.rowCount) throw new HttpError(404, 'Email job not found or not in a previewable state');
+        const record = row.rows[0];
+        const mergedEdits: ReviewEdits = { ...(record.edits || {}), ...proposedEdits };
+        const content = editedJobContent(record, mergedEdits);
+        // Normalize HTML preview so text (audience notice, reviewer comment) remains visible.
+        if (!content.html || !content.html.includes('<body')) {
+          const bodyWrap = content.html && content.html.length > 0
+            ? `<html><head><meta charset="utf-8"><title>Email Preview</title></head><body>${content.html}</body></html>`
+            : '<html><head><meta charset="utf-8"><title>Email Preview</title></head><body></body></html>';
+          content.html = bodyWrap;
+        }
        res.json({ html: content.html, text: content.text, subject: content.subject, edits: mergedEdits });
      }),
    );
