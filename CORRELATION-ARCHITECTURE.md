@@ -1,6 +1,11 @@
 # Native advisory correlation audit and implementation
 
-This change adds an independent native-table ingestion path to the existing VulnStream application. It preserves the record-store inventory, existing CVE applicability engine, RSS parser, delivery outbox, authentication, CSRF checks, SSRF controls, and process shutdown handlers. It projects operator-managed inventory into an isolated application-owned table. Owner-managed native inventory rows are read without rewriting them.
+This change adds an independent native-table ingestion path to the existing VulnStream
+application. It preserves the record-store inventory, existing CVE applicability engine,
+RSS parser, delivery outbox, authentication, CSRF checks, SSRF controls, and process
+shutdown handlers. It projects operator-managed inventory into an isolated
+application-owned table. Owner-managed native inventory rows are read without rewriting
+them.
 
 ## Audit findings and resolved gaps
 
@@ -15,26 +20,59 @@ This change adds an independent native-table ingestion path to the existing Vuln
 | No native stream supervision or controls | Heartbeat probes, memory hysteresis, per-task cancellation, bounded queue admission, persistent pending jobs and authenticated dashboard |
 | Existing mutation limiter restored tokens after allowing a request | Migration 012 exits the PL/pgSQL function immediately after its successful result; existing replica-sharing tests now pass |
 
-The configured local database initially exposed none of `assets`, `unstructured_advisories`, or `vendor_product_aliases` and was at schema version 4. It has now been upgraded to version 14. Both existing inventory records were projected, and a before/after digest verified that their stored data remained unchanged. See `correlation-deployment-report.json`. All test and benchmark records used disposable schemas.
+The configured local database initially exposed none of `assets`, `unstructured_advisories`,
+or `vendor_product_aliases` and was at schema version 4. It has now been upgraded to
+version 14. Both existing inventory records were projected, and a before/after digest
+verified that their stored data remained unchanged. See `correlation-deployment-report.json`.
+All test and benchmark records used disposable schemas.
 
 ## Eight implementation layers
 
 | Layer | Files | Behavior |
 | --- | --- | --- |
-| 1: PostgreSQL | `server/migrations/011_text_correlation.sql` | Guarded tables, partial identity indexes, lowercase composite lookup, generated TSV/GIN search, seeded aliases, separate match/review/dead-letter/pending dimensions. Index builds live in `server/migrations/indexes/` and are applied `CONCURRENTLY` outside the migration transaction by `applyIndexMigrations()` |
-| 2: Boundaries | `server/correlation/validation.ts`, `deadLetter.ts` | Strict Zod safe parsing; 200/255/50,000 title/URL/body limits; HTTP(S) URLs without credentials; encrypted malformed-input capture |
-| 3: Correlation | `extraction.ts`, `engine.ts` | Exact structured CPE/PURL intersection, indexed alias n-grams, canonical vendor/product matching, bounded version extraction, strict CVE extraction, density-based early intelligence detection |
-| 4: Version and confidence | `version.ts`, `engine.ts` | Explicit comparison bounds, preserved prereleases, uncertain backports reviewed, explicit-range exclusions cannot be overridden by aliases |
-| 5: Transactions | `ingest.ts`, `query.ts` | Dedicated client; READ COMMITTED; atomic conflict gate; rollback; broken-client destruction; three retries after the initial attempt with exponential backoff and jitter |
-| 6: Streaming and telemetry | `stream.ts`, `telemetry.ts` | Async iteration, bounded framing, global admission ceiling shared by concurrent streams, item metrics, bounded JSON stdout queue and viewer ring |
-| 7: Recovery | `supervisor.ts`, `runtime.ts`, `server/main.ts` | Heartbeats, memory shedding, DB recovery, leased durable jobs, 15-second item cancellation and safe process restart on uncaught failures |
-| 8: Dashboard | `src/components/CorrelationDashboard.tsx`, `shared/correlation.ts` | One-second polling, metrics, controls, fault simulation, NDJSON submission, following JSON console, searchable HIGH/MEDIUM match table |
+| 1: PostgreSQL | `server/migrations/011_text_correlation.sql` | Guarded tables, partial identity
+  indexes, lowercase composite lookup, generated TSV/GIN search, seeded aliases, separate
+  match/review/dead-letter/pending dimensions. Index builds live in
+  `server/migrations/indexes/` and are applied `CONCURRENTLY` outside the migration
+  transaction by `applyIndexMigrations()` |
+| 2: Boundaries | `server/correlation/validation.ts`, `deadLetter.ts` | Strict Zod safe parsing;
+  200/255/50,000 title/URL/body limits; HTTP(S) URLs without credentials; encrypted
+  malformed-input capture |
+| 3: Correlation | `extraction.ts`, `engine.ts` | Exact structured CPE/PURL intersection,
+  indexed alias n-grams, canonical vendor/product matching, bounded version extraction,
+  strict CVE extraction, density-based early intelligence detection |
+| 4: Version and confidence | `version.ts`, `engine.ts` | Explicit comparison bounds,
+  preserved prereleases, uncertain backports reviewed, explicit-range exclusions cannot
+  be overridden by aliases |
+| 5: Transactions | `ingest.ts`, `query.ts` | Dedicated client; READ COMMITTED; atomic conflict
+  gate; rollback; broken-client destruction; three retries after the initial attempt with
+  exponential backoff and jitter |
+| 6: Streaming and telemetry | `stream.ts`, `telemetry.ts` | Async iteration, bounded
+  framing, global admission ceiling shared by concurrent streams, item metrics, bounded
+  JSON stdout queue and viewer ring |
+| 7: Recovery | `supervisor.ts`, `runtime.ts`, `server/main.ts` | Heartbeats, memory shedding,
+  DB recovery, leased durable jobs, 15-second item cancellation and safe process restart
+  on uncaught failures |
+| 8: Dashboard | `src/components/CorrelationDashboard.tsx`, `shared/correlation.ts` | One-second
+  polling, metrics, controls, fault simulation, NDJSON submission, following JSON console,
+  searchable HIGH/MEDIUM match table |
 
 Root TypeScript compilation now enables `strict`. Existing modules also passed that check.
 
 ## Protected database contract
 
-Migration 011 contains no `ALTER TABLE`, `DROP`, column replacement, or owner-data updates. It seeds missing aliases without overwriting existing mappings. It adds indexes to the three protected tables. Those indexes are built with `CREATE INDEX CONCURRENTLY` by `applyIndexMigrations()` on an autocommit connection, after the schema transaction commits: a plain `CREATE INDEX` takes `SHARE` for the whole build, and ingest workers run under a 3500 ms statement timeout, so an inline build converts a deploy into a dead-letter backlog rather than a latency spike. The runner retries a contended build (`55P03`/`40P01`), drops the invalid index a cancelled `CONCURRENTLY` build leaves behind, and skips the trigram index when `gin_trgm_ops` is not resolvable on the session path. An interrupted build was previously invisible; `correlationPreflight()` and migration 024 reject any unique index whose `indisvalid` is false.
+Migration 011 contains no `ALTER TABLE`, `DROP`, column replacement, or owner-data
+updates. It seeds missing aliases without overwriting existing mappings. It adds
+indexes to the three protected tables. Those indexes are built with `CREATE INDEX
+CONCURRENTLY` by `applyIndexMigrations()` on an autocommit connection, after the
+schema transaction commits: a plain `CREATE INDEX` takes `SHARE` for the whole build,
+and ingest workers run under a 3500 ms statement timeout, so an inline build converts
+a deploy into a dead-letter backlog rather than a latency spike. The runner retries a
+contended build (`55P03`/`40P01`), drops the invalid index a cancelled `CONCURRENTLY`
+build leaves behind, and skips the trigram index when `gin_trgm_ops` is not resolvable
+on the session path. An interrupted build was previously invisible;
+`correlationPreflight()` and migration 024 reject any unique index whose `indisvalid`
+is false.
 
 The native contract is:
 
@@ -48,37 +86,108 @@ B-tree lookups are indexed logarithmic operations, not a mathematical O(1) guara
 
 ## Input and matching behavior
 
-`AdvisoryIngestor.processIncomingAdvisory(rawInput, pool)` accepts the validated object shape: `title`, `content`, `url`, optional `cpes`, optional `purls`, optional `entities`. Each entity contains `vendor`, `product`, and an optional `affectedRange`, such as `>=1.0 <2.0`. Unknown fields are rejected. URL tracking parameters and fragments are canonicalized before fingerprinting. SHA-256 hashes the unambiguous JSON tuple `[url,title]`; the URL constraint separately enforces one stored article per canonical URL. A changed title on the same URL remains a duplicate, as required by the URL uniqueness contract.
+`AdvisoryIngestor.processIncomingAdvisory(rawInput, pool)` accepts the validated object
+shape: `title`, `content`, `url`, optional `cpes`, optional `purls`, optional `entities`.
+Each entity contains `vendor`, `product`, and an optional `affectedRange`, such as
+`>=1.0 <2.0`. Unknown fields are rejected. URL tracking parameters and fragments are
+canonicalized before fingerprinting. SHA-256 hashes the unambiguous JSON tuple `[url,title]`;
+the URL constraint separately enforces one stored article per canonical URL. A changed
+title on the same URL remains a duplicate, as required by the URL uniqueness contract.
 
-`AdvisoryStreamProcessor.processAdvisoryStream(readable, concurrencyLimit, pool)` accepts object-mode records or UTF-8 NDJSON. Byte-stream frames are bounded to 256 KiB. Multibyte characters can cross arbitrary chunk boundaries. Malformed bounded frames retain their original frame inside encrypted dead letters; oversized frames retain a rejection marker instead of unbounded input. Upstream object-mode producers must likewise supply bounded records; the processor cannot undo memory already allocated by an upstream producer. No per-stream array or promise list grows with total input size.
+`AdvisoryStreamProcessor.processAdvisoryStream(readable, concurrencyLimit, pool)`
+accepts object-mode records or UTF-8 NDJSON. Byte-stream frames are bounded to 256 KiB.
+Multibyte characters can cross arbitrary chunk boundaries. Malformed bounded frames
+retain their original frame inside encrypted dead letters; oversized frames retain a
+rejection marker instead of unbounded input. Upstream object-mode producers must
+likewise supply bounded records; the processor cannot undo memory already allocated by
+an upstream producer. No per-stream array or promise list grows with total input size.
 
-Product aliases are matched against bounded token n-grams using the alias functional index. An exact alias maps to its dictionary vendor/product pair. Adjacent affected-version language can qualify only an unambiguous single-alias article. Explicit structured entity ranges override versionless aliases. Multi-product prose never broadcasts one inferred version range to all products. Native vendor/product token coincidence without a dictionary entity stays LOW.
+Product aliases are matched against bounded token n-grams using the alias functional
+index. An exact alias maps to its dictionary vendor/product pair. Adjacent
+affected-version language can qualify only an unambiguous single-alias article. Explicit
+structured entity ranges override versionless aliases. Multi-product prose never
+broadcasts one inferred version range to all products. Native vendor/product token
+coincidence without a dictionary entity stays LOW.
 
-HIGH means explicit structured identity intersection or a supported affected-range match. MEDIUM means canonical vendor/product identity with security context and unspecified versions. These are evidence confidence levels, not proof of exploitation or source authenticity. LOW results, including unmatched early intelligence and ambiguous backports, go exclusively to `low_confidence_review_buffer`. Native notification delivery is connected to the existing outbox, retries, recipient controls and email review screen. The administrator must explicitly enable its policy; activation starts with new matches rather than broadcasting historical data. HIGH evidence can reach enabled ALL_SEVERITIES recipients and ALL-event webhooks. MEDIUM email always waits for security approval, and EVERYONE recipients retain their additional review gate. LOW evidence never enters delivery automatically. Unscored intelligence cannot bypass critical-only or KEV-only subscriptions. Stored inventory revisions are checked again before transport, so disabled, deleted or changed inventory invalidates stale jobs.
+HIGH means explicit structured identity intersection or a supported affected-range
+match. MEDIUM means canonical vendor/product identity with security context and
+unspecified versions. These are evidence confidence levels, not proof of exploitation or
+source authenticity. LOW results, including unmatched early intelligence and ambiguous
+backports, go exclusively to `low_confidence_review_buffer`. Native notification delivery
+is connected to the existing outbox, retries, recipient controls and email review screen.
+The administrator must explicitly enable its policy; activation starts with new matches
+rather than broadcasting historical data. HIGH evidence can reach enabled ALL_SEVERITIES
+recipients and ALL-event webhooks. MEDIUM email always waits for security approval, and
+EVERYONE recipients retain their additional review gate. LOW evidence never enters
+delivery automatically. Unscored intelligence cannot bypass critical-only or KEV-only
+subscriptions. Stored inventory revisions are checked again before transport, so
+disabled, deleted or changed inventory invalidates stale jobs.
 
-RSS articles are handed to `correlation_pending` in the same transaction as their accepted source checkpoint. This bridge reuses the existing parser's bounded summary. The direct NDJSON path accepts up to 50,000 characters of advisory content. Parsing a multi-gigabyte RSS XML document is not supported by the existing 8 MiB RSS parser; use bounded feed pages or the new record stream for bulk datasets.
+RSS articles are handed to `correlation_pending` in the same transaction as their
+accepted source checkpoint. This bridge reuses the existing parser's bounded summary.
+The direct NDJSON path accepts up to 50,000 characters of advisory content. Parsing a
+multi-gigabyte RSS XML document is not supported by the existing 8 MiB RSS parser; use
+bounded feed pages or the new record stream for bulk datasets.
 
 ## Runtime and recovery
 
-The main process starts the native consumer when `WORKER_ENABLED=true`; monitoring remains available when the consumer is disabled. Claims use `FOR UPDATE SKIP LOCKED` and a 60-second lease. A crash leaves the job available for retry. Unique article constraints protect against duplicate effects after lease expiration or an uncertain COMMIT acknowledgment. A failed durable dead-letter capture leaves the pending job unacknowledged.
+The main process starts the native consumer when `WORKER_ENABLED=true`; monitoring
+remains available when the consumer is disabled. Claims use `FOR UPDATE SKIP LOCKED`
+and a 60-second lease. A crash leaves the job available for retry. Unique article
+constraints protect against duplicate effects after lease expiration or an uncertain
+COMMIT acknowledgment. A failed durable dead-letter capture leaves the pending job
+unacknowledged.
 
-The supervisor halves configured concurrency once memory pressure is confirmed on two consecutive probes at 85%, and pauses admission until memory falls below 60%. A single sample is a transient allocation spike, not sustained pressure, so it only arms the guard. HIGH priority keeps a floor of `max(2, ceil(desired/4))` workers while shedding: halving the global ceiling otherwise rounds its share down to one slot and starves exactly the critical advisories shedding exists to protect. The global ceiling and the HIGH pool still bound it. Pressure is the higher of V8 heap usage against the heap limit and RSS against a detected container memory limit. Optional exposed GC is invoked when available. This is admission control, not a way to recover from a fatal V8 allocation failure.
+The supervisor halves configured concurrency once memory pressure is confirmed on two
+consecutive probes at 85%, and pauses admission until memory falls below 60%. A single
+sample is a transient allocation spike, not sustained pressure, so it only arms the
+guard. HIGH priority keeps a floor of `max(2, ceil(desired/4))` workers while shedding:
+halving the global ceiling otherwise rounds its share down to one slot and starves
+exactly the critical advisories shedding exists to protect. The global ceiling and the
+HIGH pool still bound it. Pressure is the higher of V8 heap usage against the heap
+limit and RSS against a detected container memory limit. Optional exposed GC is invoked
+when available. This is admission control, not a way to recover from a fatal V8
+allocation failure.
 
-Database outages pause admission. Failed transaction clients are destroyed, and heartbeats retry connectivity. `DATABASE_URL` must point at the deployment's writable HA endpoint/proxy to recover across primary failover. The application does not promote replicas, invent secondary endpoints, or attempt writes to a read-only standby. Health probes and request authentication share that database, so the dashboard can itself become inaccessible during total database loss; external stdout collection is necessary for outage observability.
+Database outages pause admission. Failed transaction clients are destroyed, and
+heartbeats retry connectivity. `DATABASE_URL` must point at the deployment's writable HA
+endpoint/proxy to recover across primary failover. The application does not promote
+replicas, invent secondary endpoints, or attempt writes to a read-only standby. Health
+probes and request authentication share that database, so the dashboard can itself
+become inaccessible during total database loss; external stdout collection is necessary
+for outage observability.
 
-Uncaught process exceptions and unhandled rejections retain graceful shutdown followed by a nonzero exit. Compose's restart policy starts a clean process, and durable jobs resume. Continuing an unknown corrupted execution stack is unsafe. Worker extraction crashes are isolated and subsequent items receive fresh workers. The watchdog destroys a task's checked-out client on cancellation; server-side statement, lock and idle-transaction timeouts provide additional safeguards.
+Uncaught process exceptions and unhandled rejections retain graceful shutdown followed by
+a nonzero exit. Compose's restart policy starts a clean process, and durable jobs
+resume. Continuing an unknown corrupted execution stack is unsafe. Worker extraction
+crashes are isolated and subsequent items receive fresh workers. The watchdog destroys a
+task's checked-out client on cancellation; server-side statement, lock and idle-transaction
+timeouts provide additional safeguards.
 
-Neither 100% uptime nor a zero false-positive rate can be guaranteed by application code. An operational availability target requires redundant instances, independent monitoring, load-balancer readiness, an HA PostgreSQL service, capacity testing, and tested recovery procedures. This work does not certify a throughput or accuracy SLA.
+Neither 100% uptime nor a zero false-positive rate can be guaranteed by application code.
+An operational availability target requires redundant instances, independent monitoring,
+load-balancer readiness, an HA PostgreSQL service, capacity testing, and tested recovery
+procedures. This work does not certify a throughput or accuracy SLA.
 
 ## Deployment and storage
 
 1. Build using `npm run lint && npm run build`.
 2. Review the protected-table contract and index-build window.
 3. Run the existing migration entry point with the migration role. Schema version 14 is required. The runtime grant list now includes the new tables.
-4. Provide the existing base64 32-byte `ENCRYPTION_KEY`, a writable HA `DATABASE_URL`, and persistent `CORRELATION_DLQ_DIRECTORY` storage. Index builds run concurrently after the schema transaction, so they no longer need a write-quiet maintenance window — but they do need enough statement budget to finish, and they hold a lock on `vendor_product_aliases` only briefly. Compose mounts the named `correlation-deadletters` volume, whose directory is initialized for the unprivileged Node user.
+4. Provide the existing base64 32-byte `ENCRYPTION_KEY`, a writable HA `DATABASE_URL`,
+and persistent `CORRELATION_DLQ_DIRECTORY` storage. Index builds run concurrently after
+the schema transaction, so they no longer need a write-quiet maintenance window — but
+they do need enough statement budget to finish, and they hold a lock on
+`vendor_product_aliases` only briefly. Compose mounts the named `correlation-deadletters`
+volume, whose directory is initialized for the unprivileged Node user.
 5. Start at a conservative concurrency and measure workload-specific latency and pool wait times.
 
-The default development spool is `/tmp/vulnstream-correlation-dlq`; use a persistent path outside disposable development. At most 256 spool files are admitted, with each original payload limited to 256 KiB (approximately 90 MiB maximum ciphertext storage). A full or unwritable spool fails closed and retains durable pending work. Dead letters are automatically flushed into `correlation_dead_letters`; correcting/replaying rejected data remains an operator action. Preserve encryption keys for retained ciphertext.
+The default development spool is `/tmp/vulnstream-correlation-dlq`; use a persistent path
+outside disposable development. At most 256 spool files are admitted, with each original
+payload limited to 256 KiB (approximately 90 MiB maximum ciphertext storage). A full or
+unwritable spool fails closed and retains durable pending work. Dead letters are
+automatically flushed into `correlation_dead_letters`; correcting/replaying rejected data
+remains an operator action. Preserve encryption keys for retained ciphertext.
 
 The UI exposes:
 
@@ -88,9 +197,21 @@ The UI exposes:
 - `POST /api/correlation/fault`: ADMIN, `{ "fault": "memory" }` or `database`; requires `FAULT_SIMULATION_ENABLED=true` and is refused outright when `NODE_ENV=production`. Simulates control-plane signals for five seconds without exhausting real memory or severing real sockets. The circuit breaker and the simulation window are persisted on `correlation_policy`, so a restart honours an open breaker instead of clearing it and a sibling replica reports the same state; simulated outages are counted separately and can never open the real breaker.
 - `GET /api/correlation/search?q=...`: bounded native TSV fallback search.
 
-The existing `/api/correlation/simulate` asset/CVE simulator is preserved. Mutation routes inherit origin, JSON, session, CSRF, and shared rate-limit checks.
+The existing `/api/correlation/simulate` asset/CVE simulator is preserved. Mutation routes
+inherit origin, JSON, session, CSRF, and shared rate-limit checks.
 
-Stdout telemetry permits UUID tracking IDs and numeric metrics; raw payloads, URLs, credentials, database error strings and stack traces are excluded. The viewer ring and stdout queue are bounded. Admission pauses on stdout congestion; if more than 512 events accumulate despite admission control, excess events are counted in `droppedLogs` and surfaced in the dashboard. Use a reliable log collector. Throughput, latency, active worker, and dead-letter capture counters are per-process lifetime; the database match/review/dead-letter tables are durable. The separate native retention policy defaults to 720 hours and runs bounded batches of 500 rows per relation. It removes resolved low-confidence buffers, resolved encrypted dead letters and expired matches whose outbox work is terminal. Open reviews, unresolved dead letters, queued/reviewing/sending notifications, native inventory, protected articles and alias tables are preserved. Audit and idempotency decision metadata remain durable.
+Stdout telemetry permits UUID tracking IDs and numeric metrics; raw payloads, URLs,
+credentials, database error strings and stack traces are excluded. The viewer ring and
+stdout queue are bounded. Admission pauses on stdout congestion; if more than 512 events
+accumulate despite admission control, excess events are counted in `droppedLogs` and
+surfaced in the dashboard. Use a reliable log collector. Throughput, latency, active
+worker, and dead-letter capture counters are per-process lifetime; the database
+match/review/dead-letter tables are durable. The separate native retention policy defaults
+to 720 hours and runs bounded batches of 500 rows per relation. It removes resolved
+low-confidence buffers, resolved encrypted dead letters and expired matches whose outbox
+work is terminal. Open reviews, unresolved dead letters, queued/reviewing/sending
+notifications, native inventory, protected articles and alias tables are preserved. Audit
+and idempotency decision metadata remain durable.
 
 ## Verification
 

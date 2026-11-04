@@ -1,6 +1,8 @@
 # Page and watchlist verification — 21 October 2026
 
-Checked the built application against an isolated PostgreSQL 17 database. All data used here was explicitly labeled disposable test data. No production records were modified and no external messages were sent.
+Checked the built application against an isolated PostgreSQL 17 database. All data used
+here was explicitly labeled disposable test data. No production records were modified and
+no external messages were sent.
 
 ## Page checks
 
@@ -57,8 +59,15 @@ Observed four findings: two confirmed and two review-required. Only the two conf
 
 ## Automated validation
 
-`npm run lint`, `npm run build`, and the full test suite with `TEST_DATABASE_URL` passed: **42 tests, zero failures, zero skips**. Five new regression tests reproduced failures before the matching/builder fixes and passed afterward. The disposable persisted matrix is reproducible through `tests/fixtures/prepareBrowser.ts` with `NODE_ENV=test` and a fresh database named `vulnstream_pages`; this is an explicitly invoked fixture, not production startup logic.
+`npm run lint`, `npm run build`, and the full test suite with `TEST_DATABASE_URL` passed:
+**42 tests, zero failures, zero skips**. Five new regression tests reproduced failures
+before the matching/builder fixes and passed afterward. The disposable persisted matrix is
+reproducible through `tests/fixtures/prepareBrowser.ts` with `NODE_ENV=test` and a fresh
+database named `vulnstream_pages`; this is an explicitly invoked fixture, not production
+startup logic.
 
-Screenshot: [watchlist-matching-verification.png](watchlist-matching-verification.png). It shows the simulator reporting a review-required match for an unknown installed version.
+Screenshot: [watchlist-matching-verification.png](watchlist-matching-verification.png).
+It shows the simulator reporting a review-required match for an unknown installed version.
 
-Live feed availability, real SMTP/webhook delivery and target-environment load are outside this local page/matching check.
+Live feed availability, real SMTP/webhook delivery and target-environment load are
+outside this local page/matching check.

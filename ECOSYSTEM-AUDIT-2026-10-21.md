@@ -5,11 +5,19 @@
 
 # Threat intelligence ecosystem audit and fixes
 
-Reviewed on 21 October 2026. This follow-up audits the current source, Docker topology, ingestion and normalization, correlation, notification outbox, and de-duplication. It includes PostgreSQL-backed tests and small public-provider connectivity checks. It supersedes the outstanding code findings in `THREAT-INTELLIGENCE-AUDIT.md` where described below.
+Reviewed on 21 October 2026. This follow-up audits the current source, Docker topology,
+ingestion and normalization, correlation, notification outbox, and de-duplication. It
+includes PostgreSQL-backed tests and small public-provider connectivity checks. It
+supersedes the outstanding code findings in `THREAT-INTELLIGENCE-AUDIT.md` where
+described below.
 
 ## Current repository re-audit
 
-The latest pass rechecked adapters, source edits, pipeline orchestration, structured correlation, finding reconciliation, notification transport, dispatch accounting, PostgreSQL persistence and Docker topology. Earlier test counts and provider timings below are historical observations from the first pass; the verification in this section is the latest evidence.
+The latest pass rechecked adapters, source edits, pipeline orchestration, structured
+correlation, finding reconciliation, notification transport, dispatch accounting,
+PostgreSQL persistence and Docker topology. Earlier test counts and provider timings
+below are historical observations from the first pass; the verification in this section
+is the latest evidence.
 
 ### Additional verified defects and fixes
 
