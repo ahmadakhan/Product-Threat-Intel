@@ -373,22 +373,25 @@
 .ml-logs .ml-logs-table th:nth-child(1),
 .system-logs .system-logs-table th:nth-child(1)
 {
-  width: auto;
+  width: 80px;
 }
 .ml-logs .ml-logs-table th:nth-child(2),
 .system-logs .system-logs-table th:nth-child(2)
 {
-  width: 115px;
+  width: auto;
 }
-.ml-logs .ml-logs-table th:nth-child(3),
+.ml-logs .ml-logs-table th:nth-child(3)
+{
+  width: 190px;
+}
 .system-logs .system-logs-table th:nth-child(3)
 {
-  width: 150px;
+  width: 220px;
 }
 .ml-logs .ml-logs-table th:nth-child(4),
 .system-logs .system-logs-table th:nth-child(4)
 {
-  width: 106px;
+  width: 138px;
 }
 .ml-logs-code,
 .system-logs-code
@@ -469,6 +472,51 @@
   font-family: ui-monospace, monospace;
   font-size: 10px;
   overflow-wrap: anywhere;
+}
+.ml-logs-unlinked,
+.system-logs-unlinked
+{
+  display: block;
+  color: var(--ui-muted);
+  font-size: 11px;
+}
+.ml-logs-correlation-cell
+{
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.system-logs-context-cell
+{
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.system-logs-origin,
+.system-logs-correlation
+{
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 6px;
+  color: var(--ui-text);
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.system-logs-origin > span,
+.system-logs-correlation > span
+{
+  flex-shrink: 0;
+  color: var(--ui-muted);
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.system-logs-origin
+{
+  color: var(--ui-accent);
 }
 .ml-logs-error-preview,
 .system-logs-error-preview
@@ -613,16 +661,14 @@
   line-height: 1.8;
 }
 @media (max-width: 1100px){
-  .ml-logs .ml-logs-table th:nth-child(2) {
-    width: 95px;
-  }
   .ml-logs .ml-logs-table th:nth-child(3) {
-    width: 125px;
+    width: 170px;
   }
-  .ml-logs .ml-logs-table th:nth-child(4) {
-    width: 85px;
+  .system-logs .system-logs-table th:nth-child(3) {
+    width: 195px;
   }
-  .ml-logs .ml-logs-table :is(th, td) {
+  .ml-logs .ml-logs-table :is(th, td),
+  .system-logs .system-logs-table :is(th, td) {
     padding-inline: 16px;
   }
 }
@@ -659,26 +705,32 @@
     padding: 18px;
     gap: 12px;
   }
-  .ml-logs .ml-logs-table {
+  .ml-logs .ml-logs-table,
+  .system-logs .system-logs-table {
     display: block;
   }
-  .ml-logs .ml-logs-table thead {
+  .ml-logs .ml-logs-table thead,
+  .system-logs .system-logs-table thead {
     display: none;
   }
-  .ml-logs .ml-logs-table tbody {
+  .ml-logs .ml-logs-table tbody,
+  .system-logs .system-logs-table tbody {
     display: block;
   }
-  .ml-logs .ml-logs-table tr {
+  .ml-logs .ml-logs-table tr,
+  .system-logs .system-logs-table tr {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     padding: 18px;
     gap: 12px 8px;
     border-bottom: 1px solid var(--ui-divider);
   }
-  .ml-logs .ml-logs-table tr:last-child {
+  .ml-logs .ml-logs-table tr:last-child,
+  .system-logs .system-logs-table tr:last-child {
     border-bottom: 0;
   }
-  .ml-logs .ml-logs-table td {
+  .ml-logs .ml-logs-table td,
+  .system-logs .system-logs-table td {
     border: 0;
     padding: 0;
   }
@@ -688,12 +740,12 @@
   }
   .ml-logs-level-cell,
   .system-logs-level-cell {
-    grid-column: 2;
+    grid-column: 1;
     grid-row: 2;
   }
   .ml-logs-time-cell,
   .system-logs-time-cell {
-    grid-column: 1;
+    grid-column: 2;
     grid-row: 2;
   }
   .ml-logs-time-cell time {
@@ -701,17 +753,30 @@
     flex-wrap: wrap;
     gap: 4px 9px;
   }
-  .ml-logs-detail-cell,
-  .system-logs-detail-cell {
+  .ml-logs-correlation-cell,
+  .system-logs-context-cell {
     grid-column: 1 / -1;
+    grid-row: 3;
+    padding-top: 8px !important;
+    border-top: 1px solid var(--ui-divider) !important;
   }
-  .ml-logs .ml-logs-table .ml-logs-detail,
-  .system-logs .system-logs-table .system-logs-detail {
-    justify-content: center;
+  .system-logs-context > div {
     width: 100%;
-    min-height: 36px;
-    border: 1px solid var(--ui-border);
-    border-radius: 7px;
+  }
+  .system-logs-context dd {
+    max-width: 100%;
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
+  }
+  .system-logs-origin,
+  .system-logs-correlation {
+    margin-bottom: 8px;
+  }
+  .system-logs .system-logs-table th,
+  .ml-logs .ml-logs-table th {
+    width: auto;
   }
   .ml-logs-footer,
   .system-logs-footer {

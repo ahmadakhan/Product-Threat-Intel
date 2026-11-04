@@ -482,10 +482,10 @@ const AuditTrailView: React.FC = () => {
             </caption>
             <thead>
               <tr>
-                <th scope="col">Action &amp; resource</th>
-                <th scope="col">Outcome &amp; level</th>
-                <th scope="col">Actor &amp; source</th>
                 <th scope="col">Timestamp ({displayTimezone})</th>
+                <th scope="col">Action &amp; resource details</th>
+                <th scope="col">Actor &amp; source</th>
+                <th scope="col">Outcome &amp; level</th>
               </tr>
             </thead>
                     <tbody>
@@ -522,6 +522,11 @@ const AuditTrailView: React.FC = () => {
                             className="cursor-pointer transition hover:bg-zinc-800/25 light:hover:bg-zinc-50"
                           >
                     <td>
+                      <time dateTime={log.timestamp} title={log.timestamp} className="audit-timestamp">
+                        {formatAuditTimestamp(log.timestamp)}
+                      </time>
+                    </td>
+                    <td>
                       <button
                         type="button"
                         className="audit-event-link"
@@ -544,13 +549,6 @@ const AuditTrailView: React.FC = () => {
                       )}
                     </td>
                     <td>
-                      <div className="audit-classification">
-                        {renderOutcome(log)}
-                        <span className="audit-category">{auditCategory(log.category)}</span>
-                        {auditLevel(log.level)}
-                      </div>
-                    </td>
-                    <td>
                       <div className="audit-actor">
                         <UserRound size={14} aria-hidden="true" />
                         <span title={log.actor}>{log.actor || 'System'}</span>
@@ -560,9 +558,11 @@ const AuditTrailView: React.FC = () => {
                       </p>
                     </td>
                     <td>
-                      <time dateTime={log.timestamp} title={log.timestamp} className="audit-timestamp">
-                        {formatAuditTimestamp(log.timestamp)}
-                      </time>
+                      <div className="audit-classification">
+                        {renderOutcome(log)}
+                        <span className="audit-category">{auditCategory(log.category)}</span>
+                        {auditLevel(log.level)}
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -716,6 +716,7 @@ export const OperationalLogsView: React.FC = () => {
       setError('');
       fetchEvents(
         new URLSearchParams({
+          scope: 'OPERATIONS',
           ...(category && { category }),
           ...(level && { level }),
           ...(query && { q: query }),
@@ -753,7 +754,7 @@ export const OperationalLogsView: React.FC = () => {
   return (
     <div className="logs-workspace space-y-6">
       <PageHeading page="logs">
-        Trace workspace activity, investigate operational events, and verify your retained audit records.
+        Investigate operational activity, inspect ML and system diagnostics, and verify retained audit records.
       </PageHeading>
       <div
         onKeyDown={(event) => {
@@ -771,7 +772,7 @@ export const OperationalLogsView: React.FC = () => {
         }}
         className="investigation-tabs inline-flex rounded-xl border border-zinc-800 bg-zinc-950/70 p-1 light:border-zinc-200 light:bg-white"
         role="tablist"
-        aria-label="System logs views"
+        aria-label="Log views"
       >
         <button
           role="tab"
@@ -883,7 +884,7 @@ export const OperationalLogsView: React.FC = () => {
                   }}
                 >
                   <option value="">All categories</option>
-                  {EVENT_CATEGORIES.map((item) => (
+                  {EVENT_CATEGORIES.filter((item) => item !== 'ML' && item !== 'SYSTEM').map((item) => (
                     <option key={item}>{item}</option>
                   ))}
                 </select>
@@ -983,17 +984,17 @@ export const OperationalLogsView: React.FC = () => {
             {events.length > 0 && (
               <div className="ui-panel audit-entries-panel overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white">
                 <div className="audit-desktop-table overflow-x-auto">
-                  <table className="audit-actions-table w-full text-left text-xs">
+                  <table className="audit-actions-table operational-events-table w-full text-left text-xs">
                     <caption className="sr-only">
                       Operational events, newest first. All timestamps are in {timezoneLabel(settings.timezone)}.
                     </caption>
                     <thead>
                       <tr>
                         <th scope="col">Timestamp ({timezoneLabel(settings.timezone)})</th>
-                        <th scope="col">Category</th>
                         <th scope="col">Level</th>
-                        <th scope="col">Code</th>
-                        <th scope="col">Message & Error Details</th>
+                        <th scope="col">Message &amp; error details</th>
+                        <th scope="col">Category</th>
+                        <th scope="col">Event code</th>
                         <th scope="col">Execution ID</th>
                       </tr>
                     </thead>
@@ -1004,7 +1005,7 @@ export const OperationalLogsView: React.FC = () => {
                           onClick={() => setSelectedEvent(event)}
                           className="cursor-pointer transition hover:bg-zinc-800/25 light:hover:bg-zinc-50"
                         >
-                          <td className="px-4 py-3.5 align-top text-[11px] leading-tight text-zinc-400 light:text-zinc-600">
+                          <td data-label={`Timestamp · ${timezoneLabel(settings.timezone)}`} className="operational-event-timestamp px-4 py-3.5 align-top text-[11px] leading-tight text-zinc-400 light:text-zinc-600">
                             {/* Two lines, not one nowrap line: at the narrow
                                 column width the single-line form clipped the
                                 value ("Oct 25, 2026, 9:"). */}
@@ -1016,12 +1017,7 @@ export const OperationalLogsView: React.FC = () => {
                               {timezoneLabel(settings.timezone)}
                             </div>
                           </td>
-                          <td className="px-4 py-3.5 align-top text-[11px] text-zinc-300 light:text-zinc-700">
-                            <span className="inline-block max-w-full truncate rounded-md border-zinc-700/70 bg-zinc-800/60 px-2 py-1 light:border-zinc-200 light:bg-zinc-100">
-                              {event.category}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3.5">
+                          <td data-label="Level" className="operational-event-level px-4 py-3.5">
                             <span
                               className={`inline-flex rounded-full border px-2 py-1 text-[10px] font-semibold ${
                                 event.level === 'ERROR'
@@ -1034,33 +1030,27 @@ export const OperationalLogsView: React.FC = () => {
                               {event.level}
                             </span>
                           </td>
-                          <td className="px-4 py-3.5 font-mono text-[11px] text-zinc-300 light:text-zinc-700">
-                            <span className="rounded-md bg-zinc-800/70 px-1.5 py-1 light:bg-zinc-100">
-                              <button
-                                type="button"
-                                className="text-left underline decoration-dotted underline-offset-4 break-all"
-                                aria-label={`View event details: ${event.code}`}
-                                onClick={() => setSelectedEvent(event)}
-                              >
-                                {event.code}
-                              </button>
-                            </span>
-                          </td>
-                          <td className="max-w-xs px-4 py-3.5 font-sans">
+                          <td data-label="Message & error details" className="operational-event-message-cell px-4 py-3.5 font-sans">
                             <div className="text-xs font-semibold text-zinc-200 light:text-zinc-900">
                               {event.message}
                             </div>
                             {event.level === 'ERROR' && event.context?.error !== undefined && (
-                              <div className="mt-1 line-clamp-1 font-mono text-[10px] text-rose-300 light:text-rose-700">
+                              <div className="operational-event-error mt-1 font-mono text-[10px] text-rose-300 light:text-rose-700">
                                 {
                                   (typeof event.context.error === 'object'
                                     ? formatEventContext(event.context.error as Record<string, unknown>)
                                     : String(event.context.error)
-                                  ).split('\n')[0]
+                                  ).split('\n').slice(0, 2).join(' · ')
                                 }
                               </div>
                             )}
-                            <div className="mt-1.5 flex-wrap items-center gap-1.5">
+                            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                              {event.context?.errorCode !== undefined && (
+                                <span className="operational-event-reference">Error {String(event.context.errorCode)}</span>
+                              )}
+                              {event.context?.reference !== undefined && (
+                                <span className="operational-event-reference">Ref {String(event.context.reference)}</span>
+                              )}
                               {event.totalDatabaseTimeMs !== undefined && (
                                 <span className="rounded border-zinc-700/60 bg-zinc-800/50 px-1.5 py-0.5 font-mono text-[9px] text-zinc-400 light:border-zinc-200 light:bg-zinc-100 light:text-zinc-600">
                                   DB {event.totalDatabaseTimeMs.toFixed(0)} ms
@@ -1072,8 +1062,8 @@ export const OperationalLogsView: React.FC = () => {
                                 </span>
                               )}
                               {event.trackingId && (
-                                <span className="rounded border-teal-500/20 bg-teal-500/10 px-1.5 py-0.5 font-mono text-[9px] text-teal-300 light:text-teal-700">
-                                  tracked
+                                <span className="rounded border-teal-500/20 bg-teal-500/10 px-1.5 py-0.5 font-mono text-[9px] text-teal-300 light:text-teal-700" title={event.trackingId}>
+                                  Trace {event.trackingId.slice(0, 8)}
                                 </span>
                               )}
                               {Object.keys(event.context ?? {}).length > 0 && (
@@ -1084,7 +1074,22 @@ export const OperationalLogsView: React.FC = () => {
                               )}
                             </div>
                           </td>
-                          <td className="px-4 py-3.5 align-top font-mono text-[11px] text-zinc-400 light:text-zinc-600">
+                          <td data-label="Category" className="operational-event-category px-4 py-3.5 align-top text-[11px] text-zinc-300 light:text-zinc-700">
+                            <span className="inline-block max-w-full rounded-md border-zinc-700/70 bg-zinc-800/60 px-2 py-1 light:border-zinc-200 light:bg-zinc-100">
+                              {event.category}
+                            </span>
+                          </td>
+                          <td data-label="Event code" className="operational-event-code px-4 py-3.5 font-mono text-[11px] text-zinc-300 light:text-zinc-700">
+                            <button
+                              type="button"
+                              className="text-left underline decoration-dotted underline-offset-4 break-all"
+                              aria-label={`View event details: ${event.code}`}
+                              onClick={() => setSelectedEvent(event)}
+                            >
+                              {event.code}
+                            </button>
+                          </td>
+                          <td data-label="Execution ID" className="operational-event-execution px-4 py-3.5 align-top font-mono text-[11px] text-zinc-400 light:text-zinc-600">
                             {event.runId ? (
                               /* min-w-0 + truncate keeps a UUID inside its cell;
                                  a bare inline-flex row previously overran the

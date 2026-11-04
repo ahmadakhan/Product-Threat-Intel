@@ -23,18 +23,15 @@ import './logs-view.css';
 function contextPreview(event: OperationalEvent) {
   const context = event.context || {};
   const priority = [
-    'source',
-    'container',
-    'host',
+    'httpStatus',
+    'method',
+    'route',
+    'path',
     'database',
     'table',
-    'query',
-    'stack',
-    'traceId',
-    'connection',
     'durationMs',
-    'error',
-    'message',
+    'connection',
+    'reference',
   ];
   return [...new Set([...priority, ...Object.keys(context)])]
     .filter(
@@ -42,13 +39,43 @@ function contextPreview(event: OperationalEvent) {
         context[key] !== undefined &&
         context[key] !== null &&
         ['string', 'number', 'boolean'].includes(typeof context[key]) &&
-        !['timestamp'].includes(key),
+        ![
+          'timestamp', 'error', 'stack', 'query', 'subsystem', 'component', 'service',
+          'source', 'runtime', 'container', 'host', 'traceId', 'requestId',
+        ].includes(key),
     )
-    .slice(0, 3)
+    .slice(0, 5)
     .map((key) => ({
       label: key.charAt(0).toUpperCase() + key.slice(1).replace(/([A-Z])/g, ' $1').trim(),
       value: typeof context[key] === 'boolean' ? (context[key] ? 'Yes' : 'No') : String(context[key]),
     }));
+}
+
+function runtimeSource(event: OperationalEvent) {
+  const context = event.context || {};
+  const key = ['subsystem', 'component', 'service', 'source', 'runtime', 'container', 'host']
+    .find((candidate) => {
+      const value = context[candidate];
+      return ['string', 'number'].includes(typeof value) && String(value).trim() !== '';
+    });
+  return key ? { label: key.charAt(0).toUpperCase() + key.slice(1), value: String(context[key]) } : null;
+}
+
+function systemCorrelations(event: OperationalEvent) {
+  const context = event.context || {};
+  const traceId = event.trackingId ||
+    (['string', 'number'].includes(typeof context.traceId) ? String(context.traceId) : '');
+  return [
+    event.runId && { label: 'Run', value: event.runId },
+    traceId && {
+      label: 'Trace',
+      value: traceId,
+    },
+    ['string', 'number'].includes(typeof context.requestId) && {
+      label: 'Request',
+      value: String(context.requestId),
+    },
+  ].filter((item): item is { label: string; value: string } => Boolean(item));
 }
 
 export const SystemLogsView: React.FC = () => {
@@ -285,25 +312,32 @@ export const SystemLogsView: React.FC = () => {
         )}
         {events.length > 0 && (
           <table className="system-logs-table">
+            <caption className="sr-only">System log events with failure details, subsystem sources, trace correlations and local timestamps.</caption>
             <thead>
               <tr>
-                <th scope="col">Source & Details</th>
                 <th scope="col">Level</th>
+                <th scope="col">Message &amp; failure details</th>
+                <th scope="col">Subsystem &amp; trace correlation</th>
                 <th scope="col">Recorded</th>
-                <th scope="col">
-                  <span className="sr-only">Details</span>
-                </th>
               </tr>
             </thead>
             <tbody>
               {events.map((event) => {
                 const preview = contextPreview(event);
+                const source = runtimeSource(event);
+                const correlations = systemCorrelations(event);
                 return (
                   <tr
                     key={event.id}
                     onClick={() => setSelectedEvent(event)}
                     className="cursor-pointer"
                   >
+                    <td className="system-logs-level-cell">
+                      <span className={`system-logs-level is-${event.level.toLowerCase()}`}>
+                        <span aria-hidden="true" />
+                        {event.level === 'INFO' ? 'Info' : event.level === 'WARNING' ? 'Warning' : 'Error'}
+                      </span>
+                    </td>
                     <td className="system-logs-event-cell">
                       <code className="system-logs-code">{event.code}</code>
                       <button
@@ -314,47 +348,45 @@ export const SystemLogsView: React.FC = () => {
                         {event.message}
                         <ChevronRight size={15} aria-hidden="true" />
                       </button>
-                      {preview.length > 0 && (
-                        <dl className="system-logs-context">
-                          {preview.map((item) => (
-                            <div key={item.label}>
-                              <dt>{item.label}</dt>
-                              <dd>{item.value}</dd>
-                            </div>
-                          ))}
-                        </dl>
-                      )}
                       {event.level === 'ERROR' && event.context?.error !== undefined && (
-                        <p className="system-logs-error-preview">
+                        <p className="system-logs-error-preview" title={String(event.context.error)}>
                           {typeof event.context.error === 'string'
                             ? event.context.error
                             : 'Error details available'}
                         </p>
                       )}
-                      {event.runId && <span className="system-logs-run">Run {event.runId}</span>}
                     </td>
-                    <td className="system-logs-level-cell">
-                      <span className={`system-logs-level is-${event.level.toLowerCase()}`}>
-                        <span aria-hidden="true" />
-                        {event.level === 'INFO' ? 'Info' : event.level === 'WARNING' ? 'Warning' : 'Error'}
-                      </span>
+                    <td className="system-logs-context-cell">
+                      {source && (
+                        <span className="system-logs-origin" title={`${source.label}: ${source.value}`}>
+                          <span>{source.label}</span>
+                          {source.value}
+                        </span>
+                      )}
+                      {correlations.map((item) => (
+                        <span className="system-logs-correlation" key={item.label} title={item.value}>
+                          <span>{item.label}</span>
+                          {item.value}
+                        </span>
+                      ))}
+                      {preview.length > 0 ? (
+                        <dl className="system-logs-context">
+                          {preview.map((item) => (
+                            <div key={item.label}>
+                              <dt>{item.label}</dt>
+                              <dd title={item.value}>{item.value}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      ) : !source && correlations.length === 0 ? (
+                        <span className="system-logs-unlinked">No runtime context recorded</span>
+                      ) : null}
                     </td>
                     <td className="system-logs-time-cell">
                       <time dateTime={event.timestamp} title={event.timestamp}>
                         {formatDate(event.timestamp, settings.timezone)}
                         <span>{formatTime(event.timestamp, settings.timezone)}</span>
                       </time>
-                    </td>
-                    <td className="system-logs-detail-cell">
-                      <button
-                        type="button"
-                        className="system-logs-detail"
-                        aria-label={`View details: ${event.message}`}
-                        onClick={() => setSelectedEvent(event)}
-                      >
-                        Details
-                        <ChevronRight size={14} aria-hidden="true" />
-                      </button>
                     </td>
                   </tr>
                 );

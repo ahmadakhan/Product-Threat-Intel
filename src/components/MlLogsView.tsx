@@ -40,7 +40,7 @@ function contextPreview(event: OperationalEvent) {
         ['string', 'number', 'boolean'].includes(typeof context[key]) &&
         !['error', 'stack', 'timestamp'].includes(key),
     )
-    .slice(0, 3)
+    .slice(0, 5)
     .map((key) => ({
       label: humanizeEventKey(key),
       value: typeof context[key] === 'boolean' ? (context[key] ? 'Yes' : 'No') : String(context[key]),
@@ -281,14 +281,13 @@ export const MlLogsView: React.FC = () => {
         )}
         {events.length > 0 && (
           <table className="ml-logs-table">
+            <caption className="sr-only">ML events with model details, run and trace correlations, and local timestamps.</caption>
             <thead>
               <tr>
-                <th scope="col">Event</th>
                 <th scope="col">Level</th>
+                <th scope="col">Model activity &amp; details</th>
+                <th scope="col">Run &amp; trace correlation</th>
                 <th scope="col">Recorded</th>
-                <th scope="col">
-                  <span className="sr-only">Details</span>
-                </th>
               </tr>
             </thead>
             <tbody>
@@ -300,6 +299,12 @@ export const MlLogsView: React.FC = () => {
                     onClick={() => setSelectedEvent(event)}
                     className="cursor-pointer"
                   >
+                    <td className="ml-logs-level-cell">
+                      <span className={`ml-logs-level is-${event.level.toLowerCase()}`}>
+                        <span aria-hidden="true" />
+                        {event.level === 'INFO' ? 'Info' : event.level === 'WARNING' ? 'Warning' : 'Error'}
+                      </span>
+                    </td>
                     <td className="ml-logs-event-cell">
                       <code className="ml-logs-code">{event.code}</code>
                       <button
@@ -321,36 +326,31 @@ export const MlLogsView: React.FC = () => {
                         </dl>
                       )}
                       {event.level === 'ERROR' && event.context?.error !== undefined && (
-                        <p className="ml-logs-error-preview">
+                        <p className="ml-logs-error-preview" title={String(event.context.error)}>
                           {typeof event.context.error === 'string'
                             ? event.context.error
                             : 'Error details available'}
                         </p>
                       )}
-                      {event.runId && <span className="ml-logs-run">Run {event.runId}</span>}
                     </td>
-                    <td className="ml-logs-level-cell">
-                      <span className={`ml-logs-level is-${event.level.toLowerCase()}`}>
-                        <span aria-hidden="true" />
-                        {event.level === 'INFO' ? 'Info' : event.level === 'WARNING' ? 'Warning' : 'Error'}
-                      </span>
+                    <td className="ml-logs-correlation-cell">
+                      {event.runId ? (
+                        <span className="ml-logs-run" title={event.runId}>Run {event.runId}</span>
+                      ) : (
+                        <span className="ml-logs-unlinked">No run reference</span>
+                      )}
+                      {event.trackingId && (
+                        <span className="ml-logs-run" title={event.trackingId}>Trace {event.trackingId}</span>
+                      )}
+                      {event.sequence !== undefined && (
+                        <span className="ml-logs-run">Worker sequence #{event.sequence}</span>
+                      )}
                     </td>
                     <td className="ml-logs-time-cell">
                       <time dateTime={event.timestamp} title={event.timestamp}>
                         {formatDate(event.timestamp, settings.timezone)}
                         <span>{formatTime(event.timestamp, settings.timezone)}</span>
                       </time>
-                    </td>
-                    <td className="ml-logs-detail-cell">
-                      <button
-                        type="button"
-                        className="ml-logs-detail"
-                        aria-label={`View details: ${event.message}`}
-                        onClick={() => setSelectedEvent(event)}
-                      >
-                        Details
-                        <ChevronRight size={14} aria-hidden="true" />
-                      </button>
                     </td>
                   </tr>
                 );
