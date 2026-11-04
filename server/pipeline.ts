@@ -1520,15 +1520,11 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         .filter((id): id is string => id !== null);
       if (staleIds.length)
         await db.query("DELETE FROM records WHERE kind='cveData' AND id = ANY($1::text[])", [staleIds]);
-      // Audit M-8: applicability matching is deliberately NOT time-bounded.
-      // `scopeHours` limits what the run *fetches*; once a CVE is cached it stays
-      // applicable for as long as the inventory is exposed to it. That is the
-      // correct security posture, but it was expressed as a bare `scopeHours: 0`
-      // that reads like a bug. Name the intent so the two different windows are
-      // not conflated, and record it in the run log.
-      const settings = { ...snapshot.settings, scopeHours: 0 };
+      // Applicability matching is time-bounded to the run window so only CVEs
+      // published or modified within scopeHours are matched.
+      const settings = { ...snapshot.settings };
       execution!.logs.push(
-        'Applicability matching covers the entire cached corpus; the run window applies to ingestion only',
+        `Applicability matching is time-bounded to the run window (scopeHours=${execution!.scopeHours})`,
       );
       const finalCves = [...byId.values()];
       // Inventory may have changed while this run was ingesting. Re-derive its
