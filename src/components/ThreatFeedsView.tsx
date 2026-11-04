@@ -53,6 +53,7 @@ export const ThreatFeedsView: React.FC = () => {
       feed.type.toLowerCase().includes(searchTerm.toLowerCase()) ||
       feed.url.toLowerCase().includes(searchTerm.toLowerCase()),
   );
+  const activeFeedCount = feeds.filter((feed) => feed.enabled).length;
 
   const handleTest = async (feedId: string) => {
     const feed = feeds.find((f) => f.id === feedId);
@@ -181,7 +182,7 @@ export const ThreatFeedsView: React.FC = () => {
         setFormError('Failed to update feed. Please check the form values and try again.');
       }
     } else {
-      const ok = await addFeed({
+      const result = await addFeed({
         name: formData.name,
         type: formData.type,
         url: formData.url,
@@ -193,12 +194,10 @@ export const ThreatFeedsView: React.FC = () => {
         enabled: formData.enabled,
         vendorSeed: false,
       });
-      if (ok) {
+      if (result?.success) {
         setShowAddModal(false);
       } else {
-        setFormError(
-          'Failed SSRF validation: URL must not point to private/loopback IP address or include credentials.',
-        );
+        setFormError(result?.error || 'Failed to add feed. Check the URL, credentials, and server egress allowlist.');
       }
     }
   };
@@ -262,7 +261,7 @@ export const ThreatFeedsView: React.FC = () => {
           <div className="flex items-center space-x-1.5 text-emerald-400">
             <CheckCircle2 className="w-3.5 h-3.5" />
             <span className="text-zinc-300 dark:text-zinc-300 light:text-zinc-700">
-              {feeds.filter((f) => f.enabled).length} Active Feeds
+              {feeds.length} Total Feeds / {activeFeedCount} Active Feeds
             </span>
           </div>
           <div className="flex items-center gap-1.5 text-zinc-400 dark:text-zinc-400 light:text-zinc-600">
@@ -540,6 +539,13 @@ export const ThreatFeedsView: React.FC = () => {
                         ...(type === 'OPENCVE_API' || type === 'VULNCHECK_KEV'
                           ? { authType: 'BEARER' as FeedAuthType }
                           : {}),
+                        ...(type === 'OTX_API'
+                          ? {
+                              url: 'https://otx.alienvault.com/api/v1/pulses/subscribed/',
+                              authType: 'API_KEY' as FeedAuthType,
+                              rateLimitPerMin: 60,
+                            }
+                          : {}),
                       });
                     }}
                     className="w-full bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-xl px-3 py-2 text-xs text-zinc-200 dark:text-zinc-200 light:text-zinc-800 font-mono focus:border-zinc-600 focus:outline-none"
@@ -551,6 +557,7 @@ export const ThreatFeedsView: React.FC = () => {
                     <option value="EPSS_API">FIRST EPSS API</option>
                     <option value="OPENCVE_API">OpenCVE API v2 (Bearer token)</option>
                     <option value="VULNCHECK_KEV">VulnCheck KEV (Bearer token)</option>
+                    <option value="OTX_API">AlienVault OTX subscribed Pulses (API key)</option>
                     <option value="RSS_ATOM">RSS / Atom news and advisory evidence</option>
                   </select>
                 </div>

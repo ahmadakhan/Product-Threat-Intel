@@ -1,7 +1,9 @@
 import type { PoolClient } from './db.ts';
-import { list, put } from './db.ts';
+import { get, list, put, remove } from './db.ts';
 import type { ThreatFeed } from '../src/types/index.ts';
 import { RECOMMENDED_FEEDS, RECOMMENDED_FEED_URLS } from './recommendedFeeds.ts';
+
+const RETIRED_DUPLICATE_FEEDS = [{ duplicateId: 'feed-darkreading-full', canonicalId: 'feed-darkreading' }];
 
 export async function reconcileRecommendedFeeds(db: PoolClient, bootstrap = false): Promise<void> {
   const existing = await list<ThreatFeed>(db, 'feeds');
@@ -32,5 +34,22 @@ export async function reconcileRecommendedFeeds(db: PoolClient, bootstrap = fals
       consecutiveFailures: 0,
       circuitOpenUntil: null,
     });
+  }
+  for (const { duplicateId, canonicalId } of RETIRED_DUPLICATE_FEEDS) {
+    const [duplicate, canonical] = await Promise.all([
+      get<ThreatFeed>(db, 'feeds', duplicateId),
+      get<ThreatFeed>(db, 'feeds', canonicalId),
+    ]);
+    if (
+      !duplicate?.vendorSeed ||
+      !canonical?.vendorSeed ||
+      duplicate.url !== 'https://www.darkreading.com/rss.xml' ||
+      canonical.url !== duplicate.url
+    )
+      continue;
+    if (duplicate.enabled && !canonical.enabled) {
+      await put(db, 'feeds', canonicalId, { ...canonical, enabled: true });
+    }
+    await remove(db, 'feeds', duplicateId);
   }
 }

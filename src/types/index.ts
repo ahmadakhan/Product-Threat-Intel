@@ -39,6 +39,9 @@ export const FEED_TYPES = [
   'EPSS_API',
   'OPENCVE_API',
   'VULNCHECK_KEV',
+  'OTX_API',
+  'OSV_API',
+  'GITHUB_ADVISORIES',
   'RSS_ATOM',
   'GOOGLE_CSE',
 ] as const;

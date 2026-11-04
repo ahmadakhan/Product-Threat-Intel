@@ -903,6 +903,13 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
               knownCveModifiedAt,
               knownWithdrawalAt,
               knownCveContent: canonicalCache,
+              ...(feed.type === 'OSV_API'
+                ? {
+                    targetPurls: inventory
+                      .filter((item) => item.active)
+                      .flatMap((item) => item.purls || []),
+                  }
+                : {}),
             };
             // A validator is usable only together with its complete source snapshot.
             let result = await ingestFeed(

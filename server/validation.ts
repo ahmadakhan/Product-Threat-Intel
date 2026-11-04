@@ -55,6 +55,34 @@ export const feedSchema = z
       message: 'MITRE CVE requires the official CVE List deltaLog.json URL and no authentication',
       path: ['url'],
     },
+  )
+  .refine(
+    (feed) =>
+      feed.type !== 'OTX_API' ||
+      (feed.authType === 'API_KEY' &&
+        feed.url === 'https://otx.alienvault.com/api/v1/pulses/subscribed/'),
+    {
+      message: 'AlienVault OTX requires its subscribed-pulses API endpoint and an API key',
+      path: ['url'],
+    },
+  )
+  .refine(
+    (feed) =>
+      feed.type !== 'OSV_API' ||
+      (feed.authType === 'NONE' && feed.url === 'https://api.osv.dev/v1/querybatch'),
+    {
+      message: 'OSV requires the official querybatch API endpoint without authentication',
+      path: ['url'],
+    },
+  )
+  .refine(
+    (feed) =>
+      feed.type !== 'GITHUB_ADVISORIES' ||
+      (feed.authType === 'NONE' && feed.url === 'https://api.github.com/advisories'),
+    {
+      message: 'GitHub advisories require the official global advisories endpoint without authentication',
+      path: ['url'],
+    },
   );
 /** Bulk import shape: adds the stable identifier and the stored sync metadata. */
 export const feedImportSchema = z

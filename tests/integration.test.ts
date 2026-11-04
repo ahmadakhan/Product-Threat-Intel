@@ -545,6 +545,31 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       const seededFeed = (await list<any>(pool, 'feeds')).find((f) => f.name === 'Seeded NVD');
       assert.ok(seededFeed, 'Seeded NVD feed should exist in database');
       assert.equal(
+        (await command('feed.save', {
+          name: 'Duplicate Seeded NVD',
+          type: 'NVD_API',
+          url: 'https://8.8.8.8/nvd#duplicate',
+          authType: 'NONE',
+          rateLimitPerMin: 10,
+          enabled: true,
+        })).status,
+        409,
+        'a second feed must not be added for an existing endpoint',
+      );
+      assert.equal(
+        (await command('feed.import', [{
+          id: 'duplicate-seeded-nvd',
+          name: 'Imported Duplicate NVD',
+          type: 'NVD_API',
+          url: 'https://8.8.8.8/nvd',
+          authType: 'NONE',
+          rateLimitPerMin: 10,
+          enabled: true,
+        }])).status,
+        409,
+        'bulk import must reject endpoint duplicates too',
+      );
+      assert.equal(
         (await command('feed.delete', undefined, seededFeed.id)).status,
         403,
         'vendor-seeded feed should be rejected',
@@ -572,7 +597,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       const nvd = await command('feed.save', {
         name: 'Custom NVD',
         type: 'NVD_API',
-        url: 'https://8.8.8.8/nvd',
+        url: 'https://8.8.8.8/custom-nvd',
         authType: 'NONE',
         rateLimitPerMin: 10,
         enabled: true,

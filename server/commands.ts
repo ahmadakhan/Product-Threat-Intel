@@ -1,5 +1,6 @@
 import { productWildcardCpe } from '../src/utils/registrationCpe.ts';
 import { commandAudit } from './audit.ts';
+import { findDuplicateFeedSource, feedSourceKey } from './feedIdentity.ts';
 import { watchlistIdentity, watchlistDuplicateErrors } from '../shared/watchlistIdentity.ts';
 import { syncCorrelationAsset } from './correlation/inventory.ts';
 import { randomUUID } from 'node:crypto';
@@ -216,8 +217,13 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
     return previous;
   };
   if (action === 'feed.save') {
-    const input = feedSchema.parse(data),
-      old = await checkExisting('feeds');
+    const input = feedSchema.parse(data);
+    if (!(await acquireAdvisoryLock(db, 'feed-source'))) {
+      throw new HttpError(423, 'Resource temporarily unavailable - retry later');
+    }
+    const old = await checkExisting('feeds');
+    const duplicate = findDuplicateFeedSource({ id: newId, url: input.url }, await list<any>(db, 'feeds'));
+    if (duplicate) throw new HttpError(409, 'A feed with this endpoint already exists');
     const sameSource =
       old?.url === input.url &&
       old?.type === input.type &&
@@ -244,6 +250,22 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
     });
   } else if (action === 'feed.import') {
     const input = feedImportSchema.parse(data);
+    if (!(await acquireAdvisoryLock(db, 'feed-source'))) {
+      throw new HttpError(423, 'Resource temporarily unavailable - retry later');
+    }
+    const incomingIds = new Set<string>();
+    const sourceOwners = new Set<string>();
+    const existing = (await list<any>(db, 'feeds')).filter((feed) => !input.some((item) => item.id === feed.id));
+    for (const feed of existing) {
+      sourceOwners.add(feedSourceKey(feed.url));
+    }
+    for (const feed of input) {
+      if (incomingIds.has(feed.id)) throw new HttpError(409, 'Feed import contains duplicate feed IDs');
+      incomingIds.add(feed.id);
+      const key = feedSourceKey(feed.url);
+      if (sourceOwners.has(key)) throw new HttpError(409, 'Feed import contains a duplicate endpoint');
+      sourceOwners.add(key);
+    }
     for (const feed of input) {
       const old = await getForUpdate<any>(db, 'feeds', feed.id);
       const sameSource =

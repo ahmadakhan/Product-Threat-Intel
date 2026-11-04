@@ -34,6 +34,18 @@ test('feed bootstrap is opt-in and URL repair preserves operator intent without 
     assert.equal(repaired?.ssrfValidated, false);
     assert.equal(repaired?.healthStatus, 'UNTESTED');
     assert.equal(repaired?.circuitOpenUntil, null);
+
+    const darkReading = RECOMMENDED_FEEDS.find((feed) => feed.id === 'feed-darkreading');
+    assert.ok(darkReading);
+    await put(pool, 'feeds', darkReading.id, { ...darkReading, enabled: false });
+    await put(pool, 'feeds', 'feed-darkreading-full', {
+      ...darkReading,
+      id: 'feed-darkreading-full',
+      enabled: true,
+    });
+    await transaction(pool, (db) => reconcileRecommendedFeeds(db, false));
+    assert.equal(await get<ThreatFeed>(pool, 'feeds', 'feed-darkreading-full'), undefined);
+    assert.equal((await get<ThreatFeed>(pool, 'feeds', darkReading.id))?.enabled, true);
   } finally {
     await pool.end();
     await control.query(`DROP SCHEMA ${schema} CASCADE`);

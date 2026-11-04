@@ -1,19 +1,31 @@
 /** Provider integrations shown on fresh and existing deployments. */
-export const RECOMMENDED_FEEDS = [
+const recommendedFeedEntries = [
   { id: 'feed-nvd', name: 'NVD CVE API 2.0', type: 'NVD_API' as const,
     url: 'https://services.nvd.nist.gov/rest/json/cves/2.0',
     authType: 'NONE' as const, rateLimitPerMin: 10, enabled: true, vendorSeed: true },
   { id: 'feed-mitre-cve', name: 'MITRE CVE — Official CVE List', type: 'MITRE_CVE' as const,
     url: 'https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/deltaLog.json',
     authType: 'NONE' as const, rateLimitPerMin: 120, enabled: true, vendorSeed: true },
+  { id: 'feed-cisa-kev', name: 'CISA Known Exploited Vulnerabilities', type: 'CISA_KEV' as const,
+    url: 'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json',
+    authType: 'NONE' as const, rateLimitPerMin: 5, enabled: true, vendorSeed: true },
+  { id: 'feed-epss', name: 'FIRST EPSS Exploit Prediction Scores', type: 'EPSS_API' as const,
+    url: 'https://api.first.org/data/v1/epss',
+    authType: 'NONE' as const, rateLimitPerMin: 60, enabled: true, vendorSeed: true },
+  { id: 'feed-osv', name: 'OSV Package Vulnerability Database', type: 'OSV_API' as const,
+    url: 'https://api.osv.dev/v1/querybatch',
+    authType: 'NONE' as const, rateLimitPerMin: 60, enabled: true, vendorSeed: true },
+  { id: 'feed-github-advisories', name: 'GitHub Global Security Advisories', type: 'GITHUB_ADVISORIES' as const,
+    url: 'https://api.github.com/advisories',
+    authType: 'NONE' as const, rateLimitPerMin: 1, enabled: true, vendorSeed: true },
   { id:'feed-bleepingcomputer', name:'BleepingComputer Security News', type:'RSS_ATOM' as const,
-    url:'https://www.bleepingcomputer.com/feed/', authType:'NONE' as const, rateLimitPerMin:1, enabled:false, vendorSeed:true },
+    url:'https://www.bleepingcomputer.com/feed/', authType:'NONE' as const, rateLimitPerMin:5, enabled:false, vendorSeed:true },
   { id:'feed-sans-isc', name:'SANS Internet Storm Center Diary', type:'RSS_ATOM' as const,
-    url:'https://isc.sans.edu/rssfeed.xml', authType:'NONE' as const, rateLimitPerMin:1, enabled:false, vendorSeed:true },
+    url:'https://isc.sans.edu/rssfeed.xml', authType:'NONE' as const, rateLimitPerMin:5, enabled:false, vendorSeed:true },
   { id:'feed-msrc-rss', name:'Microsoft Security Response Center Updates', type:'RSS_ATOM' as const,
-    url:'https://api.msrc.microsoft.com/update-guide/rss', authType:'NONE' as const, rateLimitPerMin:1, enabled:false, vendorSeed:true },
+    url:'https://api.msrc.microsoft.com/update-guide/rss', authType:'NONE' as const, rateLimitPerMin:5, enabled:false, vendorSeed:true },
   { id:'feed-fortiguard-psirt', name:'Fortinet FortiGuard PSIRT Security Advisories', type:'RSS_ATOM' as const,
-    url:'https://filestore.fortinet.com/fortiguard/rss/ir.xml', authType:'NONE' as const, rateLimitPerMin:1, enabled:false, vendorSeed:true },
+    url:'https://filestore.fortinet.com/fortiguard/rss/ir.xml', authType:'NONE' as const, rateLimitPerMin:5, enabled:false, vendorSeed:true },
   {
     id: 'feed-opencve',
     name: 'OpenCVE CVE Enrichment',
@@ -65,13 +77,13 @@ export const RECOMMENDED_FEEDS = [
   { id: 'feed-krebs', name: 'Krebs on Security', type: 'RSS_ATOM' as const,
     url: 'https://krebsonsecurity.com/feed/', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: false, vendorSeed: true },
   { id: 'feed-cisco-psirt', name: 'Cisco Security Advisories', type: 'RSS_ATOM' as const,
-    // The historical endpoints are dead (tools.cisco.com 404) and the
-    // "rss.xml" served by sec.cloudapps.cisco.com is an HTML page wearing an
-    // .xml extension (verified 2026-11): Cisco publishes advisories through an
-    // API, not a syndication feed. Disabled rather than seeded broken; an
-    // operator who needs Cisco data can add an NVD_API feed filtered to Cisco
-    // instead.
-    url: 'https://sec.cloudapps.cisco.com/security/center/rss.xml', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: false, vendorSeed: false },
+    // Cisco PSIRT does not publish a valid RSS/Atom feed. The historical
+    // endpoints are dead (tools.cisco.com 404) and sec.cloudapps.cisco.com/rss.xml
+    // serves HTML, not XML (verified 2026-11). Cisco publishes advisories via
+    // a REST API requiring authentication, not a public syndication feed.
+    // Disabled; operators needing Cisco data should use NVD_API filtered to
+    // vendor=cisco or configure a custom JSON_SEARCH_API feed.
+    url: 'https://sec.cloudapps.cisco.com/security/center/rss.xml', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: false, vendorSeed: false, healthStatus: 'DOWN' as const, errorLog: 'Cisco PSIRT does not provide a valid RSS/Atom feed; endpoint serves HTML. Use NVD_API with vendor filter or custom JSON feed.' },
   { id: 'feed-paloalto-psirt', name: 'Palo Alto Networks Security Advisories', type: 'RSS_ATOM' as const,
     url: 'https://security.paloaltonetworks.com/rss.xml', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: false, vendorSeed: true },
   {
@@ -112,14 +124,10 @@ export const RECOMMENDED_FEEDS = [
     id: 'feed-exploitdb',
     name: 'Exploit-DB Public Exploits',
     type: 'RSS_ATOM' as const,
-    url: 'https://www.exploit-db.com/rss.xml',
-    authType: 'NONE' as const,
-    rateLimitPerMin: 5,
-    enabled: false,
-    vendorSeed: true,
-      // The endpoint returned HTTP 403 to both service and browser user agents
-      // during the 2026-11-04 catalog audit; keep it disabled until access changes.
-  },
+    // Exploit-DB's RSS feed returns HTTP 403 Forbidden to automated user agents
+    // (verified 2026-11). The feed works in browsers but blocks service-to-service
+    // requests. Keep disabled until Exploit-DB changes their access policy.
+    url: 'https://www.exploit-db.com/rss.xml', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: false, vendorSeed: true, healthStatus: 'DOWN' as const, errorLog: 'Exploit-DB RSS returns 403 Forbidden to automated requests; blocks service user agents.' },
   {
     id: 'feed-debian-security',
     name: 'Debian Security Advisories',
@@ -242,52 +250,31 @@ export const RECOMMENDED_FEEDS = [
   },
   {
     id: 'feed-twitter-security',
-    name: 'Twitter Security Announcements',
+    name: 'X (Twitter) Security Announcements',
     type: 'RSS_ATOM' as const,
-    url: 'https://blog.twitter.com/engineering/en_us.atom',
-    authType: 'NONE' as const,
-    rateLimitPerMin: 10,
-    enabled: false,
-    vendorSeed: true,
-      // This URL redirects to blog.x.com, which returned HTTP 404 to both service
-      // and browser user agents during the 2026-11-04 catalog audit.
-  },
+    // X (formerly Twitter) no longer publishes a public RSS/Atom feed for
+    // security announcements. blog.twitter.com/engineering/en_us.atom redirects
+    // to blog.x.com which returns HTTP 404 (verified 2026-11). No machine-readable
+    // security feed is currently available from X.
+    url: 'https://blog.twitter.com/engineering/en_us.atom', authType: 'NONE' as const, rateLimitPerMin: 10, enabled: false, vendorSeed: true, healthStatus: 'DOWN' as const, errorLog: 'X/Twitter no longer provides a public RSS/Atom security feed; endpoint returns 404.' },
   {
     id: 'feed-github-security-advisories',
-    name: 'GitHub Security Advisories',
+    name: 'GitHub Security Blog',
     type: 'RSS_ATOM' as const,
-    // github.com/advisories.atom answers HTTP 406 to non-browser user agents
-    // (verified 2026-11). github.blog/feed/ serves the same advisories as valid
-    // RSS and accepts the service user agent; github.blog is allowlisted.
-    url: 'https://github.blog/feed/',
-    authType: 'NONE' as const,
-    rateLimitPerMin: 5,
-    enabled: false,
-    vendorSeed: true,
-  },
-  {
-    id: 'feed-darkreading-full',
-    name: 'Dark Reading Full RSS Feed',
-    type: 'RSS_ATOM' as const,
-    url: 'https://www.darkreading.com/rss.xml',
-    authType: 'NONE' as const,
-    rateLimitPerMin: 5,
-    enabled: false,
-    vendorSeed: true,
-  },
+    // github.com/advisories.atom returns HTTP 406 to non-browser user agents
+    // (verified 2026-11). github.blog/feed/ serves the same security advisories
+    // as valid RSS and accepts the service user agent; github.blog is allowlisted.
+    // This feed provides advisory announcements, not the full GHSA database.
+    // For programmatic GHSA access, use the GitHub REST/GraphQL API (requires token).
+    url: 'https://github.blog/feed/', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: false, vendorSeed: true, healthStatus: 'UNTESTED' as const, errorLog: 'Uses github.blog RSS (works); for full GHSA database, use GitHub API with authentication.' },
   {
     id: 'feed-forbes-cybersecurity',
     name: 'Forbes Cybersecurity News',
     type: 'RSS_ATOM' as const,
-    // Forbes serves 403 to every non-interactive user agent (verified
-    // 2026-11, both the service UA and a browser UA), so no machine feed can
-    // ever fetch it. Disabled rather than seeded broken.
-    url: 'https://www.forbes.com/sites/cybersecurity/feed/',
-    authType: 'NONE' as const,
-    rateLimitPerMin: 5,
-    enabled: false,
-    vendorSeed: false,
-  },
+    // Forbes serves HTTP 403 to all non-interactive user agents including browsers
+    // (verified 2026-11). No machine-readable feed is accessible. Disabled and
+    // excluded from vendor seeding.
+    url: 'https://www.forbes.com/sites/cybersecurity/feed/', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: false, vendorSeed: false, healthStatus: 'DOWN' as const, errorLog: 'Forbes returns 403 Forbidden to all automated requests; no machine feed available.' },
   {
     id: 'feed-the-registrar-security',
     name: 'The Register Security',
@@ -441,6 +428,19 @@ export const RECOMMENDED_FEEDS = [
     vendorSeed: true,
   },
 ] as const;
+
+const feedsRequiringManualReview = new Set([
+  'feed-twitter-security',
+  'feed-exploitdb',
+]);
+
+export const RECOMMENDED_FEEDS = recommendedFeedEntries.map((feed) => ({
+  ...feed,
+  enabled:
+    feed.enabled ||
+    (feed.authType === 'NONE' && feed.vendorSeed && !feedsRequiringManualReview.has(feed.id)),
+}));
+
 /**
  * The catalog keyed by feed id.
  *

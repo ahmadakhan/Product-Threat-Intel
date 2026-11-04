@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readCookie, requireRole } from '../server/auth.ts';
-import { DEFAULT_EGRESS_HOSTS, loadConfig } from '../server/config.ts';
+import { DEFAULT_EGRESS_HOSTS, feedEgressHosts, loadConfig } from '../server/config.ts';
 import { RECOMMENDED_FEEDS } from '../server/recommendedFeeds.ts';
 import type { Request, Response } from 'express';
 
@@ -79,6 +79,7 @@ test('the default egress allowlist covers every redirect target of the recommend
   // allowlist, so a missing target fails the feed with "not in
   // EGRESS_ALLOWED_HOSTS".
   for (const host of [
+    'api.github.com',
     'www.cisecurity.org',
     'cisecurity.org',
     'feeds.feedburner.com',
@@ -98,6 +99,22 @@ test('every recommended feed URL host is allowlisted', () => {
     const host = new URL(feed.url).hostname.toLowerCase();
     assert.ok(hosts.has(host), `${feed.id} (${host}) must be allowlisted or its first request is blocked`);
   }
+});
+
+test('the official OTX API endpoint augments an explicit allowlist without weakening its other restrictions', () => {
+  const configured = ['example.com'];
+  assert.deepEqual(
+    feedEgressHosts('OTX_API', 'https://otx.alienvault.com/api/v1/pulses/subscribed/', configured),
+    ['example.com', 'otx.alienvault.com'],
+  );
+  assert.deepEqual(
+    feedEgressHosts('OTX_API', 'https://otx.alienvault.com/', configured),
+    configured,
+  );
+  assert.deepEqual(
+    feedEgressHosts('RSS_ATOM', 'https://otx.alienvault.com/api/v1/pulses/subscribed/', configured),
+    configured,
+  );
 });
 
 test('Compose egress defaults match the application and preserve explicit empty deny-all settings', () => {

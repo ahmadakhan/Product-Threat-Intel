@@ -45,6 +45,7 @@ export const DEFAULT_EGRESS_HOSTS = [
   'www.cisa.gov',
   'cisa.gov', // cisa.gov redirects to the www spelling
   'api.first.org',
+  'api.github.com',
   'app.opencve.io',
   'api.vulncheck.com',
   'otx.alienvault.com',

@@ -12,6 +12,13 @@ import { normalizeCveId, sourceCveContentHash, stableJson } from '../src/utils/d
 import { parseCPE23 } from '../src/utils/cpeMatcher.ts';
 import { paceConcurrent } from './concurrency';
 import { cvssSeverity, normalizeCvssVersion, sanitizeCvssVector } from './cvss.ts';
+import { OTX_MAX_PAGES, OTX_PAGE_SIZE, OTX_SUBSCRIBED_PULSES_URL, parseOtxPulsePage, validateOtxNextUrl } from './otx.ts';
+import {
+  GITHUB_ADVISORIES_URL,
+  OSV_QUERY_BATCH_URL,
+  parseGitHubAdvisories,
+  parseOsvVulnerability,
+} from './advisoryFeeds.ts';
 /** NVD asked us to wait (Retry-After > 60s). Defer to the next run; not a failure. */
 export class FeedDeferred extends Error {
   constructor(seconds: number) {
@@ -50,6 +57,8 @@ export interface IngestContext extends IngestionState {
    * that did not advance the source's lastModified timestamp.
    */
   knownCveContent?: ReadonlyMap<string, NormalizedCVE>;
+  /** Active inventory package URLs; OSV queries only versioned package identities. */
+  targetPurls?: readonly string[];
 }
 const CHECKPOINT_OVERLAP_MS = 15 * 60 * 1000;
 export function getIngestionWindowStart(end: Date, scopeHours: number, checkpoint?: string, maxHours = 2880): Date {
@@ -255,21 +264,27 @@ export async function ingestFeed(
     try { secret = decrypt(feed.authSecretKey || '', encryptionKeys(config), `feed:${feed.id}`); }
     catch { throw new Error('Stored feed credentials could not be decrypted; re-enter the secret or restore the original encryption key'); }
     if (!secret) throw new Error('Feed credentials are not configured');
-    if (feed.authType === 'API_KEY') headers.apiKey = secret;
+    if (feed.authType === 'API_KEY') {
+      if (feed.type === 'OTX_API') headers['X-OTX-API-KEY'] = secret;
+      else headers.apiKey = secret;
+    }
     else
       headers.Authorization = `${feed.authType === 'BASIC' ? 'Basic' : 'Bearer'} ${feed.authType === 'BASIC' ? Buffer.from(secret).toString('base64') : secret}`;
   }
   const json = async (
     url: string,
     conditional = true,
-    requestOptions: Omit<RequestOptions, 'headers'> = {},
+    requestOptions: RequestOptions = {},
     retryTransient = false,
-  ): Promise<{ data: any; etag: string | undefined }> => {
+  ): Promise<{ data: any; etag: string | undefined; headers: ResponseData['headers'] }> => {
     if (conditional && feed.etag) headers['If-None-Match'] = feed.etag;
     let response: ResponseData;
     for (let attempt = 0; ; attempt++) {
       try {
-        response = await request(url, { headers, ...requestOptions });
+        response = await request(url, {
+          ...requestOptions,
+          headers: { ...headers, ...requestOptions.headers },
+        });
       } catch (error) {
         const transient = error instanceof Error && (/timed out|timeout|^aborted$|socket hang up|premature close/i.test(error.message) || ['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'UND_ERR_SOCKET'].includes((error as NodeJS.ErrnoException).code || ''));
         if (!retryTransient || !transient || attempt >= 2) throw error;
@@ -297,7 +312,7 @@ export async function ingestFeed(
     }
     if (response.status === 304) {
       if (!conditional || !feed.etag) throw new Error('Feed returned an unexpected conditional response');
-      return { data: undefined, etag: feed.etag };
+      return { data: undefined, etag: feed.etag, headers: response.headers };
     }
     if (response.status !== 200)
       throw new Error(
@@ -307,7 +322,7 @@ export async function ingestFeed(
       );
     const etag = typeof response.headers.etag === 'string' ? response.headers.etag : undefined;
     try {
-      return { data: JSON.parse(response.body), etag };
+      return { data: JSON.parse(response.body), etag, headers: response.headers };
     } catch {
       throw new Error('Feed did not return valid JSON');
     }
@@ -329,6 +344,181 @@ export async function ingestFeed(
     if (response.status !== 200) throw new Error(`RSS/Atom source returned HTTP ${response.status}`);
     const result = parseSyndication(response.body, feed.id, scopeHours);
     return { cves: [], ...result, count: result.articles.length, etag: typeof response.headers.etag === 'string' ? response.headers.etag : undefined };
+  }
+  if (feed.type === 'OTX_API') {
+    if (feed.authType !== 'API_KEY' || feed.url !== OTX_SUBSCRIBED_PULSES_URL)
+      throw new Error('AlienVault OTX requires its subscribed-pulses API endpoint and an API key');
+    const modifiedSince = Date.now() - Math.max(0, scopeHours) * 60 * 60 * 1000;
+    const seenPages = new Set<string>();
+    const articles: IntelligenceArticle[] = [];
+    let pageUrl = new URL(feed.url);
+    pageUrl.searchParams.set('limit', String(OTX_PAGE_SIZE));
+    for (let pageNumber = 0; pageUrl; pageNumber++) {
+      if (pageNumber >= OTX_MAX_PAGES)
+        throw new Error(`OTX ingestion exceeded ${OTX_MAX_PAGES} pages; reduce the ingestion window`);
+      if (seenPages.has(pageUrl.href)) throw new Error('OTX pagination repeated a page');
+      seenPages.add(pageUrl.href);
+      const { data } = await json(pageUrl.href, false, {
+        timeoutMs: (feed.requestTimeoutSeconds || 60) * 1000,
+        socketTimeoutMs: Math.min((feed.requestTimeoutSeconds || 60) * 1000, 30000),
+        maxResponseBytes: 8 * 1024 * 1024,
+      }, true);
+      const page = parseOtxPulsePage(data, feed.id, modifiedSince);
+      articles.push(...page.articles);
+      if (!page.next) break;
+      pageUrl = validateOtxNextUrl(page.next, pageUrl.href);
+      pageUrl.searchParams.set('limit', String(OTX_PAGE_SIZE));
+      await sleep(Math.max(1000, 60000 / feed.rateLimitPerMin));
+    }
+    return { cves: [], articles, count: articles.length };
+  }
+  if (feed.type === 'OSV_API') {
+    if (feed.authType !== 'NONE' || feed.url !== OSV_QUERY_BATCH_URL)
+      throw new Error('OSV requires the official querybatch API endpoint without authentication');
+    const packageUrls = [...new Set(context.targetPurls || [])]
+      .filter((purl) => /^pkg:[a-z0-9.+-]+\/.+@[^/?#]+(?:\?.*)?(?:#.*)?$/i.test(purl))
+      .sort();
+    if (!packageUrls.length)
+      return {
+        cves: [],
+        count: 0,
+        warnings: ['OSV requires versioned package URLs on active inventory items'],
+      };
+    if (packageUrls.length > 5000)
+      throw new Error('OSV inventory query exceeds 5,000 versioned package URLs');
+    const vulnerabilityPackages = new Map<string, Set<string>>();
+    for (let offset = 0; offset < packageUrls.length; offset += 50) {
+      const batch = packageUrls.slice(offset, offset + 50);
+      let pending = batch.map((purl) => ({ purl, pageToken: undefined as string | undefined }));
+      const seenTokens = new Map<string, Set<string>>();
+      for (let pageNumber = 0; pending.length; pageNumber++) {
+        if (pageNumber >= 20) throw new Error('OSV package query exceeded 20 pages');
+        const { data } = await json(OSV_QUERY_BATCH_URL, false, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            queries: pending.map(({ purl, pageToken }) => ({
+              package: { purl },
+              ...(pageToken ? { page_token: pageToken } : {}),
+            })),
+          }),
+          timeoutMs: 60000,
+          socketTimeoutMs: 30000,
+          maxResponseBytes: 8 * 1024 * 1024,
+        }, true);
+        const response = z.object({
+          results: z.array(z.object({
+            vulns: z.array(z.object({
+              id: z.string().min(1).max(200).regex(/^[A-Za-z0-9._-]+$/),
+              modified: z.string(),
+            })).max(1000).optional(),
+            next_page_token: z.string().min(1).max(2000).optional(),
+          }).passthrough()).max(50),
+        }).passthrough().parse(data);
+        if (response.results.length !== pending.length)
+          throw new Error('OSV querybatch result count did not match submitted packages');
+        const next: typeof pending = [];
+        for (let index = 0; index < response.results.length; index++) {
+          const item = response.results[index];
+          for (const vulnerability of item.vulns || []) {
+            if (!Number.isFinite(Date.parse(vulnerability.modified)))
+              throw new Error('OSV querybatch returned an invalid modified timestamp');
+            const purls = vulnerabilityPackages.get(vulnerability.id) || new Set<string>();
+            purls.add(pending[index].purl);
+            vulnerabilityPackages.set(vulnerability.id, purls);
+            if (vulnerabilityPackages.size > 2000)
+              throw new Error('OSV inventory query exceeded 2,000 distinct vulnerabilities');
+          }
+          if (item.next_page_token) {
+            const tokens = seenTokens.get(pending[index].purl) || new Set<string>();
+            if (tokens.has(item.next_page_token)) throw new Error('OSV pagination repeated a page token');
+            tokens.add(item.next_page_token);
+            seenTokens.set(pending[index].purl, tokens);
+            next.push({ purl: pending[index].purl, pageToken: item.next_page_token });
+          }
+        }
+        pending = next;
+        if (pending.length) await sleep(Math.max(1000, 60000 / feed.rateLimitPerMin));
+      }
+      if (offset + 50 < packageUrls.length)
+        await sleep(Math.max(1000, 60000 / feed.rateLimitPerMin));
+    }
+    const ids = [...vulnerabilityPackages.keys()].sort();
+    const parsed = await paceConcurrent(
+      ids,
+      Math.max(1000, 60000 / feed.rateLimitPerMin),
+      6,
+      sleep,
+      async (id) => {
+        const detailUrl = OSV_QUERY_BATCH_URL.replace(
+          /\/querybatch$/,
+          `/vulns/${encodeURIComponent(id)}`,
+        );
+        const { data } = await json(detailUrl, false, {
+          timeoutMs: 30000,
+          socketTimeoutMs: 20000,
+          maxResponseBytes: 4 * 1024 * 1024,
+        }, true);
+        if (data?.id !== id) throw new Error('OSV detail response did not match the requested vulnerability');
+        return parseOsvVulnerability(data, feed.id, [...vulnerabilityPackages.get(id)!]);
+      },
+    );
+    return {
+      cves: parsed.flatMap((result) => result.cves),
+      articles: parsed.flatMap((result) => result.articles),
+      withdrawals: parsed.flatMap((result) => result.withdrawals),
+      count: ids.length,
+    };
+  }
+  if (feed.type === 'GITHUB_ADVISORIES') {
+    if (feed.authType !== 'NONE' || feed.url !== GITHUB_ADVISORIES_URL)
+      throw new Error('GitHub advisories require the official global advisories endpoint without authentication');
+    const { start, end, hasMore } = ingestionWindow(scopeHours, context, Date.now(), 24);
+    const results: ReturnType<typeof parseGitHubAdvisories> = {
+      cves: [],
+      articles: [],
+      withdrawals: [],
+    };
+    let after: string | undefined;
+    for (let page = 1; page <= 5; page++) {
+      const url = new URL(GITHUB_ADVISORIES_URL);
+      url.searchParams.set('modified', `>=${start.toISOString().slice(0, 10)}`);
+      url.searchParams.set('sort', 'updated');
+      url.searchParams.set('direction', 'asc');
+      url.searchParams.set('per_page', '100');
+      if (after) url.searchParams.set('after', after);
+      const { data, headers: responseHeaders } = await json(url.href, false, {
+        headers: {
+          accept: 'application/vnd.github+json',
+          'x-github-api-version': '2022-11-28',
+          'user-agent': 'VulnStream-Enterprise',
+        },
+        timeoutMs: 30000,
+        socketTimeoutMs: 20000,
+        maxResponseBytes: 8 * 1024 * 1024,
+      }, true);
+      const parsed = parseGitHubAdvisories(data, feed.id, start, end);
+      results.cves.push(...parsed.cves);
+      results.articles.push(...parsed.articles);
+      results.withdrawals.push(...parsed.withdrawals);
+      const linkHeader = responseHeaders.link;
+      const link = Array.isArray(linkHeader) ? linkHeader.join(',') : linkHeader || '';
+      const nextLink = /<([^>]+)>;\s*rel="next"/i.exec(link)?.[1];
+      if (!nextLink) break;
+      const nextUrl = new URL(nextLink);
+      if (nextUrl.origin !== url.origin || nextUrl.pathname !== url.pathname)
+        throw new Error('GitHub advisories returned an invalid pagination URL');
+      after = nextUrl.searchParams.get('after') || undefined;
+      if (!after) throw new Error('GitHub advisories returned a next page without a cursor');
+      if (page === 5)
+        throw new Error('GitHub advisories exceed the five-page ingestion bound; retry with a narrower window');
+      await sleep(Math.max(1000, 60000 / feed.rateLimitPerMin));
+    }
+    return {
+      ...results,
+      count: results.cves.length + results.articles.length + results.withdrawals.length,
+      syncState: { cursor: end.toISOString(), hasMore },
+    };
   }
   if (feed.type === 'NVD_API') {
     // NVD API key is recommended: without one, rate limits are 5 req/30s and
