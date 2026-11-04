@@ -911,6 +911,7 @@ export interface AuditLog {
 
 export const SMTP_EMAIL_PROVIDERS = [
   'SMTP_CUSTOM',
+  'GMAIL_SMTP',
   'MAILEROO_SMTP',
   'LETTR_SMTP',
   'MAILJET_SMTP',

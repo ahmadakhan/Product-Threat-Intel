@@ -7,7 +7,9 @@ const methodName = (provider: EmailProvider) =>
   isSmtpEmailProvider(provider)
     ? provider === 'SENDGRID_SMTP'
       ? 'SendGrid SMTP'
-      : 'SMTP'
+      : provider === 'GMAIL_SMTP'
+        ? 'Gmail SMTP'
+        : 'SMTP'
     : provider === 'SENDGRID'
       ? 'SendGrid API'
       : provider === 'MAILJET_API'
@@ -26,7 +28,7 @@ const initialForm = (configuration: EmailConfiguration): EmailConfiguration => (
   apiHeaderKey: configuration.apiHeaderKey || 'Authorization',
   apiAuthPrefix: configuration.apiAuthPrefix ?? 'Bearer',
   apiSourceDomain: configuration.apiSourceDomain || '',
-  smtpHost: configuration.smtpHost || (configuration.provider === 'SENDGRID_SMTP' ? 'smtp.sendgrid.net' : ''),
+  smtpHost: configuration.smtpHost || (configuration.provider === 'GMAIL_SMTP' ? 'smtp.gmail.com' : configuration.provider === 'SENDGRID_SMTP' ? 'smtp.sendgrid.net' : ''),
   smtpPort: configuration.smtpPort || 587,
   smtpSecurity: configuration.smtpSecurity || 'STARTTLS',
   smtpUsername: configuration.smtpUsername || (configuration.provider === 'SENDGRID_SMTP' ? 'apikey' : ''),
@@ -55,20 +57,26 @@ export function EmailProviderSettings() {
       apiKey: '',
       smtpPassword: '',
       mailjetApiSecret: '',
-      ...(provider === 'SENDGRID_SMTP'
+      ...(provider === 'GMAIL_SMTP'
         ? {
-            smtpHost: 'smtp.sendgrid.net',
+            smtpHost: 'smtp.gmail.com',
             smtpPort: 587,
             smtpSecurity: 'STARTTLS' as const,
-            smtpUsername: 'apikey',
           }
-        : {}),
+        : provider === 'SENDGRID_SMTP'
+          ? {
+              smtpHost: 'smtp.sendgrid.net',
+              smtpPort: 587,
+              smtpSecurity: 'STARTTLS' as const,
+              smtpUsername: 'apikey',
+            }
+          : {}),
     });
   };
   const isSmtp = isSmtpEmailProvider(form.provider);
   const isMailjet = form.provider === 'MAILJET_API';
   const isSendGridSmtp = form.provider === 'SENDGRID_SMTP';
-  const isGmailSmtp = form.smtpHost.trim().toLowerCase() === 'smtp.gmail.com';
+  const isGmailSmtp = form.provider === 'GMAIL_SMTP' || form.smtpHost.trim().toLowerCase() === 'smtp.gmail.com';
   const selectedProvider = isSendGridSmtp
     ? 'SENDGRID_SMTP'
     : isSmtp
@@ -118,6 +126,12 @@ export function EmailProviderSettings() {
               {(
                 [
                   { id: 'SMTP', title: 'SMTP relay', description: 'Your existing mail server', icon: Server },
+                  {
+                    id: 'GMAIL_SMTP',
+                    title: 'Gmail SMTP',
+                    description: 'Send via Gmail with an App Password',
+                    icon: Mail,
+                  },
                   {
                     id: 'SENDGRID_SMTP',
                     title: 'SendGrid SMTP',

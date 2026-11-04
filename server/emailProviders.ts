@@ -7,6 +7,7 @@ export const EMAIL_PROVIDER_LABELS: Record<EmailConfiguration['provider'], Email
   SMTP: 'SMTP_Relay',
   API: 'Custom API',
   SMTP_CUSTOM: 'SMTP_Relay',
+  GMAIL_SMTP: 'SMTP_Relay',
   MAILEROO_SMTP: 'SMTP_Relay',
   LETTR_SMTP: 'SMTP_Relay',
   MAILJET_SMTP: 'SMTP_Relay',
