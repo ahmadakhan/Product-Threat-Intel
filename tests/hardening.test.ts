@@ -123,6 +123,9 @@ test('advisory revision changes when CVE evidence changes but not for enrichment
   const changed = cve(base.cveId, { description: 'revised evidence' });
   assert.notEqual(original, advisoryRevision(notice, [finding(changed)]));
 
+  const reviewOnly: NormalizedCVE = { ...base, applicabilityPolicy: 'REVIEW_ONLY' };
+  assert.notEqual(original, advisoryRevision(notice, [finding(reviewOnly)]));
+
   // Enrichment-only changes are deliberately excluded from the content revision.
   const enriched: NormalizedCVE = {
     ...base,

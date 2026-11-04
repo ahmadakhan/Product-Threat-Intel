@@ -8,7 +8,7 @@ import { decrypt, encryptionKeys } from './secrets';
 import type { Config } from './config';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
-import { normalizeCveId, stableJson } from '../src/utils/deduplicator';
+import { normalizeCveId, sourceCveContentHash, stableJson } from '../src/utils/deduplicator';
 import { parseCPE23 } from '../src/utils/cpeMatcher.ts';
 import { paceConcurrent } from './concurrency';
 import { cvssSeverity, normalizeCvssVersion, sanitizeCvssVector } from './cvss.ts';
@@ -430,7 +430,14 @@ export async function ingestFeed(
             // redundant record for every overlapping re-fetch. See
             // tests/ecosystem.test.ts "NVD resumes from an overlapping
             // checkpoint" which pins this contract.
-            if (!cve || !cached || stableJson(cve) === stableJson(cached)) continue;
+            if (!cve || !cached) continue;
+            const sourceRevision = cached.sourceApplicability?.[feed.id];
+            if (
+              sourceRevision
+                ? sourceRevision.contentHash === sourceCveContentHash(cve)
+                : stableJson(cve) === stableJson(cached)
+            )
+              continue;
             cves.push(cve);
             continue;
           }
@@ -648,7 +655,15 @@ export async function ingestFeed(
         const { data } = await json(detailUrl.href, false, { timeoutMs: 60000, socketTimeoutMs: 30000, maxResponseBytes: 4 * 1024 * 1024 }, true);
         if (!data || normalizeCveId(data.cve_id) !== id) throw new Error('OpenCVE detail response did not match requested CVE');
         const cve = normalizeOpenCve(data, feed.id);
-        if (cached && stableJson(cve) === stableJson(cached)) return null;
+        if (cached) {
+          const sourceRevision = cached.sourceApplicability?.[feed.id];
+          if (
+            sourceRevision
+              ? sourceRevision.contentHash === sourceCveContentHash(cve)
+              : stableJson(cve) === stableJson(cached)
+          )
+            return null;
+        }
         revisions[id] = cve.modifiedDate;
         return cve;
       },

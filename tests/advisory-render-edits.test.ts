@@ -189,7 +189,14 @@ const findingsWithVendorLinks: Finding[] = [
       modifiedDate: '2026-10-30T00:00:00Z',
       cvss: { version: '3.1', score: 9.8, vector: 'AV:N/AC:L', severity: 'CRITICAL' },
       cwe: [],
-      cpeMatches: [],
+      cpeMatches: ['cpe:2.3:a:vendor:product:*:*:*:*:*:*:*:*'],
+      cpeMatchDetails: [
+        {
+          criteria: 'cpe:2.3:a:vendor:product:*:*:*:*:*:*:*:*',
+          range: { versionStartIncluding: '1.2.0', versionEndExcluding: '2.0.0' },
+        },
+      ],
+      versionRange: { versionStartIncluding: '1.2.0', versionEndExcluding: '2.0.0' },
       sourceFeeds: [],
       epss: { score: 0.5, percentile: 0.8 },
       cisaKev: { isKev: false },
@@ -205,7 +212,9 @@ const findingsWithVendorLinks: Finding[] = [
     } as any,
     matchedAssetId: 'asset-1',
     matchedAssetName: 'web-server-01',
-    matchedCpe: 'cpe:2.3:*',
+    matchedAssetVendor: 'Northstar Networks',
+    matchedAssetProduct: 'Edge Gateway',
+    matchedCpe: 'cpe:2.3:a:vendor:product:*:*:*:*:*:*:*:*',
     matchingMethod: 'CPE',
     matchingEvidence: 'matched',
     exploitRisk: 'STANDARD',
@@ -225,6 +234,40 @@ test('renderAdvisory shows View Vendor Guidance and Vendor Security Advisory lin
   assert.ok(html.includes('href="https://vendor.com/patch/CVE-2026-12345"'), 'view vendor guidance should point to the patch URL');
   assert.ok(html.includes('href="https://vendor.com/advisory/CVE-2026-12345"'), 'vendor security advisory should point to the advisory URL');
   assert.ok(!html.includes('href=""'), 'no empty href should remain');
+});
+
+test('renderAdvisory uses styled CVE links, affected version bounds, and per-CVE remediation', () => {
+  const first = findingsWithVendorLinks[0];
+  const secondCve = 'CVE-2026-12346';
+  const second: Finding = {
+    ...first,
+    id: 'finding-2',
+    cveId: secondCve,
+    cve: {
+      ...first.cve,
+      cveId: secondCve,
+      title: 'Second test vulnerability',
+      remediation: {
+        ...first.cve.remediation,
+        patchUrl: 'https://vendor.com/patch/CVE-2026-12346',
+        immediateActions: ['Disable the vulnerable feature until patched.'],
+        stepByStep: ['Install the vendor update and verify service health.'],
+      },
+    },
+  };
+  const advisory = { ...baseAdvisory, cveIds: [first.cveId, secondCve] };
+  const html = renderAdvisory(
+    compileCustomizedTemplate(testCustomization),
+    advisory,
+    [first, second],
+  );
+
+  assert.match(html, /color:#1d4ed8;text-decoration:underline/);
+  assert.ok(html.includes('Northstar Networks - Edge Gateway'));
+  assert.ok(html.includes('Affected versions: &gt;= 1.2.0 and &lt; 2.0.0'));
+  assert.ok(html.includes(`Confirm the affected versions of Northstar Networks - Edge Gateway against the vendor guidance for ${first.cveId}.`));
+  assert.ok(html.includes('Disable the vulnerable feature until patched.'));
+  assert.ok(html.includes(`href="https://vendor.com/patch/${secondCve}"`));
 });
 
 test('renderAdvisory hides View Vendor Guidance and Vendor Security Advisory when no vendor link is present in findings', () => {

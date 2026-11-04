@@ -21,6 +21,7 @@ test('MITRE normalizes CVE JSON 5 and keeps uncertain version semantics under re
   assert.equal(record.cvss.version, '3.1');
   assert.deepEqual(record.cwe, ['CWE-79']);
   assert.equal(record.applicabilityRequiresReview, true);
+  assert.equal(record.applicabilityPolicy, 'REVIEW_ONLY');
   assert.deepEqual(record.sourceFeeds, ['mitre']);
   const raw = mitreRecord();
   raw.containers.cna.metrics = [];
@@ -54,10 +55,33 @@ test('MITRE skips fetching details for revisions already in the canonical cache'
     sleep,
     [],
     undefined,
-    { knownCveModifiedAt: new Map([['CVE-2026-98001', date]]) },
+    {
+      revisions: { 'CVE-2026-98001': date },
+      knownCveModifiedAt: new Map([['CVE-2026-98001', new Date(Date.now() + 60_000).toISOString()]]),
+    },
   );
   assert.deepEqual(calls, [MITRE_DELTA_URL]);
   assert.equal(result.cves.length, 0);
+});
+test('a later timestamp from another provider does not suppress a MITRE revision', async () => {
+  const date = new Date(Date.now() - 1000).toISOString();
+  const laterNvdDate = new Date(Date.now()).toISOString();
+  const calls: string[] = [];
+  const result = await ingestFeed(
+    source,
+    24,
+    async (url) => {
+      calls.push(url);
+      return response(url === MITRE_DELTA_URL ? mitreDelta('CVE-2026-98001', date) : mitreRecord('CVE-2026-98001', date));
+    },
+    config,
+    sleep,
+    [],
+    undefined,
+    { knownCveModifiedAt: new Map([['CVE-2026-98001', laterNvdDate]]) },
+  );
+  assert.equal(result.cves.length, 1);
+  assert.equal(calls.length, 2, 'MITRE detail must be fetched despite the newer NVD timestamp');
 });
 test('MITRE rejects mismatched records and preserves upstream rejection as a withdrawal', async () => {
   const date = new Date(Date.now() - 1000).toISOString();

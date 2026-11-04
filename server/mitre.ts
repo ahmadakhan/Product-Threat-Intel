@@ -2,7 +2,7 @@ import type { NormalizedCVE, ThreatFeed } from '../src/types/index.ts';
 import type { Requester } from './network';
 import { type IngestContext, type IngestResult } from './ingestion';
 import { cveSchema } from './validation';
-import { normalizeCveId, stableJson } from '../src/utils/deduplicator';
+import { normalizeCveId, sourceCveContentHash, stableJson } from '../src/utils/deduplicator';
 import { parseCPE23 } from '../src/utils/cpeMatcher.ts';
 import { paceConcurrent } from './concurrency';
 import { z } from 'zod';
@@ -53,7 +53,7 @@ export function normalizeMitre(record: any, feedId: string): NormalizedCVE | nul
       // own baseScore is the storage sentinel, not a genuine CVSS 0.0.
       severity: !metric || metric.baseScore == null ? 'UNKNOWN' : cvssSeverity(score) },
     cwe: [...new Set(containers.flatMap(c => (c.problemTypes || []).flatMap((p: any) => (p.descriptions || []).map((d: any) => d.cweId).filter((id: unknown) => typeof id === 'string'))))].slice(0, 100),
-    cpeMatches: cpes, applicabilityRequiresReview: true, sourceFeeds: [feedId],
+    cpeMatches: cpes, applicabilityRequiresReview: true, applicabilityPolicy: 'REVIEW_ONLY', sourceFeeds: [feedId],
     epss: { score: 0, percentile: 0 }, cisaKev: { isKev: false }, exploitStatus: 'None',
     remediation: { patchUrl: '', vendorAdvisoryRef: reference?.url || '', immediateActions: [], workarounds: [], rollbackPlan: '', stepByStep: [] },
   });
@@ -93,9 +93,10 @@ export async function ingestMitre(feed: ThreatFeed, scopeHours: number, request:
       const updated = Date.parse(timestamp(row.dateUpdated));
       const id = normalizeCveId(row.cveId);
       if (!id) throw new Error('MITRE delta log contains an invalid CVE identifier');
-      const knownTimes = [state.knownCveModifiedAt?.get(id), state.knownWithdrawalAt?.get(id), revisions[id]]
-        .map((value) => Date.parse(value || '')).filter(Number.isFinite);
-      const known = knownTimes.length ? Math.max(...knownTimes) : NaN;
+      // Delta timestamps belong to MITRE's revision stream. NVD/OpenCVE dates
+      // are independent provider clocks and must not suppress a valid MITRE
+      // record merely because another source reports a later timestamp.
+      const known = Date.parse(revisions[id] || '');
       if (updated >= start.getTime() && updated <= end.getTime() && (!Number.isFinite(known) || updated > known || (Number.isFinite(known) && updated === known && Boolean(state.knownCveContent?.has(id))))) ids.add(id);
     }
   }
@@ -125,7 +126,14 @@ export async function ingestMitre(feed: ThreatFeed, scopeHours: number, request:
       // ones unchanged so the finding is neither re-emitted nor treated as a
       // withdrawal.
       const cached = state.knownCveContent?.get(id);
-      const unchanged = Boolean(cached && cve && stableJson(cve) === stableJson(cached));
+      const sourceRevision = cached?.sourceApplicability?.[feed.id];
+      const unchanged = Boolean(
+        cached &&
+          cve &&
+          (sourceRevision
+            ? sourceRevision.contentHash === sourceCveContentHash(cve)
+            : stableJson(cve) === stableJson(cached)),
+      );
       return { cve, withdrawnId: id, modifiedDate: timestamp(record.cveMetadata.dateUpdated || record.cveMetadata.datePublished), unchanged };
     },
   );

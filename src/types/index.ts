@@ -250,6 +250,9 @@ export interface NormalizedCVE {
   cpeMatches: string[]; // CPE 2.3 formatted strings
   versionRange?: NvdVersionRange; // NVD Version Interval
   applicabilityRequiresReview?: boolean;
+  applicabilityPolicy?: 'REVIEW_ONLY';
+  /** Internal provider-specific evidence used to reconcile independent revision clocks. */
+  sourceApplicability?: Record<string, SourceApplicabilityEvidence>;
   cpeMatchDetails?: { criteria: string; range?: NvdVersionRange }[];
   purls?: string[]; // Package URLs (PURL)
   vex?: VexStatement; // CSAF 2.0 VEX status (legacy single-statement form)
@@ -261,6 +264,17 @@ export interface NormalizedCVE {
   cisaKev: CisaKevData;
   exploitStatus: 'Active Weaponized' | 'POC Available' | 'Reported In Wild' | 'None';
   remediation: RemediationPlaybook;
+}
+
+export interface SourceApplicabilityEvidence {
+  modifiedDate: string;
+  cpeMatches: string[];
+  cpeMatchDetails: { criteria: string; range?: NvdVersionRange }[];
+  versionRange?: NvdVersionRange;
+  purls?: string[];
+  applicabilityRequiresReview?: boolean;
+  applicabilityPolicy?: 'REVIEW_ONLY';
+  contentHash: string;
 }
 
 export interface WatchListItem {

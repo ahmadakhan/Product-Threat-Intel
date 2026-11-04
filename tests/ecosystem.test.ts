@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ingestFeed, normalizeNvd } from '../server/ingestion';
 import { loadConfig } from '../server/config.ts';
-import { mergeCveRecords } from '../src/utils/deduplicator';
+import { mergeCveRecords, sourceCveContentHash } from '../src/utils/deduplicator';
 import { matchesWatchlistItem } from '../src/utils/cpeMatcher.ts';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
@@ -114,6 +114,89 @@ test('equal-revision conflicts merge deterministically and cannot auto-dispatch'
   assert.equal(a[0].applicabilityRequiresReview, true);
   assert.deepEqual(a[0].sourceFeeds, ['source-a', 'source-b']);
   assert.equal(mergeCveRecords([{ ...first, cveId: ' cve-2026-12345 ' }, first]).size, 1);
+});
+
+test('different provider clocks preserve structured applicability and conflicting evidence stays review-only', () => {
+  const structured = { ...cve(), versionRange: { versionEndExcluding: '2.0' } };
+  const textOnly = {
+    ...structured,
+    title: 'CNA text-only revision',
+    description: 'example widget vulnerability',
+    modifiedDate: '2026-10-25T00:00:00.000Z',
+    sourceFeeds: ['mitre'],
+    cpeMatches: [],
+    cpeMatchDetails: [],
+    versionRange: undefined,
+    applicabilityRequiresReview: true,
+    applicabilityPolicy: 'REVIEW_ONLY' as const,
+  };
+  const merged = mergeCveRecords([structured, textOnly]).get(structured.cveId)!;
+  assert.deepEqual(merged.cpeMatches, structured.cpeMatches);
+  assert.deepEqual(merged.cpeMatchDetails, structured.cpeMatchDetails);
+  assert.equal(merged.versionRange, undefined);
+  assert.equal(merged.applicabilityPolicy, 'REVIEW_ONLY');
+  assert.equal(merged.applicabilityRequiresReview, true);
+
+  const result = runVulnerabilityPipeline(
+    [],
+    [merged],
+    [asset],
+    [],
+    [],
+    { ...DEFAULT_SETTINGS, scopeHours: 0, autoDispatchConfidenceThreshold: 0, autoDispatchUnverifiableMatches: true },
+  );
+  assert.equal(result.newFindings[0]?.notificationStatus, 'REVIEW_REQUIRED');
+  assert.equal(result.newFindings[0]?.confidence, 0);
+});
+
+test('a provider revision replaces its own old criteria without removing another provider evidence', () => {
+  const nvd = {
+    ...cve(),
+    sourceFeeds: ['nvd'],
+    modifiedDate: '2026-10-20T00:00:00.000Z',
+    cpeMatches: [cpe('1.0')],
+    cpeMatchDetails: [{ criteria: cpe('1.0') }],
+  };
+  const mitre = {
+    ...nvd,
+    sourceFeeds: ['mitre'],
+    modifiedDate: '2026-10-21T00:00:00.000Z',
+    cpeMatches: [cpe('2.0')],
+    cpeMatchDetails: [{ criteria: cpe('2.0') }],
+    applicabilityPolicy: 'REVIEW_ONLY' as const,
+  };
+  const initial = mergeCveRecords([nvd, mitre]).get(nvd.cveId)!;
+  const nvdUpdate = {
+    ...nvd,
+    modifiedDate: '2026-10-22T00:00:00.000Z',
+    cpeMatches: [cpe('1.5')],
+    cpeMatchDetails: [{ criteria: cpe('1.5') }],
+  };
+  const updated = mergeCveRecords([initial, nvdUpdate]).get(nvd.cveId)!;
+  assert.deepEqual(updated.cpeMatches, [cpe('1.5'), cpe('2.0')]);
+  assert.deepEqual(Object.keys(updated.sourceApplicability || {}).sort(), ['mitre', 'nvd']);
+  assert.equal(updated.sourceApplicability?.nvd.contentHash, sourceCveContentHash(nvdUpdate));
+  assert.equal(updated.applicabilityPolicy, 'REVIEW_ONLY');
+});
+
+test('a newer revision from the same provider replaces superseded applicability', () => {
+  const original = {
+    ...cve(),
+    versionRange: { versionEndExcluding: '2.0' },
+    applicabilityRequiresReview: true,
+  };
+  const revised = {
+    ...original,
+    modifiedDate: '2026-10-25T00:00:00.000Z',
+    cpeMatches: [cpe('2.0')],
+    cpeMatchDetails: [{ criteria: cpe('2.0') }],
+    versionRange: { versionStartIncluding: '2.0' },
+    applicabilityRequiresReview: false,
+  };
+  const merged = mergeCveRecords([original, revised]).get(original.cveId)!;
+  assert.deepEqual(merged.cpeMatches, [cpe('2.0')]);
+  assert.deepEqual(merged.versionRange, { versionStartIncluding: '2.0' });
+  assert.equal(merged.applicabilityRequiresReview, false);
 });
 
 test('NVD retains provisional analysis as review-only and reports withdrawals', async () => {

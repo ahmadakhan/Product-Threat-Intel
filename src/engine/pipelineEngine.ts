@@ -228,7 +228,8 @@ export function runVulnerabilityPipeline(
   evaluatedAt: Date = new Date(),
 ): PipelineRunResult {
   const started = evaluatedAt,
-    known = new Set(existing.map((f) => `${normalizeCveId(f.cveId)}:${f.matchedAssetId}`));
+    known = new Set(existing.map((f) => `${normalizeCveId(f.cveId)}:${f.matchedAssetId}`)),
+    knownCves = new Set(existing.map((f) => normalizeCveId(f.cveId)).filter((id): id is string => Boolean(id)));
   const newFindings: Finding[] = [];
   const executionId = crypto.randomUUID();
   let processed = 0;
@@ -382,18 +383,18 @@ export function runVulnerabilityPipeline(
   const matchingStarted = performance.now();
   for (const raw of latest.values()) {
     const canonical = normalizeCveId(raw.cveId);
+    const inTimelineScope = isWithinTimelineScope(raw.publishedDate, raw.modifiedDate, settings.scopeHours, started);
     // Filter before candidate selection so every match method (strict CPE/PURL,
     // alias, and vendor/product fallback) sees only CVEs whose latest published
-    // or modified date is inside the run's timeline scope.
-    if (
-      !canonical ||
-      !isWithinTimelineScope(raw.publishedDate, raw.modifiedDate, settings.scopeHours, started)
-    )
-      continue;
+    // or modified date is inside the run's timeline scope. Existing findings
+    // are still re-evaluated outside that window so scope expiry alone cannot
+    // turn an active finding into NOT_APPLICABLE during reconciliation.
+    if (!canonical || (!inTimelineScope && !knownCves.has(canonical))) continue;
     processed++;
     const cve = { ...raw, cveId: canonical };
     for (const asset of assetsForCve(cve, canonical)) {
       const key = `${canonical}:${asset.id}`;
+      if (!inTimelineScope && !known.has(key)) continue;
       if (known.has(key) && !includeExistingCandidates) continue;
       // An explicit CPE match criteria is authoritative for its own entry: a
       // per-entry range without bounds means "any version of this product", so the
@@ -493,12 +494,14 @@ export function runVulnerabilityPipeline(
         cve.purls?.length
       );
       const cveReviewOverride = cve.applicabilityRequiresReview && !advisoryLacksApplicabilityData;
-      const unverifiableMatch = cveReviewOverride || result.applicabilityRequiresReview;
+      const sourceRequiresReview = cve.applicabilityPolicy === 'REVIEW_ONLY';
+      const unverifiableMatch = sourceRequiresReview || cveReviewOverride || result.applicabilityRequiresReview;
       if (unverifiableMatch) result.confidence = 0;
       const threshold = settings.autoDispatchConfidenceThreshold ?? 90;
       (result as MatchResult & { contradicted?: true }).contradicted = packageRejected || undefined;
       const confirmed =
         !packageRejected &&
+        !sourceRequiresReview &&
         (!unverifiableMatch || settings.autoDispatchUnverifiableMatches) &&
         shouldAutoDispatch(result.confidence, settings);
       // Say *why* a match is held. A held finding is re-derived before every
@@ -510,6 +513,8 @@ export function runVulnerabilityPipeline(
         ? undefined
         : packageRejected
           ? 'the package identifiers prove a different version, while the product matches by CPE; confirm which identifier is authoritative'
+          : sourceRequiresReview
+            ? 'the source classifies applicability evidence as review-only'
           : cveReviewOverride
           ? 'the CVE configuration uses complex AND/negate criteria that require manual verification'
           : result.applicabilityRequiresReview

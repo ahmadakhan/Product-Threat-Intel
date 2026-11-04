@@ -1,4 +1,5 @@
 import type { Advisory, Finding, ReviewEdits } from '../src/types/index.ts';
+import { parseCPE23 } from '../src/utils/cpeMatcher.ts';
 import { mlComposeAdvisoryEmail } from './ml/integration';
 
 const SEVERITY_COLORS: Record<string, string> = {
@@ -95,6 +96,39 @@ function severityRank(cve: string, advisory: Advisory, findings?: Finding[]): nu
   return SEVERITY_RANK[cveSeverity(cve, advisory, findings)] || 0;
 }
 
+function versionRangeLabel(range?: Finding['cve']['versionRange']): string | undefined {
+  if (!range) return undefined;
+  const bounds = [
+    range.versionStartIncluding ? `>= ${range.versionStartIncluding}` : '',
+    range.versionStartExcluding ? `> ${range.versionStartExcluding}` : '',
+    range.versionEndIncluding ? `<= ${range.versionEndIncluding}` : '',
+    range.versionEndExcluding ? `< ${range.versionEndExcluding}` : '',
+  ].filter(Boolean);
+  return bounds.length ? bounds.join(' and ') : undefined;
+}
+
+function affectedVersionLabel(finding: Finding): string | undefined {
+  const matchingCriteria = finding.cve.cpeMatchDetails?.filter(
+    (detail) => detail.criteria === finding.matchedCpe,
+  );
+  const criteria = matchingCriteria?.length
+    ? matchingCriteria
+    : finding.cve.cpeMatchDetails?.length
+      ? finding.cve.cpeMatchDetails
+      : (finding.cve.cpeMatches || []).map((criteria) => ({ criteria, range: finding.cve.versionRange }));
+  const versions = new Set<string>();
+  for (const detail of criteria || []) {
+    const parsed = parseCPE23(detail.criteria);
+    if (parsed.isValid && parsed.version !== '*' && parsed.version !== '-') {
+      versions.add(parsed.version);
+      continue;
+    }
+    const range = versionRangeLabel(detail.range || finding.cve.versionRange);
+    if (range) versions.add(range);
+  }
+  return versions.size ? [...versions].join('; ') : undefined;
+}
+
 export function renderAdvisory(template: string, advisory: Advisory, findings?: Finding[]): string {
   const validation = validateAdvisoryFields(advisory);
   if (!validation.valid) {
@@ -125,6 +159,64 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
       // Rendering must never fail because the ML layer is unavailable.
     }
   }
+  const productEntries = findings
+    ? [...new Map(findings.map((finding) => {
+        const vendor = finding.matchedAssetVendor || '';
+        const product = finding.matchedAssetProduct || '';
+        const name = vendor && product ? `${vendor} - ${product}` : finding.matchedAssetName;
+        const versions = affectedVersionLabel(finding);
+        const line = `${name}${versions ? ` | Affected versions: ${versions}` : ' | Version applicability: confirm with vendor'}`;
+        return [line, line];
+      })).values()]
+    : advisory.affectedSystems;
+  const remediationBlocks = (advisory.cveIds.length ? advisory.cveIds : ['Advisory']).map((cveId) => {
+    const cveFindings = findings?.filter((finding) => finding.cveId === cveId) || [];
+    const remediation = cveFindings[0]?.cve.remediation;
+    const immediateActions = remediation?.immediateActions || [];
+    const stepByStep = remediation?.stepByStep || [];
+    const workarounds = remediation?.workarounds || [];
+    const actions = [...new Set([...immediateActions, ...stepByStep].filter((action) => action.trim()))];
+    const patchHref = safeHttpHref(remediation?.patchUrl || '');
+    const vendorHref = safeHttpHref(remediation?.vendorAdvisoryRef || '');
+    const productNames = [...new Set(cveFindings.map((finding) => {
+      const vendor = finding.matchedAssetVendor || '';
+      const product = finding.matchedAssetProduct || '';
+      return vendor && product ? `${vendor} - ${product}` : finding.matchedAssetName;
+    }))];
+    const targetLabel = productNames.length ? productNames.join(', ') : 'the affected products listed above';
+    const fallbackActions = [
+      `Confirm the affected versions of ${targetLabel} against the vendor guidance for ${cveId}.`,
+      'Apply a vendor-supported fix after testing it in a representative environment.',
+      'Rescan affected systems and record the remediation outcome.',
+    ];
+    const actionList = actions.length ? actions : fallbackActions;
+    const actionHtml = actionList
+      .map((action) => `<li style="margin:0 0 5px;padding:0;">${escape(action)}</li>`)
+      .join('');
+    const workaroundHtml = workarounds.length
+      ? `<div style="margin:10px 0 0;"><strong>Workarounds</strong><ul style="margin:5px 0 0;padding-left:20px;">${workarounds.map((item) => `<li style="margin:0 0 5px;">${escape(item)}</li>`).join('')}</ul></div>`
+      : '';
+    const rollbackHtml = remediation?.rollbackPlan?.trim()
+      ? `<p style="margin:10px 0 0;"><strong>Rollback:</strong> ${escape(remediation.rollbackPlan)}</p>`
+      : '';
+    const guidanceLinks = [
+      patchHref
+        ? `<a href="${escape(patchHref)}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">Vendor patch</a>`
+        : '',
+      vendorHref
+        ? `<a href="${escape(vendorHref)}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">Security advisory</a>`
+        : '',
+    ].filter(Boolean);
+    const heading = cveId === 'Advisory'
+      ? 'General remediation guidance'
+      : `<a href="https://nvd.nist.gov/vuln/detail/${encodeURIComponent(cveId)}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">${escape(cveId)}</a>`;
+    return `<div style="margin:0 0 12px;padding:12px 14px;border:1px solid #e2e8f0;border-radius:4px;background:#ffffff;">
+  <div style="margin:0 0 7px;font-size:13px;line-height:19px;font-weight:700;color:#0f172a;">${heading}</div>
+  <ul style="margin:0;padding-left:20px;font-size:12px;line-height:19px;color:#334155;">${actionHtml}</ul>
+  ${workaroundHtml}${rollbackHtml}
+  ${guidanceLinks.length ? `<div style="margin:9px 0 0;font-size:12px;line-height:19px;">${guidanceLinks.join(' <span style="color:#94a3b8;padding:0 5px;">|</span> ')}</div>` : ''}
+</div>`;
+  }).join('');
   const values: Record<string, string> = {
     severity: advisory.severity,
     advisory_id: advisory.id,
@@ -142,27 +234,11 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
     affected_systems_html: advisory.affectedSystems
       .map((sys: string) => `<div style="margin:0 0 4px;padding-left:0;font-size:12px;line-height:18px;color:#334155;">${escape(sys)}</div>`)
       .join('\n'),
-    vendor_products: findings
-      ? Array.from(
-          findings.reduce((acc, f) => {
-            const vendor = f.matchedAssetVendor || '';
-            const product = f.matchedAssetProduct || '';
-            if (vendor && product) acc.add(`${vendor} - ${product}`);
-            return acc;
-          }, new Set<string>())
-        ).join('\n')
-      : advisory.affectedSystems.join('\n'),
-    vendor_products_html: findings
-      ? Array.from(
-          findings.reduce((acc, f) => {
-            const vendor = f.matchedAssetVendor || '';
-            const product = f.matchedAssetProduct || '';
-            if (vendor && product) acc.add(`${vendor} - ${product}`);
-            return acc;
-          }, new Set<string>())
-        ).map((pair: string) => `<div style="margin:0 0 4px;font-size:12px;line-height:18px;color:#334155;">${escape(pair)}</div>`).join('\n')
-       : advisory.affectedSystems.map((sys: string) => `<div style="margin:0 0 4px;font-size:12px;line-height:18px;color:#334155;">${escape(sys)}</div>`).join('\n'),
-    remediation_steps: escape(composedRemediation),
+    vendor_products: productEntries.join('\n'),
+    vendor_products_html: productEntries
+      .map((entry) => `<div style="margin:0 0 8px;padding:0 0 8px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:19px;color:#334155;">${escape(entry)}</div>`)
+      .join('\n'),
+    remediation_steps: `<p style="margin:0 0 10px;font-size:12px;line-height:19px;color:#334155;">${escape(composedRemediation)}</p>${remediationBlocks}`,
     vendor_link: safeHttpHref(advisory.vendorLink || ''),
     remediation_link:
       safeHttpHref(
@@ -176,7 +252,7 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
       .sort((a: string, b: string) => severityRank(b, advisory, findings) - severityRank(a, advisory, findings) || a.localeCompare(b))
       .map(
         (cve: string) =>
-          `<a href="https://nvd.nist.gov/vuln/detail/${escape(cve)}" target="_blank">${escape(cve)}</a>`,
+          `<a href="https://nvd.nist.gov/vuln/detail/${encodeURIComponent(cve)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin:0 8px 4px 0;color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">${escape(cve)}</a>`,
       )
       .join(', '),
     cve_details: [...advisory.cveIds]
@@ -215,20 +291,20 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
         // NVD is the authoritative, always-available source for a CVE id; it is
         // the link the reader needs from the CVE ID itself.
         const nvdHref = `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(cve)}`;
-        const sources = [`<a href="${nvdHref}" target="_blank" rel="noopener noreferrer" style="color:#2563eb;text-decoration:none;">NVD</a>`];
+        const sources = [`<a href="${nvdHref}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">NVD</a>`];
         if (vendorHref)
           sources.push(
-            `<a href="${escape(vendorHref)}" target="_blank" rel="noopener noreferrer" style="color:#2563eb;text-decoration:none;">Vendor advisory</a>`,
+            `<a href="${escape(vendorHref)}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">Vendor advisory</a>`,
           );
         sources.push(
-          `<a href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog" target="_blank" rel="noopener noreferrer" style="color:#2563eb;text-decoration:none;">CISA KEV</a>`,
+          `<a href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">CISA KEV</a>`,
         );
-        return `<div style="margin:0 0 14px;padding:14px 16px;border:1px solid #e2e8f0;border-left:4px solid ${colour};border-radius:6px;background:#ffffff;">
+        return `<div style="margin:0 0 16px;padding:16px;border:1px solid #e2e8f0;border-left:4px solid ${colour};border-radius:4px;background:#ffffff;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
     <tr>
       <td style="padding:0;vertical-align:top;">
         <div style="font-size:14px;font-weight:bold;color:#0f172a;line-height:20px;">
-          <a href="${nvdHref}" target="_blank" rel="noopener noreferrer" style="color:#0f172a;text-decoration:none;">${escape(cve)}</a>
+          <a href="${nvdHref}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">${escape(cve)}</a>
         </div>
       </td>
       <td align="right" style="padding:0 0 0 12px;white-space:nowrap;vertical-align:top;">
@@ -272,6 +348,7 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
     'cve_details',
     'affected_systems_html',
     'vendor_products_html',
+    'remediation_steps',
     'mitigation_steps',
     'recommended_actions',
     'severity_badge',

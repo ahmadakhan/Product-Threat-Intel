@@ -4,6 +4,9 @@
  */
 
 import type { NormalizedCVE } from '../types';
+import type { SourceApplicabilityEvidence } from '../types';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 
 const CVE_REGEX = /^CVE-\d{4}-\d{4,}$/i;
 
@@ -18,29 +21,71 @@ export function stableJson(value: unknown): string {
   return JSON.stringify(value) ?? 'null';
 }
 
-/** Select a complete source revision; never combine applicability ranges from unrelated revisions. */
+/** Stable SHA-256 key for detecting an unchanged provider revision. */
+export function sourceCveContentHash(cve: NormalizedCVE): string {
+  const { sourceFeeds: _sourceFeeds, sourceApplicability: _sourceApplicability, ...content } = cve;
+  return bytesToHex(sha256(utf8ToBytes(stableJson(content))));
+}
+
+/** Merge independent providers while replacing revisions within each provider. */
 export function mergeCveRecords(records: NormalizedCVE[]): Map<string, NormalizedCVE> {
   const merged = new Map<string, NormalizedCVE>();
-  const applicability = (cve: NormalizedCVE) =>
-    stableJson({
-      cpes: [...cve.cpeMatches].sort(),
-      details: cve.cpeMatchDetails?.map(stableJson).sort(),
-      range: cve.versionRange,
-      purls: cve.purls ? [...cve.purls].sort() : undefined,
-    });
-  const content = ({ sourceFeeds: _sources, applicabilityRequiresReview: _review, ...cve }: NormalizedCVE) =>
+  const content = ({ sourceFeeds: _sources, sourceApplicability: _applicability, ...cve }: NormalizedCVE) =>
     stableJson(cve);
   const detailsFor = (cve: NormalizedCVE) =>
     cve.cpeMatchDetails?.length
       ? cve.cpeMatchDetails
       : cve.cpeMatches.map((criteria) => ({ criteria, range: cve.versionRange }));
+  const evidenceFor = (cve: NormalizedCVE): SourceApplicabilityEvidence => ({
+    modifiedDate: cve.modifiedDate,
+    cpeMatches: [...cve.cpeMatches],
+    cpeMatchDetails: detailsFor(cve),
+    versionRange: cve.versionRange,
+    purls: cve.purls ? [...cve.purls] : undefined,
+    applicabilityRequiresReview: cve.applicabilityRequiresReview,
+    applicabilityPolicy: cve.applicabilityPolicy,
+    contentHash: sourceCveContentHash(cve),
+  });
+  const sourceEvidence = (cve: NormalizedCVE): Map<string, SourceApplicabilityEvidence> => {
+    if (cve.sourceApplicability) return new Map(Object.entries(cve.sourceApplicability));
+    const sources = [...new Set(cve.sourceFeeds.filter(Boolean))];
+    const keys = sources.length === 1 ? sources : ['__legacy_applicability__'];
+    return new Map(keys.map((source) => [source, evidenceFor(cve)]));
+  };
+  const applicabilitySignature = (evidence: SourceApplicabilityEvidence) =>
+    stableJson({
+      cpes: [...new Set(evidence.cpeMatches)].sort(),
+      details: evidence.cpeMatchDetails.map(stableJson).sort(),
+      range: evidence.versionRange,
+      purls: [...new Set(evidence.purls || [])].sort(),
+    });
+  const mergeEqualSourceRevision = (
+    old: SourceApplicabilityEvidence,
+    candidate: SourceApplicabilityEvidence,
+  ): SourceApplicabilityEvidence => ({
+    ...candidate,
+    cpeMatches: [...new Set([...old.cpeMatches, ...candidate.cpeMatches])].sort(),
+    cpeMatchDetails: [...new Map(
+      [...old.cpeMatchDetails, ...candidate.cpeMatchDetails].map((detail) => [stableJson(detail), detail]),
+    ).values()].sort((a, b) => stableJson(a).localeCompare(stableJson(b))),
+    versionRange:
+      stableJson(old.versionRange) === stableJson(candidate.versionRange) ? candidate.versionRange : undefined,
+    purls: [...new Set([...(old.purls || []), ...(candidate.purls || [])])].sort(),
+    applicabilityRequiresReview: true,
+    applicabilityPolicy:
+      old.applicabilityPolicy === 'REVIEW_ONLY' || candidate.applicabilityPolicy === 'REVIEW_ONLY'
+        ? 'REVIEW_ONLY'
+        : undefined,
+    contentHash: bytesToHex(sha256(utf8ToBytes([old.contentHash, candidate.contentHash].sort().join('\u0000')))),
+  });
   for (const raw of records) {
     const cveId = normalizeCveId(raw.cveId);
     if (!cveId) continue;
     const candidate = { ...raw, cveId };
     const old = merged.get(cveId);
     if (!old) {
-      merged.set(cveId, candidate);
+      const evidence = sourceEvidence(candidate);
+      merged.set(cveId, { ...candidate, sourceApplicability: Object.fromEntries(evidence) });
       continue;
     }
     const candidateTime = Date.parse(candidate.modifiedDate);
@@ -64,26 +109,58 @@ export function mergeCveRecords(records: NormalizedCVE[]): Map<string, Normalize
             : contentWins
               ? candidate
               : old;
-    const applicabilityConflict =
-      candidateValid && oldValid && delta === 0 && applicability(old) !== applicability(candidate);
-    const mergedDetails = applicabilityConflict
-      ? [...new Map([...detailsFor(old), ...detailsFor(candidate)].map((detail) => [stableJson(detail), detail])).values()]
-          .sort((a, b) => stableJson(a).localeCompare(stableJson(b)))
-      : winner.cpeMatchDetails;
+    const sources = sourceEvidence(old);
+    const equalRevisionConflicts: string[] = [];
+    for (const [source, incoming] of sourceEvidence(candidate)) {
+      const current = sources.get(source);
+      if (!current) {
+        sources.set(source, incoming);
+        continue;
+      }
+      const currentTime = Date.parse(current.modifiedDate);
+      const incomingTime = Date.parse(incoming.modifiedDate);
+      if (Number.isFinite(incomingTime) && (!Number.isFinite(currentTime) || incomingTime > currentTime)) {
+        sources.set(source, incoming);
+      } else if (
+        (incomingTime === currentTime || (!Number.isFinite(incomingTime) && !Number.isFinite(currentTime))) &&
+        applicabilitySignature(current) !== applicabilitySignature(incoming)
+      ) {
+        sources.set(source, mergeEqualSourceRevision(current, incoming));
+        equalRevisionConflicts.push(source);
+      } else if (incomingTime === currentTime && incoming.contentHash.localeCompare(current.contentHash) > 0) {
+        sources.set(source, incoming);
+      }
+    }
+    const evidence = [...sources.values()];
+    const signatures = new Set(evidence.map(applicabilitySignature));
+    const hasCrossSourceConflict = evidence.length > 1 && signatures.size > 1;
+    const rangeValues = new Set(evidence.map((entry) => stableJson(entry.versionRange)));
+    const hasConflictingRanges = rangeValues.size > 1;
+    const details = [...new Map(
+      evidence.flatMap((entry) => entry.cpeMatchDetails).map((detail) => [stableJson(detail), detail]),
+    ).values()].sort((a, b) => stableJson(a).localeCompare(stableJson(b)));
+    const cpeMatches = [...new Set([
+      ...evidence.flatMap((entry) => entry.cpeMatches),
+      ...details.map((detail) => detail.criteria),
+    ])].sort();
+    const purls = [...new Set(evidence.flatMap((entry) => entry.purls || []))].sort();
+    const sourceApplicability = Object.fromEntries([...sources.entries()].sort(([a], [b]) => a.localeCompare(b)));
     merged.set(cveId, {
       ...winner,
-      ...(applicabilityConflict
-        ? {
-            cpeMatches: [...new Set([...old.cpeMatches, ...candidate.cpeMatches])].sort(),
-            cpeMatchDetails: mergedDetails,
-            purls: [...new Set([...(old.purls || []), ...(candidate.purls || [])])].sort(),
-            // The top-level range cannot safely describe conflicting source
-            // applicability. Preserve candidates and require operator review.
-            versionRange: undefined,
-          }
-        : {}),
+      cpeMatches,
+      cpeMatchDetails: details,
+      purls: purls.length ? purls : undefined,
+      versionRange: hasConflictingRanges ? undefined : evidence.find((entry) => entry.versionRange)?.versionRange,
       sourceFeeds: [...new Set([...old.sourceFeeds, ...candidate.sourceFeeds])].sort(),
-      applicabilityRequiresReview: winner.applicabilityRequiresReview || applicabilityConflict,
+      applicabilityRequiresReview:
+        evidence.some((entry) => entry.applicabilityRequiresReview) ||
+        hasCrossSourceConflict ||
+        equalRevisionConflicts.length > 0 ||
+        hasConflictingRanges,
+      applicabilityPolicy: evidence.some((entry) => entry.applicabilityPolicy === 'REVIEW_ONLY')
+        ? 'REVIEW_ONLY'
+        : undefined,
+      sourceApplicability,
     });
   }
   return merged;

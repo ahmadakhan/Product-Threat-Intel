@@ -287,6 +287,7 @@ export const revision = (cve: NormalizedCVE) =>
         versionRange: cve.versionRange,
         purls: cve.purls,
         applicabilityRequiresReview: cve.applicabilityRequiresReview,
+        applicabilityPolicy: cve.applicabilityPolicy,
         remediation: cve.remediation,
         isKev: cve.cisaKev?.isKev ?? false,
       }),

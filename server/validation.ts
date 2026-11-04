@@ -200,6 +200,7 @@ export const cveSchema = z.object({
   cwe: strings,
   cpeMatches: z.array(z.string().refine((s) => parseCPE23(s).isValid)).max(1000),
   applicabilityRequiresReview: z.boolean().optional(),
+  applicabilityPolicy: z.enum(['REVIEW_ONLY']).optional(),
   cpeMatchDetails: z
     .array(
       z.object({ criteria: z.string().refine((s) => parseCPE23(s).isValid), range: rangeSchema.optional() }),

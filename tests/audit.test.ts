@@ -17,6 +17,7 @@ import { compareVersions } from '../src/utils/versionComparator.ts';
 import { mergeCveRecords, isWithinTimelineScope } from '../src/utils/deduplicator';
 import { quickHash, generateHmacSignature } from '../src/utils/cryptoChain';
 import { runVulnerabilityPipeline, validateSsrfSafety } from '../src/engine/pipelineEngine';
+import { reconcileFindings } from '../src/engine/reconcileFindings';
 import {
   INITIAL_NORMALIZED_CVES,
   INITIAL_WATCHLIST,
@@ -699,4 +700,54 @@ test('pipeline scopeHours supports 1 / 2 / 3 / 4 week windows', () => {
       `${label}: expected ${expected} findings, got ${result.execution.stats.matchedWatchlist}`,
     );
   }
+});
+
+test('out-of-window CVEs refresh tracked findings without creating new matches', () => {
+  const evaluatedAt = new Date();
+  const oldDate = new Date(evaluatedAt.getTime() - 48 * 3600000).toISOString();
+  const cve = makeCve('CVE-2026-1006', oldDate, oldDate);
+  const trackedAsset: WatchListItem = {
+    ...structuredClone(INITIAL_WATCHLIST[0]),
+    id: 'tracked-asset',
+    vendor: 'vendor',
+    product: 'widget',
+    version: '2.0',
+    cpes: ['cpe:2.3:a:vendor:widget:2.0:*:*:*:*:*:*:*'],
+    active: true,
+  };
+  const unrestricted = runVulnerabilityPipeline(
+    INITIAL_FEEDS,
+    [cve],
+    [trackedAsset],
+    [],
+    [],
+    { ...INITIAL_SETTINGS, scopeHours: 0 },
+    'test',
+    false,
+    {},
+    {},
+    undefined,
+    [],
+    evaluatedAt,
+  );
+  const trackedFinding = unrestricted.newFindings[0];
+  assert.ok(trackedFinding);
+  const newlyMatchingAsset = { ...trackedAsset, id: 'new-asset' };
+  const scoped = runVulnerabilityPipeline(
+    INITIAL_FEEDS,
+    [cve],
+    [trackedAsset, newlyMatchingAsset],
+    [],
+    [trackedFinding],
+    { ...INITIAL_SETTINGS, scopeHours: 1 },
+    'test',
+    true,
+    {},
+    {},
+    undefined,
+    [],
+    evaluatedAt,
+  );
+  assert.deepEqual(scoped.newFindings.map((finding) => finding.matchedAssetId), ['tracked-asset']);
+  assert.notEqual(reconcileFindings([trackedFinding], scoped.newFindings)[0].notificationStatus, 'NOT_APPLICABLE');
 });

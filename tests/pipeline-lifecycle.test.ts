@@ -78,6 +78,20 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
   };
   try {
     await migrate(pool);
+    await t.test('cached CVE matching uses the queued execution scope, not later settings', async () => {
+      await reset();
+      await save('settings', 'main', { ...DEFAULT_SETTINGS, scopeHours: 1 });
+      await save('watchlist', 'asset', asset());
+      const cached = vulnerability();
+      cached.publishedDate = new Date(Date.now() - 48 * 3600000).toISOString();
+      cached.modifiedDate = cached.publishedDate;
+      await save('cveData', cached.cveId, cached);
+      const execution = await queueRun(pool, 72, 'test');
+      assert.equal(execution.scopeHours, 72);
+      await processPipeline(pool, config, request);
+      const findings = await list<Finding>(pool, 'findings');
+      assert.equal(findings.some((finding) => finding.cveId === cached.cveId), true);
+    });
     await t.test('incremental checkpoints commit atomically, survive failures, and reset after source changes', async () => {
       await reset();
       await save('settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: false });

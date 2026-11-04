@@ -226,23 +226,23 @@ export const AdvisoryTemplateView: React.FC = () => {
       )
       .replace(
         /{{cve_id_links}}/g,
-        '<a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" target="_blank">CVE-2026-0001</a>, <a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0002" target="_blank">CVE-2026-0002</a>',
+        '<a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="display:inline-block;margin:0 8px 4px 0;color:#1d4ed8;text-decoration:underline;">CVE-2026-0001</a><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0002" style="display:inline-block;margin:0 8px 4px 0;color:#1d4ed8;text-decoration:underline;">CVE-2026-0002</a>',
       )
       .replace(
         /{{affected_systems_html}}/g,
-        '<li style="padding-left:18px;margin:4px 0;">Example inventory asset 1</li>\n<li style="padding-left:18px;margin:4px 0;">Example inventory asset 2</li>',
+        '<div style="margin:0 0 8px;font-size:12px;line-height:19px;color:#334155;">Example inventory asset 1</div>\n<div style="margin:0 0 8px;font-size:12px;line-height:19px;color:#334155;">Example inventory asset 2</div>',
       )
       .replace(
         /{{vendor_products_html}}/g,
-        '<li style="margin:4px 0;">VendorCorp - ProductSuite</li>\n<li style="margin:4px 0;">AnotherVendor - ProductLine</li>',
+        '<div style="margin:0 0 8px;padding:0 0 8px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:19px;color:#334155;"><strong>VendorCorp - ProductSuite</strong><br>Affected versions: &gt;= 4.2 and &lt; 4.8</div>\n<div style="margin:0 0 8px;padding:0 0 8px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:19px;color:#334155;"><strong>AnotherVendor - ProductLine</strong><br>Affected versions: 10.1 through 10.4</div>',
       )
       .replace(
         /{{cve_details}}/g,
-        '<p style="margin-top:0;">\n<strong>CVE-2026-0001</strong>\n</p>\n<ul style="margin:0;padding-left:18px;">\n<li>\n    Severity:\n    <span style="display:inline-block;padding:2px 8px;border-radius:4px;background:#f59e0b;color:#ffffff;font-size:11px;font-weight:bold;">\n        HIGH\n    </span>\n</li>\n<li>\n    Vendor Advisory:\n    <a href="https://example.com" target="_blank" rel="noopener noreferrer">\n        View Source\n    </a>\n</li>\n</ul>',
+        '<div style="margin:0 0 16px;padding:16px;border:1px solid #e2e8f0;border-left:4px solid #f59e0b;border-radius:4px;background:#ffffff;"><div style="font-size:14px;font-weight:bold;line-height:20px;"><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="color:#1d4ed8;text-decoration:underline;">CVE-2026-0001</a></div><p style="margin:8px 0 0;font-size:12px;line-height:19px;color:#334155;">A remotely exploitable vulnerability affects the listed product versions.</p><div style="margin:8px 0 0;font-size:11px;line-height:17px;"><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="color:#1d4ed8;text-decoration:underline;">NVD</a> &nbsp;·&nbsp; <a href="https://example.com" style="color:#1d4ed8;text-decoration:underline;">Vendor advisory</a></div></div>',
       )
       .replace(
         /{{remediation_steps}}/g,
-        'Review the applicable vendor advisory and test remediation through your change process.',
+        '<p style="margin:0 0 10px;font-size:12px;line-height:19px;color:#334155;">Review vendor guidance and validate remediation through your change process.</p><div style="margin:0 0 12px;padding:12px 14px;border:1px solid #e2e8f0;border-radius:4px;background:#ffffff;"><strong><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="color:#1d4ed8;text-decoration:underline;">CVE-2026-0001</a></strong><ul style="margin:6px 0 0;padding-left:20px;font-size:12px;line-height:19px;color:#334155;"><li>Confirm affected versions with the vendor.</li><li>Apply a tested vendor-supported fix.</li><li>Rescan affected systems and record the outcome.</li></ul><p style="margin:8px 0 0;font-size:12px;"><a href="https://example.com/patch-guidance" style="color:#1d4ed8;text-decoration:underline;">Vendor patch</a></p></div><div style="margin:0 0 12px;padding:12px 14px;border:1px solid #e2e8f0;border-radius:4px;background:#ffffff;"><strong><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0002" style="color:#1d4ed8;text-decoration:underline;">CVE-2026-0002</a></strong><ul style="margin:6px 0 0;padding-left:20px;font-size:12px;line-height:19px;color:#334155;"><li>Disable the vulnerable feature until the vendor update is deployed.</li><li>Verify service health after remediation.</li></ul></div>',
       )
       .replace(
         /{{mitigation_steps}}/g,
