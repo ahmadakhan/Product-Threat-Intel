@@ -300,7 +300,7 @@ export function EmailQueueView() {
                         {item.subject}
                       </p>
                     </td>
-                    <td className="px-4 py-3 font-mono text-zinc-400">{item.advisoryId}</td>
+                    <td className="px-4 py-3 font-mono text-zinc-400 break-all">{item.advisoryId}</td>
                     <td className="px-4 py-3">
                       <span
                         className={`inline-flex rounded-full border px-2 py-1 text-[10px] font-medium ${

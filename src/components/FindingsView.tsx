@@ -250,7 +250,7 @@ export const FindingsView: React.FC = () => {
         <div className="w-full min-w-0">
           <div className="ui-panel bg-zinc-900/50 dark:bg-zinc-900/50 light:bg-white border border-zinc-800/80 dark:border-zinc-800/80 light:border-zinc-200 rounded-2xl overflow-hidden shadow-sm transition-colors">
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1200px] text-left text-xs">
+              <table className="w-full min-w-[1320px] text-left text-xs">
                 <thead className="bg-zinc-950/80 dark:bg-zinc-950/80 light:bg-zinc-100 border-b border-zinc-800/80 dark:border-zinc-800/80 light:border-zinc-200 text-zinc-400 dark:text-zinc-400 light:text-zinc-600 font-mono uppercase text-[11px]">
                   <tr>
                     <th className="py-3 px-3.5 w-[40px]">
@@ -265,14 +265,14 @@ export const FindingsView: React.FC = () => {
                         className="w-4 h-4 rounded border-zinc-600 text-zinc-800 focus:ring-zinc-500"
                       />
                     </th>
-                    <th className="py-3 px-3.5">CVE Identifier</th>
+                    <th className="py-3 px-3.5 whitespace-nowrap">CVE Identifier</th>
                     <th className="py-3 px-3.5 whitespace-nowrap">Published</th>
                     <th className="py-3 px-3.5 whitespace-nowrap">Modified</th>
-                    <th className="py-3 px-3.5">Monitored Product</th>
-                    <th className="py-3 px-3.5">CVSS / EPSS</th>
-                    <th className="py-3 px-3.5">Exploit Risk</th>
-                    <th className="py-3 px-3.5">Auto-Notification</th>
-                    <th className="py-3 px-3.5 text-right">Details</th>
+                    <th className="py-3 px-3.5 whitespace-nowrap">Monitored Product</th>
+                    <th className="py-3 px-3.5 whitespace-nowrap">CVSS / EPSS</th>
+                    <th className="py-3 px-3.5 whitespace-nowrap">Exploit Risk</th>
+                    <th className="py-3 px-3.5 whitespace-nowrap">Auto-Notification</th>
+                    <th className="py-3 px-3.5 text-right whitespace-nowrap">Details</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -314,8 +314,8 @@ export const FindingsView: React.FC = () => {
                           </td>
 
                           {/* CVE ID */}
-                          <td className="py-3 px-3.5">
-                            <div className="font-mono font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 flex items-center space-x-1.5">
+                          <td className="py-3 px-3.5 align-top whitespace-nowrap">
+                            <div className="font-mono font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 flex items-center gap-1.5 whitespace-nowrap">
                               <CveLink cveId={finding.cveId} />
                               {isKev && (
                                 <span title="CISA KEV Catalog">
@@ -337,18 +337,18 @@ export const FindingsView: React.FC = () => {
                           </td>
 
                           {/* Matched Product */}
-                          <td className="py-3 px-3.5">
-                            <div className="font-medium text-zinc-200 dark:text-zinc-200 light:text-zinc-800 line-clamp-1 max-w-[180px]">
+                          <td className="py-3 px-3.5 align-top">
+                            <div className="font-medium text-zinc-200 dark:text-zinc-200 light:text-zinc-800 line-clamp-1 max-w-[240px]" title={finding.matchedAssetName}>
                               {finding.matchedAssetName}
                             </div>
-                            <div className="text-[10px] text-zinc-500 dark:text-zinc-500 light:text-zinc-600 font-mono truncate max-w-[180px]">
+                            <div className="text-[10px] text-zinc-500 dark:text-zinc-500 light:text-zinc-600 font-mono truncate max-w-[240px]" title={finding.matchedCpe}>
                               {finding.matchedCpe}
                             </div>
                           </td>
 
                           {/* CVSS / EPSS */}
                           <td className="py-3 px-3.5 font-mono">
-                            <div className="flex items-center space-x-1.5">
+                            <div className="flex items-center gap-1.5 whitespace-nowrap">
                               <span
                                 className={`font-bold ${
                                   finding.cve.cvss.score >= 9.0
@@ -375,7 +375,7 @@ export const FindingsView: React.FC = () => {
                           {/* Exploit Risk */}
                           <td className="py-3 px-3.5">
                             <span
-                              className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
+                              className={`inline-block text-[10px] font-mono px-2 py-0.5 rounded-full border whitespace-nowrap ${
                                 finding.exploitRisk === 'CISA_KEV_EXPLOITED'
                                   ? 'bg-amber-950/40 text-amber-300 border-amber-800/80 font-semibold'
                                   : finding.exploitRisk === 'REPORTED_IN_WILD_EXPLOIT'
@@ -391,9 +391,9 @@ export const FindingsView: React.FC = () => {
 
                           {/* Auto-Notification */}
                           <td className="py-3 px-3.5 font-mono text-[11px]">
-                            <div className="flex items-center space-x-1 text-emerald-400 dark:text-emerald-400 light:text-emerald-600 font-medium">
+                            <div className="flex items-center gap-1 text-emerald-400 dark:text-emerald-400 light:text-emerald-600 font-medium">
                               <Send className="w-3 h-3 shrink-0" />
-                              <span className="truncate max-w-[120px]">
+                              <span className="truncate max-w-[130px]" title={finding.notificationStatus.replace(/_/g, ' ')}>
                                 {finding.notificationStatus.replace(/_/g, ' ')}
                               </span>
                             </div>

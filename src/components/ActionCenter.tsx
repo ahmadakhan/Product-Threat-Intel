@@ -839,11 +839,17 @@ export const ActionCenter: React.FC = () => {
                       </td>
 
                       {/* Subject & Advisory */}
-                      <td className="py-3 px-4">
-                        <div className="font-medium text-zinc-200 dark:text-zinc-200 light:text-zinc-800 line-clamp-1 max-w-sm">
+                      <td className="py-3 px-4 align-top">
+                        {/* Two lines plus a title attribute: the subject used to be
+                            clamped to one line at max-w-sm, so a long alert title
+                            rendered as "[SECURITY ALERT]…" with no way to read it. */}
+                        <div
+                          className="font-medium text-zinc-200 dark:text-zinc-200 light:text-zinc-800 line-clamp-2 max-w-md"
+                          title={log.subject}
+                        >
                           {log.subject}
                         </div>
-                        <div className="text-[10px] text-zinc-400 dark:text-zinc-400 light:text-zinc-600 font-mono mt-0.5">
+                        <div className="text-[10px] text-zinc-400 dark:text-zinc-400 light:text-zinc-600 font-mono mt-0.5 break-all">
                           Ref: {log.advisoryId}
                         </div>
                       </td>
@@ -915,8 +921,8 @@ export const ActionCenter: React.FC = () => {
                       </td>
 
                       {/* Actions */}
-                      <td className="py-3 px-4 text-right">
-                        <div className="flex flex-wrap items-center justify-end gap-1.5">
+                      <td className="py-3 px-4 text-right align-top">
+                        <div className="flex flex-wrap items-center justify-end gap-1.5 whitespace-nowrap">
                           {isFollowUpEligible(log) && (
                             <button
                               type="button"
