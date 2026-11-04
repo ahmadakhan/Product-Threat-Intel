@@ -48,6 +48,8 @@ export function EmailQueueView() {
   const [deleting, setDeleting] = useState<EmailQueueItem | null>(null);
   const [reviewing, setReviewing] = useState<EmailQueueItem | null>(null);
   const [rejecting, setRejecting] = useState<EmailQueueItem | null>(null);
+  /** Pending confirmation: { id, action } for manual email sends. */
+  const [confirming, setConfirming] = useState<{ id: string; action: 'retry' | 'approve' | 'reject' } | null>(null);
   const [editing, setEditing] = useState<EmailQueueItem | null>(null);
   const [previewHtml, setPreviewHtml] = useState<string>('');
   const [edits, setEdits] = useState<ReviewEdits>({});
@@ -136,10 +138,20 @@ export function EmailQueueView() {
   const review = items.filter((item) => item.status === 'REVIEW').length;
 
   const retry = async (id: string) => {
-    setRetryingId(id);
-    const result = await retryEmailDelivery(id);
-    if (result) await refresh();
-    setRetryingId(null);
+    setConfirming({ id, action: 'retry' });
+  };
+
+  /** Execute a confirmed retry for a queue item. */
+  const handleConfirmedRetry = async () => {
+    if (!confirming || confirming.action !== 'retry') return;
+    setRetryingId(confirming.id);
+    try {
+      const result = await retryEmailDelivery(confirming.id);
+      if (result) await refresh();
+    } finally {
+      setRetryingId(null);
+      setConfirming(null);
+    }
   };
 
   // A queued job with attempts already spent is waiting on the retry backoff.
@@ -162,15 +174,31 @@ export function EmailQueueView() {
   };
 
   const decideReview = async (item: EmailQueueItem, decision: 'approve' | 'reject') => {
+    setReviewing(null);
+    setRejecting(null);
+    setConfirming({ id: item.id, action: decision });
+  };
+
+  /** Execute a confirmed approve/reject review decision. */
+  const handleConfirmedReview = async () => {
+    if (!confirming) return;
+    const { id, action } = confirming;
     setReviewBusy(true);
+    const item = items.find((i) => i.id === id);
+    if (!item) {
+      setConfirming(null);
+      setReviewBusy(false);
+      return;
+    }
     const result =
-      decision === 'approve' ? await approveEmailDelivery(item.id) : await rejectEmailDelivery(item.id);
+      action === 'approve' ? await approveEmailDelivery(item.id) : await rejectEmailDelivery(item.id);
     if (result) {
-      setItems((current) => current.filter((entry) => entry.id !== item.id));
+      setItems((current) => current.filter((entry) => entry.id !== id));
       setReviewing(null);
       setRejecting(null);
       await refresh();
     }
+    setConfirming(null);
     setReviewBusy(false);
   };
 
@@ -358,7 +386,7 @@ export function EmailQueueView() {
                             <button
                               type="button"
                               onClick={() => void retry(item.id)}
-                              disabled={retryingId === item.id}
+                              disabled={retryingId === item.id || confirming !== null}
                               className="ui-secondary min-h-8 px-2.5 py-1 text-[11px]"
                             >
                               <RotateCw
@@ -372,7 +400,7 @@ export function EmailQueueView() {
                             <button
                               type="button"
                               onClick={() => void retry(item.id)}
-                              disabled={retryingId === item.id}
+                              disabled={retryingId === item.id || confirming !== null}
                               title="Send now instead of waiting for the scheduled retry"
                               className="ui-secondary min-h-8 px-2.5 py-1 text-[11px]"
                             >
@@ -506,7 +534,7 @@ export function EmailQueueView() {
               <button
                 type="button"
                 className="ui-secondary"
-                disabled={reviewBusy}
+                disabled={reviewBusy || confirming !== null}
                 onClick={() => setReviewing(null)}
               >
                 Close
@@ -514,7 +542,7 @@ export function EmailQueueView() {
               <button
                 type="button"
                 className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-rose-500/30 px-4 text-xs font-semibold text-rose-300 hover:bg-rose-500/10 light:text-rose-700"
-                disabled={reviewBusy}
+                disabled={reviewBusy || confirming !== null}
                 onClick={() => {
                   setRejecting(reviewing);
                   setReviewing(null);
@@ -525,7 +553,7 @@ export function EmailQueueView() {
               <button
                 type="button"
                 className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-xs font-semibold text-white hover:bg-emerald-500"
-                disabled={reviewBusy}
+                disabled={reviewBusy || confirming !== null}
                 onClick={() => void decideReview(reviewing, 'approve')}
               >
                 <Check className="h-3.5 w-3.5" />
@@ -777,11 +805,64 @@ export function EmailQueueView() {
               <button
                 type="button"
                 className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-rose-500/30 px-4 text-xs font-semibold text-rose-300 hover:bg-rose-500/10 light:text-rose-700"
-                disabled={reviewBusy}
+                disabled={reviewBusy || confirming !== null}
                 onClick={() => void decideReview(rejecting, 'reject')}
               >
                 <X className="h-3.5 w-3.5" />
                 {reviewBusy ? 'Rejecting…' : 'Reject notification'}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {/* Confirmation modal for retry/approve/reject */}
+      {confirming && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirming(null);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-email-title"
+            className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5"
+          >
+            <h2 id="confirm-email-title" className="text-sm font-semibold">
+              Send email?
+            </h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              This will{' '}
+              {confirming.action === 'retry'
+                ? 'retry delivery of this queued email'
+                : confirming.action === 'approve'
+                ? 'approve and send this review notification'
+                : 'reject and cancel this notification'}{' '}
+              . A delivery audit record will be created.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                className="ui-secondary"
+                disabled={reviewBusy}
+                onClick={() => setConfirming(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={reviewBusy}
+                onClick={() => {
+                  if (confirming.action === 'retry') {
+                    void handleConfirmedRetry();
+                  } else {
+                    void handleConfirmedReview();
+                  }
+                }}
+              >
+                {reviewBusy ? 'Processing…' : 'Confirm'}
               </button>
             </div>
           </section>

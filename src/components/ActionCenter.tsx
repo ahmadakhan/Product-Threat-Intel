@@ -25,6 +25,7 @@ import { formatDateTime as fmtDateTime } from '../utils/dateTime';
 import type { EmailDeliveryLog, ReviewEdits } from '../types';
 import { PageHeading } from './PageHeading';
 import { isFindingDelivery } from '../utils/findingDelivery';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 
 interface SLAMetrics {
   delivered: number;
@@ -116,11 +117,16 @@ export const ActionCenter: React.FC = () => {
   const [pdfLoading, setPdfLoading] = useState(false);
   const [pdfError, setPdfError] = useState<string | null>(null);
   const [editBusy, setEditBusy] = useState(false);
+  const editDialogRef = useDialogFocus(() => {
+    if (!editBusy) setEditing(null);
+  });
   const [livePreviewDebounce, setLivePreviewDebounce] = useState<ReturnType<typeof setTimeout> | null>(null);
   const pdfUrlRef = useRef<string | null>(null);
   const [resending, setResending] = useState<{ id: string; advisoryId: string; mode: RecipientMode; email: string; reason: string } | null>(null);
   const [resendBusy, setResendBusy] = useState(false);
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
+  /** Pending email-send confirmation: { id, action, label }. Null when none pending. */
+  const [confirmSend, setConfirmSend] = useState<{ id: string; action: 'retry' | 'cancel' | 'send-now' | 'resend' | 'approve' | 'update-send'; label: string } | null>(null);
   
   // Pagination
   const [currentPage, setCurrentPage] = useState(1);
@@ -213,31 +219,15 @@ export const ActionCenter: React.FC = () => {
   }, [emailLogs]);
 
   const handleRetry = async (logId: string) => {
-    try {
-      await retryEmailDelivery(logId);
-      await reload();
-    } catch (error) {
-      console.error('Error retrying delivery:', error);
-    }
+    const log = emailLogs.find((l) => l.id === logId);
+    setConfirmSend({ id: logId, action: 'retry', label: log?.subject || 'this email' });
   };
 
   const handleBulkAction = async (action: 'retry' | 'cancel' | 'send-now') => {
     // "Retry" and "send now" both force the job back onto the queue (the
     // server refuses in-flight/due jobs so this cannot double-send); "cancel"
     // removes the queued job. Failures for one id must not abandon the rest.
-    const results = await Promise.allSettled(
-      [...selectedLogs].map((logId) =>
-        action === 'cancel'
-          ? deleteEmailQueueItem(logId)
-          : retryEmailDelivery(logId),
-      ),
-    );
-    const failures = results.filter((r) => r.status === 'rejected').length;
-    if (failures)
-      console.error(`Bulk ${action}: ${failures} of ${selectedLogs.size} operations failed`);
-    setSelectedLogs(new Set());
-    setShowBulkActions(false);
-    await reload();
+    setConfirmSend({ id: 'bulk', action: action === 'cancel' ? 'cancel' : 'send-now', label: `${selectedLogs.size} selected emails` });
   };
 
   /** Releases the blob URL backing the PDF preview. */
@@ -276,37 +266,90 @@ export const ActionCenter: React.FC = () => {
   /** Approve a held review job, or dispatch an updated copy of a delivered one. */
   const sendUpdated = useCallback(async () => {
     if (!editing) return;
-    setEditBusy(true);
+    setConfirmSend({ id: editing.id, action: editing.status === 'REVIEW_REQUIRED' ? 'approve' : 'update-send', label: editing.subject });
+  }, [editing]);
+
+  /** Execute a previously confirmed email-send action. */
+  const handleConfirmedSend = useCallback(async () => {
+    if (!confirmSend) return;
+    const { id, action, label } = confirmSend;
+    setActionBusyId(id);
     try {
-      if (editing.status === 'REVIEW_REQUIRED') {
-        const saved = await editEmailReview(editing.id, buildEdits());
-        if (!saved) return;
-        const approved = await approveEmailDelivery(editing.id);
-        if (approved) {
-          setEditing(null);
+      if (id === 'bulk') {
+        const results = await Promise.allSettled(
+          [...selectedLogs].map((logId) =>
+            action === 'cancel'
+              ? deleteEmailQueueItem(logId)
+              : retryEmailDelivery(logId),
+          ),
+        );
+        const failures = results.filter((r) => r.status === 'rejected').length;
+        if (failures)
+          console.error(`Bulk ${action}: ${failures} of ${selectedLogs.size} operations failed`);
+        setSelectedLogs(new Set());
+        setShowBulkActions(false);
+        await reload();
+        return;
+      }
+      if (action === 'retry') {
+        await retryEmailDelivery(id);
+        await reload();
+        return;
+      }
+      if (action === 'resend' && resending) {
+        const result = await resendEmailDelivery(resending.id, {
+          recipientMode: resending.mode,
+          customEmail: resending.mode === 'SINGLE_EMAIL' ? resending.email : undefined,
+          reason: resending.reason || undefined,
+        });
+        if (result) {
+          setResending(null);
           await reload();
         }
         return;
       }
-      const result = await updateAndSendEmail(editing.id, {
-        subject: subjectDraft.trim() || undefined,
-        audienceNotice: edits.audienceNotice,
-        reviewerComment: edits.reviewerComment,
-        reviewerName: edits.reviewerName,
-        customBodyOverride: edits.customBodyOverride,
-        recipientMode,
-        customEmail:
-          recipientMode === 'SINGLE_EMAIL' ? customEmail.trim() || undefined : undefined,
-        reason: reason.trim() || undefined,
-      });
-      if (result) {
-        setEditing(null);
-        await reload();
+      if ((action === 'approve' || action === 'update-send') && editing) {
+        setEditBusy(true);
+        try {
+          if (editing.status === 'REVIEW_REQUIRED') {
+            const saved = await editEmailReview(editing.id, buildEdits());
+            if (!saved) return;
+            const approved = await approveEmailDelivery(editing.id);
+            if (approved) {
+              setEditing(null);
+              await reload();
+            }
+            return;
+          }
+          const result = await updateAndSendEmail(editing.id, {
+            subject: subjectDraft.trim() || undefined,
+            audienceNotice: edits.audienceNotice,
+            reviewerComment: edits.reviewerComment,
+            reviewerName: edits.reviewerName,
+            customBodyOverride: edits.customBodyOverride,
+            recipientMode,
+            customEmail:
+              recipientMode === 'SINGLE_EMAIL' ? customEmail.trim() || undefined : undefined,
+            reason: reason.trim() || undefined,
+          });
+          if (result) {
+            setEditing(null);
+            await reload();
+          }
+        } finally {
+          setEditBusy(false);
+        }
+        return;
       }
+    } catch (error) {
+      console.error(`Error sending ${label}:`, error);
     } finally {
-      setEditBusy(false);
+      setConfirmSend(null);
+      setActionBusyId(null);
     }
   }, [
+    confirmSend,
+    resending,
     editing,
     buildEdits,
     approveEmailDelivery,
@@ -316,6 +359,10 @@ export const ActionCenter: React.FC = () => {
     recipientMode,
     customEmail,
     reason,
+    selectedLogs,
+    retryEmailDelivery,
+    deleteEmailQueueItem,
+    resendEmailDelivery,
     reload,
   ]);
 
@@ -557,20 +604,22 @@ export const ActionCenter: React.FC = () => {
       {/* Header */}
       <div className="ui-page-header">
         <PageHeading page="action-center">
-          Delivered finding emails stay here as PENDING actions until an operator
-          acknowledges them or edits and re-sends a corrected copy.
+          Delivered finding emails stay here as PENDING actions until an operator acknowledges them or edits
+          and re-sends a corrected copy.
         </PageHeading>
-        
+
         <div className="flex flex-wrap items-center gap-3">
           {/* SLA Status Indicator */}
           <div className="flex items-center space-x-2 px-3 py-1.5 rounded-xl bg-zinc-900/50 dark:bg-zinc-900/50 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200">
             <TrendingUp className="w-4 h-4 text-zinc-400" />
-            <span className="text-xs text-zinc-300 dark:text-zinc-300 light:text-zinc-700">SLA: {slaMetrics?.slaCompliance.toFixed(1)}%</span>
+            <span className="text-xs text-zinc-300 dark:text-zinc-300 light:text-zinc-700">
+              SLA: {slaMetrics?.slaCompliance.toFixed(1)}%
+            </span>
             <span className={`text-xs font-medium ${slaStatusColor(slaMetrics?.slaCompliance || 0)}`}>
               {slaMetrics?.averageDeliveryTime.toFixed(1)}% first-attempt
             </span>
           </div>
-          
+
           {/* Delivery Metrics */}
           <div className="flex items-center space-x-2 px-3 py-1.5 rounded-xl bg-zinc-900/50 dark:bg-zinc-900/50 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200">
             <Shield className="w-4 h-4 text-zinc-400" />
@@ -608,7 +657,7 @@ export const ActionCenter: React.FC = () => {
               {slaMetrics?.lastDeliveryWindow.count} delivered in last hour
             </span>
           </div>
-          
+
           {/* Refresh Button */}
           <button
             type="button"
@@ -647,11 +696,13 @@ export const ActionCenter: React.FC = () => {
               <Filter className="w-4 h-4 text-zinc-400" />
               <span className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600">Filters:</span>
             </div>
-            
+
             {/* Status Filter */}
             <select
               value={filters.status}
-              onChange={(e) => setFilters(prev => ({ ...prev, status: e.target.value as FilterOptions['status'] }))}
+              onChange={(e) =>
+                setFilters((prev) => ({ ...prev, status: e.target.value as FilterOptions['status'] }))
+              }
               className="px-3 py-1.5 rounded-xl bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 text-xs text-zinc-100 dark:text-zinc-100 light:text-zinc-900 focus:outline-none focus:border-zinc-600"
             >
               <option value="ALL">All Statuses</option>
@@ -684,19 +735,23 @@ export const ActionCenter: React.FC = () => {
             {/* Provider Filter */}
             <select
               value={filters.provider}
-              onChange={(e) => setFilters(prev => ({ ...prev, provider: e.target.value }))}
+              onChange={(e) => setFilters((prev) => ({ ...prev, provider: e.target.value }))}
               className="px-3 py-1.5 rounded-xl bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 text-xs text-zinc-100 dark:text-zinc-100 light:text-zinc-900 focus:outline-none focus:border-zinc-600"
             >
               <option value="ALL">All Providers</option>
-              {[...new Set(emailLogs.map(log => log.provider))].map(provider => (
-                <option key={provider} value={provider}>{provider}</option>
+              {[...new Set(emailLogs.map((log) => log.provider))].map((provider) => (
+                <option key={provider} value={provider}>
+                  {provider}
+                </option>
               ))}
             </select>
 
             {/* Date Range Filter */}
             <select
               value={filters.dateRange}
-              onChange={(e) => setFilters(prev => ({ ...prev, dateRange: e.target.value as FilterOptions['dateRange'] }))}
+              onChange={(e) =>
+                setFilters((prev) => ({ ...prev, dateRange: e.target.value as FilterOptions['dateRange'] }))
+              }
               className="px-3 py-1.5 rounded-xl bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 text-xs text-zinc-100 dark:text-zinc-100 light:text-zinc-900 focus:outline-none focus:border-zinc-600"
             >
               <option value="today">Today</option>
@@ -859,7 +914,9 @@ export const ActionCenter: React.FC = () => {
                         <div className="flex flex-wrap gap-1">
                           {cveChips(log.advisoryId)}
                           {cveOverflow(log.advisoryId) && (
-                            <span className="text-[10px] text-zinc-500 font-mono">{cveOverflow(log.advisoryId)}</span>
+                            <span className="text-[10px] text-zinc-500 font-mono">
+                              {cveOverflow(log.advisoryId)}
+                            </span>
                           )}
                           {trackedCves(log.advisoryId).length === 0 && (
                             <span className="text-[10px] text-zinc-500 font-mono">No CVEs</span>
@@ -873,9 +930,7 @@ export const ActionCenter: React.FC = () => {
                       </td>
 
                       {/* Status */}
-                      <td className="py-3 px-4 font-mono">
-                        {deliveryStatusBadge(log)}
-                      </td>
+                      <td className="py-3 px-4 font-mono">{deliveryStatusBadge(log)}</td>
 
                       {/* Action SLA */}
                       <td className="py-3 px-4 font-mono text-[11px]">
@@ -905,14 +960,19 @@ export const ActionCenter: React.FC = () => {
                       <td className="py-3 px-4 font-mono text-[11px]">
                         {log.nextRetryTime ? (
                           <div>
-                            <span className={new Date(log.nextRetryTime).getTime() <= Date.now() ? 'text-rose-400' : 'text-amber-400'}>
+                            <span
+                              className={
+                                new Date(log.nextRetryTime).getTime() <= Date.now()
+                                  ? 'text-rose-400'
+                                  : 'text-amber-400'
+                              }
+                            >
                               {fmtDateTime(log.nextRetryTime, settings.timezone)}
                             </span>
                             <div className="text-[10px] text-zinc-500 mt-0.5">
-                              {new Date(log.nextRetryTime).getTime() <= Date.now() ? 
-                                'Due now' : 
-                                `In ${Math.round((new Date(log.nextRetryTime).getTime() - Date.now()) / 60000)}m`
-                              }
+                              {new Date(log.nextRetryTime).getTime() <= Date.now()
+                                ? 'Due now'
+                                : `In ${Math.round((new Date(log.nextRetryTime).getTime() - Date.now()) / 60000)}m`}
                             </div>
                           </div>
                         ) : (
@@ -1018,6 +1078,7 @@ export const ActionCenter: React.FC = () => {
         />
         {editing && (
           <div
+            ref={editDialogRef}
             className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
             onMouseDown={(event) => {
               if (event.target === event.currentTarget && !editBusy) setEditing(null);
@@ -1027,24 +1088,42 @@ export const ActionCenter: React.FC = () => {
               role="dialog"
               aria-modal="true"
               aria-labelledby="edit-email-title"
-              className={`flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white`}
+              className="flex max-h-[92vh] w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-950 shadow-2xl shadow-black/30 light:border-zinc-200 light:bg-white"
             >
-              <div className="flex items-start justify-between gap-4 p-5 pb-3">
-                <div>
+              <div className="flex items-start justify-between gap-4 border-b border-zinc-800/80 px-6 py-5 light:border-zinc-200">
+                <div className="min-w-0">
                   <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-sky-300 light:text-sky-700">
                     Edit email before sending
                   </p>
-                  <h2 id="edit-email-title" className="mt-1 text-base font-semibold">
+                  <h2
+                    id="edit-email-title"
+                    className="mt-1 truncate text-lg font-semibold tracking-tight text-zinc-100 light:text-zinc-900"
+                  >
                     {editing.subject}
                   </h2>
-                  <p className="mt-1 text-xs text-zinc-500">
-                    To {editing.recipientEmail} · Advisory {editing.advisoryId}
+                  <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-400 light:text-zinc-600">
+                    <span>To {editing.recipientEmail}</span>
+                    <span aria-hidden="true" className="text-zinc-600">
+                      ·
+                    </span>
+                    <span>Advisory {editing.advisoryId}</span>
+                    <span
+                      className={`ml-1 inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                        editing.status === 'REVIEW_REQUIRED'
+                          ? 'border-amber-500/30 bg-amber-500/10 text-amber-300 light:text-amber-700'
+                          : editing.status === 'QUEUED'
+                            ? 'border-sky-500/30 bg-sky-500/10 text-sky-300 light:text-sky-700'
+                            : 'border-zinc-700 bg-zinc-800/70 text-zinc-300 light:border-zinc-300 light:bg-zinc-100 light:text-zinc-700'
+                      }`}
+                    >
+                      {editing.status.replaceAll('_', ' ')}
+                    </span>
                   </p>
                 </div>
                 <button
                   type="button"
                   aria-label="Close editor"
-                  className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800"
+                  className="rounded-lg p-2 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 disabled:cursor-not-allowed disabled:opacity-50 light:hover:bg-zinc-100 light:hover:text-zinc-800"
                   disabled={editBusy}
                   onClick={() => {
                     if (!editBusy) setEditing(null);
@@ -1054,180 +1133,294 @@ export const ActionCenter: React.FC = () => {
                 </button>
               </div>
 
-              <div className="flex-1 overflow-y-auto">
-                <div className="grid grid-cols-1 gap-0 p-5 pt-3 xl:grid-cols-2">
-                  <div className="xl:pr-4 xl:border-r xl:border-zinc-800/80 light:xl:border-zinc-200">
-                    <div className="space-y-4">
-                      <div>
-                        <label
-                          htmlFor="email-subject"
-                          className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
-                        >
-                          Subject
-                        </label>
-                        <input
-                          id="email-subject"
-                          type="text"
-                          maxLength={200}
-                          placeholder="Email subject line"
-                          value={subjectDraft}
-                          onChange={(e) => {
-                            setSubjectDraft(e.target.value);
-                            triggerLivePreview(edits, e.target.value);
-                          }}
-                          className="mt-1 w-full text-xs"
-                        />
-                      </div>
-
-                      <div>
-                        <label
-                          htmlFor="audience-notice"
-                          className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
-                        >
-                          Audience notice
-                        </label>
-                        <textarea
-                          id="audience-notice"
-                          rows={4}
-                          placeholder="Notice shown above the advisory body for all recipients"
-                           value={edits.audienceNotice || ''}
-                          onChange={(e) => {
-                            const updated = { ...edits, audienceNotice: e.target.value || undefined };
-                            setEdits(updated);
-                            triggerLivePreview(updated);
-                          }}
-                          className="mt-1 w-full resize-y font-mono text-xs"
-                        />
-                      </div>
-
-                      <div>
-                        <label
-                          htmlFor="reviewer-comment"
-                          className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
-                        >
-                          Reviewer comment
-                        </label>
-                        <textarea
-                          id="reviewer-comment"
-                          rows={3}
-                          placeholder="Optional context added at the bottom of the email"
-                           value={edits.reviewerComment || ''}
-                          onChange={(e) => {
-                            const updated = { ...edits, reviewerComment: e.target.value || undefined };
-                            setEdits(updated);
-                            triggerLivePreview(updated);
-                          }}
-                          className="mt-1 w-full resize-y font-mono text-xs"
-                        />
-                      </div>
-
-                      <div>
-                        <label
-                          htmlFor="reviewer-name"
-                          className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
-                        >
-                          Reviewer name
-                        </label>
-                        <input
-                          id="reviewer-name"
-                          type="text"
-                           maxLength={100}
-                          placeholder="Name attached to the reviewer comment"
-                           value={edits.reviewerName || ''}
-                          onChange={(e) => {
-                            const updated = { ...edits, reviewerName: e.target.value || undefined };
-                            setEdits(updated);
-                            triggerLivePreview(updated);
-                          }}
-                          className="mt-1 w-full text-xs"
-                        />
-                      </div>
-
-                      <div>
-                        <label
-                          htmlFor="custom-body"
-                          className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
-                        >
-                          Custom body override (advanced)
-                        </label>
-                        <textarea
-                          id="custom-body"
-                          rows={6}
-                           placeholder="Override the entire HTML body — leave empty to keep the template"
-                           value={edits.customBodyOverride || ''}
-                          onChange={(e) => {
-                            const updated = { ...edits, customBodyOverride: e.target.value || undefined };
-                            setEdits(updated);
-                            triggerLivePreview(updated);
-                          }}
-                          className="mt-1 w-full resize-y font-mono text-xs"
-                        />
-                      </div>
-
-<div>
-                        <label
-                          htmlFor="recipient-mode"
-                          className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
-                        >
-                          Send to
-                        </label>
-                        <select
-                          id="recipient-mode"
-                          value={recipientMode}
-                          onChange={(e) => setRecipientMode(e.target.value as 'SINGLE_EMAIL' | 'SECURITY_TEAM' | 'EVERYONE')}
-                          className="mt-1 w-full text-xs"
-                        >
-                          <option value="SINGLE_EMAIL">Single recipient</option>
-                          <option value="SECURITY_TEAM">Security team</option>
-                          <option value="EVERYONE">Everyone</option>
-                        </select>
-                        {recipientMode === 'SINGLE_EMAIL' && (
+              <div className="min-h-0 flex-1 overflow-y-auto xl:overflow-hidden">
+                <div className="grid grid-cols-1 gap-7 p-6 xl:h-full xl:min-h-0 xl:grid-cols-[minmax(0,0.88fr)_minmax(0,1.12fr)]">
+                  <div className="min-w-0 xl:min-h-0 xl:overflow-y-auto xl:overscroll-contain xl:border-r xl:border-zinc-800/80 xl:pr-7 light:xl:border-zinc-200">
+                    <div className="space-y-6">
+                      <section aria-labelledby="email-content-heading" className="space-y-4">
+                        <div className="border-b border-zinc-800/70 pb-2 light:border-zinc-200">
+                          <h3
+                            id="email-content-heading"
+                            className="text-sm font-semibold text-zinc-100 light:text-zinc-900"
+                          >
+                            Message details
+                          </h3>
+                          <p className="mt-1 text-[11px] text-zinc-500">
+                            Shape the notice recipients will receive.
+                          </p>
+                        </div>
+                        <div>
+                          <label
+                            htmlFor="email-subject"
+                            className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
+                          >
+                            Subject
+                          </label>
                           <input
-                            type="email"
-                            placeholder="Recipient email address"
-                            value={customEmail}
-                            onChange={(e) => setCustomEmail(e.target.value)}
-                            className="mt-2 w-full text-xs"
+                            id="email-subject"
+                            data-dialog-autofocus
+                            type="text"
+                            maxLength={200}
+                            placeholder="Email subject line"
+                            value={subjectDraft}
+                            onChange={(e) => {
+                              setSubjectDraft(e.target.value);
+                              triggerLivePreview(edits, e.target.value);
+                            }}
+                            className="mt-1 w-full text-sm"
                           />
-                        )}
-                      </div>
+                          <p className="mt-1 text-right text-[10px] text-zinc-500">
+                            {subjectDraft.length}/200
+                          </p>
+                        </div>
 
-                      <div>
-                        <label
-                          htmlFor="update-reason"
-                          className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
-                        >
-                          Reason for update
-                        </label>
-                        <input
-                          id="update-reason"
-                          type="text"
-                          maxLength={240}
-                          placeholder="Recorded in the delivery audit trail"
-                          value={reason}
-                          onChange={(e) => setReason(e.target.value)}
-                          className="mt-1 w-full text-xs"
-                        />
-                      </div>
+                        <div>
+                          <label
+                            htmlFor="audience-notice"
+                            className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
+                          >
+                            Audience notice
+                          </label>
+                          <textarea
+                            id="audience-notice"
+                            rows={4}
+                            placeholder="Notice shown above the advisory body for all recipients"
+                            value={edits.audienceNotice || ''}
+                            onChange={(e) => {
+                              const updated = { ...edits, audienceNotice: e.target.value || undefined };
+                              setEdits(updated);
+                              triggerLivePreview(updated);
+                            }}
+                            className="mt-1 w-full resize-y font-mono text-xs"
+                          />
+                        </div>
+
+                        <div>
+                          <label
+                            htmlFor="reviewer-comment"
+                            className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
+                          >
+                            Reviewer comment
+                          </label>
+                          <textarea
+                            id="reviewer-comment"
+                            rows={3}
+                            placeholder="Optional context added at the bottom of the email"
+                            value={edits.reviewerComment || ''}
+                            onChange={(e) => {
+                              const updated = { ...edits, reviewerComment: e.target.value || undefined };
+                              setEdits(updated);
+                              triggerLivePreview(updated);
+                            }}
+                            className="mt-1 w-full resize-y font-mono text-xs"
+                          />
+                        </div>
+
+                        <div>
+                          <label
+                            htmlFor="reviewer-name"
+                            className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
+                          >
+                            Reviewer name
+                          </label>
+                          <input
+                            id="reviewer-name"
+                            type="text"
+                            maxLength={100}
+                            placeholder="Name attached to the reviewer comment"
+                            value={edits.reviewerName || ''}
+                            onChange={(e) => {
+                              const updated = { ...edits, reviewerName: e.target.value || undefined };
+                              setEdits(updated);
+                              triggerLivePreview(updated);
+                            }}
+                            className="mt-1 w-full text-xs"
+                          />
+                        </div>
+                      </section>
+
+                      <section
+                        aria-labelledby="custom-body-heading"
+                        className="space-y-3 rounded-xl border border-zinc-800/80 bg-zinc-900/50 p-4 light:border-zinc-200 light:bg-zinc-50"
+                      >
+                        <div>
+                          <h3
+                            id="custom-body-heading"
+                            className="text-xs font-semibold text-zinc-200 light:text-zinc-800"
+                          >
+                            Advanced content
+                          </h3>
+                          <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
+                            Replace the template body only when a fully custom HTML message is needed.
+                          </p>
+                        </div>
+                        <div>
+                          <label
+                            htmlFor="custom-body"
+                            className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
+                          >
+                            Custom body override (advanced)
+                          </label>
+                          <textarea
+                            id="custom-body"
+                            rows={6}
+                            placeholder="Override the entire HTML body — leave empty to keep the template"
+                            value={edits.customBodyOverride || ''}
+                            onChange={(e) => {
+                              const updated = { ...edits, customBodyOverride: e.target.value || undefined };
+                              setEdits(updated);
+                              triggerLivePreview(updated);
+                            }}
+                            className="mt-1 w-full resize-y font-mono text-xs"
+                          />
+                        </div>
+                      </section>
+
+                      <section aria-labelledby="delivery-audience-heading" className="space-y-4">
+                        <div className="border-b border-zinc-800/70 pb-2 light:border-zinc-200">
+                          <h3
+                            id="delivery-audience-heading"
+                            className="text-sm font-semibold text-zinc-100 light:text-zinc-900"
+                          >
+                            Delivery audience
+                          </h3>
+                          <p className="mt-1 text-[11px] text-zinc-500">
+                            Choose who receives this notification.
+                          </p>
+                        </div>
+                        <div>
+                          <label
+                            htmlFor="recipient-mode"
+                            className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
+                          >
+                            Send to
+                          </label>
+                          <select
+                            id="recipient-mode"
+                            value={recipientMode}
+                            onChange={(e) =>
+                              setRecipientMode(
+                                e.target.value as 'SINGLE_EMAIL' | 'SECURITY_TEAM' | 'EVERYONE',
+                              )
+                            }
+                            className="mt-1 w-full text-xs"
+                          >
+                            <option value="SINGLE_EMAIL">Single recipient</option>
+                            <option value="SECURITY_TEAM">Security team</option>
+                            <option value="EVERYONE">Everyone</option>
+                          </select>
+                          {recipientMode === 'SINGLE_EMAIL' && (
+                            <div className="mt-3">
+                              <label
+                                htmlFor="recipient-email"
+                                className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
+                              >
+                                Recipient email address
+                              </label>
+                              <input
+                                id="recipient-email"
+                                type="email"
+                                placeholder="name@company.com"
+                                value={customEmail}
+                                onChange={(e) => setCustomEmail(e.target.value)}
+                                className="mt-1 w-full text-xs"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      </section>
+
+                      <section
+                        aria-labelledby="audit-context-heading"
+                        className="space-y-3 border-t border-zinc-800/70 pt-5 light:border-zinc-200"
+                      >
+                        <div>
+                          <h3
+                            id="audit-context-heading"
+                            className="text-sm font-semibold text-zinc-100 light:text-zinc-900"
+                          >
+                            Audit context
+                          </h3>
+                          <p className="mt-1 text-[11px] text-zinc-500">
+                            The reason is recorded with this delivery update.
+                          </p>
+                        </div>
+                        <div>
+                          <label
+                            htmlFor="update-reason"
+                            className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
+                          >
+                            Reason for update
+                          </label>
+                          <input
+                            id="update-reason"
+                            type="text"
+                            maxLength={240}
+                            placeholder="Recorded in the delivery audit trail"
+                            value={reason}
+                            onChange={(e) => setReason(e.target.value)}
+                            className="mt-1 w-full text-xs"
+                          />
+                          <p className="mt-1 text-right text-[10px] text-zinc-500">{reason.length}/240</p>
+                        </div>
+                      </section>
                     </div>
                   </div>
 
-                  <div className="xl:pl-4">
-                    <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="min-w-0 xl:min-h-0 xl:overflow-y-auto xl:overscroll-contain xl:pl-1">
+                    <div className="mb-4 flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-sky-300 light:text-sky-700">
+                          Recipient-facing preview
+                        </p>
+                        <h3 className="mt-1 text-sm font-semibold text-zinc-100 light:text-zinc-900">
+                          Review the rendered message
+                        </h3>
+                        <p className="mt-1 text-[11px] text-zinc-500">
+                          Preview reflects your edits; active content is sanitized.
+                        </p>
+                      </div>
+                      <span className="mt-1 inline-flex shrink-0 items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-medium text-emerald-300 light:text-emerald-700">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                        Live draft
+                      </span>
+                    </div>
+
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                       <div
                         role="tablist"
                         aria-label="Preview format"
-                        className="inline-flex rounded-lg border border-zinc-800/80 p-0.5 light:border-zinc-200"
+                        className="inline-flex rounded-lg border border-zinc-800/80 bg-zinc-900 p-0.5 light:border-zinc-200 light:bg-zinc-100"
+                        onKeyDown={(event) => {
+                          if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+                          event.preventDefault();
+                          const nextTab =
+                            event.key === 'Home'
+                              ? 'email'
+                              : event.key === 'End'
+                                ? 'pdf'
+                                : event.key === 'ArrowRight'
+                                  ? previewTab === 'email' ? 'pdf' : 'email'
+                                  : previewTab === 'email' ? 'pdf' : 'email';
+                          setPreviewTab(nextTab);
+                          event.currentTarget
+                            .querySelector<HTMLButtonElement>(`[data-preview-tab="${nextTab}"]`)
+                            ?.focus();
+                          if (nextTab === 'pdf') void refreshPdf();
+                        }}
                       >
                         <button
                           type="button"
                           role="tab"
+                          data-preview-tab="email"
                           aria-selected={previewTab === 'email'}
+                          tabIndex={previewTab === 'email' ? 0 : -1}
+                          aria-controls="email-preview-panel"
                           onClick={() => setPreviewTab('email')}
                           className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
                             previewTab === 'email'
-                              ? 'bg-sky-600 text-white'
-                              : 'text-zinc-400 hover:text-zinc-200'
+                              ? 'bg-sky-600 text-white shadow-sm'
+                              : 'text-zinc-400 hover:text-zinc-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-500 light:text-zinc-600 light:hover:text-zinc-900'
                           }`}
                         >
                           <Mail className="mr-1 inline h-3 w-3" /> Email
@@ -1235,15 +1428,18 @@ export const ActionCenter: React.FC = () => {
                         <button
                           type="button"
                           role="tab"
+                          data-preview-tab="pdf"
                           aria-selected={previewTab === 'pdf'}
+                          tabIndex={previewTab === 'pdf' ? 0 : -1}
+                          aria-controls="pdf-preview-panel"
                           onClick={() => {
                             setPreviewTab('pdf');
                             void refreshPdf();
                           }}
                           className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
                             previewTab === 'pdf'
-                              ? 'bg-sky-600 text-white'
-                              : 'text-zinc-400 hover:text-zinc-200'
+                              ? 'bg-sky-600 text-white shadow-sm'
+                              : 'text-zinc-400 hover:text-zinc-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-500 light:text-zinc-600 light:hover:text-zinc-900'
                           }`}
                         >
                           <FileText className="mr-1 inline h-3 w-3" /> PDF
@@ -1262,49 +1458,66 @@ export const ActionCenter: React.FC = () => {
                       )}
                     </div>
 
-                    {previewTab === 'email' ? (
-                      previewLoading ? (
-                        <div className="flex h-[480px] items-center justify-center text-xs text-zinc-500">
-                          <RefreshCw className="h-4 w-4 animate-spin" /> Generating preview…
-                        </div>
-                      ) : (
-                        <div
-                          className="h-[480px] w-full overflow-auto rounded-xl border border-zinc-800/80 light:border-zinc-200 bg-white p-4"
-                          dangerouslySetInnerHTML={{ __html: sanitizedPreviewHtml }}
-                        />
-                      )
-                    ) : (
-                      <div className="h-[480px] w-full overflow-hidden rounded-xl border border-zinc-800/80 light:border-zinc-200">
-                        {pdfLoading ? (
-                          <div className="flex h-full items-center justify-center text-xs text-zinc-500">
-                            <RefreshCw className="h-4 w-4 animate-spin" /> Rendering PDF…
+                    <div
+                      role="tabpanel"
+                      id="email-preview-panel"
+                      aria-label="Email preview"
+                      hidden={previewTab !== 'email'}
+                    >
+                      {previewTab === 'email' ? (
+                        previewLoading ? (
+                          <div className="flex h-[480px] flex-col items-center justify-center gap-3 rounded-xl border border-zinc-800/80 bg-zinc-900/50 text-xs text-zinc-400 light:border-zinc-200 light:bg-zinc-50 light:text-zinc-600">
+                            <RefreshCw className="h-5 w-5 animate-spin text-sky-400" />
+                            <span>Generating preview…</span>
                           </div>
-                        ) : pdfError ? (
-                          <div className="flex h-full items-center justify-center p-6 text-center text-xs text-rose-400">
-                            <FileText className="h-8 w-8 mb-2" />
-                            <div>{pdfError}</div>
-                            <button
-                              onClick={() => void refreshPdf()}
-                              className="mt-4 px-3 py-1.5 rounded-lg bg-rose-500/10 text-rose-400 border border-rose-500/20 hover:bg-rose-500/20 text-xs font-medium transition"
-                            >
-                              <RefreshCw className="h-3 w-3 inline mr-1" /> Retry
-                            </button>
-                          </div>
-                        ) : pdfUrl ? (
-                          <iframe
-                            title="PDF preview"
-                            className="h-full w-full"
-                            src={`${pdfUrl}#toolbar=0&view=FitH&scrollbar=0&statusbar=0&messages=0&navpanes=0`}
-                            sandbox="allow-same-origin allow-scripts allow-popups"
-                          />
                         ) : (
-                          <div className="flex h-full items-center justify-center text-xs text-zinc-500">
-                            <FileText className="h-8 w-8 mb-2" />
-                            <div>Open the PDF tab to render the attachment.</div>
-                          </div>
-                        )}
+                          <div
+                            className="h-[480px] w-full overflow-auto rounded-xl border border-zinc-800/80 bg-white p-5 shadow-inner light:border-zinc-200"
+                            dangerouslySetInnerHTML={{ __html: sanitizedPreviewHtml }}
+                          />
+                        )
+                      )}
                       </div>
-                    )}
+                      <div
+                        role="tabpanel"
+                        id="pdf-preview-panel"
+                        aria-label="PDF preview"
+                        hidden={previewTab !== 'pdf'}
+                      >
+                      {previewTab === 'pdf' && (
+                        <div className="h-[480px] w-full overflow-hidden rounded-xl border border-zinc-800/80 light:border-zinc-200">
+                          {pdfLoading ? (
+                            <div className="flex h-full items-center justify-center text-xs text-zinc-500">
+                              <RefreshCw className="h-4 w-4 animate-spin" /> Rendering PDF…
+                            </div>
+                          ) : pdfError ? (
+                            <div className="flex h-full items-center justify-center p-6 text-center text-xs text-rose-400">
+                              <FileText className="h-8 w-8 mb-2" />
+                              <div>{pdfError}</div>
+                              <button
+                                onClick={() => void refreshPdf()}
+                                className="mt-4 px-3 py-1.5 rounded-lg bg-rose-500/10 text-rose-400 border border-rose-500/20 hover:bg-rose-500/20 text-xs font-medium transition"
+                              >
+                                <RefreshCw className="h-3 w-3 inline mr-1" /> Retry
+                              </button>
+                            </div>
+                          ) : pdfUrl ? (
+                            <iframe
+                              title="PDF preview"
+                              className="h-full w-full"
+                              src={`${pdfUrl}#toolbar=0&view=FitH&scrollbar=0&statusbar=0&messages=0&navpanes=0`}
+                              sandbox="allow-same-origin allow-scripts allow-popups"
+                            />
+                          ) : (
+                            <div className="flex h-full items-center justify-center text-xs text-zinc-500">
+                              <FileText className="h-8 w-8 mb-2" />
+                              <div>Open the PDF tab to render the attachment.</div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      )}
+                      </div>
                     <p className="mt-2 text-[11px] text-zinc-500">
                       The PDF attachment is generated from this same edited body, so both stay in sync.
                     </p>
@@ -1312,10 +1525,17 @@ export const ActionCenter: React.FC = () => {
                 </div>
               </div>
 
-              <div className="flex justify-end gap-2 border-t border-zinc-800/80 p-4 light:border-zinc-200">
+              <div className="flex flex-wrap items-center gap-3 border-t border-zinc-800/80 bg-zinc-900/70 px-6 py-4 light:border-zinc-200 light:bg-zinc-50">
+                <p className="mr-auto text-[11px] text-zinc-500" aria-live="polite">
+                  {editing.status === 'REVIEW_REQUIRED'
+                    ? 'Review the message before approving delivery.'
+                    : editing.status === 'QUEUED'
+                      ? 'Edits are saved to the queued notification.'
+                      : 'The updated message will be sent as a new delivery.'}
+                </p>
                 <button
                   type="button"
-                  className="ui-secondary"
+                  className="ui-secondary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500"
                   disabled={editBusy}
                   onClick={() => setEditing(null)}
                 >
@@ -1324,7 +1544,7 @@ export const ActionCenter: React.FC = () => {
                 {editing.status === 'REVIEW_REQUIRED' ? (
                   <button
                     type="button"
-                    className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white hover:bg-sky-500 disabled:opacity-60"
+                    className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-amber-400/30 bg-amber-500 px-4 text-xs font-semibold text-zinc-950 shadow-sm transition hover:bg-amber-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400 disabled:cursor-not-allowed disabled:opacity-60"
                     disabled={editBusy}
                     onClick={sendUpdated}
                   >
@@ -1334,7 +1554,7 @@ export const ActionCenter: React.FC = () => {
                 ) : editing.status === 'QUEUED' ? (
                   <button
                     type="button"
-                    className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white hover:bg-sky-500 disabled:opacity-60"
+                    className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
                     disabled={editBusy}
                     onClick={saveEdit}
                   >
@@ -1344,10 +1564,11 @@ export const ActionCenter: React.FC = () => {
                 ) : (
                   <button
                     type="button"
-                    className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white hover:bg-sky-500 disabled:opacity-60"
+                    className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
                     disabled={
                       editBusy ||
-                      (recipientMode === 'SINGLE_EMAIL' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customEmail.trim()))
+                      (recipientMode === 'SINGLE_EMAIL' &&
+                        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customEmail.trim()))
                     }
                     onClick={sendUpdated}
                   >
@@ -1378,7 +1599,12 @@ export const ActionCenter: React.FC = () => {
                     Resend delivered email
                   </p>
                   <h2 id="resend-email-title" className="mt-1 text-base font-semibold">
-                    Resend to {resending.mode === 'SINGLE_EMAIL' ? resending.email : resending.mode === 'SECURITY_TEAM' ? 'Security team' : 'Everyone'}
+                    Resend to{' '}
+                    {resending.mode === 'SINGLE_EMAIL'
+                      ? resending.email
+                      : resending.mode === 'SECURITY_TEAM'
+                        ? 'Security team'
+                        : 'Everyone'}
                   </h2>
                   <p className="mt-1 text-xs text-zinc-500">
                     Advisory {resending.advisoryId} · queues a new PENDING delivery
@@ -1409,7 +1635,16 @@ export const ActionCenter: React.FC = () => {
                     <select
                       id="resend-mode"
                       value={resending.mode}
-                      onChange={(e) => setResending((prev) => (prev ? { ...prev, mode: e.target.value as 'SINGLE_EMAIL' | 'SECURITY_TEAM' | 'EVERYONE' } : null))}
+                      onChange={(e) =>
+                        setResending((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                mode: e.target.value as 'SINGLE_EMAIL' | 'SECURITY_TEAM' | 'EVERYONE',
+                              }
+                            : null,
+                        )
+                      }
                       className="mt-1 w-full text-xs"
                     >
                       <option value="SINGLE_EMAIL">Single recipient</option>
@@ -1421,7 +1656,9 @@ export const ActionCenter: React.FC = () => {
                         type="email"
                         placeholder="Recipient email address"
                         value={resending.email}
-                        onChange={(e) => setResending((prev) => (prev ? { ...prev, email: e.target.value } : null))}
+                        onChange={(e) =>
+                          setResending((prev) => (prev ? { ...prev, email: e.target.value } : null))
+                        }
                         className="mt-2 w-full text-xs"
                       />
                     )}
@@ -1439,7 +1676,9 @@ export const ActionCenter: React.FC = () => {
                       rows={3}
                       placeholder="Why this advisory is being resent..."
                       value={resending.reason}
-                      onChange={(e) => setResending((prev) => (prev ? { ...prev, reason: e.target.value } : null))}
+                      onChange={(e) =>
+                        setResending((prev) => (prev ? { ...prev, reason: e.target.value } : null))
+                      }
                       className="mt-1 w-full resize-y font-mono text-xs"
                     />
                   </div>
@@ -1451,22 +1690,10 @@ export const ActionCenter: React.FC = () => {
 
                   <button
                     type="button"
-                    onClick={async () => {
+                    onClick={() => {
                       if (!resending) return;
-                      setResendBusy(true);
-                      try {
-                        const result = await resendEmailDelivery(resending.id, {
-                          recipientMode: resending.mode,
-                          customEmail: resending.mode === 'SINGLE_EMAIL' ? resending.email : undefined,
-                          reason: resending.reason || undefined,
-                        });
-                        if (result) {
-                          setResending(null);
-                          await reload();
-                        }
-                      } finally {
-                        setResendBusy(false);
-                      }
+                      setResending(null);
+                      setConfirmSend({ id: resending.id, action: 'resend', label: `resend to ${resending.mode === 'SINGLE_EMAIL' ? resending.email : resending.mode}` });
                     }}
                     disabled={resendBusy || (resending.mode === 'SINGLE_EMAIL' && !resending.email)}
                     className="ui-secondary w-full"
@@ -1484,6 +1711,61 @@ export const ActionCenter: React.FC = () => {
                   onClick={() => setResending(null)}
                 >
                   Cancel
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
+        {/* Confirmation modal for manual email sends */}
+        {confirmSend && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setConfirmSend(null);
+            }}
+          >
+            <section
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="confirm-send-title"
+              className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5"
+            >
+              <h2 id="confirm-send-title" className="text-sm font-semibold">
+                Send email?
+              </h2>
+              <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+                This will{' '}
+                {confirmSend.action === 'cancel'
+                  ? 'cancel'
+                  : confirmSend.action === 'retry'
+                  ? 'retry delivery of'
+                  : confirmSend.action === 'resend'
+                  ? 'resend'
+                  : confirmSend.action === 'approve'
+                  ? 'approve and send'
+                  : 'send an updated copy of'}
+                {' '}
+                <span className="font-medium text-zinc-200 light:text-zinc-800">{confirmSend.label}</span>.{' '}
+                {confirmSend.id === 'bulk'
+                  ? 'This cannot be undone.'
+                  : 'A delivery audit record will be created.'}
+              </p>
+              <div className="mt-5 flex justify-end gap-2">
+                <button
+                  type="button"
+                  className="ui-secondary"
+                  disabled={actionBusyId === confirmSend.id}
+                  onClick={() => setConfirmSend(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={actionBusyId === confirmSend.id}
+                  onClick={() => void handleConfirmedSend()}
+                >
+                  {actionBusyId === confirmSend.id ? 'Sending…' : 'Confirm send'}
                 </button>
               </div>
             </section>

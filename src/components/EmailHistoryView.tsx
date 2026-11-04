@@ -12,6 +12,8 @@ export const EmailHistoryView: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [retryingId, setRetryingId] = useState<string | null>(null);
+  /** Pending retry confirmation for a single email log. */
+  const [confirmingRetryId, setConfirmingRetryId] = useState<string | null>(null);
 
   // Pagination
   const [currentPage, setCurrentPage] = useState(1);
@@ -30,12 +32,19 @@ export const EmailHistoryView: React.FC = () => {
   });
 
   const handleRetry = async (logId: string) => {
-    setRetryingId(logId);
+    setConfirmingRetryId(logId);
+  };
+
+  /** Execute a confirmed retry for a single email log. */
+  const handleConfirmedRetry = async () => {
+    if (!confirmingRetryId) return;
+    setRetryingId(confirmingRetryId);
     try {
-      await retryEmailDelivery(logId);
+      await retryEmailDelivery(confirmingRetryId);
       await reload();
     } finally {
       setRetryingId(null);
+      setConfirmingRetryId(null);
     }
   };
 
@@ -185,7 +194,7 @@ export const EmailHistoryView: React.FC = () => {
                         {log.status === 'FAILED' && (
                           <button
                             onClick={() => handleRetry(log.id)}
-                            disabled={retryingId === log.id}
+                            disabled={retryingId === log.id || confirmingRetryId !== null && confirmingRetryId !== log.id}
                             className="px-2.5 py-1 rounded-xl bg-zinc-800 dark:bg-zinc-800 light:bg-zinc-200 hover:bg-zinc-700 dark:hover:bg-zinc-700 light:hover:bg-zinc-300 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 border border-zinc-700 dark:border-zinc-700 light:border-zinc-300 text-xs font-medium inline-flex items-center space-x-1 transition"
                           >
                             <RotateCw className={`w-3 h-3 ${retryingId === log.id ? 'animate-spin' : ''}`} />
@@ -195,7 +204,7 @@ export const EmailHistoryView: React.FC = () => {
                         {awaitingRetry(log) && (
                           <button
                             onClick={() => handleRetry(log.id)}
-                            disabled={retryingId === log.id}
+                            disabled={retryingId === log.id || confirmingRetryId !== null && confirmingRetryId !== log.id}
                             title="Send now instead of waiting for the scheduled retry"
                             className="px-2.5 py-1 rounded-xl bg-zinc-800 dark:bg-zinc-800 light:bg-zinc-200 hover:bg-zinc-700 dark:hover:bg-zinc-700 light:hover:bg-zinc-300 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 border border-zinc-700 dark:border-zinc-700 light:border-zinc-300 text-xs font-medium inline-flex items-center space-x-1 transition"
                           >
@@ -221,6 +230,47 @@ export const EmailHistoryView: React.FC = () => {
           onPageSizeChange={setPageSize}
           pageSizeOptions={[10, 25, 50]}
         />
+        {/* Confirmation modal for retry */}
+        {confirmingRetryId && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setConfirmingRetryId(null);
+            }}
+          >
+            <section
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="confirm-retry-title"
+              className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5"
+            >
+              <h2 id="confirm-retry-title" className="text-sm font-semibold">
+                Retry email delivery?
+              </h2>
+              <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+                This will queue a new delivery attempt. A delivery audit record will be created.
+              </p>
+              <div className="mt-5 flex justify-end gap-2">
+                <button
+                  type="button"
+                  className="ui-secondary"
+                  disabled={retryingId !== null}
+                  onClick={() => setConfirmingRetryId(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={retryingId !== null}
+                  onClick={() => void handleConfirmedRetry()}
+                >
+                  {retryingId !== null ? 'Sending…' : 'Confirm retry'}
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
       </div>
     </div>
   );
