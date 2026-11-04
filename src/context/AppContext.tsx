@@ -257,9 +257,9 @@ function useApplication() {
     const remaining = Math.max(0, Math.floor((expiresAt - now) / 1000));
     if (remaining > SESSION_RENEW_THRESHOLD_SEC || remaining <= 0) return;
     sessionRenewingRef.current = true;
-    void request<{ expiresAt: string }>('/session/renew', {})
+    void request<{ expiresAt: string; csrfToken?: string }>('/session/renew', {})
       .then((result) => {
-        setSession((s) => (s ? { ...s, expiresAt: result.expiresAt } : null));
+        setSession((s) => (s ? { ...s, expiresAt: result.expiresAt, csrfToken: result.csrfToken ?? s.csrfToken } : null));
       })
       .catch(() => {})
       .finally(() => {
@@ -405,8 +405,8 @@ function useApplication() {
       : 0,
     resetSessionTimeout: () =>
       safely(async () => {
-        const result = await request<{ expiresAt: string }>('/session/renew', {});
-        setSession((s) => (s ? { ...s, expiresAt: result.expiresAt } : null));
+        const result = await request<{ expiresAt: string; csrfToken?: string }>('/session/renew', {});
+        setSession((s) => (s ? { ...s, expiresAt: result.expiresAt, csrfToken: result.csrfToken ?? s.csrfToken } : null));
       }),
     changePassword: (currentPassword: string, newPassword: string) =>
       safely(async () => {
