@@ -163,6 +163,7 @@ test('renderAdvisory throws when required advisory fields are empty', () => {
 test('renderAdvisory produces template matching the studio HTML structure', () => {
   const template = compileCustomizedTemplate(testCustomization);
   const html = renderAdvisory(template, baseAdvisory);
+  assert.ok(template.includes('ul { margin:0; padding-left:20px; }'), 'template lists should use consistent left spacing');
    assert.ok(html.includes('THREAT INTELLIGENCE &amp; BA CYBER SECURITY OPERATIONS'), 'studio label should appear');
   assert.ok(html.includes('Security Advisory'), 'static heading should appear');
   assert.ok(html.includes('ADV-2026-001'), 'advisory id should be rendered');

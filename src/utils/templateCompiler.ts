@@ -85,6 +85,7 @@ export function compileCustomizedTemplate(config: TemplateCustomization): string
   table,td { mso-table-lspace:0pt; mso-table-rspace:0pt; }
   table { border-collapse:collapse; }
   a { overflow-wrap:anywhere; word-break:break-word; }
+  ul { margin:0; padding-left:20px; }
   body{
     margin:0;
     padding:0;
