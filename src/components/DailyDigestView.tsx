@@ -51,6 +51,8 @@ export const DailyDigestView: React.FC = () => {
   const [testEmail, setTestEmail] = useState('');
   const [showTestModal, setShowTestModal] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [confirmSave, setConfirmSave] = useState<{ action: string; label: string } | null>(null);
+  const [confirmSendTest, setConfirmSendTest] = useState<{ action: string; label: string } | null>(null);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [saveToast, setSaveToast] = useState(false);
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'mobile'>('desktop');
@@ -269,10 +271,19 @@ export const DailyDigestView: React.FC = () => {
     }
   };
 
-  const handleSave = async () => {
-    if (!(await saveDailyDigestTemplate(isCustomTemplate ? customTemplate : null))) return;
-    setSaveToast(true);
-    setTimeout(() => setSaveToast(false), 2500);
+  const handleSave = () => {
+    setConfirmSave({ action: 'save', label: 'Save & Apply to Daily Digest' });
+  };
+
+  const executeSave = async () => {
+    if (!confirmSave) return;
+    try {
+      if (!(await saveDailyDigestTemplate(isCustomTemplate ? customTemplate : null))) return;
+      setSaveToast(true);
+      setTimeout(() => setSaveToast(false), 2500);
+    } finally {
+      setConfirmSave(null);
+    }
   };
 
   const handleReset = () => {
@@ -295,13 +306,22 @@ export const DailyDigestView: React.FC = () => {
       });
       return;
     }
-    const res = await sendTestDailyDigestEmail(testEmail);
-    setTestResult(res);
-    if (res.success) {
-      setTimeout(() => {
-        setShowTestModal(false);
-        setTestResult(null);
-      }, 1500);
+    setShowTestModal(false);
+    setConfirmSendTest({ action: 'send-test', label: `test email to ${testEmail || 'recipient'}` });
+  };
+
+  const executeSendTest = async () => {
+    if (!confirmSendTest) return;
+    try {
+      const res = await sendTestDailyDigestEmail(testEmail);
+      setTestResult(res);
+      if (res.success) {
+        setTimeout(() => {
+          setTestResult(null);
+        }, 1500);
+      }
+    } finally {
+      setConfirmSendTest(null);
     }
   };
 
@@ -325,6 +345,7 @@ export const DailyDigestView: React.FC = () => {
         <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={handleReset}
+            disabled={!!(confirmSave || confirmSendTest)}
             className="text-xs px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-200 light:hover:bg-zinc-300 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 font-medium transition flex items-center space-x-1"
           >
             <RotateCcw className="w-3.5 h-3.5" />
@@ -335,6 +356,7 @@ export const DailyDigestView: React.FC = () => {
               setTestResult(null);
               setShowTestModal(true);
             }}
+            disabled={!!(confirmSave || confirmSendTest)}
             className="text-xs px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-200 light:hover:bg-zinc-300 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 font-semibold transition flex items-center space-x-1.5"
           >
             <Send className="w-3.5 h-3.5" />
@@ -342,6 +364,7 @@ export const DailyDigestView: React.FC = () => {
           </button>
           <button
             onClick={handleSave}
+            disabled={!!(confirmSave || confirmSendTest)}
             className="text-xs px-4 py-1.5 rounded-xl bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-100 dark:hover:bg-zinc-200 light:bg-zinc-900 light:hover:bg-zinc-800 text-zinc-900 dark:text-zinc-900 light:text-zinc-50 font-semibold transition shadow-sm"
           >
             {saveToast ? 'Applied to Daily Digest!' : 'Save & Apply to Daily Digest'}
@@ -1345,6 +1368,50 @@ export const DailyDigestView: React.FC = () => {
         <div className="fixed bottom-6 right-6 z-50 bg-emerald-900/90 text-emerald-100 border border-emerald-700 rounded-xl px-4 py-2.5 text-xs font-mono shadow-xl flex items-center space-x-2">
           <CheckCircle2 className="w-4 h-4 text-emerald-300" />
           <span>Daily digest customization saved and applied</span>
+        </div>
+      )}
+
+      {/* Save Confirmation Modal */}
+      {confirmSave && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setConfirmSave(null);
+        }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="confirm-save-title" className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5">
+            <h2 id="confirm-save-title" className="text-sm font-semibold text-zinc-100">Save daily digest changes?</h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              This will <span className="font-medium text-zinc-200 light:text-zinc-800">{confirmSave.label}</span>. The updated template will be applied to future daily digests.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className="ui-secondary" onClick={() => setConfirmSave(null)}>
+                Cancel
+              </button>
+              <button type="button" className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500" onClick={() => void executeSave()}>
+                Confirm save
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {/* Send Test Email Confirmation Modal */}
+      {confirmSendTest && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setConfirmSendTest(null);
+        }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="confirm-send-test-title" className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5">
+            <h2 id="confirm-send-test-title" className="text-sm font-semibold text-zinc-100">Send test email?</h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              This will <span className="font-medium text-zinc-200 light:text-zinc-800">{confirmSendTest.label}</span> using the current rendered template. A delivery audit record will be created.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className="ui-secondary" onClick={() => setConfirmSendTest(null)}>
+                Cancel
+              </button>
+              <button type="button" className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500" onClick={() => void executeSendTest()}>
+                Confirm send
+              </button>
+            </div>
+          </section>
         </div>
       )}
     </div>

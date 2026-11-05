@@ -84,9 +84,11 @@ export const PipelineExecutionsView: React.FC = () => {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(5);
   const [now, setNow] = useState(Date.now());
+  const [confirmPipeline, setConfirmPipeline] = useState<{ action: 'stop' | 'run'; id: string; label: string } | null>(null);
+  const [pipelinePending, setPipelinePending] = useState(false);
   // Execution history is paginated server-side; the snapshot only carries the
   // newest few runs, so it cannot be used for the history table or its total.
-  const { items: executions, total } = useCollection<PipelineExecution>('executions', {
+  const { items: executions, total, reload } = useCollection<PipelineExecution>('executions', {
     page,
     pageSize,
   });
@@ -131,6 +133,28 @@ export const PipelineExecutionsView: React.FC = () => {
     anchor.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
+
+  const handleConfirmedPipeline = async () => {
+    if (!confirmPipeline) return;
+    setPipelinePending(true);
+    try {
+      if (confirmPipeline.action === 'stop') {
+        await stopPipelineRun(confirmPipeline.id);
+      } else {
+        const run = await triggerPipelineRun(scopeHours, incrementalFeeds);
+        if (run) {
+          setSelectedId(run.id);
+          setSelectedStage(null);
+          setPage(1);
+        }
+      }
+      await reload();
+    } finally {
+      setPipelinePending(false);
+      setConfirmPipeline(null);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="ui-page-header">
@@ -158,8 +182,10 @@ export const PipelineExecutionsView: React.FC = () => {
           </label>
           {running && canOperate ? (
             <button
-              disabled={!!running.stopRequestedAt || pending > 0}
-              onClick={() => void stopPipelineRun(running.id)}
+              disabled={!!running.stopRequestedAt || pending > 0 || confirmPipeline !== null}
+              onClick={() =>
+                setConfirmPipeline({ action: 'stop', id: running.id, label: `Stop pipeline run ${running.id}` })
+              }
               className="flex items-center gap-2 rounded-lg border border-rose-500/50 px-3 py-2 text-sm font-medium text-rose-400 light:text-rose-700 disabled:opacity-50"
             >
               <Square className="h-4 w-4" />
@@ -167,15 +193,10 @@ export const PipelineExecutionsView: React.FC = () => {
             </button>
           ) : (
             <button
-              disabled={!canOperate || isPipelineRunning || pending > 0}
-              onClick={async () => {
-                const run = await triggerPipelineRun(scopeHours, incrementalFeeds);
-                if (run) {
-                  setSelectedId(run.id);
-                  setSelectedStage(null);
-                  setPage(1);
-                }
-              }}
+              disabled={!canOperate || isPipelineRunning || pending > 0 || confirmPipeline !== null}
+              onClick={() =>
+                setConfirmPipeline({ action: 'run', id: 'new', label: 'Start a new pipeline run' })
+              }
               className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
             >
               <Activity className="h-4 w-4" />
@@ -357,6 +378,53 @@ export const PipelineExecutionsView: React.FC = () => {
             )}
           </div>
         </section>
+      )}
+
+      {/* Pipeline Action Confirmation Modal */}
+      {confirmPipeline && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirmPipeline(null);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-pipeline-title"
+            className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5"
+          >
+            <h2 id="confirm-pipeline-title" className="text-sm font-semibold">
+              {confirmPipeline.action === 'stop' ? 'Stop pipeline run?' : 'Start pipeline run?'}
+            </h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              This will{' '}
+              {confirmPipeline.action === 'stop' ? 'request a stop of' : 'initiate'}
+              <span className="font-medium text-zinc-200 light:text-zinc-800">{confirmPipeline.label}</span>.
+              {confirmPipeline.action === 'stop'
+                ? ' The worker will discard uncommitted results at its next checkpoint.'
+                : ' This will begin ingestion, normalization, matching, and delivery preparation.'}
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                className="ui-secondary"
+                disabled={pipelinePending}
+                onClick={() => setConfirmPipeline(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={pipelinePending}
+                onClick={() => void handleConfirmedPipeline()}
+              >
+                {pipelinePending ? 'Processing…' : 'Confirm'}
+              </button>
+            </div>
+          </section>
+        </div>
       )}
     </div>
   );

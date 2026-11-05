@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { PageHeading } from './PageHeading';
 import { useApp } from '../context/AppContext';
 import type { AliasEntry } from '../types';
@@ -69,6 +69,9 @@ export const AliasesView: React.FC = () => {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  const [confirmChangeSource, setConfirmChangeSource] = useState<{ id: string; action: 'promote' | 'revoke'; label: string } | null>(null);
+  const [confirmingAliasSave, setConfirmingAliasSave] = useState(false);
+  const pendingAliasSave = useRef<{ payload: { scope: Scope; canonical: string; aliases: string[]; notes?: string }; isEdit: boolean } | null>(null);
   const [form, setForm] = useState({ canonical: '', aliasText: '', notes: '' });
   const term = search.trim().toLowerCase();
   const managed = aliases.filter((entry) => entry.scope === scope);
@@ -103,7 +106,7 @@ export const AliasesView: React.FC = () => {
   };
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (busy) return;
+    if (busy || confirmingAliasSave) return;
     setError('');
     const canonical = form.canonical.trim().toLowerCase();
     const names = [
@@ -118,31 +121,52 @@ export const AliasesView: React.FC = () => {
       return setError('Enter a canonical name and at least one alternate name.');
     if (names.length > 50 || names.some((name) => name.length > 200))
       return setError('Use up to 50 alternate names, with no more than 200 characters each.');
-    setBusy(true);
-    try {
-      const payload = {
+    pendingAliasSave.current = {
+      payload: {
         scope: editing?.scope ?? scope,
         canonical,
         aliases: names,
         notes: form.notes.trim() || undefined,
-      };
-      const saved = editing ? await updateAlias({ ...editing, ...payload }) : await addAlias(payload);
+      },
+      isEdit: Boolean(editing),
+    };
+    setConfirmingAliasSave(true);
+  };
+
+  const executeConfirmedAliasSave = async () => {
+    const pending = pendingAliasSave.current;
+    if (!pending) return;
+    setConfirmingAliasSave(false);
+    setBusy(true);
+    setError('');
+    try {
+      const { payload, isEdit } = pending;
+      const saved = isEdit
+        ? await updateAlias({ ...editing!, ...payload })
+        : await addAlias(payload);
       if (!saved) return setError('Could not save this mapping. Review the fields and try again.');
       setShowModal(false);
-      setMessage(editing ? 'Alias mapping updated.' : 'Alias mapping added.');
+      setMessage(isEdit ? 'Alias mapping updated.' : 'Alias mapping added.');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not save this mapping.');
     } finally {
       setBusy(false);
+      pendingAliasSave.current = null;
     }
   };
-  const changeSource = async (entry: AliasEntry, action: 'promote' | 'revoke') => {
+  const changeSource = (entry: AliasEntry, action: 'promote' | 'revoke') => {
     if (busy) return;
+    setConfirmChangeSource({ id: entry.id, action, label: entry.canonical });
+  };
+
+  const executeConfirmedChangeSource = async () => {
+    if (!confirmChangeSource) return;
+    const { id, action, label } = confirmChangeSource;
     setBusy(true);
     setError('');
     setMessage('');
     try {
-      const ok = action === 'promote' ? await promoteAlias(entry.id) : await revokeAlias(entry.id);
+      const ok = action === 'promote' ? await promoteAlias(id) : await revokeAlias(id);
       if (!ok) setError(`Could not ${action} this mapping. Please retry.`);
       else
         setMessage(
@@ -154,6 +178,7 @@ export const AliasesView: React.FC = () => {
       setError('Could not update this mapping. Please retry.');
     } finally {
       setBusy(false);
+      setConfirmChangeSource(null);
     }
   };
   const remove = async () => {
@@ -183,9 +208,9 @@ export const AliasesView: React.FC = () => {
           same identity.
         </PageHeading>
         {admin ? (
-          <button type="button" className="ui-primary" onClick={() => openForm()}>
-            <Plus size={16} aria-hidden="true" />
-            Add alias mapping
+            <button type="button" className="ui-primary" onClick={() => openForm()} disabled={confirmChangeSource !== null || confirmingAliasSave}>
+              <Plus size={16} aria-hidden="true" />
+              Add alias mapping
           </button>
         ) : (
           <span className="alias-readonly">
@@ -367,7 +392,7 @@ export const AliasesView: React.FC = () => {
                       <>
                         <button
                           type="button"
-                          disabled={busy}
+                          disabled={busy || confirmChangeSource !== null || confirmingAliasSave}
                           onClick={() => void changeSource(entry, 'promote')}
                           aria-label={`Keep ${entry.canonical} permanently`}
                         >
@@ -376,7 +401,7 @@ export const AliasesView: React.FC = () => {
                         </button>
                         <button
                           type="button"
-                          disabled={busy}
+                          disabled={busy || confirmChangeSource !== null || confirmingAliasSave}
                           onClick={() => void changeSource(entry, 'revoke')}
                           aria-label={`Revoke ${entry.canonical}`}
                         >
@@ -388,7 +413,7 @@ export const AliasesView: React.FC = () => {
                       entry.source !== 'REVOKED' && (
                         <button
                           type="button"
-                          disabled={busy}
+                          disabled={busy || confirmChangeSource !== null || confirmingAliasSave}
                           onClick={() => openForm(entry)}
                           aria-label={`Edit ${entry.canonical}`}
                         >
@@ -399,7 +424,7 @@ export const AliasesView: React.FC = () => {
                     )}
                     <button
                       type="button"
-                      disabled={busy}
+                      disabled={busy || confirmChangeSource !== null || confirmingAliasSave}
                       aria-label={`Remove ${entry.canonical}`}
                       onClick={() => {
                         setError('');
@@ -575,6 +600,75 @@ export const AliasesView: React.FC = () => {
             </button>
           </footer>
         </AliasDialog>
+      )}
+
+      {/* Change alias source Confirmation Modal */}
+      {confirmChangeSource && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h2 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+              {confirmChangeSource.action === 'promote' ? 'Keep this mapping?' : 'Revoke this mapping?'}
+            </h2>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              <strong>{confirmChangeSource.label}</strong>{' '}
+              {confirmChangeSource.action === 'promote'
+                ? 'will be kept as a permanent operator alias.'
+                : 'will be revoked and blocked from matching and re-learning.'}
+              {' '}This cannot be undone automatically.
+            </p>
+            <div className="flex justify-end space-x-2">
+              <button
+                type="button"
+                className="ui-secondary"
+                onClick={() => setConfirmChangeSource(null)}
+                disabled={busy}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="alias-danger"
+                onClick={() => void executeConfirmedChangeSource()}
+                disabled={busy}
+              >
+                {busy ? 'Processing…' : confirmChangeSource.action === 'promote' ? 'Keep mapping' : 'Revoke mapping'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Save alias mapping Confirmation Modal */}
+      {confirmingAliasSave && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h2 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+              {pendingAliasSave.current?.isEdit ? 'Save alias changes?' : 'Add alias mapping?'}
+            </h2>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              This will {pendingAliasSave.current?.isEdit ? 'update' : 'create'} the{' '}
+              <strong>{pendingAliasSave.current?.payload.canonical || ''}</strong> alias mapping.
+            </p>
+            <div className="flex justify-end space-x-2">
+              <button
+                type="button"
+                className="ui-secondary"
+                onClick={() => setConfirmingAliasSave(false)}
+                disabled={busy}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="ui-primary"
+                onClick={() => void executeConfirmedAliasSave()}
+                disabled={busy}
+              >
+                {busy ? 'Saving…' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -281,8 +281,20 @@ export function SettingsView() {
   const [editingUser, setEditingUser] = useState<any | null>(null);
   const [editForm, setEditForm] = useState({ username: '', role: 'VIEWER', email: '', disabled: false });
   const [editMessage, setEditMessage] = useState('');
+  // Confirmation dialogs for mutating actions
+  const [confirmProcessingToggle, setConfirmProcessingToggle] = useState<{ id: string; action: 'enable' | 'disable'; label: string } | null>(null);
+  const [confirmProcessingSave, setConfirmProcessingSave] = useState<{ id: string; action: string; label: string } | null>(null);
+  const [confirmFindingToggle, setConfirmFindingToggle] = useState<{ id: string; action: 'enable' | 'disable'; label: string } | null>(null);
+  const [confirmFindingSave, setConfirmFindingSave] = useState<{ id: string; action: string; label: string } | null>(null);
+  const [confirmSecuritySave, setConfirmSecuritySave] = useState<{ id: string; action: string; label: string } | null>(null);
+  const [confirmChangePassword, setConfirmChangePassword] = useState<{ id: string; action: string; label: string } | null>(null);
+  const [confirmCreateUser, setConfirmCreateUser] = useState<{ id: string; action: string; label: string } | null>(null);
+  const [confirmEditUser, setConfirmEditUser] = useState<{ id: string; action: string; label: string } | null>(null);
+  const [confirmEnableUser, setConfirmEnableUser] = useState<{ id: string; action: string; label: string } | null>(null);
   const admin = session?.role === 'ADMIN';
   const [activeSection, setActiveSection] = useState(admin ? 'processing' : 'security');
+  const processingConfirmPending = confirmProcessingToggle !== null || confirmProcessingSave !== null;
+  const findingConfirmPending = confirmFindingToggle !== null || confirmFindingSave !== null;
   const processingDirty =
     form.scopeHours !== settings.scopeHours ||
     form.schedulerIntervalMinutes !== settings.schedulerIntervalMinutes ||
@@ -354,6 +366,141 @@ export function SettingsView() {
   useEffect(() => {
     if (admin) void reloadUsers();
   }, [admin]);
+
+  const executeProcessingToggle = async () => {
+    if (!confirmProcessingToggle) return;
+    const { id, action } = confirmProcessingToggle;
+    const enable = action === 'enable';
+    setForm((prev) => {
+      switch (id) {
+        case 'scheduler': return { ...prev, schedulerEnabled: enable };
+        case 'batching': return { ...prev, digestBatchingEnabled: enable };
+        case 'news': return { ...prev, autoDispatchNewsToSecurityTeam: enable };
+        case 'defer': return { ...prev, deferEveryoneUntilSecurityDelivered: enable };
+        case 'email': return { ...prev, emailEnabled: enable };
+        case 'retry': return { ...prev, emailRetryEnabled: enable };
+      }
+      return prev;
+    });
+    setConfirmProcessingToggle(null);
+  };
+
+  const executeProcessingSave = async () => {
+    if (!confirmProcessingSave) return;
+    setProcessingSaveError(false);
+    const saved = await updateSettings({
+      ...form,
+      ...findingDispatchSettings(settings),
+      securityPolicy: settings.securityPolicy,
+      selfHealing: selfHealingForm,
+    });
+    setProcessingSaveError(!saved);
+    setMessage(
+      saved
+        ? 'Settings saved successfully.'
+        : 'Could not save processing settings. Your changes are still available to retry.',
+    );
+    setConfirmProcessingSave(null);
+  };
+
+  const executeFindingToggle = async () => {
+    if (!confirmFindingToggle) return;
+    const { id, action } = confirmFindingToggle;
+    const enable = action === 'enable';
+    setFindingForm((prev) => {
+      if (id === 'auto-dispatch') return { ...prev, autoDispatchEnabled: enable };
+      return prev;
+    });
+    setConfirmFindingToggle(null);
+  };
+
+  const executeFindingSave = async () => {
+    if (!confirmFindingSave) return;
+    setFindingSaveError(false);
+    const nextFindingForm = {
+      ...findingForm,
+      autoDispatchConfidenceThreshold: Number(confidenceDrafts.queued),
+      reviewConfidenceThreshold: Number(confidenceDrafts.review),
+    };
+    const saved = await updateSettings(nextFindingForm);
+    if (saved) {
+      setFindingForm(nextFindingForm);
+      setConfidenceDrafts({
+        queued: String(nextFindingForm.autoDispatchConfidenceThreshold),
+        review: String(nextFindingForm.reviewConfidenceThreshold),
+      });
+    }
+    setFindingSaveError(!saved);
+    setFindingMessage(
+      saved
+        ? 'Finding dispatch settings saved.'
+        : 'Could not save finding dispatch settings. Your changes are still available to retry.',
+    );
+    setConfirmFindingSave(null);
+  };
+
+  const executeSecuritySave = async () => {
+    if (!confirmSecuritySave) return;
+    setSecurityMessage('');
+    if (await updateSettings({ securityPolicy: securityForm }))
+      setSecurityMessage('Security policy saved successfully.');
+    setConfirmSecuritySave(null);
+  };
+
+  const executeChangePassword = async () => {
+    if (!confirmChangePassword) return;
+    const changed = await changePassword(currentPassword, newPassword);
+    if (changed) {
+      setCurrentPassword('');
+      setNewPassword('');
+    }
+    setConfirmChangePassword(null);
+  };
+
+  const executeCreateUser = async () => {
+    if (!confirmCreateUser) return;
+    setAccountMessage('');
+    if (await createUser({ username, password, role, email: email.trim() })) {
+      setUsername('');
+      setPassword('');
+      setRole('VIEWER');
+      setEmail('');
+      await reloadUsers();
+      setAccountMessage('Operator created successfully.');
+    } else {
+      setAccountMessage('Failed to create operator.');
+    }
+    setConfirmCreateUser(null);
+  };
+
+  const executeEditUser = async () => {
+    if (!confirmEditUser || !editingUser) return;
+    setEditMessage('');
+    const ok = await updateUser(editingUser.id, {
+      role: editForm.role,
+      email: editForm.email.trim(),
+      disabled: editForm.disabled,
+    });
+    if (!ok) {
+      setEditMessage('The account could not be updated.');
+      return;
+    }
+    await reloadUsers();
+    setEditingUser(null);
+    setConfirmEditUser(null);
+  };
+
+  const executeEnableUser = async () => {
+    if (!confirmEnableUser) return;
+    const target = users.find((u) => u.id === confirmEnableUser.id);
+    if (!target) {
+      setConfirmEnableUser(null);
+      return;
+    }
+    await updateUser(target.id, { role: target.role, disabled: false });
+    await reloadUsers();
+    setConfirmEnableUser(null);
+  };
 
   return (
     <div className="settings-page space-y-6 text-zinc-100 light:text-zinc-900">
@@ -456,18 +603,11 @@ export function SettingsView() {
                   if (pending > 0 || !processingDirty) return;
                   setMessage('');
                   setProcessingSaveError(false);
-                  const saved = await updateSettings({
-                    ...form,
-                    ...findingDispatchSettings(settings),
-                    securityPolicy: settings.securityPolicy,
-                    selfHealing: selfHealingForm,
+                  setConfirmProcessingSave({
+                    id: 'processing-settings',
+                    action: 'save',
+                    label: 'Processing settings',
                   });
-                  setProcessingSaveError(!saved);
-                  setMessage(
-                    saved
-                      ? 'Settings saved successfully.'
-                      : 'Could not save processing settings. Your changes are still available to retry.',
-                  );
                 }}
               >
                 <SectionHeading
@@ -536,7 +676,7 @@ export function SettingsView() {
                     </a>
                   ))}
                 </nav>
-                <fieldset className="processing-settings-fields" disabled={pending > 0}>
+                <fieldset className="processing-settings-fields" disabled={pending > 0 || processingConfirmPending}>
                   <legend className="sr-only">Processing and delivery configuration</legend>
                   <ProcessingSection
                     number="01"
@@ -544,13 +684,20 @@ export function SettingsView() {
                     title="Pipeline scheduling"
                     description="Set the collection window and the interval between automatic runs."
                   >
-                    <ProcessingToggle
-                      id="processing-scheduler"
-                      title="Enable server scheduler"
-                      description="Allow the server to start pipeline runs on the configured interval."
-                      checked={form.schedulerEnabled}
-                      onChange={(checked) => setForm({ ...form, schedulerEnabled: checked })}
-                    />
+                      <ProcessingToggle
+                        id="processing-scheduler"
+                        title="Enable server scheduler"
+                        description="Allow the server to start pipeline runs on the configured interval."
+                        checked={form.schedulerEnabled}
+                        disabled={processingConfirmPending}
+                        onChange={(checked) =>
+                          setConfirmProcessingToggle({
+                            id: 'scheduler',
+                            action: checked ? 'enable' : 'disable',
+                            label: 'Server scheduler',
+                          })
+                        }
+                      />
                     <div className="processing-field-grid">
                       <ProcessingField
                         id="processing-scope"
@@ -603,15 +750,20 @@ export function SettingsView() {
                     title="Recipient review and handoff"
                     description="Control when an advisory becomes available to the Everyone group."
                   >
-                    <ProcessingToggle
-                      id="processing-defer-everyone"
-                      title="Send to the Security team before Everyone"
-                      description="After the transport accepts a Security-team email, queue the advisory for Everyone-group preview and approval."
-                      checked={form.deferEveryoneUntilSecurityDelivered ?? false}
-                      onChange={(checked) =>
-                        setForm({ ...form, deferEveryoneUntilSecurityDelivered: checked })
-                      }
-                    />
+                      <ProcessingToggle
+                        id="processing-defer-everyone"
+                        title="Send to the Security team before Everyone"
+                        description="After the transport accepts a Security-team email, queue the advisory for Everyone-group preview and approval."
+                        checked={form.deferEveryoneUntilSecurityDelivered ?? false}
+                        disabled={processingConfirmPending}
+                        onChange={(checked) =>
+                          setConfirmProcessingToggle({
+                            id: 'defer',
+                            action: checked ? 'enable' : 'disable',
+                            label: 'Send to Security team before Everyone',
+                          })
+                        }
+                      />
                     {form.deferEveryoneUntilSecurityDelivered ? (
                       <ol className="processing-delivery-flow" aria-label="Recipient delivery sequence">
                         <li>
@@ -649,13 +801,20 @@ export function SettingsView() {
                     title="News evidence"
                     description="Control how security news and advisory evidence is handled."
                   >
-                    <ProcessingToggle
-                      id="processing-auto-news"
-                      title="Send matching news to Security team"
-                      description="Automatically notify Security-team recipients about news that matches a monitored vendor and product."
-                      checked={form.autoDispatchNewsToSecurityTeam}
-                      onChange={(checked) => setForm({ ...form, autoDispatchNewsToSecurityTeam: checked })}
-                    />
+                      <ProcessingToggle
+                        id="processing-auto-news"
+                        title="Send matching news to Security team"
+                        description="Automatically notify Security-team recipients about news that matches a monitored vendor and product."
+                        checked={form.autoDispatchNewsToSecurityTeam}
+                        disabled={processingConfirmPending}
+                        onChange={(checked) =>
+                          setConfirmProcessingToggle({
+                            id: 'news',
+                            action: checked ? 'enable' : 'disable',
+                            label: 'Send matching news to Security team',
+                          })
+                        }
+                      />
                     <div className="processing-context">
                       <ShieldCheck size={17} aria-hidden="true" />
                       <div>
@@ -705,7 +864,14 @@ export function SettingsView() {
                         title="Combine threats into one email"
                         description="Send one combined email per recipient, containing only findings permitted by their subscription."
                         checked={form.digestBatchingEnabled ?? false}
-                        onChange={(checked) => setForm({ ...form, digestBatchingEnabled: checked })}
+                        disabled={processingConfirmPending}
+                        onChange={(checked) =>
+                          setConfirmProcessingToggle({
+                            id: 'batching',
+                            action: checked ? 'enable' : 'disable',
+                            label: 'Combine threats into one email',
+                          })
+                        }
                       />
                       <ProcessingField
                         id="processing-batch-window"
@@ -806,14 +972,28 @@ export function SettingsView() {
                       title="Enable email delivery"
                       description="Master switch for all outbound email. When off, no advisory, digest, news, self-healing, or test email is generated or sent."
                       checked={form.emailEnabled ?? true}
-                      onChange={(checked) => setForm({ ...form, emailEnabled: checked })}
+                      disabled={processingConfirmPending}
+                      onChange={(checked) =>
+                        setConfirmProcessingToggle({
+                          id: 'email',
+                          action: checked ? 'enable' : 'disable',
+                          label: 'Email delivery',
+                        })
+                      }
                     />
                     <ProcessingToggle
                       id="processing-retry-enabled"
                       title="Enable automatic email retry"
                       description="Keep eligible failed deliveries queued and retry them with an increasing delay."
                       checked={form.emailRetryEnabled ?? true}
-                      onChange={(checked) => setForm({ ...form, emailRetryEnabled: checked })}
+                      disabled={processingConfirmPending}
+                      onChange={(checked) =>
+                        setConfirmProcessingToggle({
+                          id: 'retry',
+                          action: checked ? 'enable' : 'disable',
+                          label: 'Automatic email retry',
+                        })
+                      }
                     />
                     <div className="processing-field-grid processing-retry-grid">
                       <ProcessingField
@@ -1038,25 +1218,11 @@ export function SettingsView() {
                   if (pending > 0 || !findingDirty || findingInvalid) return;
                   setFindingMessage('');
                   setFindingSaveError(false);
-                  const nextFindingForm = {
-                    ...findingForm,
-                    autoDispatchConfidenceThreshold: Number(confidenceDrafts.queued),
-                    reviewConfidenceThreshold: Number(confidenceDrafts.review),
-                  };
-                  const saved = await updateSettings(nextFindingForm);
-                  if (saved) {
-                    setFindingForm(nextFindingForm);
-                    setConfidenceDrafts({
-                      queued: String(nextFindingForm.autoDispatchConfidenceThreshold),
-                      review: String(nextFindingForm.reviewConfidenceThreshold),
-                    });
-                  }
-                  setFindingSaveError(!saved);
-                  setFindingMessage(
-                    saved
-                      ? 'Finding dispatch settings saved.'
-                      : 'Could not save finding dispatch settings. Your changes are still available to retry.',
-                  );
+                  setConfirmFindingSave({
+                    id: 'finding-dispatch-settings',
+                    action: 'save',
+                    label: 'Finding dispatch settings',
+                  });
                 }}
               >
                 <SectionHeading
@@ -1065,21 +1231,28 @@ export function SettingsView() {
                   title="Finding dispatch and review"
                   description="Configure automatic finding notifications, match confidence, and review notices."
                 />
-                <fieldset className="processing-settings-fields" disabled={pending > 0}>
-                  <legend className="sr-only">Finding dispatch and review configuration</legend>
+                   <fieldset className="processing-settings-fields" disabled={pending > 0 || findingConfirmPending}>
+                     <legend className="sr-only">Finding dispatch and review configuration</legend>
                   <ProcessingSection
                     number="01"
                     id="processing-dispatch"
                     title="Dispatch policy"
                     description="Set the confidence minimum and review options for matched findings."
                   >
-                    <ProcessingToggle
-                      id="processing-auto-dispatch"
-                      title="Send confirmed findings automatically"
-                      description="Send queued findings automatically to eligible Security-team recipients. When off, eligible findings stay queued."
-                      checked={findingForm.autoDispatchEnabled}
-                      onChange={(checked) => setFindingForm({ ...findingForm, autoDispatchEnabled: checked })}
-                    />
+                     <ProcessingToggle
+                       id="processing-auto-dispatch"
+                       title="Send confirmed findings automatically"
+                       description="Send queued findings automatically to eligible Security-team recipients. When off, eligible findings stay queued."
+                       checked={findingForm.autoDispatchEnabled}
+                       disabled={findingConfirmPending}
+                       onChange={(checked) =>
+                         setConfirmFindingToggle({
+                           id: 'auto-dispatch',
+                           action: checked ? 'enable' : 'disable',
+                           label: 'Automatic finding dispatch',
+                         })
+                       }
+                     />
                     <div className="processing-field-grid">
                       <ProcessingField
                         id="processing-confidence"
@@ -1246,9 +1419,13 @@ export function SettingsView() {
                 onChangeCapture={() => setSecurityMessage('')}
                 onSubmit={async (e) => {
                   e.preventDefault();
+                  if (pending > 0 || !securityDirty) return;
                   setSecurityMessage('');
-                  if (await updateSettings({ securityPolicy: securityForm }))
-                    setSecurityMessage('Security policy saved successfully.');
+                  setConfirmSecuritySave({
+                    id: 'security-policy',
+                    action: 'save',
+                    label: 'Security policy',
+                  });
                 }}
               >
                 <SectionHeading
@@ -1403,13 +1580,12 @@ export function SettingsView() {
               aria-labelledby="account-security-title"
               onSubmit={async (e) => {
                 e.preventDefault();
-                const changed = await changePassword(currentPassword, newPassword);
-                // Keep the fields intact when the change failed so the operator can
-                // correct the current password instead of retyping both values.
-                if (changed) {
-                  setCurrentPassword('');
-                  setNewPassword('');
-                }
+                if (pending > 0) return;
+                setConfirmChangePassword({
+                  id: 'change-password',
+                  action: 'change',
+                  label: 'Account password',
+                });
               }}
             >
               <SectionHeading
@@ -1557,16 +1733,11 @@ export function SettingsView() {
                       return;
                     }
                     setAccountMessage('');
-                    if (await createUser({ username, password, role, email: email.trim() })) {
-                      setUsername('');
-                      setPassword('');
-                      setRole('VIEWER');
-                      setEmail('');
-                      await reloadUsers();
-                      setAccountMessage('Operator created successfully.');
-                    } else {
-                      setAccountMessage('Failed to create operator.');
-                    }
+                    setConfirmCreateUser({
+                      id: 'create-user',
+                      action: 'create',
+                      label: `Workspace account "${username.trim()}"`,
+                    });
                   }}
                 >
                   <label className="block text-xs font-medium text-zinc-300 light:text-zinc-700">
@@ -1751,14 +1922,17 @@ export function SettingsView() {
                                     ? 'border-emerald-500/25 text-emerald-300 hover:bg-emerald-500/10 light:text-emerald-700'
                                     : 'border-zinc-700 text-zinc-300 hover:bg-zinc-800 light:border-zinc-300 light:text-zinc-700 light:hover:bg-zinc-100'
                                 }`}
-                                disabled={pending > 0}
+                                disabled={pending > 0 || confirmEnableUser !== null}
                                 onClick={async () => {
                                   if (!user.disabled) {
                                     setDisablingUserId(user.id);
                                     return;
                                   }
-                                  await updateUser(user.id, { role: user.role, disabled: !user.disabled });
-                                  await reloadUsers();
+                                  setConfirmEnableUser({
+                                    id: user.id,
+                                    action: 'enable',
+                                    label: `Account "${user.username}"`,
+                                  });
                                 }}
                               >
                                 {user.disabled ? 'Enable account' : 'Disable account'}
@@ -1862,28 +2036,22 @@ export function SettingsView() {
                 setEditMessage('Enter a valid email address, for example name@company.com.');
                 return;
               }
-              setEditMessage('');
-              const ok = await updateUser(editingUser.id, {
-                role: editForm.role,
-                email: address,
-                disabled: editForm.disabled,
-              });
-              if (!ok) {
-                setEditMessage('The account could not be updated.');
-                return;
-              }
-              await reloadUsers();
-              setEditingUser(null);
-            }}
-          >
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h3
-                  id="edit-account-title"
-                  className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900"
-                >
-                  Edit workspace account
-                </h3>
+                setEditMessage('');
+                setConfirmEditUser({
+                  id: editingUser?.id ?? '',
+                  action: 'update',
+                  label: `Workspace account "${editForm.username}"`,
+                });
+              }}
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h3
+                    id="edit-account-title"
+                    className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900"
+                  >
+                    Edit workspace account
+                  </h3>
                 <p className="mt-1 text-xs text-zinc-400 light:text-zinc-600">
                   The username <strong>{editForm.username}</strong> is the login and cannot be changed. Use
                   Reset password to set a new one.
@@ -2037,6 +2205,271 @@ export function SettingsView() {
                 className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold disabled:opacity-50 transition"
               >
                 {pending > 0 ? 'Deleting…' : 'Delete Account'}
+              </button>
+            </div>
+          </div>
+        </SettingsDialog>
+      )}
+
+      {/* Processing Toggle Confirmation */}
+      {confirmProcessingToggle && (
+        <SettingsDialog title="Confirm processing change" onClose={() => setConfirmProcessingToggle(null)}>
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+              {confirmProcessingToggle.action === 'enable' ? 'Enable' : 'Disable'} {confirmProcessingToggle.label}?
+            </h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              Are you sure you want to {confirmProcessingToggle.action} {confirmProcessingToggle.label.toLowerCase()}? The change will be saved with your processing settings.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmProcessingToggle(null)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={pending > 0}
+                onClick={executeProcessingToggle}
+                className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold disabled:opacity-50 transition"
+              >
+                {pending > 0 ? 'Saving…' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </SettingsDialog>
+      )}
+
+      {/* Processing Save Confirmation */}
+      {confirmProcessingSave && (
+        <SettingsDialog title="Confirm save processing settings" onClose={() => setConfirmProcessingSave(null)}>
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">Save processing settings?</h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              This will persist scheduler, digest, retry, email, and self-healing changes to the server.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmProcessingSave(null)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={pending > 0}
+                onClick={executeProcessingSave}
+                className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold disabled:opacity-50 transition"
+              >
+                {pending > 0 ? 'Saving…' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </SettingsDialog>
+      )}
+
+      {/* Finding Dispatch Toggle Confirmation */}
+      {confirmFindingToggle && (
+        <SettingsDialog title="Confirm finding dispatch change" onClose={() => setConfirmFindingToggle(null)}>
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+              {confirmFindingToggle.action === 'enable' ? 'Enable' : 'Disable'} {confirmFindingToggle.label}?
+            </h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              Are you sure you want to {confirmFindingToggle.action} {confirmFindingToggle.label.toLowerCase()}? The change will be saved with your finding dispatch settings.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmFindingToggle(null)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={pending > 0}
+                onClick={executeFindingToggle}
+                className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold disabled:opacity-50 transition"
+              >
+                {pending > 0 ? 'Saving…' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </SettingsDialog>
+      )}
+
+      {/* Finding Dispatch Save Confirmation */}
+      {confirmFindingSave && (
+        <SettingsDialog title="Confirm save finding dispatch settings" onClose={() => setConfirmFindingSave(null)}>
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">Save finding dispatch settings?</h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              This will persist automatic dispatch and confidence threshold changes to the server.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmFindingSave(null)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={pending > 0}
+                onClick={executeFindingSave}
+                className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold disabled:opacity-50 transition"
+              >
+                {pending > 0 ? 'Saving…' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </SettingsDialog>
+      )}
+
+      {/* Security Policy Save Confirmation */}
+      {confirmSecuritySave && (
+        <SettingsDialog title="Confirm save security policy" onClose={() => setConfirmSecuritySave(null)}>
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">Save security policy?</h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              This will persist session timeout, password length, and lockout settings to the server.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmSecuritySave(null)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={pending > 0}
+                onClick={executeSecuritySave}
+                className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold disabled:opacity-50 transition"
+              >
+                {pending > 0 ? 'Saving…' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </SettingsDialog>
+      )}
+
+      {/* Change Password Confirmation */}
+      {confirmChangePassword && (
+        <SettingsDialog title="Confirm password change" onClose={() => setConfirmChangePassword(null)}>
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">Change password?</h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              Changing your password will sign out all active sessions.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmChangePassword(null)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={pending > 0}
+                onClick={executeChangePassword}
+                className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold disabled:opacity-50 transition"
+              >
+                {pending > 0 ? 'Changing…' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </SettingsDialog>
+      )}
+
+      {/* Create User Confirmation */}
+      {confirmCreateUser && (
+        <SettingsDialog title="Confirm create operator" onClose={() => setConfirmCreateUser(null)}>
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">Create operator account?</h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              Are you sure you want to create the account {confirmCreateUser.label}?
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmCreateUser(null)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={pending > 0}
+                onClick={executeCreateUser}
+                className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold disabled:opacity-50 transition"
+              >
+                {pending > 0 ? 'Creating…' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </SettingsDialog>
+      )}
+
+      {/* Edit User Confirmation */}
+      {confirmEditUser && (
+        <SettingsDialog title="Confirm save workspace account" onClose={() => setConfirmEditUser(null)}>
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">Save account changes?</h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              Are you sure you want to save changes to {confirmEditUser.label}?
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmEditUser(null)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={pending > 0}
+                onClick={executeEditUser}
+                className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold disabled:opacity-50 transition"
+              >
+                {pending > 0 ? 'Saving…' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </SettingsDialog>
+      )}
+
+      {/* Enable User Confirmation */}
+      {confirmEnableUser && (
+        <SettingsDialog title="Confirm enable operator account" onClose={() => setConfirmEnableUser(null)}>
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">Enable account?</h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              Are you sure you want to re-enable {confirmEnableUser.label}? The operator will be able to sign in again.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmEnableUser(null)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={pending > 0}
+                onClick={executeEnableUser}
+                className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold disabled:opacity-50 transition"
+              >
+                {pending > 0 ? 'Enabling…' : 'Confirm'}
               </button>
             </div>
           </div>

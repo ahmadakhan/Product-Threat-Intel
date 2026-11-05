@@ -122,6 +122,11 @@ export const WatchListView: React.FC = () => {
   const [editingItem, setEditingItem] = useState<WatchListItem | null>(null);
   const [deletingAsset, setDeletingAsset] = useState<WatchListItem | null>(null);
   const [togglingAssetId, setTogglingAssetId] = useState<string | null>(null);
+  const [confirmToggle, setConfirmToggle] = useState<{ id: string; active: boolean } | null>(null);
+  const [confirmingSave, setConfirmingSave] = useState(false);
+  const [confirmingBulk, setConfirmingBulk] = useState(false);
+  const pendingSave = useRef<{ isEdit: boolean; items: WatchListItem[]; newProductsCount?: number; selectedProductIdsLength?: number } | null>(null);
+  const pendingBulk = useRef<Array<Omit<WatchListItem, 'id' | 'createdAt'>> | null>(null);
 
   // Pagination for inventory table
   const [currentPage, setCurrentPage] = useState(1);
@@ -505,7 +510,7 @@ export const WatchListView: React.FC = () => {
 
   const handleSaveProduct = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (savingProduct) return;
+    if (savingProduct || confirmingSave) return;
     setSavingProduct(true);
     try {
       setSaveFeedback(null);
@@ -660,23 +665,13 @@ export const WatchListView: React.FC = () => {
           });
           return;
         }
-        const saved = await saveRegisteredProducts(verifiedItems);
-        if (!saved.success || saved.errors?.length) {
-          setSaveFeedback({
-            type: 'error',
-            message: saved.errors?.join('; ') || 'Could not save the registered products.',
-          });
-          return;
-        }
-        setSaveFeedback({
-          type: 'success',
-          message: newProducts.length
-            ? `Saved the asset and added ${newProducts.length} product(s).`
-            : selectedProductIds.length
-              ? 'Asset changes saved; the selected catalog product(s) were already attached to this asset.'
-              : 'Asset changes saved.',
-        });
-        setShowAddModal(false);
+        pendingSave.current = {
+          isEdit: true,
+          items: verifiedItems,
+          newProductsCount: newProducts.length,
+          selectedProductIdsLength: selectedProductIds.length,
+        };
+        setConfirmingSave(true);
         return;
       }
 
@@ -699,13 +694,9 @@ export const WatchListView: React.FC = () => {
         });
         return;
       }
-      const result = await bulkImportWatchlist(newItems);
-      if (!result.errors.length) setShowAddModal(false);
-      else
-        setSaveFeedback({
-          type: 'error',
-          message: `${result.imported} product(s) registered. ${result.errors.join(' ')}`,
-        });
+      pendingSave.current = { isEdit: false, items: newItems as WatchListItem[] };
+      setConfirmingSave(true);
+      return;
     } catch (error) {
       setSaveFeedback({
         type: 'error',
@@ -716,8 +707,97 @@ export const WatchListView: React.FC = () => {
     }
   };
 
+  const executeToggle = async () => {
+    if (!confirmToggle) return;
+    const { id, active } = confirmToggle;
+    setTogglingAssetId(id);
+    try {
+      await toggleWatchlistItemActive(id);
+    } finally {
+      setTogglingAssetId(null);
+      setConfirmToggle(null);
+    }
+  };
+
+  const executeConfirmedSave = async () => {
+    const pending = pendingSave.current;
+    if (!pending) return;
+    setConfirmingSave(false);
+    setSavingProduct(true);
+    try {
+      if (pending.isEdit) {
+        const saved = await saveRegisteredProducts(pending.items);
+        if (!saved.success || saved.errors?.length) {
+          setSaveFeedback({
+            type: 'error',
+            message: saved.errors?.join('; ') || 'Could not save the registered products.',
+          });
+          return;
+        }
+        setSaveFeedback({
+          type: 'success',
+          message: pending.newProductsCount
+            ? `Saved the asset and added ${pending.newProductsCount} product(s).`
+            : pending.selectedProductIdsLength
+              ? 'Asset changes saved; the selected catalog product(s) were already attached to this asset.'
+              : 'Asset changes saved.',
+        });
+      } else {
+        const result = await bulkImportWatchlist(pending.items);
+        if (!result.errors.length) setShowAddModal(false);
+        else
+          setSaveFeedback({
+            type: 'error',
+            message: `${result.imported} product(s) registered. ${result.errors.join(' ')}`,
+          });
+      }
+      setShowAddModal(false);
+    } catch (error) {
+      setSaveFeedback({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Could not save the product. Please retry.',
+      });
+    } finally {
+      setSavingProduct(false);
+      pendingSave.current = null;
+    }
+  };
+
+  const executeConfirmedBulk = async () => {
+    const items = pendingBulk.current;
+    if (!items || items.length === 0) {
+      setConfirmingBulk(false);
+      return;
+    }
+    setConfirmingBulk(false);
+    setBulkImporting(true);
+    setBulkFeedback(null);
+    try {
+      const verifiedItems = await verifyRegistrationAssets(items, verifySelectedCpe);
+      const duplicates = checkDuplicates(verifiedItems);
+      if (duplicates.length) {
+        setBulkFeedback({ imported: 0, errors: duplicates });
+        return;
+      }
+      const result = await bulkImportWatchlist(verifiedItems);
+      if (result.errors.length) {
+        setBulkFeedback(result);
+        return;
+      }
+      setBulkFeedback({ imported: items.length, errors: [] });
+      setShowBulkModal(false);
+    } catch (error) {
+      setBulkFeedback({
+        imported: 0,
+        errors: [error instanceof Error ? error.message : 'Could not verify and import products. Please retry.'],
+      });
+    } finally {
+      setBulkImporting(false);
+    }
+  };
+
   const handleBulkImport = async () => {
-    if (bulkImporting) return;
+    if (bulkImporting || confirmingBulk) return;
     setBulkImporting(true);
     setBulkFeedback(null);
     try {
@@ -764,17 +844,9 @@ export const WatchListView: React.FC = () => {
         return;
       }
       if (validItems.length > 0) {
-        const verifiedItems = await verifyRegistrationAssets(validItems, verifySelectedCpe);
-        const duplicates = checkDuplicates(verifiedItems);
-        if (duplicates.length) {
-          setBulkFeedback({ imported: 0, errors: duplicates });
-          return;
-        }
-        const result = await bulkImportWatchlist(verifiedItems);
-        if (result.errors.length) {
-          setBulkFeedback(result);
-          return;
-        }
+        pendingBulk.current = validItems;
+        setConfirmingBulk(true);
+        return;
       }
 
       setBulkFeedback({
@@ -1309,15 +1381,8 @@ export const WatchListView: React.FC = () => {
                               role="switch"
                               aria-checked={asset.active}
                               aria-label={`${asset.active ? 'Disable' : 'Enable'} vulnerability matching for ${asset.assetTag}`}
-                              disabled={togglingAssetId === asset.id}
-                              onClick={async () => {
-                                setTogglingAssetId(asset.id);
-                                try {
-                                  await toggleWatchlistItemActive(asset.id);
-                                } finally {
-                                  setTogglingAssetId(null);
-                                }
-                              }}
+                              disabled={togglingAssetId === asset.id || (confirmToggle !== null && confirmToggle.id !== asset.id)}
+                              onClick={() => setConfirmToggle({ id: asset.id, active: !asset.active })}
                               className={`w-9 h-5 shrink-0 flex items-center rounded-full p-0.5 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 disabled:opacity-60 ${
                                 asset.active
                                   ? 'bg-emerald-600 justify-end'
@@ -1339,6 +1404,7 @@ export const WatchListView: React.FC = () => {
                           <div className="flex items-center justify-end space-x-2">
                             <button
                               onClick={() => handleOpenEdit(asset)}
+                              disabled={confirmToggle !== null}
                               className="p-1.5 rounded-lg hover:bg-zinc-800 dark:hover:bg-zinc-800 light:hover:bg-zinc-200 text-zinc-400 hover:text-zinc-200 dark:hover:text-zinc-200 light:hover:text-zinc-900 transition"
                               title="Edit Product"
                             >
@@ -1346,6 +1412,7 @@ export const WatchListView: React.FC = () => {
                             </button>
                             <button
                               onClick={() => setDeletingAsset(asset)}
+                              disabled={confirmToggle !== null || deletingAsset?.id === asset.id}
                               className="p-1.5 rounded-lg hover:bg-zinc-800 dark:hover:bg-zinc-800 light:hover:bg-zinc-200 text-zinc-400 hover:text-rose-400 transition"
                               title="Delete Product"
                             >
@@ -2275,6 +2342,70 @@ export const WatchListView: React.FC = () => {
                 className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold"
               >
                 Remove Product
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Save Product Confirmation Modal */}
+      {confirmingSave && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+              {pendingSave.current?.isEdit ? 'Save Product Changes?' : 'Register New Products?'}
+            </h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              This will save changes to the monitored inventory.{' '}
+              {pendingSave.current?.isEdit
+                ? `This will update ${pendingSave.current.newProductsCount || 0} product(s).`
+                : `This will register ${pendingSave.current?.items.length || 0} product(s).`}
+            </p>
+            <div className="flex justify-end space-x-2">
+              <button
+                type="button"
+                onClick={() => setConfirmingSave(false)}
+                className="px-3 py-1.5 rounded-xl bg-zinc-800 dark:bg-zinc-800 light:bg-zinc-100 hover:bg-zinc-700 dark:hover:bg-zinc-700 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void executeConfirmedSave()}
+                className="px-3 py-1.5 rounded-xl bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-100 dark:hover:bg-zinc-200 light:bg-zinc-900 light:hover:bg-zinc-800 text-zinc-900 dark:text-zinc-900 light:text-zinc-50 font-semibold"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Import Confirmation Modal */}
+      {confirmingBulk && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+              Confirm Bulk Import?
+            </h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              This will verify and register {pendingBulk.current?.length || 0} product(s) into the monitored
+              inventory.
+            </p>
+            <div className="flex justify-end space-x-2">
+              <button
+                type="button"
+                onClick={() => setConfirmingBulk(false)}
+                className="px-3 py-1.5 rounded-xl bg-zinc-800 dark:bg-zinc-800 light:bg-zinc-100 hover:bg-zinc-700 dark:hover:bg-zinc-700 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void executeConfirmedBulk()}
+                className="px-3 py-1.5 rounded-xl bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-100 dark:hover:bg-zinc-200 light:bg-zinc-900 light:hover:bg-zinc-800 text-zinc-900 dark:text-zinc-900 light:text-zinc-50 font-semibold"
+              >
+                Confirm
               </button>
             </div>
           </div>

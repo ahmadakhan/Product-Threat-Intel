@@ -32,6 +32,10 @@ export const ThreatFeedsView: React.FC = () => {
   const [deletePending, setDeletePending] = useState(false);
   const [disablePending, setDisablePending] = useState(false);
   const [disablingFeed, setDisablingFeed] = useState<ThreatFeed | null>(null);
+  const [confirmFeed, setConfirmFeed] = useState<{ id: string; label: string; enable: boolean } | null>(null);
+  const [confirmSave, setConfirmSave] = useState<{ isEdit: boolean; label: string; feed: unknown } | null>(null);
+  const [togglePending, setTogglePending] = useState(false);
+  const [savePending, setSavePending] = useState(false);
 
   const [formData, setFormData] = useState({
     name: '',
@@ -159,47 +163,36 @@ export const ThreatFeedsView: React.FC = () => {
     setShowAddModal(true);
   };
 
-  const handleSaveFeed = async (e: React.FormEvent) => {
+  const handleSaveFeed = (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
 
+    const feedData = {
+      name: formData.name,
+      type: formData.type,
+      url: formData.url,
+      authType: formData.authType,
+      authSecretKey: formData.authSecretKey || undefined,
+      requestTimeoutSeconds: formData.requestTimeoutSeconds,
+      recoveryDelayMinutes: formData.recoveryDelayMinutes,
+      rateLimitPerMin: formData.rateLimitPerMin,
+      enabled: formData.enabled,
+    };
+
     if (editingFeed) {
-      const ok = await updateFeed({
-        ...editingFeed,
-        name: formData.name,
-        type: formData.type,
-        url: formData.url,
-        authType: formData.authType,
-        authSecretKey: formData.authSecretKey || undefined,
-        requestTimeoutSeconds: formData.requestTimeoutSeconds,
-        recoveryDelayMinutes: formData.recoveryDelayMinutes,
-        rateLimitPerMin: formData.rateLimitPerMin,
-        enabled: formData.enabled,
+      setConfirmSave({
+        isEdit: true,
+        label: `Update "${editingFeed.name}"`,
+        feed: { ...editingFeed, ...feedData },
       });
-      if (ok) {
-        setShowAddModal(false);
-      } else {
-        setFormError('Failed to update feed. Please check the form values and try again.');
-      }
     } else {
-      const result = await addFeed({
-        name: formData.name,
-        type: formData.type,
-        url: formData.url,
-        authType: formData.authType,
-        authSecretKey: formData.authSecretKey || undefined,
-        requestTimeoutSeconds: formData.requestTimeoutSeconds,
-        recoveryDelayMinutes: formData.recoveryDelayMinutes,
-        rateLimitPerMin: formData.rateLimitPerMin,
-        enabled: formData.enabled,
-        vendorSeed: false,
+      setConfirmSave({
+        isEdit: false,
+        label: `Add "${formData.name}"`,
+        feed: { ...feedData, vendorSeed: false },
       });
-      if (result?.success) {
-        setShowAddModal(false);
-      } else {
-        setFormError(result?.error || 'Failed to add feed. Check the URL, credentials, and server egress allowlist.');
-      }
     }
+    setShowAddModal(false);
   };
 
   const handleDeleteFeed = async () => {
@@ -208,6 +201,47 @@ export const ThreatFeedsView: React.FC = () => {
     const result = await deleteFeed(deletingFeed.id);
     setDeletePending(false);
     if (result) setDeletingFeed(null);
+  };
+
+  const handleConfirmedSave = async () => {
+    if (!confirmSave) return;
+    setSavePending(true);
+    try {
+      if (confirmSave.isEdit) {
+        const ok = await updateFeed(confirmSave.feed as ThreatFeed);
+        if (ok) {
+          setConfirmSave(null);
+        } else {
+          setFormError('Failed to update feed. Please check the form values and try again.');
+          setConfirmSave(null);
+          setShowAddModal(true);
+        }
+      } else {
+        const result = await addFeed(
+          confirmSave.feed as Omit<ThreatFeed, 'id' | 'healthStatus' | 'lastSync' | 'latencyMs' | 'itemCountLastRun' | 'ssrfValidated'>,
+        );
+        if (result?.success) {
+          setConfirmSave(null);
+        } else {
+          setFormError(result?.error || 'Failed to add feed. Check the URL, credentials, and server egress allowlist.');
+          setConfirmSave(null);
+          setShowAddModal(true);
+        }
+      }
+    } finally {
+      setSavePending(false);
+    }
+  };
+
+  const handleConfirmedEnable = async () => {
+    if (!confirmFeed) return;
+    setTogglePending(true);
+    try {
+      await toggleFeedEnabled(confirmFeed.id);
+    } finally {
+      setTogglePending(false);
+      setConfirmFeed(null);
+    }
   };
 
   return (
@@ -403,8 +437,9 @@ export const ThreatFeedsView: React.FC = () => {
                       <button
                         onClick={() => {
                           if (feed.enabled) setDisablingFeed(feed);
-                          else void toggleFeedEnabled(feed.id);
+                          else setConfirmFeed({ id: feed.id, label: feed.name, enable: true });
                         }}
+                        disabled={confirmFeed !== null || disablingFeed !== null}
                         className={`w-8 h-4 flex items-center rounded-full p-0.5 transition ${
                           feed.enabled
                             ? 'bg-zinc-200 dark:bg-zinc-200 light:bg-zinc-900 justify-end'
@@ -754,6 +789,38 @@ export const ThreatFeedsView: React.FC = () => {
         </div>
       )}
 
+      {/* Enable Feed Confirmation Modal */}
+      {confirmFeed && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-emerald-300 dark:text-emerald-300 light:text-emerald-700 mb-2">
+              Enable Threat Feed Source?
+            </h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              Are you sure you want to enable <strong>{confirmFeed.label}</strong>? Polling for this
+              endpoint will resume immediately and begin ingesting new findings.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmFeed(null)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmedEnable()}
+                disabled={togglePending}
+                className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold disabled:opacity-50 transition"
+              >
+                {togglePending ? 'Enabling…' : 'Enable Feed'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Delete Feed Confirmation Modal */}
       {deletingFeed && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
@@ -780,6 +847,41 @@ export const ThreatFeedsView: React.FC = () => {
                 className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold disabled:opacity-50 transition"
               >
                 {deletePending ? 'Deleting…' : 'Delete Feed'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Save Feed Confirmation Modal */}
+      {confirmSave && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+              Save Threat Feed Changes?
+            </h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              Are you sure you want to <strong>{confirmSave.isEdit ? 'update' : 'add'}</strong>
+              <span className="font-medium text-zinc-200 dark:text-zinc-200 light:text-zinc-800">
+                {confirmSave.label}
+              </span>
+              ? This will change the feed configuration and may affect polling.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmSave(null)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmedSave()}
+                disabled={savePending}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-100 dark:text-zinc-100 light:text-zinc-900 text-xs font-semibold disabled:opacity-50 transition"
+              >
+                {savePending ? 'Saving…' : 'Confirm Save'}
               </button>
             </div>
           </div>

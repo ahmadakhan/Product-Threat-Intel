@@ -163,7 +163,8 @@ export const ArchiveRetentionView: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
   const [running, setRunning] = useState(false);
-  const [confirming, setConfirming] = useState(false);
+  const [confirmCleanup, setConfirmCleanup] = useState<{ action: string; label: string } | null>(null);
+  const [confirmSavePolicy, setConfirmSavePolicy] = useState<{ action: string; label: string } | null>(null);
   const [runNotice, setRunNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
   // Exact footprint counts come from the server. The snapshot only carries
   // capped recent slices, so computing totals from it would under-report.
@@ -181,10 +182,10 @@ export const ArchiveRetentionView: React.FC = () => {
 
   // A policy edit or disabling the policy invalidates an armed manual cleanup.
   useEffect(() => {
-    if (dirty || !form.enabled) setConfirming(false);
+    if (dirty || !form.enabled) setConfirmCleanup(null);
   }, [dirty, form.enabled]);
   useEffect(() => {
-    setConfirming(false);
+    setConfirmCleanup(null);
   }, [view]);
 
   // Refresh the server-side footprint as the operator edits the policy. The
@@ -231,6 +232,11 @@ export const ArchiveRetentionView: React.FC = () => {
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!admin || saving || !dirty) return;
+    setConfirmSavePolicy({ action: 'save', label: 'Retention policy' });
+  };
+
+  const executeSavePolicy = async () => {
+    if (!confirmSavePolicy) return;
     setSaving(true);
     setNotice(null);
     try {
@@ -242,6 +248,7 @@ export const ArchiveRetentionView: React.FC = () => {
       );
     } finally {
       setSaving(false);
+      setConfirmSavePolicy(null);
     }
   };
 
@@ -374,15 +381,15 @@ export const ArchiveRetentionView: React.FC = () => {
     : null;
   const mode = MODES.find((item) => item.id === form.retentionMode) ?? MODES[1];
 
-  const runCleanup = async () => {
+  const runCleanup = () => {
     if (!admin || running || !form.enabled || dirty || previewLoading || !preview || previewError) return;
-    // First click arms a destructive action; the second click performs it.
-    if (!confirming) {
-      setConfirming(true);
-      setRunNotice(null);
-      return;
-    }
-    setConfirming(false);
+    setConfirmCleanup({ action: 'cleanup', label: 'Manual retention cleanup' });
+    setRunNotice(null);
+  };
+
+  const executeCleanup = async () => {
+    if (!confirmCleanup) return;
+    setConfirmCleanup(null);
     setRunning(true);
     setRunNotice(null);
     try {
@@ -681,7 +688,7 @@ export const ArchiveRetentionView: React.FC = () => {
                 <button
                   type="button"
                   className="ui-secondary"
-                  disabled={!admin || saving || !dirty}
+                  disabled={!admin || saving || !dirty || !!confirmSavePolicy || !!confirmCleanup}
                   onClick={() => {
                     setForm(saved);
                     setNotice(null);
@@ -690,7 +697,7 @@ export const ArchiveRetentionView: React.FC = () => {
                   <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
                   Reset
                 </button>
-                <button type="submit" className="ui-primary" disabled={!admin || saving || !dirty}>
+                <button type="submit" className="ui-primary" disabled={!admin || saving || !dirty || !!confirmSavePolicy || !!confirmCleanup}>
                   {saving ? (
                     <>
                       <LoaderCircle size={14} className="animate-spin" />
@@ -859,24 +866,9 @@ export const ArchiveRetentionView: React.FC = () => {
             </div>
             <div className="flex shrink-0 flex-col items-stretch gap-2 sm:items-end">
               <div className="flex flex-wrap gap-2">
-                {confirming && (
-                  <button
-                    type="button"
-                    className="ui-secondary"
-                    disabled={running}
-                    onClick={() => setConfirming(false)}
-                  >
-                    <X className="h-3.5 w-3.5" aria-hidden="true" />
-                    Cancel
-                  </button>
-                )}
                 <button
                   type="button"
-                  className={
-                    confirming
-                      ? 'inline-flex items-center justify-center gap-2 rounded-xl bg-red-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-60'
-                      : 'ui-primary'
-                  }
+                  className="ui-primary"
                   disabled={
                     !admin ||
                     running ||
@@ -884,18 +876,18 @@ export const ArchiveRetentionView: React.FC = () => {
                     dirty ||
                     previewLoading ||
                     !preview ||
-                    !!previewError
+                    !!previewError ||
+                    !!confirmSavePolicy ||
+                    !!confirmCleanup
                   }
                   onClick={runCleanup}
                 >
                   {running ? (
                     <RefreshCw className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                  ) : confirming ? (
-                    <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
                   ) : (
                     <Play className="h-3.5 w-3.5" aria-hidden="true" />
                   )}
-                  {running ? 'Running…' : confirming ? 'Confirm cleanup' : 'Run cleanup now'}
+                  {running ? 'Running…' : 'Run cleanup now'}
                 </button>
               </div>
               <span aria-live="polite" className={`text-right text-[11px] ${muted}`}>
@@ -909,8 +901,8 @@ export const ArchiveRetentionView: React.FC = () => {
                         ? 'Updating the footprint preview…'
                         : !preview || previewError
                           ? 'Load a current footprint preview before cleanup.'
-                          : confirming
-                            ? `This pass would remove ${projectedRemoval?.toLocaleString() ?? '—'} record${projectedRemoval === 1 ? '' : 's'} using ${mode.label.toLowerCase()} mode.`
+                          : confirmCleanup
+                            ? `This pass would remove ${projectedRemoval?.toLocaleString() ?? '—'} record${projectedRemoval === 1 ? '' : 's'} using ${mode.label.toLowerCase()} mode. Confirm to proceed.`
                             : 'Applies the saved policy immediately.'}
               </span>
             </div>
@@ -971,6 +963,50 @@ export const ArchiveRetentionView: React.FC = () => {
             </p>
         </section>
       </div>
+
+      {/* Save Policy Confirmation Modal */}
+      {confirmSavePolicy && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setConfirmSavePolicy(null);
+        }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="confirm-save-policy-title" className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5">
+            <h2 id="confirm-save-policy-title" className="text-sm font-semibold text-zinc-100">Save retention policy?</h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              This will <span className="font-medium text-zinc-200 light:text-zinc-800">{confirmSavePolicy.label}</span> changes to the workspace retention settings.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className="ui-secondary" onClick={() => setConfirmSavePolicy(null)}>
+                Cancel
+              </button>
+              <button type="button" className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500" onClick={() => void executeSavePolicy()}>
+                Confirm save
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {/* Cleanup Confirmation Modal */}
+      {confirmCleanup && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setConfirmCleanup(null);
+        }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="confirm-cleanup-title" className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5">
+            <h2 id="confirm-cleanup-title" className="text-sm font-semibold text-zinc-100">Run retention cleanup?</h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              This will <span className="font-medium text-zinc-200 light:text-zinc-800">{confirmCleanup.label}</span> using the saved policy. Expired records will be permanently removed.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className="ui-secondary" onClick={() => setConfirmCleanup(null)}>
+                Cancel
+              </button>
+              <button type="button" className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-red-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-red-500" onClick={() => void executeCleanup()}>
+                Confirm cleanup
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 };

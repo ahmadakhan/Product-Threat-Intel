@@ -50,6 +50,9 @@ export function EmailProviderSettings() {
     latency: number;
     error?: string;
   } | null>(null);
+  const [confirmSaveSettings, setConfirmSaveSettings] = useState<{ action: string; label: string } | null>(null);
+  const [confirmTestConnectivity, setConfirmTestConnectivity] = useState<{ action: string; label: string } | null>(null);
+  const [confirmSendTestEmail, setConfirmSendTestEmail] = useState<{ action: string; label: string } | null>(null);
   const savedVersion = JSON.stringify(emailConfig);
   useEffect(() => {
     setForm(initialForm(emailConfig));
@@ -76,7 +79,12 @@ export function EmailProviderSettings() {
         : {}),
     });
   };
-  const testConnectivity = async () => {
+  const testConnectivity = () => {
+    setConfirmTestConnectivity({ action: 'test-connectivity', label: 'Test email connectivity' });
+  };
+
+  const executeTestConnectivity = async () => {
+    if (!confirmTestConnectivity) return;
     setConnectivityTest(null);
     setMessage('');
     const input = {
@@ -92,6 +100,26 @@ export function EmailProviderSettings() {
     } else {
       setMessage(`Connectivity failed: ${result.error}`);
     }
+    setConfirmTestConnectivity(null);
+  };
+
+  const executeSaveSettings = async () => {
+    if (!confirmSaveSettings) return;
+    setMessage('');
+    if (await configureEmailProvider(form)) {
+      setForm((old) => ({ ...old, apiKey: '', smtpPassword: '', mailjetApiSecret: '' }));
+      setDirty(false);
+      setMessage(`${methodName(form.provider)} configuration saved.`);
+    }
+    setConfirmSaveSettings(null);
+  };
+
+  const executeSendTestEmail = async () => {
+    if (!confirmSendTestEmail) return;
+    setMessage('');
+    const result = await sendTestEmail(testEmail);
+    if (result.success) setMessage('Test email queued. Check Email History for provider acceptance.');
+    setConfirmSendTestEmail(null);
   };
   const isSmtp = isSmtpEmailProvider(form.provider);
   const isMailjet = form.provider === 'MAILJET_API';
@@ -131,11 +159,7 @@ export function EmailProviderSettings() {
         onSubmit={async (event) => {
           event.preventDefault();
           setMessage('');
-          if (await configureEmailProvider(form)) {
-            setForm((old) => ({ ...old, apiKey: '', smtpPassword: '', mailjetApiSecret: '' }));
-            setDirty(false);
-            setMessage(`${methodName(form.provider)} configuration saved.`);
-          }
+          setConfirmSaveSettings({ action: 'save', label: 'Save email settings' });
         }}
       >
         <div className="grid gap-4 sm:grid-cols-2">
@@ -478,14 +502,14 @@ export function EmailProviderSettings() {
               <button
                 type="button"
                 className="ui-secondary"
-                disabled={pending > 0 || !!connectivityTest}
+                disabled={pending > 0 || !!connectivityTest || !!confirmSaveSettings || !!confirmTestConnectivity || !!confirmSendTestEmail}
                 onClick={testConnectivity}
               >
                 {pending > 0 ? <LoaderCircle size={14} className="animate-spin" /> : <RotateCcw size={14} />}
                 {pending > 0 ? 'Testing…' : connectivityTest ? 'Test connectivity again' : 'Test connectivity'}
               </button>
             )}
-            <button type="submit" className="ui-primary" disabled={pending > 0 || !dirty}>
+            <button type="submit" className="ui-primary" disabled={pending > 0 || !dirty || !!confirmSaveSettings || !!confirmTestConnectivity || !!confirmSendTestEmail}>
               {pending > 0 ? <LoaderCircle size={14} className="animate-spin" /> : <Save size={14} />}
               {pending > 0 ? 'Saving…' : 'Save email settings'}
             </button>
@@ -498,8 +522,7 @@ export function EmailProviderSettings() {
         onSubmit={async (event) => {
           event.preventDefault();
           setMessage('');
-          const result = await sendTestEmail(testEmail);
-          if (result.success) setMessage('Test email queued. Check Email History for provider acceptance.');
+          setConfirmSendTestEmail({ action: 'send-test', label: `Test email to ${testEmail || 'recipient'}` });
         }}
       >
         <div>
@@ -522,7 +545,7 @@ export function EmailProviderSettings() {
             value={testEmail}
             onChange={(event) => setTestEmail(event.target.value)}
           />
-          <button type="submit" className="ui-secondary shrink-0" disabled={pending > 0 || dirty}>
+          <button type="submit" className="ui-secondary shrink-0" disabled={pending > 0 || dirty || !!confirmSaveSettings || !!confirmTestConnectivity || !!confirmSendTestEmail}>
             <Send className="h-3.5 w-3.5" /> Queue test email
           </button>
         </div>
@@ -542,6 +565,72 @@ export function EmailProviderSettings() {
           {connectivityTest.ok
             ? `SMTP connectivity OK — ${connectivityTest.latency}ms`
             : `Connectivity failed: ${connectivityTest.error}`}
+        </div>
+      )}
+
+      {/* Save Settings Confirmation Modal */}
+      {confirmSaveSettings && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setConfirmSaveSettings(null);
+        }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="confirm-save-settings-title" className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5">
+            <h2 id="confirm-save-settings-title" className="text-sm font-semibold text-zinc-100">Save email settings?</h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              This will <span className="font-medium text-zinc-200 light:text-zinc-800">{confirmSaveSettings.label}</span>. Provider credentials will be encrypted and stored.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className="ui-secondary" onClick={() => setConfirmSaveSettings(null)}>
+                Cancel
+              </button>
+              <button type="button" className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500" onClick={() => void executeSaveSettings()}>
+                Confirm save
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {/* Test Connectivity Confirmation Modal */}
+      {confirmTestConnectivity && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setConfirmTestConnectivity(null);
+        }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="confirm-connectivity-title" className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5">
+            <h2 id="confirm-connectivity-title" className="text-sm font-semibold text-zinc-100">Test connectivity?</h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              This will <span className="font-medium text-zinc-200 light:text-zinc-800">{confirmTestConnectivity.label}</span> against your configured SMTP server.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className="ui-secondary" onClick={() => setConfirmTestConnectivity(null)}>
+                Cancel
+              </button>
+              <button type="button" className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500" onClick={() => void executeTestConnectivity()}>
+                Confirm test
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {/* Send Test Email Confirmation Modal */}
+      {confirmSendTestEmail && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setConfirmSendTestEmail(null);
+        }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="confirm-send-test-email-title" className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5">
+            <h2 id="confirm-send-test-email-title" className="text-sm font-semibold text-zinc-100">Send test email?</h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              This will <span className="font-medium text-zinc-200 light:text-zinc-800">{confirmSendTestEmail.label}</span> using the saved provider configuration.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className="ui-secondary" onClick={() => setConfirmSendTestEmail(null)}>
+                Cancel
+              </button>
+              <button type="button" className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500" onClick={() => void executeSendTestEmail()}>
+                Confirm send
+              </button>
+            </div>
+          </section>
         </div>
       )}
     </section>

@@ -30,6 +30,12 @@ export const RecipientsView: React.FC = () => {
 
   const [editingRecipient, setEditingRecipient] = useState<EmailRecipient | null>(null);
   const [editingWebhook, setEditingWebhook] = useState<WebhookEndpoint | null>(null);
+  const [confirmToggleRecipient, setConfirmToggleRecipient] = useState<{ id: string; enabled: boolean } | null>(null);
+  const [confirmToggleWebhook, setConfirmToggleWebhook] = useState<{ id: string; enabled: boolean } | null>(null);
+  const [confirmToggleDigest, setConfirmToggleDigest] = useState<{ id: string; dailyDigest: boolean } | null>(null);
+  const [confirmTestWebhook, setConfirmTestWebhook] = useState<{ id: string; name: string } | null>(null);
+  const [confirmingEmailSave, setConfirmingEmailSave] = useState(false);
+  const [confirmingWebhookSave, setConfirmingWebhookSave] = useState(false);
 
   // Email form state
   const [emailForm, setEmailForm] = useState({
@@ -89,39 +95,9 @@ export const RecipientsView: React.FC = () => {
 
   const handleAddEmailSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (confirmingEmailSave) return;
     setErrorMsg(null);
-    const payload = {
-      name: emailForm.name.trim(),
-      email: emailForm.email.trim(),
-      role: emailForm.role.trim() || 'Security Engineer',
-      deliveryGroup: emailForm.deliveryGroup,
-      subscriptionTier: emailForm.subscriptionTier,
-      enabled: emailForm.enabled,
-      dailyDigest: emailForm.dailyDigest,
-    };
-    const ok = editingRecipient
-      ? await updateRecipient({
-          ...payload,
-          id: editingRecipient.id,
-          deliverySuccessRate: editingRecipient.deliverySuccessRate,
-        })
-      : await addRecipient(payload);
-
-    if (ok) {
-      setShowAddEmailModal(false);
-      setEditingRecipient(null);
-      setEmailForm({
-        name: '',
-        email: '',
-        role: '',
-        deliveryGroup: 'SECURITY_TEAM',
-        subscriptionTier: 'CRITICAL_HIGH_ONLY',
-        enabled: true,
-        dailyDigest: false,
-      });
-    } else {
-      setErrorMsg('Invalid email format. Please check and try again.');
-    }
+    setConfirmingEmailSave(true);
   };
 
   const handleOpenWebhookEdit = (w: WebhookEndpoint) => {
@@ -139,12 +115,122 @@ export const RecipientsView: React.FC = () => {
 
   const handleAddWebhookSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (confirmingWebhookSave) return;
     setErrorMsg(null);
     if (!webhookForm.name.trim() || !webhookForm.url.trim()) {
       setErrorMsg('Please provide a name and webhook URL.');
       return;
     }
+    setConfirmingWebhookSave(true);
+  };
 
+  const handleRunWebhookTest = async (endpoint: WebhookEndpoint) => {
+    setErrorMsg(null);
+    const res = await testWebhook(endpoint.id);
+    if (res.success) {
+      setTestResult({
+        endpointName: endpoint.name,
+        statusCode: res.statusCode,
+        signature: res.signature,
+      });
+    } else {
+      setErrorMsg(
+        `Webhook test for ${endpoint.name} failed${res.statusCode ? ` (HTTP ${res.statusCode})` : ''}.`,
+      );
+    }
+  };
+
+  const executeToggleRecipient = async () => {
+    if (!confirmToggleRecipient) return;
+    const { id, enabled } = confirmToggleRecipient;
+    try {
+      await toggleRecipientEnabled(id);
+    } finally {
+      setConfirmToggleRecipient(null);
+    }
+  };
+
+  const executeToggleWebhook = async () => {
+    if (!confirmToggleWebhook) return;
+    const { id, enabled } = confirmToggleWebhook;
+    try {
+      await toggleWebhookEnabled(id);
+    } finally {
+      setConfirmToggleWebhook(null);
+    }
+  };
+
+  const executeToggleDigest = async () => {
+    if (!confirmToggleDigest) return;
+    const { id, dailyDigest } = confirmToggleDigest;
+    const r = recipients.find((x) => x.id === id);
+    if (!r) {
+      setConfirmToggleDigest(null);
+      return;
+    }
+    try {
+      await updateRecipient({ ...r, dailyDigest });
+    } finally {
+      setConfirmToggleDigest(null);
+    }
+  };
+
+  const executeTestWebhook = async () => {
+    if (!confirmTestWebhook) return;
+    const { id, name } = confirmTestWebhook;
+    setErrorMsg(null);
+    const res = await testWebhook(id);
+    if (res.success) {
+      setTestResult({
+        endpointName: name,
+        statusCode: res.statusCode,
+        signature: res.signature,
+      });
+    } else {
+      setErrorMsg(
+        `Webhook test for ${name} failed${res.statusCode ? ` (HTTP ${res.statusCode})` : ''}.`,
+      );
+    }
+    setConfirmTestWebhook(null);
+  };
+
+  const executeConfirmedEmailSave = async () => {
+    setConfirmingEmailSave(false);
+    const payload = {
+      name: emailForm.name.trim(),
+      email: emailForm.email.trim(),
+      role: emailForm.role.trim() || 'Security Engineer',
+      deliveryGroup: emailForm.deliveryGroup,
+      subscriptionTier: emailForm.subscriptionTier,
+      enabled: emailForm.enabled,
+      dailyDigest: emailForm.dailyDigest,
+    };
+    const ok = editingRecipient
+      ? await updateRecipient({
+          ...payload,
+          id: editingRecipient.id,
+          deliverySuccessRate: editingRecipient.deliverySuccessRate,
+        })
+      : await addRecipient(payload);
+    if (ok) {
+      setShowAddEmailModal(false);
+      setEditingRecipient(null);
+      setEmailForm({
+        name: '',
+        email: '',
+        role: '',
+        deliveryGroup: 'SECURITY_TEAM',
+        subscriptionTier: 'CRITICAL_HIGH_ONLY',
+        enabled: true,
+        dailyDigest: false,
+      });
+    } else {
+      setErrorMsg('Invalid email format. Please check and try again.');
+    }
+  };
+
+  const executeConfirmedWebhookSave = async () => {
+    setConfirmingWebhookSave(false);
     const payload = {
       name: webhookForm.name.trim(),
       url: webhookForm.url.trim(),
@@ -163,7 +249,6 @@ export const RecipientsView: React.FC = () => {
     } else {
       ok = await addWebhook(payload);
     }
-
     if (!ok) return;
     setShowAddWebhookModal(false);
     setEditingWebhook(null);
@@ -175,22 +260,6 @@ export const RecipientsView: React.FC = () => {
       events: ['CRITICAL', 'CISA_KEV'],
       enabled: true,
     });
-  };
-
-  const handleRunWebhookTest = async (endpoint: WebhookEndpoint) => {
-    setErrorMsg(null);
-    const res = await testWebhook(endpoint.id);
-    if (res.success) {
-      setTestResult({
-        endpointName: endpoint.name,
-        statusCode: res.statusCode,
-        signature: res.signature,
-      });
-    } else {
-      setErrorMsg(
-        `Webhook test for ${endpoint.name} failed${res.statusCode ? ` (HTTP ${res.statusCode})` : ''}.`,
-      );
-    }
   };
 
   return (
@@ -362,7 +431,8 @@ export const RecipientsView: React.FC = () => {
                         </td>
                         <td className="py-3 px-4">
                           <button
-                            onClick={() => toggleRecipientEnabled(r.id)}
+                            onClick={() => setConfirmToggleRecipient({ id: r.id, enabled: !r.enabled })}
+                            disabled={confirmToggleRecipient !== null}
                             className={`px-2 py-0.5 rounded-full text-[10px] font-mono border transition ${
                               r.enabled
                                 ? 'bg-emerald-950/40 text-emerald-300 light:text-emerald-700 border-emerald-800/60'
@@ -375,7 +445,8 @@ export const RecipientsView: React.FC = () => {
                         <td className="py-3 px-4">
                           <button
                             type="button"
-                            onClick={() => updateRecipient({ ...r, dailyDigest: !r.dailyDigest })}
+                            onClick={() => setConfirmToggleDigest({ id: r.id, dailyDigest: !r.dailyDigest })}
+                            disabled={confirmToggleDigest !== null}
                             className={`inline-flex items-center justify-center w-5 h-5 rounded border transition ${
                               r.dailyDigest
                                 ? 'bg-amber-500 border-amber-500 text-white'
@@ -387,22 +458,24 @@ export const RecipientsView: React.FC = () => {
                           </button>
                         </td>
                         <td className="py-3 px-4 text-right">
-                          <div className="flex items-center justify-end space-x-1">
-                            <button
-                              onClick={() => handleOpenEmailEdit(r)}
-                              className="p-1 rounded hover:bg-zinc-800 dark:hover:bg-zinc-800 light:hover:bg-zinc-200 text-zinc-400 dark:text-zinc-400 light:text-zinc-600 hover:text-zinc-200 dark:hover:text-zinc-200 light:hover:text-zinc-900 transition"
-                              title="Edit"
-                            >
-                              <Edit2 className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              onClick={() => setDeletingRecipientId(r.id)}
-                              className="p-1 rounded hover:bg-zinc-800 dark:hover:bg-zinc-800 light:hover:bg-zinc-200 text-zinc-400 dark:text-zinc-400 light:text-zinc-600 hover:text-zinc-200 dark:hover:text-zinc-200 light:hover:text-zinc-900 transition"
-                              title="Delete"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
+                            <div className="flex items-center justify-end space-x-1">
+                              <button
+                                onClick={() => handleOpenEmailEdit(r)}
+                                disabled={confirmToggleRecipient !== null || confirmToggleDigest !== null || confirmingEmailSave}
+                                className="p-1 rounded hover:bg-zinc-800 dark:hover:bg-zinc-800 light:hover:bg-zinc-200 text-zinc-400 dark:text-zinc-400 light:text-zinc-600 hover:text-zinc-200 dark:hover:text-zinc-200 light:hover:text-zinc-900 transition"
+                                title="Edit"
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => setDeletingRecipientId(r.id)}
+                                disabled={confirmToggleRecipient !== null || confirmToggleDigest !== null || deletingRecipientId === r.id}
+                                className="p-1 rounded hover:bg-zinc-800 dark:hover:bg-zinc-800 light:hover:bg-zinc-200 text-zinc-400 dark:text-zinc-400 light:text-zinc-600 hover:text-zinc-200 dark:hover:text-zinc-200 light:hover:text-zinc-900 transition"
+                                title="Delete"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                         </td>
                       </tr>
                     ))
@@ -470,7 +543,8 @@ export const RecipientsView: React.FC = () => {
                         </td>
                         <td className="py-3 px-4">
                           <button
-                            onClick={() => toggleWebhookEnabled(w.id)}
+                            onClick={() => setConfirmToggleWebhook({ id: w.id, enabled: !w.enabled })}
+                            disabled={confirmToggleWebhook !== null}
                             className={`px-2 py-0.5 rounded-full text-[10px] font-mono border transition ${
                               w.enabled
                                 ? 'bg-emerald-950/40 text-emerald-300 light:text-emerald-700 border-emerald-800/60'
@@ -481,27 +555,30 @@ export const RecipientsView: React.FC = () => {
                           </button>
                         </td>
                         <td className="py-3 px-4 text-right">
-                          <div className="flex items-center justify-end space-x-1">
-                            <button
-                              onClick={() => handleOpenWebhookEdit(w)}
-                              className="p-1 rounded hover:bg-zinc-800 dark:hover:bg-zinc-800 light:hover:bg-zinc-200 text-zinc-400 dark:text-zinc-400 light:text-zinc-600 hover:text-zinc-200 dark:hover:text-zinc-200 light:hover:text-zinc-900 transition"
-                              title="Edit"
-                            >
-                              <Edit2 className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              onClick={() => handleRunWebhookTest(w)}
-                              className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-200 light:hover:bg-zinc-300 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 text-[11px] font-medium transition flex items-center space-x-1"
-                              title="Send Test Ping"
-                            >
-                              <Send className="w-3 h-3" />
-                              <span>Test</span>
-                            </button>
-                            <button
-                              onClick={() => setDeletingWebhookId(w.id)}
-                              className="p-1 rounded hover:bg-zinc-800 dark:hover:bg-zinc-800 light:hover:bg-zinc-100 text-zinc-400 dark:text-zinc-400 light:text-zinc-500 hover:text-red-400 transition"
-                              title="Delete"
-                            >
+                            <div className="flex items-center justify-end space-x-1">
+                              <button
+                                onClick={() => handleOpenWebhookEdit(w)}
+                                disabled={confirmToggleWebhook !== null || confirmingWebhookSave}
+                                className="p-1 rounded hover:bg-zinc-800 dark:hover:bg-zinc-800 light:hover:bg-zinc-200 text-zinc-400 dark:text-zinc-400 light:text-zinc-600 hover:text-zinc-200 dark:hover:text-zinc-200 light:hover:text-zinc-900 transition"
+                                title="Edit"
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => setConfirmTestWebhook({ id: w.id, name: w.name })}
+                                disabled={confirmTestWebhook !== null || confirmToggleWebhook !== null}
+                                className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-200 light:hover:bg-zinc-300 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 text-[11px] font-medium transition flex items-center space-x-1"
+                                title="Send Test Ping"
+                              >
+                                <Send className="w-3 h-3" />
+                                <span>Test</span>
+                              </button>
+                              <button
+                                onClick={() => setDeletingWebhookId(w.id)}
+                                disabled={confirmToggleWebhook !== null || deletingWebhookId === w.id}
+                                className="p-1 rounded hover:bg-zinc-800 dark:hover:bg-zinc-800 light:hover:bg-zinc-100 text-zinc-400 dark:text-zinc-400 light:text-zinc-500 hover:text-red-400 transition"
+                                title="Delete"
+                              >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           </div>
@@ -887,6 +964,184 @@ export const RecipientsView: React.FC = () => {
                 className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold disabled:opacity-50 transition"
               >
                 Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toggle Recipient Confirmation */}
+      {confirmToggleRecipient && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+              {confirmToggleRecipient.enabled ? 'Mute Recipient?' : 'Activate Recipient?'}
+            </h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              {confirmToggleRecipient.enabled
+                ? 'This recipient will stop receiving automated vulnerability notifications.'
+                : 'This recipient will start receiving automated vulnerability notifications.'}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmToggleRecipient(null)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-100 dark:text-zinc-100 light:text-zinc-900 font-semibold text-xs transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void executeToggleRecipient()}
+                className="px-3.5 py-2 rounded-xl bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-100 dark:hover:bg-zinc-200 light:bg-zinc-900 light:hover:bg-zinc-800 text-zinc-900 dark:text-zinc-900 light:text-zinc-50 font-semibold text-xs transition"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toggle Webhook Confirmation */}
+      {confirmToggleWebhook && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+              {confirmToggleWebhook.enabled ? 'Pause Webhook?' : 'Enable Webhook?'}
+            </h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              {confirmToggleWebhook.enabled
+                ? 'Automated payload delivery to this endpoint will be paused.'
+                : 'Automated payload delivery to this endpoint will be enabled.'}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmToggleWebhook(null)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-100 dark:text-zinc-100 light:text-zinc-900 font-semibold text-xs transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void executeToggleWebhook()}
+                className="px-3.5 py-2 rounded-xl bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-100 dark:hover:bg-zinc-200 light:bg-zinc-900 light:hover:bg-zinc-800 text-zinc-900 dark:text-zinc-900 light:text-zinc-50 font-semibold text-xs transition"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toggle Daily Digest Confirmation */}
+      {confirmToggleDigest && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+              {confirmToggleDigest.dailyDigest ? 'Opt Out of Daily Digest?' : 'Opt In to Daily Digest?'}
+            </h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              {confirmToggleDigest.dailyDigest
+                ? 'This recipient will no longer receive the daily summary.'
+                : 'This recipient will receive a daily summary of findings.'}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmToggleDigest(null)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-100 dark:text-zinc-100 light:text-zinc-900 font-semibold text-xs transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void executeToggleDigest()}
+                className="px-3.5 py-2 rounded-xl bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-100 dark:hover:bg-zinc-200 light:bg-zinc-900 light:hover:bg-zinc-800 text-zinc-900 dark:text-zinc-900 light:text-zinc-50 font-semibold text-xs transition"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Test Webhook Confirmation */}
+      {confirmTestWebhook && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+              Send Test Ping?
+            </h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              A test notification will be sent to <strong>{confirmTestWebhook.name}</strong>.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmTestWebhook(null)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-100 dark:text-zinc-100 light:text-zinc-900 font-semibold text-xs transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void executeTestWebhook()}
+                className="px-3.5 py-2 rounded-xl bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-100 dark:hover:bg-zinc-200 light:bg-zinc-900 light:hover:bg-zinc-800 text-zinc-900 dark:text-zinc-900 light:text-zinc-50 font-semibold text-xs transition"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Save Email Recipient Confirmation */}
+      {confirmingEmailSave && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+              {editingRecipient ? 'Save Recipient Changes?' : 'Add Email Recipient?'}
+            </h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              {editingRecipient
+                ? `This will update the recipient ${emailForm.name}.`
+                : `This will add ${emailForm.name} as a new email recipient.`}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmingEmailSave(false)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-100 dark:text-zinc-100 light:text-zinc-900 font-semibold text-xs transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void executeConfirmedEmailSave()}
+                className="px-3.5 py-2 rounded-xl bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-100 dark:hover:bg-zinc-200 light:bg-zinc-900 light:hover:bg-zinc-800 text-zinc-900 dark:text-zinc-900 light:text-zinc-50 font-semibold text-xs transition"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Save Webhook Confirmation */}
+      {confirmingWebhookSave && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+              {editingWebhook ? 'Save Webhook Changes?' : 'Register Webhook?'}
+            </h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              {editingWebhook
+                ? `This will update the webhook ${webhookForm.name}.`
+                : `This will register ${webhookForm.name} as a new webhook endpoint.`}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmingWebhookSave(false)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-100 dark:text-zinc-100 light:text-zinc-900 font-semibold text-xs transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void executeConfirmedWebhookSave()}
+                className="px-3.5 py-2 rounded-xl bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-100 dark:hover:bg-zinc-200 light:bg-zinc-900 light:hover:bg-zinc-800 text-zinc-900 dark:text-zinc-900 light:text-zinc-50 font-semibold text-xs transition"
+              >
+                Confirm
               </button>
             </div>
           </div>
