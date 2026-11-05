@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import type { CorrelationPolicy, CorrelationWorkflows } from '../../shared/correlation';
 import { formatDateTime as fmtDateTime } from '../utils/dateTime';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 interface InventoryRow {
   id: string;
   vendor: string;
@@ -54,6 +55,16 @@ export function CorrelationOperations() {
     confirmDismissReview !== null ||
     confirmReplayDeadLetter !== null ||
     confirmDismissDeadLetter !== null;
+  const confirmationDialogRef = useDialogFocus(() => {
+    if (busy) return;
+    setConfirmSavePolicy(null);
+    setConfirmRetentionRun(null);
+    setConfirmArmGate(null);
+    setConfirmApproveReview(null);
+    setConfirmDismissReview(null);
+    setConfirmReplayDeadLetter(null);
+    setConfirmDismissDeadLetter(null);
+  }, isConfirming);
   useEffect(() => {
     if (selected) decisionRef.current?.focus();
   }, [selected]);
@@ -639,6 +650,7 @@ export function CorrelationOperations() {
           }}
         >
           <section
+            ref={confirmationDialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="confirm-save-policy-title"
@@ -674,6 +686,7 @@ export function CorrelationOperations() {
           }}
         >
           <section
+            ref={confirmationDialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="confirm-retention-run-title"
@@ -709,6 +722,7 @@ export function CorrelationOperations() {
           }}
         >
           <section
+            ref={confirmationDialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="confirm-arm-gate-title"
@@ -744,6 +758,7 @@ export function CorrelationOperations() {
           }}
         >
           <section
+            ref={confirmationDialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="confirm-approve-review-title"
@@ -779,6 +794,7 @@ export function CorrelationOperations() {
           }}
         >
           <section
+            ref={confirmationDialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="confirm-dismiss-review-title"
@@ -814,6 +830,7 @@ export function CorrelationOperations() {
           }}
         >
           <section
+            ref={confirmationDialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="confirm-replay-dead-letter-title"
@@ -849,6 +866,7 @@ export function CorrelationOperations() {
           }}
         >
           <section
+            ref={confirmationDialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="confirm-dismiss-dead-letter-title"

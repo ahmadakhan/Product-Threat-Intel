@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
 
-import { initMlRuntime, getMlRuntime, cpePreFilter, calibrateCredibilityScore, shouldAutoDispatch, rankReviewFindings, isTelemetryAnomaly, computeRetryDelay, predictRemediation } from '../server/ml/integration.ts';
+import { initMlRuntime, getMlRuntime, cpePreFilter, calibrateCredibilityScore, shouldAutoDispatch, rankReviewFindings, isTelemetryAnomaly, shouldSampleMlTelemetry, computeRetryDelay, predictRemediation } from '../server/ml/integration.ts';
 import type { TrainingDataSources } from '../server/ml/train/orchestrator.ts';
 import { TrainingOrchestrator } from '../server/ml/train/orchestrator.ts';
 import type { MetricFeatures } from '../server/ml/models/metricAnomalyDetector.ts';
@@ -43,6 +43,8 @@ describe('ML pipeline integration', () => {
       const result = calibrateCredibilityScore(75);
       assert.equal(result.score, 75);
       assert.equal(result.probability, 0.75);
+      assert.equal(calibrateCredibilityScore(0).score, 0);
+      assert.equal(calibrateCredibilityScore(100).score, 100);
       assert.equal(result.confidence, 'LOW');
     });
 
@@ -61,6 +63,9 @@ describe('ML pipeline integration', () => {
 
       const result = calibrateCredibilityScore(80);
       assert.ok(result.probability >= 0.7, `Expected probability >= 0.7, got ${result.probability}`);
+      assert.equal(result.score, result.probability * 100);
+      assert.equal(calibrateCredibilityScore(0).score, 0);
+      assert.equal(calibrateCredibilityScore(100).score, 100);
       assert.equal(result.confidence !== 'LOW', true);
 
       fs.rmSync(dir, { recursive: true, force: true });
@@ -119,6 +124,34 @@ describe('ML pipeline integration', () => {
       };
       assert.equal(isTelemetryAnomaly(metrics), false);
     });
+  });
+
+  describe('shouldSampleMlTelemetry', () => {
+    it('samples once before pending depth has ever been refreshed', () => {
+      assert.equal(shouldSampleMlTelemetry(-1, 0), true);
+      assert.equal(shouldSampleMlTelemetry(-1, 1), false);
+      assert.equal(shouldSampleMlTelemetry(0, 1), true);
+    });
+  });
+
+  it('does not persist per-prediction informational events', async () => {
+    const dir = tmpDir();
+    let queries = 0;
+    const pool = {
+      query: async () => {
+        queries++;
+        return { rows: [] };
+      },
+    } as unknown as Db;
+    try {
+      await initMlRuntime(pool, { directory: dir });
+      const initializationQueries = queries;
+      calibrateCredibilityScore(75);
+      computeRetryDelay(1);
+      assert.equal(queries, initializationQueries);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   describe('computeRetryDelay', () => {

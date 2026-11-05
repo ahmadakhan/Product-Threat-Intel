@@ -139,7 +139,7 @@ function useApplication() {
     return data;
   }
 
-  const [systemUptime, setSystemUptime] = useState<{ upSince: string; uptime: string; loadAverage: number[] }>({ upSince: 'unknown', uptime: 'unknown', loadAverage: [0, 0, 0] });
+  const [systemUptime, setSystemUptime] = useState<{ uptime: string }>({ uptime: 'unknown' });
 
   useEffect(() => {
     let active = true;
@@ -151,7 +151,7 @@ function useApplication() {
       } catch (error) {
         if (active) {
           console.error('Failed to load application uptime', error);
-          setSystemUptime({ upSince: 'unknown', uptime: 'unknown', loadAverage: [0, 0, 0] });
+          setSystemUptime({ uptime: 'unknown' });
         }
       }
     };

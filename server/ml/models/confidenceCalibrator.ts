@@ -78,10 +78,10 @@ export class ConfidenceCalibrator {
 
     const pts = this.weights.points;
     if (raw <= pts[0].raw) {
-      return { score: pts[0].calibrated, probability: pts[0].calibrated, confidence: 'HIGH', reason: `clamped to min: raw=${raw.toFixed(1)}` };
+      return { score: pts[0].calibrated * 100, probability: pts[0].calibrated, confidence: 'HIGH', reason: `clamped to min: raw=${raw.toFixed(1)}` };
     }
     if (raw >= pts[pts.length - 1].raw) {
-      return { score: pts[pts.length - 1].calibrated, probability: pts[pts.length - 1].calibrated, confidence: 'HIGH', reason: `clamped to max: raw=${raw.toFixed(1)}` };
+      return { score: pts[pts.length - 1].calibrated * 100, probability: pts[pts.length - 1].calibrated, confidence: 'HIGH', reason: `clamped to max: raw=${raw.toFixed(1)}` };
     }
 
     // Binary search + linear interpolation
@@ -99,7 +99,7 @@ export class ConfidenceCalibrator {
 
     const confidence: PredictionResult['confidence'] = Math.abs(calibrated - raw / 100) > 0.2 ? 'HIGH' : 'MEDIUM';
     return {
-      score: calibrated,
+      score: calibrated * 100,
       probability: calibrated,
       confidence,
       reason: `calibrated from raw=${raw.toFixed(1)} (interp between ${p0.raw}→${p0.calibrated.toFixed(3)} and ${p1.raw}→${p1.calibrated.toFixed(3)})`,

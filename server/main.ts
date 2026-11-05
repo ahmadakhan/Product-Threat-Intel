@@ -34,7 +34,7 @@ import { initMlRuntime } from './ml/integration.ts';
 import { encryptionKeys } from './secrets';
 import { runScheduledTraining, TrainingAlreadyRunningError } from './ml/train/cron.ts';
 import type { TrainingSummary } from './ml/train/orchestrator.ts';
-import { isTelemetryAnomaly } from './ml/integration.ts';
+import { isTelemetryAnomaly, shouldSampleMlTelemetry } from './ml/integration.ts';
 import type { Db } from './db';
 import { processPipeline } from './pipeline';
 import { runSelfHealCheck } from './selfHealing';
@@ -549,7 +549,8 @@ mlTrainingTick();
 let mlTelemetryRunning: Promise<void> | null = null;
 let mlTelemetryPrevious = { time: Date.now(), completed: correlation.supervisor.ingestor.telemetry.completed };
 const mlTelemetryTimer = setInterval(() => {
-  if (stopping || config.WORKER_ENABLED !== 'true' || mlTelemetryRunning || correlation.pendingDepth < 0) return;
+  if (stopping || config.WORKER_ENABLED !== 'true' || mlTelemetryRunning ||
+      !shouldSampleMlTelemetry(correlation.pendingDepth, correlation.pendingSampledAt)) return;
   const telemetry = correlation.supervisor.ingestor.telemetry;
   const now = Date.now();
   const metrics = {
@@ -558,14 +559,20 @@ const mlTelemetryTimer = setInterval(() => {
     concurrencyLimit: correlation.supervisor.concurrencyLimit,
     latencyMs: telemetry.completed ? telemetry.latencyTotal / telemetry.completed : 0,
     deadLetters: telemetry.deadLetters,
-    pendingClaims: correlation.pendingDepth,
+    pendingClaims: Math.max(0, correlation.pendingDepth),
     itemsPerSecond: Math.max(0, telemetry.completed - mlTelemetryPrevious.completed) / Math.max(1, (now - mlTelemetryPrevious.time) / 1000),
     poolWaiting: pool.waitingCount,
   };
   mlTelemetryPrevious = { time: now, completed: telemetry.completed };
   mlTelemetryRunning = writeEvent(pool, {
     category: 'ML', code: 'ml.telemetry.sample', message: 'Observed ML telemetry training sample', context: metrics,
-  }).then(() => { isTelemetryAnomaly(metrics); })
+  }).then(() => {
+    if (isTelemetryAnomaly(metrics))
+      return writeEvent(pool, {
+        category: 'ML', level: 'WARNING', code: 'ml.telemetry.anomaly',
+        message: 'ML telemetry anomaly detected', context: metrics,
+      });
+  })
     .catch(report('ml.telemetry'))
     .finally(() => { mlTelemetryRunning = null; });
 }, 60000);

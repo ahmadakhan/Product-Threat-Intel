@@ -627,10 +627,9 @@ describe('ZeroDayRateLimitOptimizer', () => {
     const samples = [];
     for (let i = 0; i < 25; i++) {
       samples.push({
-        zeroDayCount: 30 + (i % 50),
-        credibilityScores: Array.from({ length: 10 }, (_, j) => 50 + j * 5),
-        keptOutcomes: Array.from({ length: 10 }, () => 'PATCHED' as const),
-        droppedOutcomes: Array.from({ length: 10 }, () => 'FALSE_POSITIVE' as const),
+        zeroDayCount: 20,
+        credibilityScores: Array.from({ length: 20 }, (_, j) => 50 + j * 5),
+        outcomes: Array.from({ length: 20 }, (_, j) => j < 10 ? 'PATCHED' as const : 'FALSE_POSITIVE' as const),
       });
     }
     model.train(samples);
@@ -644,10 +643,9 @@ describe('ZeroDayRateLimitOptimizer', () => {
     const samples = [];
     for (let i = 0; i < 25; i++) {
       samples.push({
-        zeroDayCount: 40 + i,
+        zeroDayCount: 3,
         credibilityScores: [80, 70, 60],
-        keptOutcomes: ['PATCHED' as const, 'RESOLVED' as const, 'FALSE_POSITIVE' as const],
-        droppedOutcomes: ['FALSE_POSITIVE' as const, 'TIDY' as const],
+        outcomes: ['PATCHED' as const, 'RESOLVED' as const, 'FALSE_POSITIVE' as const],
       });
     }
     model.train(samples);
@@ -656,6 +654,19 @@ describe('ZeroDayRateLimitOptimizer', () => {
     restored.load(artifact);
     assert.equal(restored.isTrained(), true);
     assert.equal(restored.getCap(), model.getCap());
+  });
+
+  it('keeps each outcome paired with its score when ranking candidate caps', () => {
+    const model = new ZeroDayRateLimitOptimizer();
+    const sample = {
+      zeroDayCount: 20,
+      credibilityScores: Array.from({ length: 20 }, (_, index) => index),
+      outcomes: Array.from({ length: 20 }, (_, index) => index < 10 ? 'FALSE_POSITIVE' as const : 'DELIVERED' as const),
+    };
+    model.train(Array.from({ length: 20 }, () => sample));
+    const capTen = model.getDecisionPoints().find((point) => point.cap === 10);
+    assert.equal(capTen?.keptTruePositiveRate, 1);
+    assert.equal(model.getCap(), 10);
   });
 
   it('quality gate exists', () => {

@@ -17,6 +17,8 @@ test('failed sources recover at their persisted deadline and back off to one hou
   assert.equal(recoveryDue({ ...feed, enabled: false, circuitOpenUntil: deadline }, now + 120000), false);
   assert.equal(recoveryDue({ ...feed, healthStatus: 'HEALTHY', circuitOpenUntil: deadline }, now + 120000), false);
   assert.equal(Date.parse(recoveryAt(feed, 100, now)), now + 3600000);
+  assert.equal(Date.parse(recoveryAt({ ...feed, recoveryDelayMinutes: 30 }, 1, now, 5 * 60000)), now + 1800000);
+  assert.equal(Date.parse(recoveryAt(feed, 1, now, 2 * 3600000)), now + 3600000);
 });
 test('authentication and rate-limit HTTP failures remain recoverable', () => {
   for (const errorLog of ['HTTP 401 Unauthorized', 'HTTP 403 Forbidden', 'HTTP 408 Timeout', 'HTTP 429 Too Many Requests']) {

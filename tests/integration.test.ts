@@ -288,7 +288,13 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
         .set('x-csrf-token', viewCsrf).send(feedback)).status, 403);
       assert.equal((await admin.post('/api/ml/feedback').set('Origin', config.APP_ORIGIN).send(feedback)).status, 403);
       assert.equal((await post('/api/ml/feedback', { ...feedback, sample: { credibilityScore: 101, isActionable: true } })).status, 400);
-      assert.equal((await post('/api/ml/feedback', feedback)).status, 201);
+      const feedbackResponse = await post('/api/ml/feedback', feedback);
+      assert.equal(feedbackResponse.status, 201);
+      assert.deepEqual(feedbackResponse.body, {
+        recorded: true,
+        source: feedback.source,
+        effect: 'next_training_run',
+      });
       const saved = await pool.query("SELECT id,context FROM operational_events WHERE code='ml.training.feedback' ORDER BY id DESC LIMIT 1");
       assert.deepEqual(saved.rows[0].context, feedback);
       await pool.query('DELETE FROM operational_events WHERE id=$1', [saved.rows[0].id]);

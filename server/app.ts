@@ -1629,7 +1629,7 @@ export function createApp(
       });
       await appendAudit(db, 'ML training feedback recorded', feedback.source, req.operator!.username, 'PIPELINE');
     });
-    res.status(201).json({ recorded: true, source: feedback.source });
+    res.status(201).json({ recorded: true, source: feedback.source, effect: 'next_training_run' });
   }));
   app.get(
     '/api/health',

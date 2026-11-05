@@ -1,9 +1,10 @@
 import { pages, type PageId } from '../design/pages';
 import { formatDateTime } from '../utils/dateTime';
 import { DEFAULT_INGESTION_WINDOW_HOURS } from '../utils/scopePresets';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { RotateCw, Play, Clock, Cpu, Sun, Moon, Menu, KeyRound } from 'lucide-react';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 
 export const TopHeader: React.FC = () => {
   const {
@@ -44,14 +45,27 @@ export const TopHeader: React.FC = () => {
   }, []);
 
   const [confirmingAction, setConfirmingAction] = useState<{ type: 'pipeline' | 'session'; label: string } | null>(null);
+  const [confirmActionBusy, setConfirmActionBusy] = useState(false);
+  const confirmActionInProgress = useRef(false);
+  const confirmationDialogRef = useDialogFocus(() => {
+    if (!confirmActionInProgress.current) setConfirmingAction(null);
+  }, !!confirmingAction);
 
   const handleRunPipeline = () => {
     setConfirmingAction({ type: 'pipeline', label: 'Run Pipeline (1 day)' });
   };
 
   const executeRunPipeline = async () => {
-    setConfirmingAction(null);
-    await triggerPipelineRun(DEFAULT_INGESTION_WINDOW_HOURS);
+    if (confirmActionInProgress.current) return;
+    confirmActionInProgress.current = true;
+    setConfirmActionBusy(true);
+    try {
+      await triggerPipelineRun(DEFAULT_INGESTION_WINDOW_HOURS);
+    } finally {
+      confirmActionInProgress.current = false;
+      setConfirmActionBusy(false);
+      setConfirmingAction(null);
+    }
   };
 
   const handleSessionRenewal = () => {
@@ -59,8 +73,16 @@ export const TopHeader: React.FC = () => {
   };
 
   const executeSessionRenewal = async () => {
-    setConfirmingAction(null);
-    await resetSessionTimeout();
+    if (confirmActionInProgress.current) return;
+    confirmActionInProgress.current = true;
+    setConfirmActionBusy(true);
+    try {
+      await resetSessionTimeout();
+    } finally {
+      confirmActionInProgress.current = false;
+      setConfirmActionBusy(false);
+      setConfirmingAction(null);
+    }
   };
 
   const meta = pages[activeTab as PageId] || { section: 'OPERATIONS', title: 'Vulnerability Intelligence' };
@@ -201,10 +223,11 @@ export const TopHeader: React.FC = () => {
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setConfirmingAction(null);
+            if (event.target === event.currentTarget && !confirmActionBusy) setConfirmingAction(null);
           }}
         >
           <section
+            ref={confirmationDialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="confirm-action-title"
@@ -222,6 +245,7 @@ export const TopHeader: React.FC = () => {
               <button
                 type="button"
                 className="ui-secondary"
+                disabled={confirmActionBusy}
                 onClick={() => setConfirmingAction(null)}
               >
                 Cancel
@@ -229,6 +253,7 @@ export const TopHeader: React.FC = () => {
               <button
                 type="button"
                 className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500"
+                disabled={confirmActionBusy}
                 onClick={() => {
                   if (confirmingAction.type === 'pipeline') {
                     void executeRunPipeline();

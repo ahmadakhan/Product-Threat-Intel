@@ -1,7 +1,5 @@
 interface SystemUptime {
-  upSince: string;
   uptime: string;
-  loadAverage: number[];
 }
 
 export const getSystemUptime = async (): Promise<SystemUptime> => {
@@ -13,12 +11,7 @@ export const getSystemUptime = async (): Promise<SystemUptime> => {
   if (!response.ok) throw new Error(`Uptime request failed (HTTP ${response.status})`);
   const data: unknown = await response.json();
   if (!data || typeof data !== 'object' ||
-    !('systemUptime' in data) || typeof data.systemUptime !== 'string' || !data.systemUptime ||
-    !('startedAt' in data) || typeof data.startedAt !== 'string' || !Number.isFinite(Date.parse(data.startedAt)))
+    !('systemUptime' in data) || typeof data.systemUptime !== 'string' || !data.systemUptime)
     throw new Error('Invalid application uptime response');
-  return {
-    upSince: data.startedAt,
-    uptime: data.systemUptime,
-    loadAverage: [0, 0, 0],
-  };
+  return { uptime: data.systemUptime };
 };

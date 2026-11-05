@@ -125,8 +125,8 @@ export function calibrateCredibilityScore(rawScore: number): {
     modelVersion: model.getMetadata().version,
   });
   return {
-    score: result.score * 100,
-    probability: result.probability ?? result.score,
+    score: result.score,
+    probability: result.probability ?? result.score / 100,
     confidence: result.confidence,
   };
 }
@@ -190,15 +190,11 @@ export function isTelemetryAnomaly(
   const model = ctx.runtime?.metricAnomalyDetector;
   if (!model?.isTrained()) return false;
   const features = extractMetricFeatures(metrics);
-  const result = model.isAnomaly(features);
-  void logMlEvent('ml.telemetry_anomaly', result ? 'Anomaly detected' : 'Metrics within normal range', {
-    isAnomaly: result,
-    modelVersion: model.getMetadata().version,
-    features: Object.fromEntries(
-      Object.entries(features).map(([k, v]) => [k, typeof v === 'number' ? Number(v.toFixed(4)) : v]),
-    ),
-  });
-  return result;
+  return model.isAnomaly(features);
+}
+
+export function shouldSampleMlTelemetry(pendingDepth: number, pendingSampledAt: number): boolean {
+  return pendingSampledAt === 0 || pendingDepth >= 0;
 }
 
 /**
@@ -738,7 +734,7 @@ async function logMlEvent(
   message: string,
   context: Record<string, unknown> = {},
 ): Promise<void> {
-  if (!ctx.pool) return;
+  if (!ctx.pool || !['WARNING', 'ERROR'].includes(String(context.level))) return;
   try {
     await writeEvent(ctx.pool, {
       category: 'ML',

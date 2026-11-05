@@ -165,6 +165,7 @@ export interface Job {
     dailyDigest?: boolean;
   };
   attempts: number;
+  prior_attempt_at?: Date | string | null;
   lock_token: string;
   review_approved?: boolean;
   edits?: ReviewEdits;
@@ -249,6 +250,30 @@ export const emailRetryDelayMs = (attempt: number, policy: EmailRetryPolicy) =>
     policy.maxDelayMinutes * 60_000,
     policy.initialDelayMinutes * 60_000 * 2 ** Math.max(0, attempt - 1),
   );
+export function emailRetryDelayPlan(
+  attempt: number,
+  policy: EmailRetryPolicy,
+  mlDelayMs?: number,
+): { delayMs: number; source: 'OPERATOR' | 'ML' | 'ML_CAPPED' } {
+  const operatorDelayMs = emailRetryDelayMs(attempt, policy);
+  if (mlDelayMs === undefined || !Number.isFinite(mlDelayMs) || mlDelayMs <= operatorDelayMs)
+    return { delayMs: operatorDelayMs, source: 'OPERATOR' };
+  const ceiling = policy.maxDelayMinutes * 60_000;
+  return {
+    delayMs: Math.min(ceiling, mlDelayMs),
+    source: mlDelayMs > ceiling ? 'ML_CAPPED' : 'ML',
+  };
+}
+export function observedRetryDelay(
+  priorAttemptAt: Date | string | null | undefined,
+  attemptStartedAt: number,
+): { delayMs: number; observed: boolean } {
+  if (!priorAttemptAt) return { delayMs: 0, observed: false };
+  const priorTime = new Date(priorAttemptAt).getTime();
+  return Number.isFinite(priorTime)
+    ? { delayMs: Math.max(0, attemptStartedAt - priorTime), observed: true }
+    : { delayMs: 0, observed: false };
+}
 /** Human-readable schedule stored on the delivery log for operator visibility. */
 export const emailRetrySchedule = (policy: EmailRetryPolicy) =>
   policy.enabled
@@ -1481,20 +1506,34 @@ export async function deliverNext(
   const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
   const job = await transaction(pool, async (db) => {
     const claimed = await db.query(
-      `WITH candidate AS (SELECT id FROM outbox WHERE ((status='QUEUED' AND next_attempt<=now()) OR (status='SENDING' AND locked_at<now()-interval '2 minutes')) AND (channel<>'email' OR $2::boolean) ORDER BY priority DESC, next_attempt FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE outbox SET status='SENDING',locked_at=now(),lock_token=$1,attempts=attempts+1,updated_at=now() WHERE id IN (SELECT id FROM candidate) RETURNING *`,
+      `WITH candidate AS (
+         SELECT id,
+           CASE WHEN channel='email' AND attempts > 0 THEN
+             (SELECT occurred_at FROM operational_events
+              WHERE code='ml.delivery.outcome' AND context->>'jobId'=outbox.id::text
+              ORDER BY id DESC LIMIT 1)
+           END AS prior_attempt_at
+         FROM outbox
+         WHERE ((status='QUEUED' AND next_attempt<=now()) OR
+           (status='SENDING' AND locked_at<now()-interval '2 minutes'))
+           AND (channel<>'email' OR $2::boolean)
+         ORDER BY priority DESC, next_attempt
+         FOR UPDATE SKIP LOCKED LIMIT 1
+       )
+       UPDATE outbox AS o
+       SET status='SENDING',locked_at=now(),lock_token=$1,attempts=attempts+1,updated_at=now()
+       FROM candidate AS c WHERE o.id=c.id
+       RETURNING o.*,c.prior_attempt_at`,
       [randomUUID(), settings.emailEnabled !== false],
     );
     return claimed.rows[0] as Job | undefined;
   });
   if (!job) return false;
   const attemptStartedAt = Date.now();
-  const priorAttempt = job.channel === 'email' && job.attempts > 1
-    ? (await pool.query<{ occurred_at: Date }>(
-      "SELECT occurred_at FROM operational_events WHERE code='ml.delivery.outcome' AND context->>'jobId'=$1 ORDER BY id DESC LIMIT 1",
-      [job.id],
-    )).rows[0]
-    : undefined;
-  const retryDelayObserved = priorAttempt ? Math.max(0, attemptStartedAt - new Date(priorAttempt.occurred_at).getTime()) : 0;
+  const observedDelay = job.channel === 'email' && job.attempts > 1
+    ? observedRetryDelay(job.prior_attempt_at, attemptStartedAt)
+    : { delayMs: 0, observed: false };
+  const retryDelayObserved = observedDelay.delayMs;
   let transportAttempted = false;
   // Email retries follow the operator policy; webhooks retain the historical
   // six-attempt policy because their budget is not exposed as an email setting.
@@ -1956,10 +1995,15 @@ export async function deliverNext(
         !!error &&
         !routeToReview &&
         (permanent || !retryPolicy.enabled || job.attempts >= retryPolicy.maxAttempts),
-      next = new Date(Math.max(retryNotBefore, Date.now() + Math.max(
-        emailRetryDelayMs(job.attempts, retryPolicy),
-        getMlRuntime()?.deliveryOptimizer.isTrained() ? computeRetryDelay(job.attempts) : 0,
-      )));
+      mlDelayMs = getMlRuntime()?.deliveryOptimizer.isTrained() ? computeRetryDelay(job.attempts) : undefined,
+      retryDelay = emailRetryDelayPlan(job.attempts, retryPolicy, mlDelayMs);
+    const retryDelayBaseAt = Date.now();
+    const nextAttemptAt = Math.max(retryNotBefore, retryDelayBaseAt + retryDelay.delayMs);
+    const next = new Date(nextAttemptAt);
+    const scheduledRetryDelayMs = nextAttemptAt - retryDelayBaseAt;
+    const scheduledRetryDelaySource = retryNotBefore > retryDelayBaseAt + retryDelay.delayMs
+      ? 'PROVIDER_RETRY_AFTER'
+      : retryDelay.source;
     await db.query(
       'UPDATE outbox SET status=$2,next_attempt=$3,error=$4,provider_id=$5,locked_at=NULL,lock_token=NULL,updated_at=now() WHERE id=$1',
       [
@@ -2017,6 +2061,8 @@ export async function deliverNext(
           transportRejected,
           status,
           attemptCount: job.attempts,
+          retryDelayMs: error && !failed ? scheduledRetryDelayMs : undefined,
+          retryDelaySource: error && !failed ? scheduledRetryDelaySource : undefined,
           errorMessage: routeToReview ? undefined : error || undefined,
           nextRetryTime: routeToReview ? null : error && !failed ? next.toISOString() : null,
           sentAt,
@@ -2214,7 +2260,7 @@ export async function deliverNext(
         category: 'ML', code: 'ml.delivery.outcome', message: 'Observed delivery attempt outcome',
         context: {
           jobId: job.id, provider: emailProvider ?? 'unknown', attempt: job.attempts, delayMs: retryDelayObserved,
-          delayObserved: job.attempts === 1 || Boolean(priorAttempt),
+          delayObserved: observedDelay.observed,
           succeeded: !error, isRateLimited: observedStatus === 429, isPermanentFailure: permanent,
         },
       });

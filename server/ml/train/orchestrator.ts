@@ -1075,7 +1075,7 @@ export class TrainingOrchestrator {
       const testTrainingSamples: TrainingSample[] = testSamples.map((s, i) => ({
         id: `zd-test-${i}`,
         features: { zero_day_count: s.zeroDayCount, avg_credibility: s.credibilityScores.reduce((a, b) => a + b, 0) / Math.max(1, s.credibilityScores.length) },
-        label: s.keptOutcomes.some((o) => ['PATCHED', 'RESOLVED', 'DELIVERED'].includes(o)) ? 1 : 0,
+        label: s.outcomes.some((o) => ['PATCHED', 'RESOLVED', 'DELIVERED'].includes(o)) ? 1 : 0,
         weight: 1,
         timestamp: new Date().toISOString(),
       }));

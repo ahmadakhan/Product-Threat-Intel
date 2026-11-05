@@ -45,7 +45,7 @@ const compositionSample = z.object({
   subjectTemplate: z.string().refine((value) => SUBJECT_TEMPLATES.includes(value), 'Unknown subject template'),
   wasActionable: z.boolean(),
 }).strict();
-const outcome = z.enum(['PATCHED', 'RESOLVED', 'FALSE_POSITIVE']);
+const outcome = z.enum(['TIDY', 'PATCHED', 'RESOLVED', 'DELIVERED', 'FALSE_POSITIVE']);
 
 export const mlTelemetrySchema = z.object({
   memoryPercent: z.number().min(0).max(100),
@@ -84,16 +84,31 @@ export const mlFeedbackSchema = z.discriminatedUnion('source', [
   }).strict() }).strict(),
   z.object({ source: z.literal('zeroDayRateLimitSamples'), sample: z.object({
     zeroDayCount: count, credibilityScores: z.array(score).max(10000),
-    keptOutcomes: z.array(outcome).max(10000), droppedOutcomes: z.array(outcome).max(10000),
+    outcomes: z.array(outcome).max(10000),
   }).strict().refine((sample) =>
     sample.credibilityScores.length === sample.zeroDayCount &&
-    sample.keptOutcomes.length + sample.droppedOutcomes.length === sample.zeroDayCount,
-  'Provide one measured outcome and credibility score per zero-day finding') }).strict(),
+    sample.outcomes.length === sample.zeroDayCount,
+  'Provide one measured outcome paired with each zero-day credibility score') }).strict(),
   z.object({ source: z.literal('emailCompositionSamples'), sample: compositionSample }).strict(),
 ]).refine((value) => JSON.stringify(value).length <= 28000, 'Feedback exceeds the event storage limit');
 
 export function appendMlFeedback(data: TrainingDataSources, input: unknown): void {
-  const feedback = mlFeedbackSchema.parse(input);
+  const parsed = mlFeedbackSchema.safeParse(input);
+  if (!parsed.success) {
+    const legacyZeroDayFeedback = z.object({
+      source: z.literal('zeroDayRateLimitSamples'),
+      sample: z.object({
+        zeroDayCount: count,
+        credibilityScores: z.array(score).max(10000),
+        keptOutcomes: z.array(outcome).max(10000),
+        droppedOutcomes: z.array(outcome).max(10000),
+      }).strict().refine((sample) => sample.credibilityScores.length === sample.zeroDayCount &&
+        sample.keptOutcomes.length + sample.droppedOutcomes.length === sample.zeroDayCount),
+    }).strict();
+    if (legacyZeroDayFeedback.safeParse(input).success) return;
+    throw parsed.error;
+  }
+  const feedback = parsed.data;
   switch (feedback.source) {
     case 'calibrationPairs': (data.calibrationPairs ??= []).push(feedback.sample); break;
     case 'exploitRiskSamples': (data.exploitRiskSamples ??= []).push(feedback.sample); break;

@@ -185,12 +185,15 @@ describe('ConfidenceCalibrator', () => {
     const high = calibrator.predict({ credibility_score: 95 });
     const low = calibrator.predict({ credibility_score: 70 });
     assert.ok(high.score > low.score, 'high raw score should calibrate higher');
+    assert.equal(high.score, high.probability! * 100);
+    assert.ok(high.score >= 0 && high.score <= 100);
   });
 
   it('untrained model passes through raw score', () => {
     const calibrator = new ConfidenceCalibrator();
     const result = calibrator.predict({ credibility_score: 80 });
     assert.equal(result.score, 80);
+    assert.equal(result.probability, 0.8);
     assert.equal(result.reason.includes('untrained'), true);
   });
 

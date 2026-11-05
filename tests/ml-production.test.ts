@@ -7,6 +7,7 @@ import { mlFeedbackSchema, appendMlFeedback } from '../server/ml/feedback.ts';
 import { assessFinding, assessFindings } from '../server/ml/assessment.ts';
 import { findingFeatures } from '../server/ml/findingFeatures.ts';
 import { initMlRuntime } from '../server/ml/integration.ts';
+import { ZeroDayRateLimitOptimizer } from '../server/ml/models/zeroDayRateLimitOptimizer.ts';
 import { TrainingOrchestrator, type TrainingDataSources } from '../server/ml/train/orchestrator.ts';
 import { CronDataProvider } from '../server/ml/train/dataProvider.ts';
 import type { Db } from '../server/db.ts';
@@ -25,7 +26,7 @@ const samples = [
     findingInDigest: true, timeInDigestMinutes: 10,
   }, isRelevant: true } },
   { source: 'zeroDayRateLimitSamples', sample: {
-    zeroDayCount: 2, credibilityScores: [80, 10], keptOutcomes: ['PATCHED'], droppedOutcomes: ['FALSE_POSITIVE'],
+    zeroDayCount: 2, credibilityScores: [80, 10], outcomes: ['PATCHED', 'FALSE_POSITIVE'],
   } },
   { source: 'emailCompositionSamples', sample: {
     features: {
@@ -48,9 +49,34 @@ test('all formerly missing analyst label sources accept validated feedback and r
   assert.throws(() => mlFeedbackSchema.parse({ source: 'calibrationPairs', sample: { credibilityScore: 101, isActionable: true } }));
   assert.throws(() => mlFeedbackSchema.parse({ source: 'calibrationPairs', sample: { credibilityScore: 50, isActionable: 'yes' } }));
   assert.throws(() => mlFeedbackSchema.parse({ source: 'zeroDayRateLimitSamples', sample: {
-    zeroDayCount: 2, credibilityScores: [90], keptOutcomes: ['DELIVERED'], droppedOutcomes: [],
+    zeroDayCount: 2, credibilityScores: [90], outcomes: ['DELIVERED'],
   } }));
   assert.throws(() => mlFeedbackSchema.parse({ source: 'severityTierSamples', sample: { features: risk, tier: 'MADE_UP' } }));
+});
+
+test('zero-day feedback accepts every modeled outcome and skips legacy unpaired labels', () => {
+  const data: TrainingDataSources = {};
+  const outcomes = ['TIDY', 'PATCHED', 'RESOLVED', 'DELIVERED', 'FALSE_POSITIVE'] as const;
+  for (let index = 0; index < 20; index++) {
+    const outcome = outcomes[index % outcomes.length];
+    appendMlFeedback(data, {
+      source: 'zeroDayRateLimitSamples',
+      sample: { zeroDayCount: 1, credibilityScores: [50], outcomes: [outcome] },
+    });
+  }
+  assert.equal(data.zeroDayRateLimitSamples?.length, 20);
+  const model = new ZeroDayRateLimitOptimizer();
+  model.train(data.zeroDayRateLimitSamples);
+  assert.equal(model.getDecisionPoints()[0].keptTruePositiveRate, 0.6);
+  assert.throws(() => mlFeedbackSchema.parse({
+    source: 'zeroDayRateLimitSamples',
+    sample: { zeroDayCount: 1, credibilityScores: [50], keptOutcomes: ['PATCHED'], droppedOutcomes: [] },
+  }));
+  appendMlFeedback(data, {
+    source: 'zeroDayRateLimitSamples',
+    sample: { zeroDayCount: 1, credibilityScores: [50], keptOutcomes: ['PATCHED'], droppedOutcomes: [] },
+  });
+  assert.equal(data.zeroDayRateLimitSamples?.length, 20);
 });
 
 test('training collectors read observed telemetry, delivery and every analyst label from persisted events', async () => {

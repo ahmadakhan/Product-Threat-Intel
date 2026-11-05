@@ -2,9 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_EMAIL_RETRY_POLICY,
+  emailRetryDelayPlan,
   emailRetryDelayMs,
   emailRetryPolicy,
   emailRetrySchedule,
+  observedRetryDelay,
 } from '../server/delivery.ts';
 import { settingsSchema } from '../server/validation.ts';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
@@ -16,6 +18,30 @@ test('email retry policy defaults apply to legacy settings', () => {
     maxAttempts: 6,
     initialDelayMinutes: 1,
     maxDelayMinutes: 60,
+  });
+});
+
+test('ML retry recommendations are capped by the operator maximum and identify their source', () => {
+  const policy = emailRetryPolicy({ emailRetryMaxDelayMinutes: 60 });
+  assert.deepEqual(emailRetryDelayPlan(2, policy, 120 * 60_000), {
+    delayMs: 60 * 60_000,
+    source: 'ML_CAPPED',
+  });
+  assert.deepEqual(emailRetryDelayPlan(2, policy, 20 * 60_000), {
+    delayMs: 20 * 60_000,
+    source: 'ML',
+  });
+  assert.deepEqual(emailRetryDelayPlan(2, policy), {
+    delayMs: emailRetryDelayMs(2, policy),
+    source: 'OPERATOR',
+  });
+});
+
+test('first attempt is not reported as an observed zero-delay training sample', () => {
+  assert.deepEqual(observedRetryDelay(null, 1000), { delayMs: 0, observed: false });
+  assert.deepEqual(observedRetryDelay('1970-01-01T00:00:00.500Z', 1000), {
+    delayMs: 500,
+    observed: true,
   });
 });
 

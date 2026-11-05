@@ -18,8 +18,7 @@ import type { ModelMetadata, ModelArtifact, PredictionResult } from '../types.ts
 export interface ZeroDayRateLimitSample {
   zeroDayCount: number;
   credibilityScores: number[];
-  keptOutcomes: Array<'TIDY' | 'PATCHED' | 'RESOLVED' | 'DELIVERED' | 'FALSE_POSITIVE'>;
-  droppedOutcomes: Array<'TIDY' | 'PATCHED' | 'RESOLVED' | 'DELIVERED' | 'FALSE_POSITIVE'>;
+  outcomes: Array<'TIDY' | 'PATCHED' | 'RESOLVED' | 'DELIVERED' | 'FALSE_POSITIVE'>;
 }
 
 export interface ZeroDayRateLimitWeights {
@@ -61,7 +60,12 @@ export class ZeroDayRateLimitOptimizer {
   }
 
   train(samples: ZeroDayRateLimitSample[] = this.history): void {
-    if (samples.length < 20) return;
+    const validSamples = samples.filter((sample) =>
+      Number.isInteger(sample.zeroDayCount) && sample.zeroDayCount >= 0 &&
+      sample.credibilityScores.length === sample.zeroDayCount &&
+      sample.outcomes.length === sample.zeroDayCount,
+    );
+    if (validSamples.length < 20) return;
 
     const caps = [10, 20, 30, 40, 50, 75, 100, 150, 200, 300];
     const threshold = 50;
@@ -73,14 +77,16 @@ export class ZeroDayRateLimitOptimizer {
       let droppedTotal = 0;
       let droppedTruePositives = 0;
 
-      for (const s of samples) {
+      for (const s of validSamples) {
         const total = s.zeroDayCount;
-        const ranked = [...s.credibilityScores].sort((a, b) => b - a);
+        const ranked = s.credibilityScores
+          .map((score, index) => ({ score, outcome: s.outcomes[index] }))
+          .sort((a, b) => b.score - a.score);
         const keptCount = Math.min(cap, total);
         const droppedCount = total - keptCount;
 
         for (let i = 0; i < keptCount; i++) {
-          const outcome = s.keptOutcomes[i];
+          const outcome = ranked[i]?.outcome;
           if (outcome === 'PATCHED' || outcome === 'RESOLVED' || outcome === 'DELIVERED') {
             truePositives++;
           } else {
@@ -90,7 +96,7 @@ export class ZeroDayRateLimitOptimizer {
         }
 
         for (let i = 0; i < droppedCount; i++) {
-          const outcome = s.droppedOutcomes[i];
+          const outcome = ranked[keptCount + i]?.outcome;
           if (outcome === 'PATCHED' || outcome === 'RESOLVED' || outcome === 'DELIVERED') {
             droppedTruePositives++;
           }
@@ -182,8 +188,7 @@ export class ZeroDayRateLimitOptimizer {
   static collectTrainingData(samples: Array<{
     zeroDayCount: number;
     credibilityScores: number[];
-    keptOutcomes: Array<'TIDY' | 'PATCHED' | 'RESOLVED' | 'DELIVERED' | 'FALSE_POSITIVE'>;
-    droppedOutcomes: Array<'TIDY' | 'PATCHED' | 'RESOLVED' | 'DELIVERED' | 'FALSE_POSITIVE'>;
+    outcomes: Array<'TIDY' | 'PATCHED' | 'RESOLVED' | 'DELIVERED' | 'FALSE_POSITIVE'>;
   }>): ZeroDayRateLimitSample[] {
     return samples;
   }

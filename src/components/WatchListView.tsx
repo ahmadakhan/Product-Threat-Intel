@@ -121,12 +121,27 @@ export const WatchListView: React.FC = () => {
   const [bulkImporting, setBulkImporting] = useState(false);
   const [editingItem, setEditingItem] = useState<WatchListItem | null>(null);
   const [deletingAsset, setDeletingAsset] = useState<WatchListItem | null>(null);
+  const [deletingAssetBusy, setDeletingAssetBusy] = useState(false);
   const [togglingAssetId, setTogglingAssetId] = useState<string | null>(null);
   const [confirmToggle, setConfirmToggle] = useState<{ id: string; active: boolean } | null>(null);
   const [confirmingSave, setConfirmingSave] = useState(false);
   const [confirmingBulk, setConfirmingBulk] = useState(false);
   const pendingSave = useRef<{ isEdit: boolean; items: WatchListItem[]; newProductsCount?: number; selectedProductIdsLength?: number } | null>(null);
   const pendingBulk = useRef<Array<Omit<WatchListItem, 'id' | 'createdAt'>> | null>(null);
+  const deleteInProgress = useRef(false);
+  const deleteConfirmationRef = useDialogFocus(() => {
+    if (!deletingAssetBusy) setDeletingAsset(null);
+  }, deletingAsset !== null);
+  const saveConfirmationRef = useDialogFocus(() => {
+    if (!savingProduct) setConfirmingSave(false);
+  }, confirmingSave);
+  const bulkConfirmationRef = useDialogFocus(() => {
+    if (!bulkImporting) setConfirmingBulk(false);
+  }, confirmingBulk);
+  const toggleInProgress = useRef(false);
+  const toggleConfirmationRef = useDialogFocus(() => {
+    if (togglingAssetId === null) setConfirmToggle(null);
+  }, confirmToggle !== null);
 
   // Pagination for inventory table
   const [currentPage, setCurrentPage] = useState(1);
@@ -708,14 +723,50 @@ export const WatchListView: React.FC = () => {
   };
 
   const executeToggle = async () => {
-    if (!confirmToggle) return;
+    if (!confirmToggle || toggleInProgress.current) return;
     const { id, active } = confirmToggle;
+    toggleInProgress.current = true;
     setTogglingAssetId(id);
     try {
-      await toggleWatchlistItemActive(id);
+      const updated = await toggleWatchlistItemActive(id);
+      if (!updated) {
+        setSaveFeedback({ type: 'error', message: 'Could not change matching status. Please retry.' });
+      }
+    } catch (error) {
+      setSaveFeedback({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Could not change matching status. Please retry.',
+      });
     } finally {
+      toggleInProgress.current = false;
       setTogglingAssetId(null);
       setConfirmToggle(null);
+    }
+  };
+
+  const executeDelete = async () => {
+    const target = deletingAsset;
+    if (!target || deleteInProgress.current) return;
+    deleteInProgress.current = true;
+    setDeletingAssetBusy(true);
+    try {
+      const result = await deleteWatchlistItem(target.id);
+      setDeleteFeedback(result
+        ? {
+            type: 'success',
+            message: `Removed ${target.vendor} ${target.product} (${target.assetTag}) from monitored inventory.`,
+          }
+        : { type: 'error', message: 'Failed to remove product from inventory. Please try again.' });
+      if (result) setTimeout(() => setDeleteFeedback(null), 5000);
+    } catch (error) {
+      setDeleteFeedback({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Failed to remove product from inventory. Please retry.',
+      });
+    } finally {
+      deleteInProgress.current = false;
+      setDeletingAssetBusy(false);
+      setDeletingAsset(null);
     }
   };
 
@@ -2303,9 +2354,21 @@ export const WatchListView: React.FC = () => {
 
       {/* Delete Product Confirmation Modal */}
       {deletingAsset && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
-          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
-            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !deletingAssetBusy) setDeletingAsset(null);
+          }}
+        >
+          <div
+            ref={deleteConfirmationRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="watchlist-delete-confirm-title"
+            tabIndex={-1}
+            className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative"
+          >
+            <h3 id="watchlist-delete-confirm-title" className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
               Remove Monitored Product?
             </h3>
             <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
@@ -2316,32 +2379,19 @@ export const WatchListView: React.FC = () => {
             <div className="flex justify-end space-x-2">
               <button
                 type="button"
+                disabled={deletingAssetBusy}
                 onClick={() => setDeletingAsset(null)}
-                className="px-3 py-1.5 rounded-xl bg-zinc-800 dark:bg-zinc-800 light:bg-zinc-100 hover:bg-zinc-700 dark:hover:bg-zinc-700 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium"
+                className="px-3 py-1.5 rounded-xl bg-zinc-800 dark:bg-zinc-800 light:bg-zinc-100 hover:bg-zinc-700 dark:hover:bg-zinc-700 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium disabled:opacity-60"
               >
                 Cancel
               </button>
               <button
                 type="button"
-                onClick={async () => {
-                  const result = await deleteWatchlistItem(deletingAsset.id);
-                  if (result) {
-                    setDeleteFeedback({
-                      type: 'success',
-                      message: `Removed ${deletingAsset.vendor} ${deletingAsset.product} (${deletingAsset.assetTag}) from monitored inventory.`,
-                    });
-                    setTimeout(() => setDeleteFeedback(null), 5000);
-                  } else {
-                    setDeleteFeedback({
-                      type: 'error',
-                      message: 'Failed to remove product from inventory. Please try again.',
-                    });
-                  }
-                  setDeletingAsset(null);
-                }}
-                className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold"
+                disabled={deletingAssetBusy}
+                onClick={() => void executeDelete()}
+                className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold disabled:opacity-60"
               >
-                Remove Product
+                {deletingAssetBusy ? 'Removing…' : 'Remove Product'}
               </button>
             </div>
           </div>
@@ -2349,10 +2399,62 @@ export const WatchListView: React.FC = () => {
       )}
 
       {/* Save Product Confirmation Modal */}
+      {confirmToggle && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && togglingAssetId === null) setConfirmToggle(null);
+          }}
+        >
+          <div
+            ref={toggleConfirmationRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="watchlist-toggle-confirm-title"
+            tabIndex={-1}
+            className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative"
+          >
+            <h3 id="watchlist-toggle-confirm-title" className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+              {confirmToggle.active ? 'Enable matching?' : 'Disable matching?'}
+            </h3>
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+              {confirmToggle.active
+                ? 'Vulnerability matching and alerting will resume for this product.'
+                : 'Vulnerability matching and alerting will stop for this product.'}
+            </p>
+            <div className="flex justify-end space-x-2">
+              <button
+                type="button"
+                disabled={togglingAssetId !== null}
+                onClick={() => setConfirmToggle(null)}
+                className="px-3 py-1.5 rounded-xl bg-zinc-800 dark:bg-zinc-800 light:bg-zinc-100 hover:bg-zinc-700 dark:hover:bg-zinc-700 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={togglingAssetId !== null}
+                onClick={() => void executeToggle()}
+                className="px-3 py-1.5 rounded-xl bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-100 dark:hover:bg-zinc-200 light:bg-zinc-900 light:hover:bg-zinc-800 text-zinc-900 dark:text-zinc-900 light:text-zinc-50 font-semibold disabled:opacity-60"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {confirmingSave && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
-          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
-            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+          <div
+            ref={saveConfirmationRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="watchlist-save-confirm-title"
+            tabIndex={-1}
+            className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative"
+          >
+            <h3 id="watchlist-save-confirm-title" className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
               {pendingSave.current?.isEdit ? 'Save Product Changes?' : 'Register New Products?'}
             </h3>
             <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
@@ -2384,8 +2486,15 @@ export const WatchListView: React.FC = () => {
       {/* Bulk Import Confirmation Modal */}
       {confirmingBulk && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
-          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
-            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+          <div
+            ref={bulkConfirmationRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="watchlist-bulk-confirm-title"
+            tabIndex={-1}
+            className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative"
+          >
+            <h3 id="watchlist-bulk-confirm-title" className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
               Confirm Bulk Import?
             </h3>
             <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">

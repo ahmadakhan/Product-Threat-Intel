@@ -868,6 +868,10 @@ export interface EmailDeliveryLog {
   errorMessage?: string;
   /** Provider-assigned message id of the last attempt, when one was returned. */
   providerId?: string;
+  /** Delay selected for the next retry, in milliseconds. */
+  retryDelayMs?: number;
+  /** Whether the operator policy or its ML recommendation selected the delay. */
+  retryDelaySource?: 'OPERATOR' | 'ML' | 'ML_CAPPED' | 'PROVIDER_RETRY_AFTER';
   /**
    * Action Center follow-up state. Set to PENDING by the delivery worker when
    * the transport accepts a finding email, and moved to ACTIONED when an

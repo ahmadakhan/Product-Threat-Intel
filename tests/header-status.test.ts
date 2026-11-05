@@ -36,11 +36,10 @@ test('uptime client keeps the start timestamp separate from elapsed duration and
   }));
   t.mock.method(globalThis, 'fetch', async () => response);
   const uptime = await getSystemUptime();
-  assert.equal(uptime.upSince, '2026-11-04T22:00:00Z');
-  assert.equal(uptime.uptime, '0h 2m 5s');
+  assert.deepEqual(uptime, { uptime: '0h 2m 5s' });
   response = new Response('{}', { status: 503 });
   await assert.rejects(getSystemUptime(), /HTTP 503/);
-  response = new Response(JSON.stringify({ systemUptime: '8 days, 1:16' }));
+  response = new Response(JSON.stringify({ systemUptime: '' }));
   await assert.rejects(getSystemUptime(), /Invalid application uptime/);
   t.mock.method(globalThis, 'fetch', async () => { throw new Error('Network unavailable'); });
   await assert.rejects(getSystemUptime(), /Network unavailable/);
