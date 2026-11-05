@@ -304,6 +304,7 @@ export const ThreatIntelligenceSearch: React.FC = () => {
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [apiKeyMessage, setApiKeyMessage] = useState('');
   const [apiKeySaving, setApiKeySaving] = useState(false);
+  const [confirmingApiKey, setConfirmingApiKey] = useState(false);
   useEffect(
     () => () => {
       searchSequence.current++;
@@ -322,6 +323,12 @@ export const ThreatIntelligenceSearch: React.FC = () => {
 
   const handleSaveApiKey = async () => {
     if (apiKeySaving || !apiKeyInput.trim()) return;
+    setConfirmingApiKey(true);
+    setApiKeyDialogOpen(false);
+  };
+
+  const executeSaveApiKey = async () => {
+    setConfirmingApiKey(false);
     setApiKeySaving(true);
     setApiKeyMessage('');
     if (!nvdFeed) {
@@ -338,6 +345,7 @@ export const ThreatIntelligenceSearch: React.FC = () => {
       if (ok) {
         setApiKeyMessage('API key saved. Run a new search to pick it up.');
         setApiKeyInput('');
+        setApiKeyDialogOpen(false);
       } else {
         setApiKeyMessage('Failed to save API key. Please try again.');
       }
@@ -1323,7 +1331,7 @@ export const ThreatIntelligenceSearch: React.FC = () => {
               >
                 {apiKeyMessage.includes('saved') ? 'Done' : 'Cancel'}
               </button>
-              <button type="submit" disabled={apiKeySaving || !apiKeyInput.trim()} className="ui-primary">
+              <button type="button" disabled={apiKeySaving || !apiKeyInput.trim()} onClick={handleSaveApiKey} className="ui-primary">
                 {apiKeySaving ? (
                   <Loader2 size={14} className="animate-spin" aria-hidden="true" />
                 ) : (
@@ -1334,6 +1342,47 @@ export const ThreatIntelligenceSearch: React.FC = () => {
             </footer>
           </form>
         </ThreatApiKeyDialog>
+      )}
+
+      {/* Confirmation modal for saving API key */}
+      {confirmingApiKey && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirmingApiKey(false);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-api-key-title"
+            className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5"
+          >
+            <h2 id="confirm-api-key-title" className="text-sm font-semibold">
+              Save NVD API key?
+            </h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              This will replace the configured API key for your NVD feed and persist it to the server.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                className="ui-secondary"
+                onClick={() => setConfirmingApiKey(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 disabled:opacity-60"
+                disabled={apiKeySaving}
+                onClick={() => void executeSaveApiKey()}
+              >
+                {apiKeySaving ? 'Saving…' : 'Confirm save'}
+              </button>
+            </div>
+          </section>
+        </div>
       )}
 
       {/* Results placeholder before the first search */}

@@ -50,6 +50,8 @@ export const AdvisoryTemplateView: React.FC = () => {
   const [saveToast, setSaveToast] = useState(false);
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'mobile'>('desktop');
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
+  const [confirmSave, setConfirmSave] = useState(false);
+  const [confirmSendTest, setConfirmSendTest] = useState(false);
 
   // Enterprise Live Rendering & Scroll Management
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -258,8 +260,13 @@ export const AdvisoryTemplateView: React.FC = () => {
         .replace(/{{references_link}}/g, 'https://example.com/vendor-advisory');
     };
 
-  const handleSave = async () => {
+  const handleSave = () => {
+    setConfirmSave(true);
+  };
+
+  const confirmSaveAction = async () => {
     if (!(await saveTemplate(isCustomTemplate ? customTemplate : undefined))) return;
+    setConfirmSave(false);
     setSaveToast(true);
     setTimeout(() => setSaveToast(false), 2500);
   };
@@ -273,8 +280,11 @@ export const AdvisoryTemplateView: React.FC = () => {
     setShowResetConfirm(false);
   };
 
-  const handleSendTest = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSendTest = () => {
+    setConfirmSendTest(true);
+  };
+
+  const confirmSendTestAction = async () => {
     const rendered = getRenderedHtml();
     const unrenderedTokens = rendered.match(/\{\{[a-z_]+\}\}/g);
     if (unrenderedTokens && unrenderedTokens.length > 0) {
@@ -282,10 +292,12 @@ export const AdvisoryTemplateView: React.FC = () => {
         success: false,
         message: `Template has unrendered tokens in preview: ${[...new Set(unrenderedTokens)].join(', ')}. Check the HTML source or token list.`,
       });
+      setConfirmSendTest(false);
       return;
     }
     const res = await sendTestEmail(testEmail, testForceReview);
     setTestResult(res);
+    setConfirmSendTest(false);
     if (res.success) {
       setTimeout(() => {
         setShowTestModal(false);
@@ -323,6 +335,7 @@ export const AdvisoryTemplateView: React.FC = () => {
               setTestResult(null);
               setShowTestModal(true);
             }}
+            disabled={confirmSave || confirmSendTest}
             className="text-xs px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-200 light:hover:bg-zinc-300 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 font-semibold transition flex items-center space-x-1.5"
           >
             <Send className="w-3.5 h-3.5" />
@@ -330,6 +343,7 @@ export const AdvisoryTemplateView: React.FC = () => {
           </button>
           <button
             onClick={handleSave}
+            disabled={confirmSave || confirmSendTest}
             className="text-xs px-4 py-1.5 rounded-xl bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-100 dark:hover:bg-zinc-200 light:bg-zinc-900 light:hover:bg-zinc-800 text-zinc-900 dark:text-zinc-900 light:text-zinc-50 font-semibold transition shadow-sm"
           >
             {saveToast ? 'Applied to All Notifications!' : 'Save & Apply to Notifications'}
@@ -1308,6 +1322,7 @@ export const AdvisoryTemplateView: React.FC = () => {
                 </button>
                 <button
                   type="submit"
+                  disabled={confirmSendTest}
                   className="px-4 py-1.5 rounded-xl bg-zinc-100 hover:bg-zinc-200 text-zinc-900 font-semibold"
                 >
                   Send Test
@@ -1341,6 +1356,65 @@ export const AdvisoryTemplateView: React.FC = () => {
                 className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold"
               >
                 Apply to preview
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Save Template Confirmation Modal */}
+      {confirmSave && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="ui-panel bg-zinc-900 border border-zinc-800 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 mb-2">Save & Apply to Notifications?</h3>
+            <p className="text-xs text-zinc-400 leading-relaxed mb-6">
+              Persist the customized advisory template to the server so it applies to future notifications.
+            </p>
+            <div className="flex justify-end space-x-2">
+              <button
+                type="button"
+                onClick={() => setConfirmSave(false)}
+                className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmSaveAction}
+                disabled={confirmSave}
+                className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold"
+              >
+                Save & Apply
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Send Test Email Confirmation Modal */}
+      {confirmSendTest && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="ui-panel bg-zinc-900 border border-zinc-800 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+            <h3 className="text-sm font-bold text-zinc-100 mb-2">Send Test Email?</h3>
+            <p className="text-xs text-zinc-400 leading-relaxed mb-6">
+              Sends a real email to {testEmail || '(no address entered)'} using the customized template.
+              Confirm to send.
+            </p>
+            <div className="flex justify-end space-x-2">
+              <button
+                type="button"
+                onClick={() => setConfirmSendTest(false)}
+                className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmSendTestAction}
+                disabled={confirmSendTest}
+                className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold"
+              >
+                Send Test Email
               </button>
             </div>
           </div>

@@ -18,6 +18,16 @@ export const Sidebar: React.FC = () => {
     feeds,
     logout,
   } = useApp();
+  const [confirmingLogout, setConfirmingLogout] = useState(false);
+
+  const handleLogout = async () => {
+    setConfirmingLogout(true);
+  };
+
+  const executeLogout = async () => {
+    setConfirmingLogout(false);
+    await logout();
+  };
 
   useEffect(() => {
     const media = window.matchMedia('(max-width: 767px)');
@@ -177,12 +187,40 @@ export const Sidebar: React.FC = () => {
       <div className="border-t border-zinc-800/80 dark:border-zinc-800/80 light:border-zinc-200 p-3">
         <button
           type="button"
-          onClick={() => void logout()}
+          onClick={handleLogout}
           className="w-full flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-medium text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60 dark:hover:bg-zinc-800/60 light:text-zinc-600 light:hover:text-zinc-900 light:hover:bg-zinc-100"
         >
           <LogOut className="h-3.5 w-3.5" />
           <span>Sign out</span>
         </button>
+        {confirmingLogout && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+            <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+              <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+                Sign out?
+              </h3>
+              <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+                This will end your session and return you to the login screen.
+              </p>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setConfirmingLogout(false)}
+                  className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-100 dark:text-zinc-100 light:text-zinc-900 font-semibold text-xs transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={executeLogout}
+                  className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold disabled:opacity-50 transition"
+                >
+                  Sign out
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </aside>
   );

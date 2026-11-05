@@ -39,6 +39,21 @@ export function CorrelationOperations() {
   const [query, setQuery] = useState('');
   const [assetCursor, setAssetCursor] = useState<string | null>(null);
   const decisionRef = useRef<HTMLDivElement>(null);
+  const [confirmSavePolicy, setConfirmSavePolicy] = useState<{ action: string; label: string } | null>(null);
+  const [confirmRetentionRun, setConfirmRetentionRun] = useState<{ action: string; label: string } | null>(null);
+  const [confirmArmGate, setConfirmArmGate] = useState<{ action: 'arm' | 'disarm'; armed: boolean } | null>(null);
+  const [confirmApproveReview, setConfirmApproveReview] = useState<{ id: string; assetId: string; note: string } | null>(null);
+  const [confirmDismissReview, setConfirmDismissReview] = useState<{ id: string; note: string } | null>(null);
+  const [confirmReplayDeadLetter, setConfirmReplayDeadLetter] = useState<{ id: string; note: string; correction: string } | null>(null);
+  const [confirmDismissDeadLetter, setConfirmDismissDeadLetter] = useState<{ id: string; note: string } | null>(null);
+  const isConfirming =
+    confirmSavePolicy !== null ||
+    confirmRetentionRun !== null ||
+    confirmArmGate !== null ||
+    confirmApproveReview !== null ||
+    confirmDismissReview !== null ||
+    confirmReplayDeadLetter !== null ||
+    confirmDismissDeadLetter !== null;
   useEffect(() => {
     if (selected) decisionRef.current?.focus();
   }, [selected]);
@@ -105,10 +120,15 @@ export function CorrelationOperations() {
       setBusy(false);
     }
   };
-  const armGate = useCallback(async () => {
+  const armGate = useCallback(() => {
     if (!state) return;
     const next = !state.faultSimulationArmed;
-    setState((current) => (current ? { ...current, faultSimulationArmed: next } : current));
+    setConfirmArmGate({ action: next ? 'arm' : 'disarm', armed: next });
+  }, [state]);
+
+  const executeArmGate = async () => {
+    const confirmation = confirmArmGate;
+    if (!confirmation || !state) return;
     setBusy(true);
     setNotice('');
     setNoticeError(false);
@@ -117,7 +137,7 @@ export function CorrelationOperations() {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'content-type': 'application/json', 'x-csrf-token': csrfToken },
-        body: JSON.stringify({ armed: next }),
+        body: JSON.stringify({ armed: confirmation.armed }),
         signal: AbortSignal.timeout(10000),
       });
       if (!response.ok) {
@@ -132,11 +152,70 @@ export function CorrelationOperations() {
     } catch (reason) {
       setNoticeError(true);
       setNotice(reason instanceof Error ? reason.message : 'Fault simulation arming failed');
-      setState((current) => (current ? { ...current, faultSimulationArmed: !next } : current));
     } finally {
       setBusy(false);
+      setConfirmArmGate(null);
     }
-  }, [state, csrfToken]);
+  };
+
+  const executeSavePolicy = async () => {
+    if (!confirmSavePolicy || !policy) return;
+    await mutate('policy', policy, 'PATCH');
+    setConfirmSavePolicy(null);
+  };
+
+  const executeRetentionRun = async () => {
+    if (!confirmRetentionRun) return;
+    await mutate('retention/run', {});
+    setConfirmRetentionRun(null);
+  };
+
+  const executeApproveReview = async () => {
+    const confirmation = confirmApproveReview;
+    if (!confirmation) return;
+    await mutate(`reviews/${confirmation.id}/decision`, {
+      decision: 'APPROVED',
+      assetId: confirmation.assetId,
+      note: confirmation.note,
+    });
+    setConfirmApproveReview(null);
+  };
+
+  const executeDismissReview = async () => {
+    const confirmation = confirmDismissReview;
+    if (!confirmation) return;
+    await mutate(`reviews/${confirmation.id}/decision`, { decision: 'DISMISSED', note: confirmation.note });
+    setConfirmDismissReview(null);
+  };
+
+  const executeReplayDeadLetter = async () => {
+    const confirmation = confirmReplayDeadLetter;
+    if (!confirmation) return;
+    let payload: unknown;
+    if (confirmation.correction.trim()) {
+      try {
+        payload = JSON.parse(confirmation.correction);
+      } catch {
+        setNoticeError(true);
+        setNotice('Corrected advisory must be valid JSON');
+        return;
+      }
+    }
+    await mutate(`dead-letters/${confirmation.id}/decision`, {
+      action: 'REPLAYED',
+      note: confirmation.note,
+      ...(payload ? { payload } : {}),
+    });
+    setConfirmReplayDeadLetter(null);
+  };
+
+  const executeDismissDeadLetter = async () => {
+    const confirmation = confirmDismissDeadLetter;
+    if (!confirmation) return;
+    await mutate(`dead-letters/${confirmation.id}/decision`, { action: 'DISMISSED', note: confirmation.note });
+    setConfirmDismissDeadLetter(null);
+  };
+
   const searchAssets = async (after?: string) => {
     setBusy(true);
     try {
@@ -157,23 +236,6 @@ export function CorrelationOperations() {
     } finally {
       setBusy(false);
     }
-  };
-  const replay = () => {
-    let payload: unknown;
-    if (correction.trim()) {
-      try {
-        payload = JSON.parse(correction);
-      } catch {
-        setNoticeError(true);
-        setNotice('Corrected advisory must be valid JSON');
-        return;
-      }
-    }
-    void mutate(`dead-letters/${selected}/decision`, {
-      action: 'REPLAYED',
-      note,
-      ...(payload ? { payload } : {}),
-    });
   };
   return (
     <section className="cr-workflows cr-view-content" aria-labelledby="correlation-review-title">
@@ -213,7 +275,7 @@ export function CorrelationOperations() {
           className="ui-panel cr-control-card cr-policy-form"
           onSubmit={(event) => {
             event.preventDefault();
-            void mutate('policy', policy, 'PATCH');
+            setConfirmSavePolicy({ action: 'save', label: 'Save policy' });
           }}
         >
           <div className="cr-section-title">
@@ -262,6 +324,7 @@ export function CorrelationOperations() {
               disabled={
                 !admin ||
                 busy ||
+                isConfirming ||
                 !Number.isInteger(policy.retentionHours) ||
                 policy.retentionHours < 24 ||
                 policy.retentionHours > 87600
@@ -272,8 +335,8 @@ export function CorrelationOperations() {
             <button
               type="button"
               className={button}
-              disabled={!admin || busy}
-              onClick={() => void mutate('retention/run', {})}
+              disabled={!admin || busy || isConfirming}
+              onClick={() => setConfirmRetentionRun({ action: 'run', label: 'Run retention batch' })}
             >
               Run retention batch
             </button>
@@ -449,17 +512,15 @@ export function CorrelationOperations() {
               </label>
               <button
                 className={button}
-                disabled={busy || note.trim().length < 5 || !assetId}
-                onClick={() =>
-                  void mutate(`reviews/${selected}/decision`, { decision: 'APPROVED', assetId, note })
-                }
+                disabled={busy || note.trim().length < 5 || !assetId || isConfirming}
+                onClick={() => setConfirmApproveReview({ id: selected, assetId, note })}
               >
                 Approve applicability
               </button>{' '}
               <button
                 className={button}
-                disabled={busy || note.trim().length < 5}
-                onClick={() => void mutate(`reviews/${selected}/decision`, { decision: 'DISMISSED', note })}
+                disabled={busy || note.trim().length < 5 || isConfirming}
+                onClick={() => setConfirmDismissReview({ id: selected, note })}
               >
                 Dismiss review
               </button>
@@ -477,15 +538,17 @@ export function CorrelationOperations() {
                   placeholder="Leave empty to validate and replay the encrypted original"
                 />
               </label>
-              <button className={button} disabled={busy || note.trim().length < 5} onClick={replay}>
+              <button
+                className={button}
+                disabled={busy || note.trim().length < 5 || isConfirming}
+                onClick={() => setConfirmReplayDeadLetter({ id: selected, note, correction })}
+              >
                 Validate and replay
               </button>{' '}
               <button
                 className={button}
-                disabled={busy || note.trim().length < 5}
-                onClick={() =>
-                  void mutate(`dead-letters/${selected}/decision`, { action: 'DISMISSED', note })
-                }
+                disabled={busy || note.trim().length < 5 || isConfirming}
+                onClick={() => setConfirmDismissDeadLetter({ id: selected, note })}
               >
                 Dismiss dead letter
               </button>
@@ -566,6 +629,251 @@ export function CorrelationOperations() {
           className={`cr-notice ${noticeError ? 'cr-notice-warning' : ''}`}
         >
           <p>{notice}</p>
+        </div>
+      )}
+      {confirmSavePolicy && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirmSavePolicy(null);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-save-policy-title"
+            className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5"
+          >
+            <h2 id="confirm-save-policy-title" className="text-sm font-semibold text-zinc-100">
+              Save delivery &amp; retention policy?
+            </h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              Confirm to send PATCH /api/correlation/policy.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className={button} onClick={() => setConfirmSavePolicy(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="ui-primary"
+                disabled={busy}
+                onClick={() => void executeSavePolicy()}
+              >
+                Confirm
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {confirmRetentionRun && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirmRetentionRun(null);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-retention-run-title"
+            className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5"
+          >
+            <h2 id="confirm-retention-run-title" className="text-sm font-semibold text-zinc-100">
+              Run retention batch?
+            </h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              Confirm to send POST /api/correlation/retention/run.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className={button} onClick={() => setConfirmRetentionRun(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="ui-primary"
+                disabled={busy}
+                onClick={() => void executeRetentionRun()}
+              >
+                Confirm
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {confirmArmGate && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirmArmGate(null);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-arm-gate-title"
+            className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5"
+          >
+            <h2 id="confirm-arm-gate-title" className="text-sm font-semibold text-zinc-100">
+              {confirmArmGate.action === 'arm' ? 'Arm fault simulation gate?' : 'Disarm fault simulation gate?'}
+            </h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              Confirm to send POST /api/correlation/fault/arming.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className={button} onClick={() => setConfirmArmGate(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="ui-primary"
+                disabled={busy}
+                onClick={() => void executeArmGate()}
+              >
+                Confirm
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {confirmApproveReview && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirmApproveReview(null);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-approve-review-title"
+            className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5"
+          >
+            <h2 id="confirm-approve-review-title" className="text-sm font-semibold text-zinc-100">
+              Approve applicability?
+            </h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              Confirm to send POST /api/correlation/reviews/{'{'}id{'}'}/decision with APPROVED.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className={button} onClick={() => setConfirmApproveReview(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="ui-primary"
+                disabled={busy}
+                onClick={() => void executeApproveReview()}
+              >
+                Confirm
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {confirmDismissReview && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirmDismissReview(null);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-dismiss-review-title"
+            className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5"
+          >
+            <h2 id="confirm-dismiss-review-title" className="text-sm font-semibold text-zinc-100">
+              Dismiss review?
+            </h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              Confirm to send POST /api/correlation/reviews/{'{'}id{'}'}/decision with DISMISSED.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className={button} onClick={() => setConfirmDismissReview(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="ui-primary"
+                disabled={busy}
+                onClick={() => void executeDismissReview()}
+              >
+                Confirm
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {confirmReplayDeadLetter && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirmReplayDeadLetter(null);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-replay-dead-letter-title"
+            className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5"
+          >
+            <h2 id="confirm-replay-dead-letter-title" className="text-sm font-semibold text-zinc-100">
+              Validate and replay dead letter?
+            </h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              Confirm to send POST /api/correlation/dead-letters/{'{'}id{'}'}/decision with REPLAYED.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className={button} onClick={() => setConfirmReplayDeadLetter(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="ui-primary"
+                disabled={busy}
+                onClick={() => void executeReplayDeadLetter()}
+              >
+                Confirm
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {confirmDismissDeadLetter && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirmDismissDeadLetter(null);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-dismiss-dead-letter-title"
+            className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5"
+          >
+            <h2 id="confirm-dismiss-dead-letter-title" className="text-sm font-semibold text-zinc-100">
+              Dismiss dead letter?
+            </h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              Confirm to send POST /api/correlation/dead-letters/{'{'}id{'}'}/decision with DISMISSED.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className={button} onClick={() => setConfirmDismissDeadLetter(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="ui-primary"
+                disabled={busy}
+                onClick={() => void executeDismissDeadLetter()}
+              >
+                Confirm
+              </button>
+            </div>
+          </section>
         </div>
       )}
     </section>

@@ -52,6 +52,10 @@ export function CorrelationDashboard() {
   const [ndjson, setNdjson] = useState(sample);
   const [filter, setFilter] = useState('');
   const [pendingAction, setPendingAction] = useState('');
+  const [confirmIngest, setConfirmIngest] = useState(false);
+  const [confirmConcurrency, setConfirmConcurrency] = useState(false);
+  const [confirmFaultDatabase, setConfirmFaultDatabase] = useState(false);
+  const [confirmFaultMemory, setConfirmFaultMemory] = useState(false);
   const [follow, setFollow] = useState(true);
   const [rawLogs, setRawLogs] = useState(false);
   const [logLevel, setLogLevel] = useState('ALL');
@@ -60,6 +64,7 @@ export function CorrelationDashboard() {
   const consoleRef = useRef<HTMLDivElement>(null);
   const initializedLimit = useRef(false);
   const busy = !!pendingAction;
+  const confirmationPending = confirmIngest || confirmConcurrency || confirmFaultDatabase || confirmFaultMemory;
   const canControl = session?.role === 'ADMIN' || session?.role === 'OPERATOR';
 
   useEffect(() => {
@@ -148,6 +153,23 @@ export function CorrelationDashboard() {
     } finally {
       setPendingAction('');
     }
+  };
+
+  const executeIngest = async () => {
+    setConfirmIngest(false);
+    await mutate('ingest', { ndjson });
+  };
+  const executeConcurrency = async () => {
+    setConfirmConcurrency(false);
+    await mutate('concurrency', { limit });
+  };
+  const executeFaultDatabase = async () => {
+    setConfirmFaultDatabase(false);
+    await mutate('fault', { fault: 'database' });
+  };
+  const executeFaultMemory = async () => {
+    setConfirmFaultMemory(false);
+    await mutate('fault', { fault: 'memory' });
   };
 
   const connected = !!snapshot && !error;
@@ -522,8 +544,8 @@ export function CorrelationDashboard() {
               <button
                 type="button"
                 className="ui-primary"
-                disabled={!canControl || busy || !ndjson.trim()}
-                onClick={() => void mutate('ingest', { ndjson })}
+                disabled={!canControl || busy || confirmationPending || !ndjson.trim()}
+                onClick={() => setConfirmIngest(true)}
               >
                 {pendingAction === 'ingest' ? (
                   <LoaderCircle size={15} className="animate-spin" />
@@ -568,8 +590,8 @@ export function CorrelationDashboard() {
               <button
                 type="button"
                 className="ui-secondary"
-                disabled={!canControl || busy || !Number.isInteger(limit) || limit < 1 || limit > 32}
-                onClick={() => void mutate('concurrency', { limit })}
+                disabled={!canControl || busy || confirmationPending || !Number.isInteger(limit) || limit < 1 || limit > 32}
+                onClick={() => setConfirmConcurrency(true)}
               >
                 {pendingAction === 'concurrency' && <LoaderCircle size={14} className="animate-spin" />}
                 {pendingAction === 'concurrency' ? 'Applying…' : 'Apply limit'}
@@ -594,16 +616,16 @@ export function CorrelationDashboard() {
               <button
                 type="button"
                 className="ui-secondary"
-                disabled={session?.role !== 'ADMIN' || busy}
-                onClick={() => void mutate('fault', { fault: 'database' })}
+                disabled={session?.role !== 'ADMIN' || busy || confirmationPending}
+                onClick={() => setConfirmFaultDatabase(true)}
               >
                 Simulate DB disconnect
               </button>
               <button
                 type="button"
                 className="ui-secondary"
-                disabled={session?.role !== 'ADMIN' || busy}
-                onClick={() => void mutate('fault', { fault: 'memory' })}
+                disabled={session?.role !== 'ADMIN' || busy || confirmationPending}
+                onClick={() => setConfirmFaultMemory(true)}
               >
                 Simulate memory pressure
               </button>
@@ -617,6 +639,129 @@ export function CorrelationDashboard() {
           >
             {noticeError ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}
             <p>{notice}</p>
+          </div>
+        )}
+
+        {confirmIngest && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+            <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+              <h2 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+                Queue advisory stream?
+              </h2>
+              <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+                Submit the advisory NDJSON to the durable processing queue. This cannot be undone once
+                queued.
+              </p>
+              <div className="flex justify-end space-x-2">
+                <button
+                  type="button"
+                  className="ui-secondary"
+                  onClick={() => setConfirmIngest(false)}
+                  disabled={busy}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="ui-primary"
+                  onClick={() => void executeIngest()}
+                  disabled={busy}
+                >
+                  {busy ? 'Queuing…' : 'Confirm'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {confirmConcurrency && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+            <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+              <h2 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+                Apply concurrency limit?
+              </h2>
+              <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+                Set the concurrency limit to <strong>{limit}</strong> workers. Controls and counters apply
+                to this server instance.
+              </p>
+              <div className="flex justify-end space-x-2">
+                <button
+                  type="button"
+                  className="ui-secondary"
+                  onClick={() => setConfirmConcurrency(false)}
+                  disabled={busy}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="ui-primary"
+                  onClick={() => void executeConcurrency()}
+                  disabled={busy}
+                >
+                  {busy ? 'Applying…' : 'Confirm'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {confirmFaultDatabase && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+            <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+              <h2 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+                Simulate database disconnect?
+              </h2>
+              <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+                Inject a database fault for five seconds. Simulations are disabled in production.
+              </p>
+              <div className="flex justify-end space-x-2">
+                <button
+                  type="button"
+                  className="ui-secondary"
+                  onClick={() => setConfirmFaultDatabase(false)}
+                  disabled={busy}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="ui-primary"
+                  onClick={() => void executeFaultDatabase()}
+                  disabled={busy}
+                >
+                  {busy ? 'Simulating…' : 'Confirm'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {confirmFaultMemory && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+            <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
+              <h2 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+                Simulate memory pressure?
+              </h2>
+              <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
+                Inject memory pressure for five seconds. Simulations are disabled in production.
+              </p>
+              <div className="flex justify-end space-x-2">
+                <button
+                  type="button"
+                  className="ui-secondary"
+                  onClick={() => setConfirmFaultMemory(false)}
+                  disabled={busy}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="ui-primary"
+                  onClick={() => void executeFaultMemory()}
+                  disabled={busy}
+                >
+                  {busy ? 'Simulating…' : 'Confirm'}
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </div>
