@@ -14,7 +14,7 @@
  */
 import pg from 'pg';
 import { pathToFileURL } from 'node:url';
-import { resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 import { schemaLockKey } from '../../db.ts';
 import type { Db } from '../../db.ts';
 import type { ModelStorageOptions } from '../types.ts';
@@ -251,6 +251,13 @@ export async function main(): Promise<void> {
 }
 
 // Run as CLI when executed directly
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+export function isCronCliEntrypoint(moduleUrl: string, entrypoint: string | undefined): boolean {
+  return Boolean(
+    entrypoint && /^cron\.(?:[cm]?js|tsx?)$/i.test(basename(entrypoint)) &&
+    moduleUrl === pathToFileURL(resolve(entrypoint)).href,
+  );
+}
+
+if (isCronCliEntrypoint(import.meta.url, process.argv[1])) {
   void main().catch((error) => { console.error('ML training failed:', error); process.exitCode = 1; });
 }

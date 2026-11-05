@@ -8,6 +8,8 @@ Requires Docker Compose, a public hostname pointing to the host, ports 80/443 av
 
 For a new Linux host with Docker Engine, Docker Compose v2, and Bash already installed, run `bash ./install.sh`. The installer generates protected database/encryption/metrics secrets, starts PostgreSQL and waits for migrations before starting the application, then prompts for the initial administrator password. It refuses to overwrite an existing `.env.production`.
 
+For a trusted LAN/Tailscale deployment without TLS, run `bash ./install-lan.sh`. It asks for the server's RFC1918 LAN and Tailscale IPv4 addresses, binds the Caddy dashboard to both on HTTP port `80`, and keeps the app/API internal on port `8080`. It creates an isolated `vulnstream-lan` Compose project/database and does not publish PostgreSQL or HTTPS port `443`. Open `http://<LAN-IP>` or `http://<TAILSCALE-IP>`. HTTP sends session cookies and credentials unencrypted; use only on a trusted LAN/tailnet and restrict port `80` in the host firewall. External feed/API access is disabled by default.
+
 Products, threat feeds, settings, users, findings, queues, audit events, dead letters, and ML model versions are persisted in PostgreSQL. Existing ML artifacts and dead-letter spool files on the legacy named volumes are imported into PostgreSQL on first startup in database mode; the source files are removed after the database copy succeeds. Caddy certificates/configuration and optional Prometheus metrics remain in their own infrastructure volumes.
 
 1. Copy `.env.example` to `.env.production` and restrict it with `chmod 600 .env.production`.

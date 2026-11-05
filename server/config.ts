@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import ipaddr from 'ipaddr.js';
 const databaseUrl = z
   .string()
   .min(1)
@@ -138,6 +139,7 @@ const schema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(8080),
   DATABASE_URL: databaseUrl,
   APP_ORIGIN: z.url(),
+  ALLOW_INSECURE_HTTP: z.enum(['true', 'false']).default('false'),
   ENCRYPTION_KEY: z.string().regex(/^[A-Za-z0-9+/]{43}=$/, 'Must be a base64 encoded 32-byte key'),
   ENCRYPTION_KEYS: z.string().max(2048).default('').refine((value) => {
     const keys = value.split(',').map((key) => key.trim()).filter(Boolean);
@@ -238,8 +240,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   };
   const origin = new URL(config.APP_ORIGIN);
   if (origin.origin !== config.APP_ORIGIN) throw new Error('APP_ORIGIN must be an origin without a path');
-  if (config.NODE_ENV === 'production' && origin.protocol !== 'https:')
-    throw new Error('Production requires an HTTPS APP_ORIGIN');
+  if (config.ALLOW_INSECURE_HTTP === 'true') {
+    let isPrivateIpv4 = false;
+    try {
+      const address = ipaddr.parse(origin.hostname);
+      isPrivateIpv4 = address.kind() === 'ipv4' &&
+        ['private', 'carrierGradeNat'].includes(address.range());
+    } catch {
+      isPrivateIpv4 = false;
+    }
+    if (config.NODE_ENV !== 'production' || origin.protocol !== 'http:' || !isPrivateIpv4)
+      throw new Error('ALLOW_INSECURE_HTTP requires production HTTP on a private or Tailscale IPv4 address');
+  }
+  if (config.NODE_ENV === 'production' && origin.protocol !== 'https:' && config.ALLOW_INSECURE_HTTP !== 'true')
+    throw new Error('Production requires an HTTPS APP_ORIGIN unless ALLOW_INSECURE_HTTP is enabled for a private or Tailscale IPv4 origin');
   if (Buffer.from(config.ENCRYPTION_KEY, 'base64').length !== 32) throw new Error('Invalid encryption key');
   if (config.NODE_ENV === 'production' && config.FAULT_SIMULATION_ENABLED === 'true')
     throw new Error('FAULT_SIMULATION_ENABLED is not permitted in production');

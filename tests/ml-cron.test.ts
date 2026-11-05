@@ -2,11 +2,13 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import os from 'node:os';
 import fs from 'node:fs';
 
 import {
   CronDataProvider,
+  isCronCliEntrypoint,
   runScheduledTraining,
   TrainingAlreadyRunningError,
 } from '../server/ml/train/cron.ts';
@@ -16,6 +18,14 @@ import type { Db } from '../server/db.ts';
 import type { Pool as pgPool } from 'pg';
 
 const tmpDir = () => join(os.tmpdir(), `ml-cron-test-${Math.random().toString(36).slice(2)}`);
+
+it('runs the training CLI only when the entrypoint is cron itself', () => {
+  const cron = join(process.cwd(), 'server/ml/train/cron.ts');
+  const app = join(process.cwd(), 'server-dist/main.js');
+  assert.equal(isCronCliEntrypoint(pathToFileURL(cron).href, cron), true);
+  assert.equal(isCronCliEntrypoint(pathToFileURL(app).href, app), false);
+  assert.equal(isCronCliEntrypoint(pathToFileURL(app).href, cron), false);
+});
 
 /** Minimal mock Db that matches SQL against patterns and returns canned rows. */
 function createMockDb(rowsByQuery: Record<string, { rows: unknown[] }>): Db {

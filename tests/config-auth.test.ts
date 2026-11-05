@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readCookie, requireRole } from '../server/auth.ts';
+import { cookieName, readCookie, requireRole, sessionCookieOptions } from '../server/auth.ts';
 import { DEFAULT_EGRESS_HOSTS, feedEgressHosts, loadConfig } from '../server/config.ts';
 import { RECOMMENDED_FEEDS } from '../server/recommendedFeeds.ts';
 import type { Request, Response } from 'express';
@@ -70,6 +70,30 @@ test('configuration rejects malformed database URLs and trust-all proxy settings
   }
   assert.equal(loadConfig({ ...baseEnv, TRUST_PROXY: 'loopback,10.0.0.0/8' }).TRUST_PROXY, 'loopback,10.0.0.0/8');
   assert.equal(loadConfig(baseEnv).TRUST_PROXY, '');
+});
+
+test('production HTTP is opt-in for private IPv4 LAN origins only', () => {
+  for (const APP_ORIGIN of ['http://192.168.1.72:8088', 'http://100.123.19.58:8088']) {
+    const lan = loadConfig({
+      ...baseEnv,
+      NODE_ENV: 'production',
+      APP_ORIGIN,
+      ALLOW_INSECURE_HTTP: 'true',
+    });
+    assert.equal(cookieName(lan), 'vulnstream');
+    assert.equal(sessionCookieOptions(lan).secure, false);
+  }
+  assert.throws(() => loadConfig({
+    ...baseEnv,
+    NODE_ENV: 'production',
+    APP_ORIGIN: 'http://example.com',
+    ALLOW_INSECURE_HTTP: 'true',
+  }), /private or Tailscale IPv4 address/);
+  assert.throws(() => loadConfig({
+    ...baseEnv,
+    NODE_ENV: 'production',
+    APP_ORIGIN: 'http://192.168.1.72:8088',
+  }), /HTTPS APP_ORIGIN/);
 });
 
 test('database storage modes are validated and retain filesystem defaults outside Compose', () => {

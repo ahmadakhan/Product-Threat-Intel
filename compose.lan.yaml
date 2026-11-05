@@ -1,0 +1,34 @@
+services:
+  db:
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 3G
+  app:
+    environment:
+      APP_ORIGIN: ${APP_ORIGIN:?Set a private LAN HTTP origin}
+      ALLOW_INSECURE_HTTP: 'true'
+      TRUST_PROXY: ''
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+  proxy:
+    environment:
+      LAN_BIND_ADDRESS: ${LAN_BIND_ADDRESS:?Set a private LAN IPv4 address}
+      TAILSCALE_ADDRESS: ${TAILSCALE_ADDRESS:?Set a Tailscale IPv4 address}
+    volumes: !override
+      - ./deploy/Caddyfile.lan:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    ports: !override
+      - "${LAN_BIND_ADDRESS:?Set a private LAN IPv4 address}:80:80"
+      - "${TAILSCALE_ADDRESS:?Set a Tailscale IPv4 address}:80:80"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M

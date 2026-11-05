@@ -45,7 +45,9 @@ export const asyncRoute =
     void fn(req, res, next).catch(next);
   };
 export function cookieName(config: Config) {
-  return config.NODE_ENV === 'production' ? '__Host-vulnstream' : 'vulnstream';
+  return config.NODE_ENV === 'production' && config.ALLOW_INSECURE_HTTP !== 'true'
+    ? '__Host-vulnstream'
+    : 'vulnstream';
 }
 /**
  * Parses the Cookie header into exact name/value pairs. Prefix matching is not
@@ -60,7 +62,8 @@ export function cookieName(config: Config) {
 export function sessionCookieOptions(config: Config) {
   return {
     httpOnly: true,
-    secure: config.NODE_ENV === 'production' || new URL(config.APP_ORIGIN).protocol === 'https:',
+    secure: (config.NODE_ENV === 'production' && config.ALLOW_INSECURE_HTTP !== 'true') ||
+      new URL(config.APP_ORIGIN).protocol === 'https:',
     sameSite: 'strict' as const,
     path: '/',
   };
