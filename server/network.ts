@@ -113,6 +113,8 @@ export interface RequestOptions {
   redirectMethod?: 'GET' | 'DROP';
   /** Reject redirects whose target is a different hostname. Defaults to false; each hop is still re-validated through the SSRF gauntlet. */
   sameHostRedirects?: boolean;
+  /** Exact hostname(s) of the persisted feed being fetched; still subject to DNS/IP validation. */
+  additionalAllowedHosts?: readonly string[];
   /**
    * Also allow a hop that only adds or removes a leading `www.` label, even
    * when that spelling is missing from the allowlist. Publishers routinely
@@ -182,6 +184,12 @@ export function createRequester(config: Config, hooks: RequesterHooks = {}) {
     .filter(Boolean);
   return async (value: string, options: RequestOptions = {}): Promise<ResponseData> => {
     options.signal?.throwIfAborted();
+    const requestAllowlist = [
+      ...allowlist,
+      ...(options.additionalAllowedHosts ?? [])
+        .map((host) => host.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, ''))
+        .filter(Boolean),
+    ];
     const opts: RedirectOptions = {
       allowRedirects: options.allowRedirects ?? true,
       maxRedirects: options.maxRedirects ?? 5,
@@ -189,7 +197,7 @@ export function createRequester(config: Config, hooks: RequesterHooks = {}) {
       sameHostRedirects: options.sameHostRedirects ?? false,
       sameSiteRedirects: options.sameSiteRedirects ?? false,
     };
-    return withAbortSignal(doRequest(value, options, opts, allowlist, hooks, hooks.allowedPorts ?? ['443']), options.signal);
+    return withAbortSignal(doRequest(value, options, opts, requestAllowlist, hooks, hooks.allowedPorts ?? ['443']), options.signal);
   };
 }
 

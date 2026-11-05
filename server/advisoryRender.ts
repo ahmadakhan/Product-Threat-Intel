@@ -300,7 +300,7 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
         sources.push(
           `<a href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">CISA KEV</a>`,
         );
-        return `<div style="margin:0 0 16px;padding:16px;border:1px solid #e2e8f0;border-left:4px solid ${colour};border-radius:4px;background:#ffffff;">
+        return `<div class="vulnstream-pdf-card" data-pdf-accent="${colour}" style="margin:0 0 16px;padding:16px;border:1px solid #e2e8f0;border-left:4px solid ${colour};border-radius:4px;background:#ffffff;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
     <tr>
       <td style="padding:0;vertical-align:top;">

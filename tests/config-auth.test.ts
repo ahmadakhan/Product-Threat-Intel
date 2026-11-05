@@ -152,8 +152,19 @@ test('the official OTX API endpoint augments an explicit allowlist without weake
   );
   assert.deepEqual(
     feedEgressHosts('RSS_ATOM', 'https://otx.alienvault.com/api/v1/pulses/subscribed/', configured),
-    configured,
+    ['example.com', 'otx.alienvault.com'],
   );
+});
+
+test('a configured HTTPS feed adds only its exact hostname to the per-feed egress list', () => {
+  const configured = ['example.com'];
+  assert.deepEqual(
+    feedEgressHosts('RSS_ATOM', 'https://usn.ubuntu.com/usn/usn.rss', configured),
+    ['example.com', 'usn.ubuntu.com'],
+  );
+  assert.deepEqual(feedEgressHosts('RSS_ATOM', 'http://feeds.example.test/feed', configured), configured);
+  assert.deepEqual(feedEgressHosts('WEBHOOK', 'https://feeds.example.test/feed', configured), configured);
+  assert.deepEqual(feedEgressHosts('RSS_ATOM', 'https://feeds.example.test/feed', []), []);
 });
 
 test('Compose egress defaults match the application and preserve explicit empty deny-all settings', () => {

@@ -9,18 +9,21 @@ import {
   Clock,
   Cpu,
   Download,
+  Eye,
   LoaderCircle,
   Radio,
   Send,
   Square,
   TriangleAlert,
+  X,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import type { PipelineExecution, PipelinePhase } from '../types';
+import type { Finding, PipelineExecution, PipelinePhase } from '../types';
 import { Pagination } from './Pagination';
 import { useCollection } from '../hooks/useCollection';
 import { DEFAULT_INGESTION_WINDOW_HOURS } from '../utils/scopePresets';
 import { formatExecutionName } from '../utils/executionName';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 
 const stages = [
   {
@@ -83,6 +86,8 @@ export const PipelineExecutionsView: React.FC = () => {
   const [selectedStage, setSelectedStage] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(5);
+  const [findingPage, setFindingPage] = useState(1);
+  const [findingsRunId, setFindingsRunId] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const [confirmPipeline, setConfirmPipeline] = useState<{ action: 'stop' | 'run'; id: string; label: string } | null>(null);
   const [pipelinePending, setPipelinePending] = useState(false);
@@ -91,6 +96,17 @@ export const PipelineExecutionsView: React.FC = () => {
   const { items: executions, total, reload } = useCollection<PipelineExecution>('executions', {
     page,
     pageSize,
+  });
+  const findingsDialogRef = useDialogFocus(() => setFindingsRunId(null), !!findingsRunId);
+  const {
+    items: executionFindings,
+    total: executionFindingTotal,
+    loading: executionFindingsLoading,
+  } = useCollection<Finding>('findings', {
+    page: findingPage,
+    pageSize: 10,
+    filters: findingsRunId ? { executionId: findingsRunId } : undefined,
+    enabled: findingsRunId !== null,
   });
   const running = isPipelineRunning ? latestExecution : null;
   // Every branch is nullable: an execution selected from the snapshot may age out
@@ -312,29 +328,48 @@ export const PipelineExecutionsView: React.FC = () => {
           <>
             <div className="space-y-2">
               {executions.map((run) => (
-                <button
+                <div
                   key={run.id}
-                  aria-pressed={execution?.id === run.id}
-                  onClick={() => {
-                    setSelectedId(run.id);
-                    setSelectedStage(null);
-                  }}
-                  className={`w-full flex flex-wrap items-center justify-between gap-2 rounded-xl border px-4 py-3 text-left ${execution?.id === run.id ? 'border-blue-500/60 bg-blue-500/5' : 'border-zinc-800 light:border-zinc-200'}`}
+                  className={`w-full flex items-center gap-3 rounded-xl border px-4 py-3 ${execution?.id === run.id ? 'border-blue-500/60 bg-blue-500/5' : 'border-zinc-800 light:border-zinc-200'}`}
                 >
-                  <div>
-                    <p className="text-sm font-semibold text-zinc-100 light:text-zinc-900 break-all">
-                      {run.name || formatExecutionName(run.id)}
-                    </p>
-                    <p className="mt-1 text-xs text-zinc-400 light:text-zinc-600">
-                      {fmtDateTime(run.startTime)} · {run.stats?.matchedWatchlist ?? 0}{' '}
-                      {run.stats?.matchedWatchlist === 1 ? 'new finding' : 'new findings'}
-                    </p>
-                  </div>
-                  <span className={`flex items-center gap-2 text-xs font-medium ${tone(run.status)}`}>
-                    <StatusIcon status={run.status} />
-                    {run.status}
-                  </span>
-                </button>
+                  <button
+                    type="button"
+                    aria-pressed={execution?.id === run.id}
+                    onClick={() => {
+                      setSelectedId(run.id);
+                      setSelectedStage(null);
+                    }}
+                    className="min-w-0 flex-1 flex flex-wrap items-center justify-between gap-2 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-zinc-100 light:text-zinc-900 break-all">
+                        {run.name || formatExecutionName(run.id)}
+                      </p>
+                      <p className="mt-1 text-xs text-zinc-400 light:text-zinc-600">
+                        {fmtDateTime(run.startTime)} · {run.stats?.matchedWatchlist ?? 0}{' '}
+                        {run.stats?.matchedWatchlist === 1 ? 'new finding' : 'new findings'}
+                      </p>
+                    </div>
+                    <span className={`flex items-center gap-2 text-xs font-medium ${tone(run.status)}`}>
+                      <StatusIcon status={run.status} />
+                      {run.status}
+                    </span>
+                  </button>
+                  {(run.stats?.matchedWatchlist ?? 0) > 0 && (
+                    <button
+                      type="button"
+                      aria-label={`View findings for ${run.name || formatExecutionName(run.id)}`}
+                      title="View findings from this execution"
+                      onClick={() => {
+                        setFindingPage(1);
+                        setFindingsRunId(run.id);
+                      }}
+                      className="shrink-0 rounded-lg border border-zinc-700 light:border-zinc-300 p-2 text-zinc-300 light:text-zinc-700 hover:bg-zinc-800 light:hover:bg-zinc-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400"
+                    >
+                      <Eye className="h-4 w-4" />
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
             <Pagination
@@ -378,6 +413,86 @@ export const PipelineExecutionsView: React.FC = () => {
             )}
           </div>
         </section>
+      )}
+
+      {findingsRunId && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setFindingsRunId(null);
+          }}
+        >
+          <section
+            ref={findingsDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="execution-findings-title"
+            tabIndex={-1}
+            className="w-full max-w-3xl max-h-[85vh] overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl light:border-zinc-200 light:bg-white"
+          >
+            <header className="flex items-center justify-between gap-3 border-b border-zinc-800 px-5 py-4 light:border-zinc-200">
+              <div className="min-w-0">
+                <h2 id="execution-findings-title" className="text-sm font-semibold text-zinc-100 light:text-zinc-900">
+                  Execution findings
+                </h2>
+                <p className="mt-1 truncate text-xs text-zinc-400 light:text-zinc-600">
+                  {executions.find((run) => run.id === findingsRunId)?.name || formatExecutionName(findingsRunId)}
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Close execution findings"
+                onClick={() => setFindingsRunId(null)}
+                className="shrink-0 rounded-lg p-2 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 light:hover:bg-zinc-100 light:hover:text-zinc-900"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </header>
+            <div className="max-h-[calc(85vh-72px)] overflow-y-auto p-5">
+              {executionFindingsLoading ? (
+                <p role="status" className="text-sm text-zinc-400 light:text-zinc-600">Loading findings…</p>
+              ) : executionFindings.length ? (
+                <div className="space-y-3">
+                  {executionFindings.map((finding) => (
+                    <article key={finding.id} className="rounded-lg border border-zinc-700 p-4 light:border-zinc-200">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h3 className="font-semibold text-blue-300 light:text-blue-700">{finding.cveId}</h3>
+                        <span className={`text-xs font-semibold ${tone(finding.cve.cvss.severity)}`}>
+                          {finding.cve.cvss.severity} · CVSS {finding.cve.cvss.score.toFixed(1)}
+                        </span>
+                      </div>
+                      <p className="mt-2 text-sm font-medium text-zinc-200 light:text-zinc-800">
+                        {finding.matchedAssetName}
+                        {finding.matchedAssetVendor || finding.matchedAssetProduct
+                          ? ` · ${[finding.matchedAssetVendor, finding.matchedAssetProduct].filter(Boolean).join(' - ')}`
+                          : ''}
+                      </p>
+                      <p className="mt-2 text-sm leading-relaxed text-zinc-400 light:text-zinc-600">
+                        {finding.cve.description || 'No description available.'}
+                      </p>
+                      <p className="mt-2 whitespace-pre-wrap break-words text-xs text-zinc-500 light:text-zinc-600">
+                        {finding.matchingEvidence}
+                      </p>
+                    </article>
+                  ))}
+                  {executionFindingTotal > 10 && (
+                    <Pagination
+                      currentPage={findingPage}
+                      totalItems={executionFindingTotal}
+                      pageSize={10}
+                      onPageChange={setFindingPage}
+                      pageSizeOptions={[10]}
+                    />
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-zinc-400 light:text-zinc-600">
+                  No finding details are available for this execution. Older runs may not have per-finding execution links.
+                </p>
+              )}
+            </div>
+          </section>
+        </div>
       )}
 
       {/* Pipeline Action Confirmation Modal */}

@@ -1,11 +1,12 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import PDFDocument from 'pdfkit';
-import { convert, type HtmlToTextOptions } from 'html-to-text';
+import { convert, type FormatCallback, type HtmlToTextOptions } from 'html-to-text';
 import { resolveTimezone } from '../src/utils/dateTime.ts';
 
 const PDF_CACHE_TTL_MS = 5 * 60_000;
 const PDF_CACHE_MAX = 64;
 const pdfCache = new Map<string, { content: Uint8Array; expires: number }>();
+let pdfQueue: Promise<void> = Promise.resolve();
 let cacheAccess = 0;
 const HTML_TO_TEXT_OPTIONS: HtmlToTextOptions = {
   baseElements: { selectors: ['body'], returnDomByDefault: false },
@@ -25,6 +26,10 @@ export interface PdfAttachment {
   content: Uint8Array;
   contentType: 'application/pdf';
 }
+
+export type AdvisoryPdfBlock =
+  | { kind: 'text'; text: string }
+  | { kind: 'cve-card'; text: string; accent: string };
 
 /**
  * Attachment filename: `ddMMMyyyyHHMM.pdf`, e.g. `03Nov20261435.pdf`.
@@ -64,14 +69,52 @@ export function advisoryHtmlToText(html: string): string {
   return convert(html, HTML_TO_TEXT_OPTIONS).trim();
 }
 
-export async function renderAdvisoryPdf(html: string): Promise<Uint8Array> {
-  const key = createHash('sha256').update(html).digest('hex');
-  const cached = pdfCache.get(key);
-  if (cached && cached.expires > Date.now()) return cached.content;
+export function advisoryHtmlToPdfBlocks(html: string): AdvisoryPdfBlock[] {
+  if (Buffer.byteLength(html, 'utf8') > 2_000_000) throw new Error('Advisory HTML exceeds the PDF size limit');
+  const marker = `VULNSTREAMPDF${randomUUID().replaceAll('-', '')}`;
+  const accents: string[] = [];
+  const pdfCveCard: FormatCallback = (element, walk, builder) => {
+    const index = accents.length;
+    const candidate = String(element.attribs?.['data-pdf-accent'] || '');
+    accents.push(/^#[0-9a-f]{6}$/i.test(candidate) ? candidate.toLowerCase() : '#64748b');
+    builder.openBlock({ leadingLineBreaks: 1 });
+    builder.addInline(`[[[${marker}_${index}_START]]]`, { noWordTransform: true });
+    builder.addLineBreak();
+    walk(element.children, builder);
+    builder.addLineBreak();
+    builder.addInline(`[[[${marker}_${index}_END]]]`, { noWordTransform: true });
+    builder.closeBlock({ trailingLineBreaks: 1 });
+  };
+  const text = convert(html, {
+    ...HTML_TO_TEXT_OPTIONS,
+    formatters: { pdfCveCard },
+    selectors: [
+      ...(HTML_TO_TEXT_OPTIONS.selectors ?? []),
+      { selector: 'div.vulnstream-pdf-card', format: 'pdfCveCard' },
+      { selector: 'tr.vulnstream-pdf-card', format: 'pdfCveCard' },
+    ],
+  });
+  const blocks: AdvisoryPdfBlock[] = [];
+  const startPattern = new RegExp(`\\[\\[\\[${marker}_(\\d+)_START\\]\\]\\]`, 'g');
+  let cursor = 0;
+  for (let match = startPattern.exec(text); match; match = startPattern.exec(text)) {
+    const index = Number(match[1]);
+    const endMarker = `[[[${marker}_${index}_END]]]`;
+    const end = text.indexOf(endMarker, startPattern.lastIndex);
+    if (end < 0) continue;
+    const before = text.slice(cursor, match.index).trim();
+    const cardText = text.slice(startPattern.lastIndex, end).trim();
+    if (before) blocks.push({ kind: 'text', text: before });
+    if (cardText) blocks.push({ kind: 'cve-card', text: cardText, accent: accents[index] || '#64748b' });
+    cursor = end + endMarker.length;
+    startPattern.lastIndex = cursor;
+  }
+  const remaining = text.slice(cursor).trim();
+  if (remaining) blocks.push({ kind: 'text', text: remaining });
+  return blocks;
+}
 
-  const text = advisoryHtmlToText(html);
-  if (!text) throw new Error('Advisory HTML contains no printable content');
-
+async function renderPdfBlocks(blocks: AdvisoryPdfBlock[]): Promise<Uint8Array> {
   const content = await new Promise<Uint8Array>((resolve, reject) => {
     const document = new PDFDocument({
       size: 'A4',
@@ -84,14 +127,47 @@ export async function renderAdvisoryPdf(html: string): Promise<Uint8Array> {
     document.once('error', reject);
     document.once('end', () => resolve(new Uint8Array(Buffer.concat(chunks))));
 
-    document.font('Helvetica-Bold').fontSize(18).fillColor('#122033').text('Security Advisory');
-    document.moveDown(0.35);
-    document.moveTo(48, document.y).lineTo(document.page.width - 48, document.y).strokeColor('#ccd4df').stroke();
-    document.moveDown(0.8);
-    document.font('Helvetica').fontSize(10).fillColor('#202a38').text(text, {
-      lineGap: 3,
-      paragraphGap: 5,
-    });
+    const left = document.page.margins.left;
+    const width = document.page.width - left - document.page.margins.right;
+    const contentBottom = document.page.height - document.page.margins.bottom - 28;
+    for (const block of blocks) {
+      if (block.kind === 'text') {
+        document.font('Helvetica').fontSize(9).fillColor('#202a38').text(block.text, {
+          width,
+          lineGap: 3,
+          paragraphGap: 5,
+        });
+        document.moveDown(0.3);
+        continue;
+      }
+
+      document.font('Helvetica').fontSize(9).fillColor('#202a38');
+      const innerWidth = width - 28;
+      const cardHeight = Math.max(54, document.heightOfString(block.text, {
+        width: innerWidth,
+        lineGap: 3,
+        paragraphGap: 4,
+      }) + 22);
+      if (cardHeight > document.page.height - document.page.margins.top - document.page.margins.bottom - 28) {
+        document.moveTo(left + 3, document.y).lineTo(left + 3, document.y + 12).lineWidth(4).strokeColor(block.accent).stroke();
+        document.font('Helvetica').fontSize(9).fillColor('#202a38').text(block.text, { width: innerWidth, indent: 12, lineGap: 3, paragraphGap: 4 });
+        document.moveDown(0.4);
+        continue;
+      }
+      if (document.y + cardHeight > contentBottom) document.addPage();
+      const top = document.y;
+      document.save();
+      document.roundedRect(left, top, width, cardHeight, 4).fillAndStroke('#ffffff', '#dfe4e8');
+      document.moveTo(left + 2, top + 5).lineTo(left + 2, top + cardHeight - 5)
+        .lineWidth(4).strokeColor(block.accent).stroke();
+      document.restore();
+      document.font('Helvetica').fontSize(9).fillColor('#202a38').text(block.text, left + 14, top + 11, {
+        width: innerWidth,
+        lineGap: 3,
+        paragraphGap: 4,
+      });
+      document.y = Math.max(document.y, top + cardHeight) + 10;
+    }
 
     const pages = document.bufferedPageRange();
     for (let pageIndex = pages.start; pageIndex < pages.start + pages.count; pageIndex++) {
@@ -107,7 +183,27 @@ export async function renderAdvisoryPdf(html: string): Promise<Uint8Array> {
     }
     document.end();
   });
-  pdfCache.set(key, { content, expires: Date.now() + PDF_CACHE_TTL_MS });
+  return content;
+}
+
+function serializePdf<T>(operation: () => Promise<T>): Promise<T> {
+  const result = pdfQueue.then(operation);
+  pdfQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+export async function renderAdvisoryPdf(html: string): Promise<Uint8Array> {
+  if (Buffer.byteLength(html, 'utf8') > 2_000_000) throw new Error('Advisory HTML exceeds the PDF size limit');
+  const key = createHash('sha256').update(html).digest('hex');
+  const content = await serializePdf(async () => {
+    const cached = pdfCache.get(key);
+    if (cached && cached.expires > Date.now()) return cached.content;
+    const blocks = advisoryHtmlToPdfBlocks(html);
+    if (!blocks.length) throw new Error('Advisory HTML contains no printable content');
+    const rendered = await renderPdfBlocks(blocks);
+    pdfCache.set(key, { content: rendered, expires: Date.now() + PDF_CACHE_TTL_MS });
+    return rendered;
+  });
   if (++cacheAccess > PDF_CACHE_MAX * 2) evictPdfCache();
   return content;
 }

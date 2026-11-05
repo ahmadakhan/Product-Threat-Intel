@@ -1,5 +1,5 @@
 import type { Db } from '../../db.ts';
-import type { Finding, EmailDeliveryLog, IntelligenceArticle, IntelligenceMatch } from '../../../src/types/index.ts';
+import type { FeedType, Finding, EmailDeliveryLog, IntelligenceArticle, IntelligenceMatch } from '../../../src/types/index.ts';
 import { parseCPE23 } from '../../../src/utils/cpeMatcher.ts';
 import { FEED_WEIGHTS } from '../../../src/utils/intelligenceMatcher.ts';
 import type { FindingFeatures } from '../models/reviewRanker.ts';
@@ -14,6 +14,7 @@ const finite = (value: unknown, fallback = 0) =>
 export class CronDataProvider {
   private snapshot?: Promise<Finding[]>;
   private feedbackSnapshot?: Promise<TrainingDataSources>;
+  private feedTypeSnapshot?: Promise<ReadonlyMap<string, FeedType>>;
   constructor(readonly lookbackDays = 30) {}
   private cutoff() {
     return new Date(Date.now() - this.lookbackDays * 86_400_000).toISOString();
@@ -32,8 +33,15 @@ export class CronDataProvider {
     return this.snapshot;
   }
 
-  private features(f: Finding): FindingFeatures {
-    return findingFeatures(f);
+  private feedTypes(db: Db): Promise<ReadonlyMap<string, FeedType>> {
+    this.feedTypeSnapshot ??= db.query<{ id: string; type: string }>(
+      "SELECT id,data->>'type' AS type FROM records WHERE kind='feeds' ORDER BY id",
+    ).then(({ rows }) => new Map(rows.map((row) => [row.id, row.type as FeedType])));
+    return this.feedTypeSnapshot;
+  }
+
+  private features(f: Finding, feedTypesById?: ReadonlyMap<string, FeedType>): FindingFeatures {
+    return findingFeatures(f, feedTypesById);
   }
   // A delivered email or an unresolved finding is not an analyst relevance label.
   private adjudicated(f: Finding) {
@@ -66,12 +74,13 @@ export class CronDataProvider {
       }));
   }
   async collectReviewOutcomeHistory(db: Db): Promise<CronTrainingData['reviewOutcomeHistory']> {
-    return (await this.findings(db))
+    const [findings, feedTypesById] = await Promise.all([this.findings(db), this.feedTypes(db)]);
+    return findings
       .filter((f) => this.adjudicated(f))
       .map((f) => {
         const times = (f.timeline || []).map((e) => Date.parse(e.timestamp)).filter(Number.isFinite);
         return {
-          features: this.features(f),
+          features: this.features(f, feedTypesById),
           statusAfterReview: f.status === 'PATCH_APPLIED' ? 'PATCHED' : 'FALSE_POSITIVE',
           daysToAction:
             times.length > 1 ? Math.max(0, (Math.max(...times) - Math.min(...times)) / 86_400_000) : 0,
@@ -79,18 +88,20 @@ export class CronDataProvider {
       });
   }
   async collectRemediationFindings(db: Db): Promise<CronTrainingData['remediationFindings']> {
-    return (await this.findings(db))
+    const [findings, feedTypesById] = await Promise.all([this.findings(db), this.feedTypes(db)]);
+    return findings
       .filter((f) => f.cve.remediation)
       .map((f) => {
-        const features = this.features(f);
+        const features = this.features(f, feedTypesById);
         return { features, playbook: { ...f.cve.remediation } };
       });
   }
   async collectMatchConfidenceSamples(db: Db): Promise<CronTrainingData['matchConfidenceSamples']> {
-    return (await this.findings(db))
+    const [findings, feedTypesById] = await Promise.all([this.findings(db), this.feedTypes(db)]);
+    return findings
       .filter((f) => this.adjudicated(f))
       .map((f) => {
-        const features = this.features(f);
+        const features = this.features(f, feedTypesById);
         return {
           features: {
             ...features,
@@ -109,13 +120,14 @@ export class CronDataProvider {
     }));
   }
   async collectAliasConfidenceSamples(db: Db): Promise<CronTrainingData['aliasConfidenceSamples']> {
-    return (await this.findings(db))
+    const [findings, feedTypesById] = await Promise.all([this.findings(db), this.feedTypes(db)]);
+    return findings
       .filter(
         (f) =>
           this.adjudicated(f) &&
           ['VENDOR_PRODUCT_ALIAS', 'VENDOR_PRODUCT_FALLBACK', 'KEYWORD'].includes(f.matchingMethod),
       )
-      .map((f) => ({ features: this.features(f), isConfirmed: f.status === 'PATCH_APPLIED' }));
+      .map((f) => ({ features: this.features(f, feedTypesById), isConfirmed: f.status === 'PATCH_APPLIED' }));
   }
 
   private async deliveryRows(db: Db) {

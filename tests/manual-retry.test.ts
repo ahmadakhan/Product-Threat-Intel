@@ -6,7 +6,7 @@ import pg from 'pg';
 import { createApp } from '../server/app.ts';
 import { createUser } from '../server/auth.ts';
 import { loadConfig } from '../server/config.ts';
-import { createPool, migrate } from '../server/db.ts';
+import { createPool, migrate, put } from '../server/db.ts';
 
 /**
  * The operator's manual "retry delivery" action, and the unknown-collection
@@ -44,7 +44,12 @@ async function withDatabase<T>(fn: (pool: pg.Pool) => Promise<T>): Promise<T | n
 async function queueEmail(
   pool: pg.Pool,
   status: 'FAILED' | 'QUEUED' | 'SENDING' | 'ACCEPTED',
-  options: { attempts?: number; dueInMs?: number } = {},
+  options: {
+    attempts?: number;
+    dueInMs?: number;
+    advisoryId?: string;
+    payload?: Record<string, unknown>;
+  } = {},
 ): Promise<string> {
   const id = randomUUID();
   const attempts = options.attempts ?? 1;
@@ -54,12 +59,12 @@ async function queueEmail(
      VALUES($1,'email','test',$2,$3,$4,$5,$6,$7)`,
     [
       id,
-      `ADV-${id}`,
+      options.advisoryId ?? `ADV-${id}`,
       status,
       attempts,
       next,
       `email:test:${id}`,
-      JSON.stringify({ recipientEmail: 'ops@example.org', text: 'body' }),
+      JSON.stringify(options.payload ?? { recipientEmail: 'ops@example.org', text: 'body' }),
     ],
   );
   return id;
@@ -94,6 +99,63 @@ test(
       const scheduled = await queueEmail(pool, 'QUEUED', { attempts: 2, dueInMs: 600_000 });
       const due = await queueEmail(pool, 'QUEUED', { attempts: 1, dueInMs: -1000 });
       const inFlight = await queueEmail(pool, 'SENDING', { attempts: 1 });
+      const legacyAdvisoryId = 'ADV-legacy-retry-format';
+      const legacyFindingId = 'finding-legacy-retry-format';
+      const legacyCveId = 'CVE-2026-76543';
+      await put(pool, 'advisories', legacyAdvisoryId, {
+        id: legacyAdvisoryId,
+        title: 'Vulnerability Notification: 1 High',
+        severity: 'HIGH',
+        cveIds: [legacyCveId],
+        findingIds: [legacyFindingId],
+        createdDate: new Date().toISOString(),
+        deliveryStatus: 'FAILED',
+        recipientCount: 1,
+        executiveSummary: 'A vulnerability affects a monitored asset.',
+        affectedSystems: ['server-01'],
+        remediationInstructions: 'Apply the vendor fix.',
+        vendorLink: '',
+      });
+      await put(pool, 'findings', legacyFindingId, {
+        id: legacyFindingId,
+        cveId: legacyCveId,
+        cve: {
+          cveId: legacyCveId,
+          title: 'Retry format fixture',
+          description: 'A retry fixture vulnerability.',
+          publishedDate: new Date().toISOString(),
+          modifiedDate: new Date().toISOString(),
+          cvss: { version: '3.1', score: 8, vector: '', severity: 'HIGH' },
+          cwe: [],
+          cpeMatches: [],
+          versionRange: {},
+          sourceFeeds: [],
+          epss: { score: 0, percentile: 0 },
+          cisaKev: { isKev: false },
+          exploitStatus: 'None',
+          remediation: {
+            patchUrl: '',
+            vendorAdvisoryRef: '',
+            immediateActions: [],
+            workarounds: [],
+            rollbackPlan: '',
+            stepByStep: [],
+          },
+        },
+        matchedAssetId: 'asset-01',
+        matchedAssetName: 'server-01',
+        matchedAssetVendor: 'Example Vendor',
+        matchedAssetProduct: 'Example Product',
+        matchedCpe: 'cpe:2.3:a:example:product:*:*:*:*:*:*:*:*',
+      });
+      const legacyHtmlEmail = await queueEmail(pool, 'FAILED', {
+        advisoryId: legacyAdvisoryId,
+        payload: {
+          recipientEmail: 'ops@example.org',
+          text: 'legacy message',
+          html: `<html><body><h1>${legacyCveId}</h1><p>Old list format</p></body></html>`,
+        },
+      });
 
       const retry = (id: string) =>
         agent.post(`/api/email/${id}/retry`).set('Origin', origin).set('x-csrf-token', csrf).set('content-type', 'application/json').send({});
@@ -106,6 +168,11 @@ test(
       assert.equal(restarted.status, 'QUEUED');
       assert.equal(restarted.attempts, 0);
       assert.ok(new Date(restarted.next_attempt).getTime() <= Date.now() + 1000);
+
+      assert.equal((await retry(legacyHtmlEmail)).status, 200);
+      const refreshed = (await pool.query('SELECT payload FROM outbox WHERE id=$1', [legacyHtmlEmail])).rows[0].payload;
+      assert.match(refreshed.html, /border:1px solid #e2e8f0;border-left:4px solid #f59e0b/);
+      assert.match(refreshed.html, new RegExp(legacyCveId));
 
       // A job waiting on a scheduled retry can be pulled forward, but its
       // attempt history is evidence and must survive.

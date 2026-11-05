@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import ipaddr from 'ipaddr.js';
+import { FEED_TYPES } from '../src/types/index.ts';
 const databaseUrl = z
   .string()
   .min(1)
@@ -222,12 +223,28 @@ export function mergeAllowedHosts(...parts: string[]): string {
   ].join(',');
 }
 export function feedEgressHosts(type: unknown, endpoint: unknown, configuredHosts: string[]): string[] {
-  if (
-    type !== 'OTX_API' ||
-    endpoint !== 'https://otx.alienvault.com/api/v1/pulses/subscribed/'
-  )
-    return configuredHosts;
-  return [...new Set([...configuredHosts, 'otx.alienvault.com'])];
+  const baseline = [
+    ...new Set(
+      configuredHosts
+        .map((host) => host.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, ''))
+        .filter(Boolean),
+    ),
+  ];
+  if (!baseline.length) return baseline;
+  if (!FEED_TYPES.includes(type as (typeof FEED_TYPES)[number]) || typeof endpoint !== 'string')
+    return baseline;
+  if (type === 'OTX_API' && endpoint !== 'https://otx.alienvault.com/api/v1/pulses/subscribed/')
+    return baseline;
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return baseline;
+  }
+  if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443'))
+    return baseline;
+  const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase().replace(/\.$/, '');
+  return host ? [...new Set([...baseline, host])] : baseline;
 }
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = schema.parse(env);

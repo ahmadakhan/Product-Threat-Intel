@@ -144,6 +144,19 @@ test('trained finding models produce recommendations without changing authoritat
     assert.equal(features.exploitStatus, 1);
     assert.equal(rankFeatures.has_version_evidence, 1);
     assert.equal(rankFeatures.exploit_status, features.exploitStatus);
+    const sourceFinding = {
+      ...original,
+      cve: { ...original.cve, sourceFeeds: ['nvd-source', 'kev-source'] },
+    };
+    const feedTypesById = new Map([
+      ['nvd-source', 'NVD_API'],
+      ['kev-source', 'CISA_KEV'],
+    ] as const);
+    assert.equal(findingFeatures(sourceFinding, feedTypesById).sourceFeedWeight, 40);
+    assessFindings([sourceFinding], feedTypesById);
+    const sourceRankFeatures = rank.mock.calls[rank.mock.calls.length - 1]?.arguments[0]?.[0];
+    assert.equal(sourceRankFeatures?.source_feed_weight, 40);
+    assert.equal(findingFeatures({ ...sourceFinding, cve: { ...sourceFinding.cve, sourceFeeds: ['kev-source'] } }, feedTypesById).sourceFeedWeight, 10);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

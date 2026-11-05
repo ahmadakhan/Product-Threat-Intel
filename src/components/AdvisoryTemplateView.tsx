@@ -51,7 +51,9 @@ export const AdvisoryTemplateView: React.FC = () => {
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'mobile'>('desktop');
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
   const [confirmSave, setConfirmSave] = useState(false);
+  const [savingTemplate, setSavingTemplate] = useState(false);
   const [confirmSendTest, setConfirmSendTest] = useState(false);
+  const [sendingTest, setSendingTest] = useState(false);
 
   // Enterprise Live Rendering & Scroll Management
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -265,10 +267,16 @@ export const AdvisoryTemplateView: React.FC = () => {
   };
 
   const confirmSaveAction = async () => {
-    if (!(await saveTemplate(isCustomTemplate ? customTemplate : undefined))) return;
-    setConfirmSave(false);
-    setSaveToast(true);
-    setTimeout(() => setSaveToast(false), 2500);
+    if (savingTemplate) return;
+    setSavingTemplate(true);
+    try {
+      if (!(await saveTemplate(isCustomTemplate ? customTemplate : undefined))) return;
+      setConfirmSave(false);
+      setSaveToast(true);
+      setTimeout(() => setSaveToast(false), 2500);
+    } finally {
+      setSavingTemplate(false);
+    }
   };
 
   const handleReset = () => {
@@ -280,29 +288,42 @@ export const AdvisoryTemplateView: React.FC = () => {
     setShowResetConfirm(false);
   };
 
-  const handleSendTest = () => {
+  const handleSendTest = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
     setConfirmSendTest(true);
   };
 
   const confirmSendTestAction = async () => {
-    const rendered = getRenderedHtml();
-    const unrenderedTokens = rendered.match(/\{\{[a-z_]+\}\}/g);
-    if (unrenderedTokens && unrenderedTokens.length > 0) {
+    if (sendingTest) return;
+    setSendingTest(true);
+    try {
+      const rendered = getRenderedHtml();
+      const unrenderedTokens = rendered.match(/\{\{[a-z_]+\}\}/g);
+      if (unrenderedTokens && unrenderedTokens.length > 0) {
+        setTestResult({
+          success: false,
+          message: `Template has unrendered tokens in preview: ${[...new Set(unrenderedTokens)].join(', ')}. Check the HTML source or token list.`,
+        });
+        setConfirmSendTest(false);
+        return;
+      }
+      const res = await sendTestEmail(testEmail, testForceReview, rendered);
+      setTestResult(res);
+      setConfirmSendTest(false);
+      if (res.success) {
+        setTimeout(() => {
+          setShowTestModal(false);
+          setTestResult(null);
+        }, 1500);
+      }
+    } catch (error) {
       setTestResult({
         success: false,
-        message: `Template has unrendered tokens in preview: ${[...new Set(unrenderedTokens)].join(', ')}. Check the HTML source or token list.`,
+        message: error instanceof Error ? error.message : 'Test email could not be queued.',
       });
       setConfirmSendTest(false);
-      return;
-    }
-    const res = await sendTestEmail(testEmail, testForceReview);
-    setTestResult(res);
-    setConfirmSendTest(false);
-    if (res.success) {
-      setTimeout(() => {
-        setShowTestModal(false);
-        setTestResult(null);
-      }, 1500);
+    } finally {
+      setSendingTest(false);
     }
   };
 
@@ -1316,13 +1337,13 @@ export const AdvisoryTemplateView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setShowTestModal(false)}
+                  disabled={sendingTest}
                   className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={confirmSendTest}
                   className="px-4 py-1.5 rounded-xl bg-zinc-100 hover:bg-zinc-200 text-zinc-900 font-semibold"
                 >
                   Send Test
@@ -1374,6 +1395,7 @@ export const AdvisoryTemplateView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setConfirmSave(false)}
+                disabled={savingTemplate}
                 className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium"
               >
                 Cancel
@@ -1381,10 +1403,10 @@ export const AdvisoryTemplateView: React.FC = () => {
               <button
                 type="button"
                 onClick={confirmSaveAction}
-                disabled={confirmSave}
-                className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold"
+                disabled={savingTemplate}
+                className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white text-xs font-semibold"
               >
-                Save & Apply
+                {savingTemplate ? 'Saving…' : 'Save & Apply'}
               </button>
             </div>
           </div>
@@ -1404,6 +1426,7 @@ export const AdvisoryTemplateView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setConfirmSendTest(false)}
+                disabled={sendingTest}
                 className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium"
               >
                 Cancel
@@ -1411,10 +1434,10 @@ export const AdvisoryTemplateView: React.FC = () => {
               <button
                 type="button"
                 onClick={confirmSendTestAction}
-                disabled={confirmSendTest}
-                className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold"
+                disabled={sendingTest}
+                className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white text-xs font-semibold"
               >
-                Send Test Email
+                {sendingTest ? 'Sending…' : 'Send Test Email'}
               </button>
             </div>
           </div>

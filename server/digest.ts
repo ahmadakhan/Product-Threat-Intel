@@ -123,7 +123,7 @@ const buildDigestAdvisory = (findings: Finding[], settings: AppSettings): Adviso
   const rank = ['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
   return {
     id: formatAdvisoryId(settings.advisoryPrefix),
-    title: `Vulnerability digest: ${cveIds.slice(0, 3).join(', ')}${cveIds.length > 3 ? ` (+${cveIds.length - 3} more)` : ''}`,
+    title: `Vulnerability Notification: ${cveIds.slice(0, 3).join(', ')}${cveIds.length > 3 ? ` (+${cveIds.length - 3} more)` : ''}`,
     severity: findings.reduce(
       (severity, finding) =>
         rank.indexOf(finding.cve.cvss.severity) > rank.indexOf(severity)

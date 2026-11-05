@@ -70,7 +70,7 @@ import { recoveryDue, recoveryAt, isPermanentFeedFailure, shouldStartAutomaticRu
 import { ingestionWindow, type FeedCursor, OPENCVE_MAX_WINDOW_HOURS } from './ingestionState';
 import type { Requester } from './network';
 import { withAbortSignal } from './network';
-import type { Config } from './config';
+import { feedEgressHosts, type Config } from './config';
 import {
   enqueue,
   deliveryRevisionEvidence,
@@ -718,37 +718,13 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     execution = queued.rows[0]?.data;
     if (!execution) {
       const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
-      const last = (await pool.query('SELECT last_run, next_catchup_run FROM scheduler_state WHERE id=1'))
-        .rows[0];
-      const configuredFeeds = await list<ThreatFeed>(pool, 'feeds');
-      const cursors = new Map(
-        (await pool.query("SELECT id,data FROM records WHERE kind='feedCursors'")).rows.map((row) => [
-          row.id,
-          row.data as FeedCursor,
-        ]),
-      );
-      const now = Date.now();
-      const catchupDue = configuredFeeds.some((feed) => {
-        const cursor = cursors.get(feed.id);
-        if (!feed.enabled || cursor?.fingerprint !== sourceFingerprint(feed)) return false;
-        if (Date.parse(feed.circuitOpenUntil || '') > now) return false;
-        // A catch-up in progress respects its next_catchup_at cooldown: hasMore
-        // alone must not bypass the cooldown, or multi-run catch-up storms the
-        // provider immediately after a partial run.
-        if (cursor?.catch_up) {
-          if (!cursor.next_catchup_at) return false;
-          return Date.parse(cursor.next_catchup_at) <= now;
-        }
-        return Boolean(cursor?.hasMore);
-      });
-      // Prioritize catch-up run if scheduled.
-      const catchupScheduled = last?.next_catchup_run && Date.parse(last.next_catchup_run) <= now;
-      const recoveryProbeDue = configuredFeeds.some((feed) => recoveryDue(feed));
+      const last = (await pool.query('SELECT last_run FROM scheduler_state WHERE id=1')).rows[0];
+      const recoveryProbeDue = !settings.schedulerEnabled &&
+        (await list<ThreatFeed>(pool, 'feeds')).some((feed) => recoveryDue(feed));
       if (
         shouldStartAutomaticRun({
           schedulerEnabled: settings.schedulerEnabled,
           recoveryProbeDue,
-          catchupDue: catchupDue || catchupScheduled,
           lastRun: last?.last_run ? new Date(last.last_run).toISOString() : null,
           intervalMinutes: settings.schedulerIntervalMinutes,
         })
@@ -803,7 +779,9 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         runId: execution!.id,
       });
     });
-    const feeds = (await list<ThreatFeed>(pool, 'feeds')).filter((f) => f.enabled);
+    const allFeeds = await list<ThreatFeed>(pool, 'feeds');
+    const feeds = allFeeds.filter((feed) => feed.enabled);
+    const feedTypesById = new Map(allFeeds.map((feed) => [feed.id, feed.type]));
     const [cachedCves, cachedWithdrawals, inventory, aliasEntries] = await Promise.all([
       list<NormalizedCVE>(pool, 'cveData'),
       list<{ cveId: string; modifiedDate: string }>(pool, 'cveWithdrawals'),
@@ -857,6 +835,9 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
               ? Math.max(config.FEED_MAX_DURATION_SECONDS, 3600)
               : config.FEED_MAX_DURATION_SECONDS;
           const deadline = start + maxDurationSeconds * 1000;
+          const configuredFeedHosts = config.EGRESS_ALLOWED_HOSTS.split(',').map((host) => host.trim()).filter(Boolean);
+          const additionalAllowedHosts = feedEgressHosts(feed.type, feed.url, configuredFeedHosts)
+            .filter((host) => !configuredFeedHosts.includes(host));
           const sourceCheckpoint = async () => {
             await checkpoint();
             if (Date.now() >= deadline) throw new FeedDeadlineExceeded();
@@ -869,6 +850,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
                 ? AbortSignal.any([signal, options.signal]) : signal ?? options?.signal;
               const response = await withAbortSignal(request(url, {
                 ...options,
+                additionalAllowedHosts,
                 signal: requestSignal,
                 timeoutMs: Math.min(options?.timeoutMs ?? 20000, remaining),
                 socketTimeoutMs: Math.min(options?.socketTimeoutMs ?? 15000, remaining),
@@ -1566,7 +1548,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         const known = new Set(correlated.newFindings.map(findingIdentity));
         correlated.newFindings.push(...historical.newFindings.filter((finding) => !known.has(findingIdentity(finding))));
       }
-      correlated.newFindings = assessFindings(correlated.newFindings);
+      correlated.newFindings = assessFindings(correlated.newFindings, feedTypesById);
       await put(db, 'systemState', 'matched-inventory-v1', inventoryFingerprints);
       // `correlated.newFindings` is every current match because the server asks
       // for existing candidates so it can refresh applicability. The execution
@@ -1586,6 +1568,12 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       // before reconciliation or any delivery queue sees them. A finding whose
       // asset an operator ruled FALSE_POSITIVE/NOT_AFFECTED during the pre-CVE
       // window is created MONITORED with the ruling recorded, never queued.
+      const existingFindingIdentities = new Set(snapshot.findings.map(findingIdentity));
+      const newFindingIds = new Set(
+        [...new Map(correlated.newFindings
+          .filter((finding) => !existingFindingIdentities.has(findingIdentity(finding)))
+          .map((finding) => [findingIdentity(finding), finding.id])).values()],
+      );
       const suppressedNewFindings: Finding[] = [];
       const survivingNewFindings: Finding[] = [];
       {
@@ -1599,12 +1587,16 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           if (suppressed.has(finding.matchedAssetId))
             suppressedNewFindings.push({
               ...finding,
+              ...(newFindingIds.has(finding.id) && { executionId: execution!.id }),
               status: 'FALSE_POSITIVE',
               notificationStatus: 'NOT_APPLICABLE',
               matchingEvidence:
                 'Suppressed by operator ruling on the pre-CVE cluster; canonical CVE inherits the earlier decision',
             });
-          else survivingNewFindings.push(finding);
+          else
+            survivingNewFindings.push(
+              newFindingIds.has(finding.id) ? { ...finding, executionId: execution!.id } : finding,
+            );
         }
       }
       const reconciled = reconcileFindings(

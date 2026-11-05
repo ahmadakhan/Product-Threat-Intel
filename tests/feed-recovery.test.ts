@@ -58,7 +58,6 @@ test('recovery probes run with routine scheduling disabled, while periodic runs 
     shouldStartAutomaticRun({
       schedulerEnabled: false,
       recoveryProbeDue: true,
-      catchupDue: false,
       lastRun: new Date(now).toISOString(),
       intervalMinutes: 60,
     }, now),
@@ -68,11 +67,31 @@ test('recovery probes run with routine scheduling disabled, while periodic runs 
     shouldStartAutomaticRun({
       schedulerEnabled: false,
       recoveryProbeDue: false,
-      catchupDue: true,
       lastRun: null,
       intervalMinutes: 60,
     }, now),
     false,
+  );
+});
+test('enabled scheduler enforces its interval even when recovery work is due', () => {
+  const now = Date.parse('2026-10-22T00:00:00Z');
+  assert.equal(
+    shouldStartAutomaticRun({
+      schedulerEnabled: true,
+      recoveryProbeDue: true,
+      lastRun: new Date(now - 5 * 60_000).toISOString(),
+      intervalMinutes: 120,
+    }, now),
+    false,
+  );
+  assert.equal(
+    shouldStartAutomaticRun({
+      schedulerEnabled: true,
+      recoveryProbeDue: false,
+      lastRun: new Date(now - 120 * 60_000).toISOString(),
+      intervalMinutes: 120,
+    }, now),
+    true,
   );
 });
 test('feed settings validate bounds and retain legacy timeout behavior', () => {

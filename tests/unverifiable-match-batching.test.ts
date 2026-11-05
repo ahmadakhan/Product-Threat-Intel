@@ -111,8 +111,10 @@ async function saveReviewFinding(pool: pg.Pool, value: Finding): Promise<Finding
 test('unverifiable matches are batched into a single combined email per recipient', { skip: !process.env.TEST_DATABASE_URL }, async () => {
   const outcome = await withDatabase(async (pool) => {
     await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: true });
+    const first = finding('CVE-2026-10001', 'f1', 'server-1', 'acme', 'widget');
     const findings: Finding[] = [
-      finding('CVE-2026-10001', 'f1', 'server-1', 'acme', 'widget'),
+      first,
+      { ...first },
       finding('CVE-2026-10002', 'f2', 'server-2', 'acme', 'gadget'),
       finding('CVE-2026-10003', 'f3', 'server-3'),
     ];
@@ -203,6 +205,9 @@ test('review email links sources safely and escapes evidence', () => {
   assert.ok(renderUnverifiableReviewEmail([candidate]).html.includes('href="https://vendor.example/security/CVE-2026-10001?a=1&amp;b=2"'));
   candidate.cve.remediation.vendorAdvisoryRef = 'https://user:secret@vendor.example/advisory';
   assert.ok(!renderUnverifiableReviewEmail([candidate]).html.includes('user:secret'));
+  const timestamped = renderUnverifiableReviewEmail([candidate], 'America/Los_Angeles');
+  assert.ok(timestamped.text.includes('CVE published: 31 Dec 2025, 16:00 UTC-8 | 2026-01-01 00:00:00 UTC'));
+  assert.ok(timestamped.text.includes('Source updated: 31 Dec 2025, 16:00 UTC-8 | 2026-01-01 00:00:00 UTC'));
   candidate.cve.versionRange = { versionEndExcluding: '1.0' };
   candidate.cve.cpeMatchDetails = [{ criteria: candidate.matchedCpe }];
   const criterion = renderUnverifiableReviewEmail([candidate]);

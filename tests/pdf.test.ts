@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { advisoryHtmlToText, renderAdvisoryPdf, closePdfRenderer } from '../server/pdf.ts';
+import { advisoryHtmlToPdfBlocks, advisoryHtmlToText, renderAdvisoryPdf, closePdfRenderer } from '../server/pdf.ts';
 import { renderAdvisory } from '../server/advisoryRender.ts';
 import { advisoryFilename, unverifiableMatchFilename } from '../server/pdf.ts';
 import { compileCustomizedTemplate, DEFAULT_TEMPLATE_CUSTOMIZATION } from '../src/utils/templateCompiler.ts';
@@ -19,6 +19,19 @@ test('advisory HTML conversion preserves readable content and skips executable/r
   assert.match(text, /Patch the affected application/);
   assert.match(text, /Vendor guidance/);
   assert.doesNotMatch(text, /Ignored title|secret|EXECUTABLE_SENTINEL|tracker\.example|SVG_SENTINEL/);
+});
+
+test('PDF blocks preserve each email CVE card and its severity accent', () => {
+  const blocks = advisoryHtmlToPdfBlocks(
+    '<html><body><p>Security advisory</p>' +
+      '<div class="vulnstream-pdf-card" data-pdf-accent="#f59e0b" style="border-left:4px solid #f59e0b"><h2>CVE-2026-12345</h2><p>High description</p></div>' +
+      '<div class="vulnstream-pdf-card" data-pdf-accent="#10b981" style="border-left:4px solid #10b981"><h2>CVE-2026-67890</h2><p>Low description</p></div>' +
+      '</body></html>',
+  );
+  const cards = blocks.filter((block) => block.kind === 'cve-card');
+  assert.deepEqual(cards.map((card) => card.kind === 'cve-card' && card.accent), ['#f59e0b', '#10b981']);
+  assert.ok(cards[0].text.includes('CVE-2026-12345'));
+  assert.ok(cards[1].text.includes('CVE-2026-67890'));
 });
 
 test('advisoryFilename is a ddMMMyyyyHHMM timestamp in the workspace timezone', () => {
@@ -52,6 +65,11 @@ test('renderAdvisoryPdf renders the compiled advisory HTML to a PDF without a br
   const html = renderAdvisory(template, advisory);
   assert.ok(html.includes('CVE-2026-12345'));
   assert.ok(!html.includes('{{advisory_id}}'));
+  const cveCards = advisoryHtmlToPdfBlocks(html).filter((block) => block.kind === 'cve-card');
+  assert.equal(cveCards.length, advisory.cveIds.length);
+  assert.deepEqual(cveCards.map((block) => block.kind === 'cve-card' && block.accent), ['#ef4444', '#ef4444']);
+  assert.ok(cveCards[0].text.includes('CVE-2026-12345'));
+  assert.ok(cveCards[1].text.includes('CVE-2026-67890'));
 
   const pdf = await renderAdvisoryPdf(html);
   try {

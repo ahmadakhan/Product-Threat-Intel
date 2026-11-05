@@ -119,7 +119,7 @@ test('equal-revision conflicts merge deterministically and cannot auto-dispatch'
   assert.equal(mergeCveRecords([{ ...first, cveId: ' cve-2026-12345 ' }, first]).size, 1);
 });
 
-test('different provider clocks preserve structured applicability and conflicting evidence stays review-only', () => {
+test('text-only provider review policy does not override verified structured applicability', () => {
   const structured = { ...cve(), versionRange: { versionEndExcluding: '2.0' } };
   const textOnly = {
     ...structured,
@@ -133,23 +133,37 @@ test('different provider clocks preserve structured applicability and conflictin
     applicabilityRequiresReview: true,
     applicabilityPolicy: 'REVIEW_ONLY' as const,
   };
-  const merged = mergeCveRecords([structured, textOnly]).get(structured.cveId)!;
+  const legacyTextOnly = {
+    ...structured,
+    title: 'Legacy text-only revision',
+    sourceFeeds: [],
+    cpeMatches: [],
+    cpeMatchDetails: [],
+    versionRange: undefined,
+    applicabilityRequiresReview: true,
+    applicabilityPolicy: 'REVIEW_ONLY' as const,
+  };
+  const merged = mergeCveRecords([structured, textOnly, legacyTextOnly]).get(structured.cveId)!;
   assert.deepEqual(merged.cpeMatches, structured.cpeMatches);
   assert.deepEqual(merged.cpeMatchDetails, structured.cpeMatchDetails);
-  assert.equal(merged.versionRange, undefined);
-  assert.equal(merged.applicabilityPolicy, 'REVIEW_ONLY');
-  assert.equal(merged.applicabilityRequiresReview, true);
+  assert.deepEqual(merged.versionRange, structured.versionRange);
+  assert.equal(merged.applicabilityPolicy, undefined);
+  assert.equal(merged.applicabilityRequiresReview, false);
+  assert.ok(merged.sourceApplicability?.__legacy_applicability__);
+  const reloaded = mergeCveRecords([merged]).get(merged.cveId)!;
+  assert.equal(reloaded.applicabilityPolicy, undefined);
+  assert.equal(reloaded.applicabilityRequiresReview, false);
 
   const result = runVulnerabilityPipeline(
     [],
-    [merged],
+    [reloaded],
     [asset],
     [],
     [],
-    { ...DEFAULT_SETTINGS, scopeHours: 0, autoDispatchConfidenceThreshold: 0, autoDispatchUnverifiableMatches: true },
+    { ...DEFAULT_SETTINGS, scopeHours: 0, autoDispatchEnabled: true, autoDispatchConfidenceThreshold: 90 },
   );
-  assert.equal(result.newFindings[0]?.notificationStatus, 'REVIEW_REQUIRED');
-  assert.equal(result.newFindings[0]?.confidence, 0);
+  assert.equal(result.newFindings[0]?.notificationStatus, 'QUEUED_FOR_DISPATCH');
+  assert.equal(result.newFindings[0]?.confidence, 90);
 });
 
 test('a provider revision replaces its own old criteria without removing another provider evidence', () => {
@@ -180,6 +194,16 @@ test('a provider revision replaces its own old criteria without removing another
   assert.deepEqual(Object.keys(updated.sourceApplicability || {}).sort(), ['mitre', 'nvd']);
   assert.equal(updated.sourceApplicability?.nvd.contentHash, sourceCveContentHash(nvdUpdate));
   assert.equal(updated.applicabilityPolicy, 'REVIEW_ONLY');
+  assert.equal(updated.applicabilityRequiresReview, true);
+  const conflictingFinding = runVulnerabilityPipeline(
+    [],
+    [updated],
+    [{ ...asset, cpes: [cpe('1.5')] }],
+    [],
+    [],
+    { ...DEFAULT_SETTINGS, scopeHours: 0, autoDispatchEnabled: true, autoDispatchConfidenceThreshold: 0, autoDispatchUnverifiableMatches: true },
+  ).newFindings[0];
+  assert.equal(conflictingFinding?.notificationStatus, 'REVIEW_REQUIRED');
 });
 
 test('a newer revision from the same provider replaces superseded applicability', () => {

@@ -8,7 +8,18 @@ Release with `docker compose --env-file .env.production up -d --build`. Confirm 
 
 For a fresh Linux installation, `bash ./install.sh` creates a protected `.env.production`, generates distinct database passwords and encryption/metrics secrets, starts the Compose stack, and prompts for the initial administrator password. It requires Bash, Docker Engine, and the Compose v2 plugin; it does not install or modify the host's Docker packages. In database storage mode, products, feeds, settings, queue records, audit data, dead letters and ML model artifacts are stored in PostgreSQL. The ML/DLQ named volumes are retained only to import data from earlier filesystem-backed deployments; remove them after confirming migration and backups. Caddy certificate state and optional Prometheus time-series data remain in infrastructure volumes.
 
-`bash ./install-lan.sh` is a separate trusted-LAN/tailnet option. It binds Caddy to the entered RFC1918 and Tailscale IPv4 addresses on HTTP port `80`; the API remains internal on container port `8080`. It uses an isolated PostgreSQL volume/project, does not publish PostgreSQL or HTTPS port `443`, and disables external feed/API hosts by default. `ALLOW_INSECURE_HTTP=true` disables Secure session cookies to permit HTTP; credentials and session cookies are therefore visible to anyone able to observe LAN/tailnet traffic. Restrict access to a trusted network, do not port-forward this service, and prefer HTTPS for any untrusted network.
+`bash ./install-lan.sh` is a separate LAN/tailnet option. It binds Caddy to the entered RFC1918 and Tailscale IPv4 addresses on ports `80` and `443`; HTTP redirects to HTTPS and the API remains internal on container port `8080`. It uses an isolated PostgreSQL volume/project and inherits `EGRESS_ALLOWED_HOSTS` and `EGRESS_ALLOWED_HOSTS_EXTRA` from `.env.production` when present; otherwise it uses the bundled Compose defaults. An explicit empty allowlist still denies outbound hosts. A private CA signs one certificate containing both IP addresses, which also supports clients that omit SNI for IP URLs. Install `.runtime/lan-ca.crt` in each client's trusted root store; protect `.runtime/lan-ca.key` and restrict access to the Docker host. Restrict access to a trusted network and do not port-forward this service.
+
+For an existing LAN deployment, update `APP_ORIGIN` in `.env.lan` to `https://<TAILSCALE-IP>`, generate the combined-IP certificate, then apply the HTTPS overlay without recreating the database:
+
+```sh
+```sh
+bash ./scripts/lan-tls-certs.sh
+docker compose --project-name vulnstream-lan --env-file .env.lan -f compose.yaml -f compose.lan.yaml up -d --force-recreate --no-deps app proxy
+cp .runtime/lan-ca.crt "$HOME/vulnstream-lan-root.crt"
+```
+
+Install `vulnstream-lan-root.crt` in each client's trusted root store. Renew the leaf certificate annually by rerunning the helper and force-recreating the proxy. The root certificate is public, but never export or distribute `.runtime/lan-ca.key`. Port `443` must also be allowed through the host firewall; HTTP redirects only work for clients that can still reach port `80`.
 
 The runtime's `/live` endpoint reports process availability and `/ready` checks PostgreSQL. Neither certifies feed freshness or successful delivery. Monitor authenticated System Health, feed errors, execution failures, queue depth, failed deliveries, database size and worker heartbeat (normally updated every five seconds outside an active run). Alert on heartbeat staleness relative to your maximum ingestion time. Logs are JSON on standard output; retain and restrict access through your platform. Feed/provider error details may contain operational information.
 

@@ -94,6 +94,35 @@ test('outbound requests and non-cooperative operations reject promptly when abor
   }
 });
 
+test('per-feed host additions remain request-scoped and pass through the SSRF checks', async () => {
+  const { close } = await serve((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/rss+xml' });
+    res.end('<rss/>');
+  });
+  const url = 'https://feed.example.test/feed.xml';
+  const restrictedConfig = { ...config, EGRESS_ALLOWED_HOSTS: 'cdn.example.test' };
+  try {
+    const request = createRequester(restrictedConfig, hooks);
+    await assert.rejects(request(url), /not in EGRESS_ALLOWED_HOSTS/);
+    assert.equal(
+      (await request(url, { additionalAllowedHosts: ['feed.example.test'] })).status,
+      200,
+    );
+    await assert.rejects(request(url), /not in EGRESS_ALLOWED_HOSTS/);
+
+    const privateDnsRequest = createRequester(restrictedConfig, {
+      ...hooks,
+      resolver: async () => [{ address: '127.0.0.1', family: 4 }],
+    });
+    await assert.rejects(
+      privateDnsRequest(url, { additionalAllowedHosts: ['feed.example.test'] }),
+      /non-public address/,
+    );
+  } finally {
+    await close();
+  }
+});
+
 test('redirects are followed for allowlisted hosts and keep the ETag/304 contract', async () => {
   const { requests, close } = await serve((req, res) => {
     if (req.url === '/feed.xml') {

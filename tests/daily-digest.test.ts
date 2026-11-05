@@ -40,7 +40,7 @@ const HEALTH: DigestHealth = {
 
 const PARTS: DailyDigestParts = {
   advisory_id: 'DAILY-2026-10-29',
-  advisory_title: 'Daily Vulnerability Digest',
+  advisory_title: 'Daily Vulnerability Notification',
   dispatch_date: '2026-10-29T10:00:00.000Z',
   severity: 'HIGH',
   finding_count: FINDINGS.length,
@@ -143,7 +143,7 @@ test('renderDailyDigest embeds the findings summary and the health report', () =
   assert.equal(typeof html, 'string');
   assert.ok(html.includes('CVE-2026-0001'), 'digest embeds the findings summary');
   assert.ok(html.includes('Operational (12 ms)'), 'digest embeds the health report');
-  assert.ok(html.includes('Daily Vulnerability Digest'), 'digest embeds the title');
+  assert.ok(html.includes('Daily Vulnerability Notification'), 'digest embeds the title');
 });
 
 test('renderDailyDigest populates KPI counts exactly', () => {

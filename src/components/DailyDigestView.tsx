@@ -181,7 +181,7 @@ export const DailyDigestView: React.FC = () => {
       .replace(/{{medium_count}}/g, String(mediumCount))
       .replace(/{{low_count}}/g, String(lowCount))
       .replace(/{{asset_count}}/g, '5')
-      .replace(/{{advisory_title}}/g, 'Daily Vulnerability Digest')
+      .replace(/{{advisory_title}}/g, 'Daily Vulnerability Notification')
       .replace(/{{advisory_id}}/g, 'DAILY-PREVIEW')
       .replace(/{{recipient_name}}/g, 'Team')
       .replace(/{{severity_counts}}/g, '2 critical, 1 high, 1 medium, 1 low')

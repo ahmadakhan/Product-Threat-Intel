@@ -433,7 +433,7 @@ export function compileDailyDigestTemplate(config: TemplateCustomization): strin
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="x-apple-disable-message-reformatting">
-<title>Daily Vulnerability Digest</title>
+<title>Daily Vulnerability Notification</title>
 
 <style>
 body{
@@ -643,15 +643,15 @@ export function renderDailyFindingSummary(findings: DigestFinding[], config: Tem
   };
   return ordered
     .map((severity, index) => {
-      const items = bySeverity[severity];
+      const items = bySeverity[severity].slice().sort((left, right) => left.cveId.localeCompare(right.cveId));
       const style = severityStyle[severity] || severityStyle.UNKNOWN;
       const marginBottom = index < ordered.length - 1 ? ' style="margin-bottom:18px;"' : '';
-      const list = items
+      const cards = items
         .slice(0, 25)
         .map((f) => {
           const cveIdHtml = f.sourceUrl
-            ? `<a href="${digestEscapeHtml(f.sourceUrl)}" target="_blank">${digestEscapeHtml(f.cveId)}</a>`
-            : `<strong>${digestEscapeHtml(f.cveId)}</strong>`;
+            ? `<a href="${digestEscapeHtml(f.sourceUrl)}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">${digestEscapeHtml(f.cveId)}</a>`
+            : `<strong style="color:#1d4ed8;">${digestEscapeHtml(f.cveId)}</strong>`;
           const tags: string[] = [];
           if (typeof f.cvssScore === 'number') {
             tags.push(`CVSS ${f.cvssScore.toFixed(1)}`);
@@ -665,26 +665,34 @@ export function renderDailyFindingSummary(findings: DigestFinding[], config: Tem
           if (typeof f.epssScore === 'number' && f.epssScore > 0.2) {
             tags.push(`EPSS ${(f.epssScore * 100).toFixed(0)}%`);
           }
-          const tagHtml = tags.length
-            ? ` <span style="display:inline-block;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:3px;padding:0 5px;font-size:11px;color:#475569;margin-left:6px;">${digestEscapeHtml(tags.join(' · '))}</span>`
-            : '';
-          return `${cveIdHtml} — ${digestEscapeHtml(f.assetName)}${f.vendor ? ` (${digestEscapeHtml(f.vendor)})` : ''}${tagHtml}`;
-        })
-        .join('<br>');
-      const extra = items.length > 25 ? `<br><span style="color:#71717a;">…and ${items.length - 25} more</span>` : '';
-      return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"${marginBottom}>
-    <tr>
-        <td bgcolor="${style.bg}" style="padding:12px 16px;border-left:4px solid ${style.border};">
-            <strong style="color:${style.text};font-size:13px;">${severity} (${items.length})</strong>
-        </td>
-    </tr>
-
-    <tr>
-        <td style="padding:14px 16px;border:1px solid #e2e8f0;font-size:13px;color:#334155;line-height:22px;">
-            ${list}${extra}
+          const tagHtml = tags.map((tag) =>
+            `<span style="display:inline-block;margin:3px 5px 0 0;padding:2px 6px;border:1px solid #dbe2ea;border-radius:3px;background:#f8fafc;color:#475569;font-size:10px;line-height:15px;">${digestEscapeHtml(tag)}</span>`,
+          ).join('');
+          return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 10px;border-collapse:collapse;table-layout:fixed;">
+    <tr class="vulnstream-pdf-card" data-pdf-accent="${style.border}">
+        <td style="padding:12px 14px;border:1px solid #e2e8f0;border-left:4px solid ${style.border};background:#ffffff;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;table-layout:fixed;">
+                <tr>
+                    <td style="padding:0 8px 0 0;font-size:14px;line-height:20px;font-weight:700;word-break:break-word;">${cveIdHtml}</td>
+                    <td align="right" style="width:1%;padding:0;white-space:nowrap;vertical-align:top;">
+                        <span style="display:inline-block;padding:3px 7px;border-radius:3px;background:${style.bg};color:${style.text};font-size:10px;line-height:15px;font-weight:700;">${severity}${typeof f.cvssScore === 'number' ? ` · CVSS ${f.cvssScore.toFixed(1)}` : ''}</span>
+                    </td>
+                </tr>
+            </table>
+            <p style="margin:8px 0 0;font-size:12px;line-height:18px;color:#334155;"><strong>Asset:</strong> ${digestEscapeHtml(f.assetName)}${f.vendor ? ` (${digestEscapeHtml(f.vendor)})` : ''}</p>
+            ${tagHtml ? `<div style="margin-top:5px;line-height:20px;">${tagHtml}</div>` : ''}
         </td>
     </tr>
 </table>`;
+        })
+        .join('');
+      const extra = items.length > 25
+        ? `<p style="margin:0;font-size:11px;line-height:17px;color:#71717a;">${items.length - 25} more ${severity.toLowerCase()} finding${items.length - 25 === 1 ? '' : 's'} omitted</p>`
+        : '';
+      return `<div${marginBottom}>
+    <p style="margin:0 0 9px;font-size:12px;line-height:18px;font-weight:700;color:${style.text};">${severity} (${items.length})</p>
+    ${cards}${extra}
+</div>`;
     })
     .join('\n');
 }

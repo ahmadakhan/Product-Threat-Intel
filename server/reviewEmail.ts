@@ -1,5 +1,6 @@
 import type { Finding, Severity } from '../src/types/index.ts';
 import { parseCPE23 } from '../src/utils/cpeMatcher.ts';
+import { formatDateTime } from '../src/utils/dateTime.ts';
 import { escapeHtml } from './emailEdits.ts';
 
 const SEVERITIES: readonly Severity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
@@ -35,6 +36,13 @@ function finiteScore(value: number | undefined, maximum: number, suffix: string)
     : 'Not available';
 }
 
+function dualTimestamp(value: string | undefined, timezone?: string): string {
+  const date = value ? new Date(value) : undefined;
+  if (!date || !Number.isFinite(date.getTime())) return 'Not available';
+  const utc = date.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC');
+  return `${formatDateTime(date, timezone)} | ${utc}`;
+}
+
 function rangeLabel(range: Finding['cve']['versionRange']): string {
   if (!range) return '';
   return [
@@ -63,7 +71,10 @@ function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-export function renderUnverifiableReviewEmail(findings: readonly Finding[]): { subject: string; text: string; html: string } {
+export function renderUnverifiableReviewEmail(
+  findings: readonly Finding[],
+  timezone?: string,
+): { subject: string; text: string; html: string } {
   const ordered = [...findings].sort((left, right) =>
     SEVERITIES.indexOf(severityOf(left)) - SEVERITIES.indexOf(severityOf(right)) ||
     compareText(left.cveId, right.cveId) ||
@@ -97,6 +108,8 @@ export function renderUnverifiableReviewEmail(findings: readonly Finding[]): { s
       ...(finding.matchedAssetProduct ? [['Product', finding.matchedAssetProduct] as [string, string]] : []),
       ...(criterionVersion ? [['Matched CPE version', criterionVersion] as [string, string]] : []),
       ['Affected range', range || 'Not specified; verify against source guidance'],
+      ['CVE published', dualTimestamp(finding.cve.publishedDate, timezone)],
+      ['Source updated', dualTimestamp(finding.cve.modifiedDate, timezone)],
     ];
     textBlocks.push([
       `${index + 1}. ${finding.cveId} | ${severity}`,
@@ -110,7 +123,7 @@ export function renderUnverifiableReviewEmail(findings: readonly Finding[]): { s
       `<tr><td valign="top" width="108" style="width:108px;padding:5px 12px 5px 0;color:#52606d;font-size:13px;line-height:19px;">${escapeHtml(label)}</td>` +
       `<td valign="top" style="padding:5px 0;color:#17212b;font-size:13px;line-height:19px;${WRAP}">${escapeHtml(value)}</td></tr>`,
     ).join('');
-    return `<tr><td style="padding:24px 24px 26px;border-top:1px solid #dfe4e8;${WRAP}">` +
+    return `<tr class="vulnstream-pdf-card" data-pdf-accent="${badge.background}"><td style="padding:24px 24px 26px;border-top:1px solid #dfe4e8;border-left:4px solid ${badge.background};${WRAP}">` +
       `<p style="margin:0 0 8px;font-size:12px;line-height:18px;color:#52606d;">FINDING ${index + 1} OF ${count}</p>` +
       `<h2 style="margin:0 0 4px;font-size:20px;line-height:28px;font-weight:700;${WRAP}"><a href="${escapeHtml(url)}" style="color:#155e75;text-decoration:underline;${WRAP}">${escapeHtml(finding.cveId)}</a></h2>` +
       `<p style="margin:0 0 12px;font-size:13px;line-height:19px;color:#52606d;${WRAP}">Source: ${escapeHtml(new URL(url).hostname)}</p>` +

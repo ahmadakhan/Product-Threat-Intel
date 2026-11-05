@@ -73,9 +73,13 @@ APP_DB_PASSWORD=$(openssl rand -hex 32)
 ENCRYPTION_KEY=$(openssl rand -base64 32 | tr -d '\n')
 METRICS_TOKEN=$(openssl rand -hex 32)
 ML_SIGNING_KEY=$(openssl rand -hex 32)
-APP_ORIGIN="http://${TAILSCALE_ADDRESS}"
+APP_ORIGIN="https://${TAILSCALE_ADDRESS}"
 
 umask 077
+mkdir -p .runtime
+chmod 700 .runtime
+bash ./scripts/lan-tls-certs.sh "$LAN_IP" "$TAILSCALE_ADDRESS"
+
 cat > .env.lan <<EOF
 APP_HOST=$TAILSCALE_ADDRESS
 APP_ORIGIN=$APP_ORIGIN
@@ -87,8 +91,6 @@ APP_DB_PASSWORD=$APP_DB_PASSWORD
 ENCRYPTION_KEY=$ENCRYPTION_KEY
 METRICS_TOKEN=$METRICS_TOKEN
 ML_SIGNING_KEY=$ML_SIGNING_KEY
-EGRESS_ALLOWED_HOSTS=
-EGRESS_ALLOWED_HOSTS_EXTRA=
 BOOTSTRAP_RECOMMENDED_FEEDS=false
 LOG_LEVEL=standard
 SMTP_HOST=
@@ -98,17 +100,20 @@ SMTP_PASSWORD=
 SMTP_FROM=
 EOF
 chmod 600 .env.lan
-mkdir -p .runtime
-chmod 700 .runtime
 printf '%s' "$METRICS_TOKEN" > .runtime/metrics.token
 chmod 600 .runtime/metrics.token
 unset POSTGRES_PASSWORD APP_DB_PASSWORD ENCRYPTION_KEY METRICS_TOKEN ML_SIGNING_KEY
 
-compose=(docker compose --project-name vulnstream-lan --env-file .env.lan -f compose.yaml -f compose.lan.yaml)
+compose=(docker compose --project-name vulnstream-lan)
+if [[ -f .env.production ]]; then
+  compose+=(--env-file .env.production)
+fi
+compose+=(--env-file .env.lan -f compose.yaml -f compose.lan.yaml)
 "${compose[@]}" config --quiet
 "${compose[@]}" up -d --build --scale app=1 --wait --wait-timeout 300
 printf '%s' "$ADMIN_PASSWORD" | "${compose[@]}" exec -T app node server-dist/create-user.js admin ADMIN
 unset ADMIN_PASSWORD
 "${compose[@]}" ps
-printf 'LAN installation complete. Open http://%s or http://%s\n' "$LAN_IP" "$TAILSCALE_ADDRESS"
-printf '%s\n' 'HTTP is unencrypted. Restrict port 80 to trusted LAN/Tailscale clients in the host firewall.'
+printf 'LAN installation complete. Open https://%s or https://%s\n' "$LAN_IP" "$TAILSCALE_ADDRESS"
+printf '%s\n' 'Install .runtime/lan-ca.crt in each client trust store. Keep .runtime/lan-ca.key private.'
+printf '%s\n' 'HTTP on port 80 redirects to HTTPS on port 443.'

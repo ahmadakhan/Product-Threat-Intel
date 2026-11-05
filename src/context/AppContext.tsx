@@ -749,10 +749,11 @@ function useApplication() {
       }
       return success;
     },
-    sendTestEmail: async (email: string, forceReview = false) =>
+    sendTestEmail: async (email: string, forceReview = false, html?: string) =>
       (await call<{ success: boolean; message: string }>('/test-email', {
         email,
         forceReview,
+        ...(html !== undefined ? { html } : {}),
       })) || {
         success: false,
         message: 'Test could not be queued; see the error banner.',

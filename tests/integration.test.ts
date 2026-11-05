@@ -246,6 +246,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
   let capturedUrl = '',
     capturedUrls: string[] = [],
     capturedBody = '',
+    capturedMethod = '',
     capturedHeaders: Record<string, string> = {},
     responseStatus = 200,
     responseBody = '[]';
@@ -253,6 +254,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
     capturedUrl = _url;
     capturedUrls.push(_url);
     capturedBody = options?.body || '';
+    capturedMethod = options?.method || 'GET';
     capturedHeaders = options?.headers || {};
     return { status: responseStatus, body: responseBody, headers: {} };
   };
@@ -552,6 +554,24 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
         enabled: false,
       });
       assert.equal(feed.status, 400);
+      const autoAllowedFeed = await command('feed.save', {
+        name: 'Auto-allowed public RSS host',
+        type: 'RSS_ATOM',
+        url: 'https://1.1.1.1/security.rss',
+        authType: 'NONE',
+        rateLimitPerMin: 5,
+        enabled: false,
+      });
+      assert.equal(autoAllowedFeed.status, 200, JSON.stringify(autoAllowedFeed.body));
+      const unlistedWebhook = await command('webhook.save', {
+        name: 'Unlisted destination',
+        url: 'https://1.1.1.1/hook',
+        provider: 'SLACK',
+        secretToken: '',
+        enabled: true,
+        events: ['ALL'],
+      });
+      assert.equal(unlistedWebhook.status, 400, 'feed host allowance must not expand webhook egress');
     });
     await t.test('vendor-seeded feeds cannot be deleted but can be toggled', async () => {
       const seeded = await command('feed.save', {
@@ -778,6 +798,35 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       } finally {
         responseStatus = 200;
         responseBody = '[]';
+        await pool.query("DELETE FROM records WHERE kind='feeds' AND id=$1", [feedId]);
+      }
+    });
+    await t.test('OSV connectivity tests use querybatch POST instead of GET', async () => {
+      const feedId = 'osv-connectivity-test';
+      await put(pool, 'feeds', feedId, {
+        id: feedId, name: 'OSV Package Vulnerability Database', type: 'OSV_API',
+        url: 'https://api.osv.dev/v1/querybatch', authType: 'NONE',
+        enabled: false, rateLimitPerMin: 1, healthStatus: 'UNTESTED',
+      });
+      try {
+        responseBody = JSON.stringify({ results: [{ vulns: [] }] });
+        const tested = await post(`/api/feeds/${feedId}/test`);
+        assert.equal(tested.status, 200);
+        assert.equal(tested.body.success, true);
+        assert.equal(capturedUrl, 'https://api.osv.dev/v1/querybatch');
+        assert.equal(capturedMethod, 'POST');
+        assert.equal(capturedHeaders['content-type'], 'application/json');
+        assert.deepEqual(JSON.parse(capturedBody), {
+          queries: [{ package: { purl: 'pkg:npm/vulnstream-connectivity-check@1.0.0' } }],
+        });
+        assert.equal((await get<any>(pool, 'feeds', feedId)).healthStatus, 'HEALTHY');
+      } finally {
+        responseStatus = 200;
+        responseBody = '[]';
+        capturedUrl = '';
+        capturedUrls = [];
+        capturedBody = '';
+        capturedMethod = '';
         await pool.query("DELETE FROM records WHERE kind='feeds' AND id=$1", [feedId]);
       }
     });

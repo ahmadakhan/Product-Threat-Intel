@@ -30,8 +30,17 @@ export function sourceCveContentHash(cve: NormalizedCVE): string {
 /** Merge independent providers while replacing revisions within each provider. */
 export function mergeCveRecords(records: NormalizedCVE[]): Map<string, NormalizedCVE> {
   const merged = new Map<string, NormalizedCVE>();
-  const content = ({ sourceFeeds: _sources, sourceApplicability: _applicability, ...cve }: NormalizedCVE) =>
-    stableJson(cve);
+  const content = ({
+    sourceFeeds: _sources,
+    sourceApplicability: _applicability,
+    cpeMatches: _cpeMatches,
+    cpeMatchDetails: _cpeMatchDetails,
+    purls: _purls,
+    versionRange: _versionRange,
+    applicabilityRequiresReview: _applicabilityRequiresReview,
+    applicabilityPolicy: _applicabilityPolicy,
+    ...cve
+  }: NormalizedCVE) => stableJson(cve);
   const detailsFor = (cve: NormalizedCVE) =>
     cve.cpeMatchDetails?.length
       ? cve.cpeMatchDetails
@@ -46,6 +55,11 @@ export function mergeCveRecords(records: NormalizedCVE[]): Map<string, Normalize
     applicabilityPolicy: cve.applicabilityPolicy,
     contentHash: sourceCveContentHash(cve),
   });
+  const hasApplicabilityData = (evidence: SourceApplicabilityEvidence) =>
+    evidence.cpeMatches.length > 0 ||
+    evidence.cpeMatchDetails.length > 0 ||
+    Boolean(evidence.purls?.length) ||
+    Boolean(evidence.versionRange && Object.values(evidence.versionRange).some(Boolean));
   const sourceEvidence = (cve: NormalizedCVE): Map<string, SourceApplicabilityEvidence> => {
     if (cve.sourceApplicability) return new Map(Object.entries(cve.sourceApplicability));
     const sources = [...new Set(cve.sourceFeeds.filter(Boolean))];
@@ -59,6 +73,43 @@ export function mergeCveRecords(records: NormalizedCVE[]): Map<string, Normalize
       range: evidence.versionRange,
       purls: [...new Set(evidence.purls || [])].sort(),
     });
+  const aggregateApplicability = (
+    evidence: SourceApplicabilityEvidence[],
+    equalRevisionConflict = false,
+  ) => {
+    const applicabilityEvidence = evidence.filter(hasApplicabilityData);
+    const decisionEvidence = applicabilityEvidence.length ? applicabilityEvidence : evidence;
+    const signatures = new Set(applicabilityEvidence.map(applicabilitySignature));
+    const hasCrossSourceConflict = applicabilityEvidence.length > 1 && signatures.size > 1;
+    const rangeValues = new Set(
+      applicabilityEvidence.filter((entry) => entry.versionRange).map((entry) => stableJson(entry.versionRange)),
+    );
+    const hasConflictingRanges = rangeValues.size > 1;
+    const details = [...new Map(
+      evidence.flatMap((entry) => entry.cpeMatchDetails).map((detail) => [stableJson(detail), detail]),
+    ).values()].sort((a, b) => stableJson(a).localeCompare(stableJson(b)));
+    const cpeMatches = [...new Set([
+      ...evidence.flatMap((entry) => entry.cpeMatches),
+      ...details.map((detail) => detail.criteria),
+    ])].sort();
+    const purls = [...new Set(evidence.flatMap((entry) => entry.purls || []))].sort();
+    return {
+      cpeMatches,
+      cpeMatchDetails: details,
+      purls: purls.length ? purls : undefined,
+      versionRange: hasConflictingRanges
+        ? undefined
+        : applicabilityEvidence.find((entry) => entry.versionRange)?.versionRange,
+      applicabilityRequiresReview:
+        decisionEvidence.some((entry) => entry.applicabilityRequiresReview) ||
+        hasCrossSourceConflict ||
+        equalRevisionConflict ||
+        hasConflictingRanges,
+      applicabilityPolicy: decisionEvidence.some((entry) => entry.applicabilityPolicy === 'REVIEW_ONLY')
+        ? 'REVIEW_ONLY' as const
+        : undefined,
+    };
+  };
   const mergeEqualSourceRevision = (
     old: SourceApplicabilityEvidence,
     candidate: SourceApplicabilityEvidence,
@@ -85,7 +136,12 @@ export function mergeCveRecords(records: NormalizedCVE[]): Map<string, Normalize
     const old = merged.get(cveId);
     if (!old) {
       const evidence = sourceEvidence(candidate);
-      merged.set(cveId, { ...candidate, sourceApplicability: Object.fromEntries(evidence) });
+      const sourceApplicability = Object.fromEntries([...evidence.entries()].sort(([a], [b]) => a.localeCompare(b)));
+      merged.set(cveId, {
+        ...candidate,
+        ...aggregateApplicability([...evidence.values()]),
+        sourceApplicability,
+      });
       continue;
     }
     const candidateTime = Date.parse(candidate.modifiedDate);
@@ -125,41 +181,24 @@ export function mergeCveRecords(records: NormalizedCVE[]): Map<string, Normalize
         (incomingTime === currentTime || (!Number.isFinite(incomingTime) && !Number.isFinite(currentTime))) &&
         applicabilitySignature(current) !== applicabilitySignature(incoming)
       ) {
+        const currentHasApplicability = hasApplicabilityData(current);
+        const incomingHasApplicability = hasApplicabilityData(incoming);
+        if (currentHasApplicability !== incomingHasApplicability) {
+          if (incomingHasApplicability) sources.set(source, incoming);
+          continue;
+        }
         sources.set(source, mergeEqualSourceRevision(current, incoming));
-        equalRevisionConflicts.push(source);
+        if (currentHasApplicability) equalRevisionConflicts.push(source);
       } else if (incomingTime === currentTime && incoming.contentHash.localeCompare(current.contentHash) > 0) {
         sources.set(source, incoming);
       }
     }
     const evidence = [...sources.values()];
-    const signatures = new Set(evidence.map(applicabilitySignature));
-    const hasCrossSourceConflict = evidence.length > 1 && signatures.size > 1;
-    const rangeValues = new Set(evidence.map((entry) => stableJson(entry.versionRange)));
-    const hasConflictingRanges = rangeValues.size > 1;
-    const details = [...new Map(
-      evidence.flatMap((entry) => entry.cpeMatchDetails).map((detail) => [stableJson(detail), detail]),
-    ).values()].sort((a, b) => stableJson(a).localeCompare(stableJson(b)));
-    const cpeMatches = [...new Set([
-      ...evidence.flatMap((entry) => entry.cpeMatches),
-      ...details.map((detail) => detail.criteria),
-    ])].sort();
-    const purls = [...new Set(evidence.flatMap((entry) => entry.purls || []))].sort();
     const sourceApplicability = Object.fromEntries([...sources.entries()].sort(([a], [b]) => a.localeCompare(b)));
     merged.set(cveId, {
       ...winner,
-      cpeMatches,
-      cpeMatchDetails: details,
-      purls: purls.length ? purls : undefined,
-      versionRange: hasConflictingRanges ? undefined : evidence.find((entry) => entry.versionRange)?.versionRange,
+      ...aggregateApplicability(evidence, equalRevisionConflicts.length > 0),
       sourceFeeds: [...new Set([...old.sourceFeeds, ...candidate.sourceFeeds])].sort(),
-      applicabilityRequiresReview:
-        evidence.some((entry) => entry.applicabilityRequiresReview) ||
-        hasCrossSourceConflict ||
-        equalRevisionConflicts.length > 0 ||
-        hasConflictingRanges,
-      applicabilityPolicy: evidence.some((entry) => entry.applicabilityPolicy === 'REVIEW_ONLY')
-        ? 'REVIEW_ONLY'
-        : undefined,
       sourceApplicability,
     });
   }

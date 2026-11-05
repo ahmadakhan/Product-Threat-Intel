@@ -1,15 +1,19 @@
-FROM node:22-alpine AS build
+FROM node:22-alpine3.22 AS build
+RUN apk upgrade --no-cache
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
 RUN npm run lint && npm run build
 
-FROM node:22-alpine AS runtime
+FROM node:22-alpine3.22 AS runtime
 ENV NODE_ENV=production PORT=8080
+RUN apk upgrade --no-cache
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev && npm cache clean --force \
+	&& rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+	&& rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/server-dist ./server-dist
 RUN mkdir -p /var/lib/vulnstream/deadletters /var/lib/vulnstream/ml && chown -R node:node /var/lib/vulnstream

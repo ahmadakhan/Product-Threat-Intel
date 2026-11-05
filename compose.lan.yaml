@@ -7,8 +7,7 @@ services:
           memory: 3G
   app:
     environment:
-      APP_ORIGIN: ${APP_ORIGIN:?Set a private LAN HTTP origin}
-      ALLOW_INSECURE_HTTP: 'true'
+      APP_ORIGIN: ${APP_ORIGIN:?Set an HTTPS origin for the LAN deployment}
       TRUST_PROXY: ''
     deploy:
       replicas: 1
@@ -22,11 +21,15 @@ services:
       TAILSCALE_ADDRESS: ${TAILSCALE_ADDRESS:?Set a Tailscale IPv4 address}
     volumes: !override
       - ./deploy/Caddyfile.lan:/etc/caddy/Caddyfile:ro
+      - ./.runtime/lan-tls.crt:/etc/caddy/lan-tls.crt:ro
+      - ./.runtime/lan-tls.key:/etc/caddy/lan-tls.key:ro
       - caddy-data:/data
       - caddy-config:/config
     ports: !override
       - "${LAN_BIND_ADDRESS:?Set a private LAN IPv4 address}:80:80"
+      - "${LAN_BIND_ADDRESS:?Set a private LAN IPv4 address}:443:443"
       - "${TAILSCALE_ADDRESS:?Set a Tailscale IPv4 address}:80:80"
+      - "${TAILSCALE_ADDRESS:?Set a Tailscale IPv4 address}:443:443"
     deploy:
       resources:
         limits:

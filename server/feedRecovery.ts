@@ -96,16 +96,12 @@ export function shouldStartAutomaticRun(
   input: {
     schedulerEnabled: boolean;
     recoveryProbeDue: boolean;
-    catchupDue: boolean;
     lastRun?: string | null;
     intervalMinutes: number;
   },
   now = Date.now(),
 ): boolean {
-  if (input.recoveryProbeDue) return true;
-  return input.schedulerEnabled && (
-    input.catchupDue ||
-    !input.lastRun ||
-    now - Date.parse(input.lastRun) >= input.intervalMinutes * 60000
-  );
+  if (!input.schedulerEnabled) return input.recoveryProbeDue;
+  const lastRun = input.lastRun ? Date.parse(input.lastRun) : NaN;
+  return !Number.isFinite(lastRun) || now - lastRun >= input.intervalMinutes * 60000;
 }

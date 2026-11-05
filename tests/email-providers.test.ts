@@ -318,16 +318,19 @@ test(
       assert.equal((await get<EmailConfiguration>(pool, 'emailConfig', 'main'))?.apiKey, stored.apiKey);
       assert.equal((await command({ ...settings, provider: 'POSTMARK', apiKey: '' })).status, 400);
       assert.equal((await command({ ...settings, fromName: 'Injected\r\nHeader' })).status, 400);
+      const liveTemplateHtml = '<html><body><h1>Live Studio Draft</h1><p>Unsubmitted preview content.</p></body></html>';
       const queued = await admin
         .post('/api/test-email')
         .set('Origin', config.APP_ORIGIN)
         .set('x-csrf-token', csrf)
-        .send({ email: job.payload.recipientEmail });
+        .send({ email: job.payload.recipientEmail, html: liveTemplateHtml });
       assert.equal(queued.status, 202);
       const queuedPayload = (await pool.query('SELECT payload FROM outbox')).rows[0].payload;
       assert.match(queuedPayload.subject, /^\[ADV-TEST\]/);
       assert.match(queuedPayload.text, /Advisory ID: ADV-TEST/);
       assert.match(queuedPayload.html, /ADV-TEST/);
+      assert.match(queuedPayload.html, /Live Studio Draft/);
+      assert.match(queuedPayload.html, /Unsubmitted preview content/);
       assert.ok(!queuedPayload.html.includes('{{advisory_id}}'));
       assert.equal(await deliverNext(pool, config, request, createMailSender(config, pool, request)), true);
       const logs = await list<EmailDeliveryLog>(pool, 'emailLogs');

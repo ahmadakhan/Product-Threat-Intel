@@ -97,7 +97,7 @@ export const TopHeader: React.FC = () => {
   return (
     <>
       <header className="ui-topbar border-b border-zinc-800/80 dark:border-zinc-800/80 light:border-zinc-200 bg-zinc-950/80 dark:bg-zinc-950/80 light:bg-white/80 backdrop-blur-md sticky top-0 z-20 transition-colors duration-200">
-        <div className="px-3 sm:px-6 py-3.5 flex items-center justify-between gap-2">
+        <div className="px-3 sm:px-6 py-2.5 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             <button
               type="button"
@@ -110,9 +110,6 @@ export const TopHeader: React.FC = () => {
               <Menu className="w-4 h-4" />
             </button>
             <div className="min-w-0">
-              <div className="text-[10px] font-mono text-zinc-500 uppercase font-semibold tracking-wider">
-                {meta.section}
-              </div>
               <div
                 className="text-sm sm:text-base font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 tracking-tight truncate"
                 aria-hidden="true"

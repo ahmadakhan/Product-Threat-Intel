@@ -65,6 +65,8 @@ export interface UnverifiableMatchPayload {
   findings: UnverifiableMatchFinding[];
   /** CVE identifiers referenced across the batch, de-duplicated and sorted. */
   cveIds: string[];
+  /** Workspace timezone used for publication/update timestamps in the rendered email. */
+  timezone?: string;
 }
 import { buildAliasMap, parseCPE23 } from '../src/utils/cpeMatcher';
 import { randomUUID, createHmac, createHash } from 'node:crypto';
@@ -1165,7 +1167,10 @@ export async function queueUnverifiableMatchNotification(
   }
   await db.query(`SELECT pg_advisory_xact_lock(hashtext($1), ${schemaLockKey})`, ['review-notifications']);
   const settings = { ...DEFAULT_SETTINGS, ...await get<AppSettings>(db, 'settings', 'main') };
-  const eligible = findings.filter((finding) => eligibleForReviewNotification(finding, settings) && !finding.reviewNotifiedAt);
+  const uniqueFindings = [...new Map(findings.map((finding) => [finding.id, finding])).values()];
+  const eligible = uniqueFindings.filter(
+    (finding) => eligibleForReviewNotification(finding, settings) && !finding.reviewNotifiedAt,
+  );
   const selected = recipients.filter(
     (r) => r.enabled && (r.deliveryGroup === 'SECURITY_TEAM' || r.deliveryGroup === undefined),
   );
@@ -1250,7 +1255,7 @@ export async function queueUnverifiableMatchNotification(
     const findingIds = [...ownIds].sort();
     const findingRevisions = Object.fromEntries(ownFindings.map((finding) => [finding.id, findingRevision(finding)]));
     const cveRevisions = Object.fromEntries(ownFindings.map((finding) => [finding.cveId, revision(finding.cve)]));
-    const { subject, text, html } = renderUnverifiableReviewEmail(ownFindings);
+    const { subject, text, html } = renderUnverifiableReviewEmail(ownFindings, settings.timezone);
     const batchRevision = createHash('sha256').update(stableJson({ findingRevisions, cveRevisions, html })).digest('hex');
     const contentRevision = `${findingIds.join(',')}:${batchRevision}`;
     const identity = `unverifiable:${findingIds.join(',')}:${contentRevision}`;
@@ -1268,7 +1273,7 @@ export async function queueUnverifiableMatchNotification(
           findingRevisions,
           cveRevisions,
           contentRevision,
-          unverifiableMatch: { findings: ownLines, cveIds },
+          unverifiableMatch: { findings: ownLines, cveIds, timezone: settings.timezone },
           recipientEmail: recipient.email,
         },
         `${identity}:email:${recipient.id}`,

@@ -1,13 +1,16 @@
-import type { Finding } from '../../src/types/index.ts';
+import type { FeedType, Finding } from '../../src/types/index.ts';
 import { findingFeatures } from './findingFeatures.ts';
 import {
   cpePreFilter, predictAliasConfidence, predictExploitRisk, predictMatchConfidence,
   predictRemediation, predictSeverityTier, rankReviewFindings,
 } from './integration.ts';
 
-export function assessFinding(finding: Finding): Finding {
+export function assessFinding(
+  finding: Finding,
+  feedTypesById?: ReadonlyMap<string, FeedType>,
+): Finding {
   const cve = finding.cve;
-  const common = findingFeatures(finding);
+  const common = findingFeatures(finding, feedTypesById);
   // Recommendations never replace the parser's applicability, VEX, or operator dispatch policy.
   return {
     ...finding,
@@ -30,6 +33,12 @@ export function assessFinding(finding: Finding): Finding {
   };
 }
 
-export function assessFindings(findings: Finding[]): Finding[] {
-  return rankReviewFindings(findings.map(assessFinding));
+export function assessFindings(
+  findings: Finding[],
+  feedTypesById?: ReadonlyMap<string, FeedType>,
+): Finding[] {
+  return rankReviewFindings(
+    findings.map((finding) => assessFinding(finding, feedTypesById)),
+    feedTypesById,
+  );
 }

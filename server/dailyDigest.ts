@@ -156,7 +156,7 @@ const buildDailyDigestAdvisory = (findings: Finding[], settings: AppSettings, da
   const severityCounts = countSeverities(findings);
   return {
     id: `${settings.advisoryPrefix}DAILY_${dateKey.replace(/-/g, '')}`,
-    title: `Daily Vulnerability Digest — ${formatDigestDate(dateKey)}`,
+    title: `Daily Vulnerability Notification — ${formatDigestDate(dateKey)}`,
     severity,
     cveIds,
     findingIds: findings.map((finding) => finding.id),

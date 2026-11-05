@@ -1153,6 +1153,9 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
           assert.match(job.payload.text, /Findings:/);
         }
         const all = jobs.find((job) => job.target_id === 'ALL_SEVERITIES')!;
+        assert.match(all.payload.subject, /Vulnerability Notification:/);
+        assert.equal((all.payload.html.match(/border-left:4px solid #f59e0b/g) || []).length, 1);
+        assert.equal((all.payload.html.match(/border-left:4px solid #10b981/g) || []).length, 1);
         assert.match(all.payload.text, new RegExp(high.cveId));
         assert.match(all.payload.text, new RegExp(low.cveId));
 
@@ -1517,6 +1520,10 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       await run();
       const [matched] = await list<Finding>(pool, 'findings');
       assert.equal(matched.notificationStatus, 'QUEUED_FOR_DISPATCH');
+      const producingRun = (
+        await pool.query("SELECT id FROM records WHERE kind='executions' ORDER BY updated_at DESC LIMIT 1")
+      ).rows[0];
+      assert.equal(matched.executionId, producingRun.id);
       await save('settings', 'main', {
         ...DEFAULT_SETTINGS,
         timezone: 'UTC',
@@ -1537,7 +1544,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       assert.deepEqual(job.payload.cveIds, [cve.cveId]);
       assert.ok(job.payload.cveRevisions[cve.cveId]);
       assert.ok(job.payload.findingRevisions[matched.id]);
-      assert.match(job.payload.subject, /Daily Vulnerability Digest/);
+      assert.match(job.payload.subject, /Daily Vulnerability Notification/);
       assert.match(job.payload.text, /CVE-2026-98001/);
       let transports = 0;
       assert.equal(

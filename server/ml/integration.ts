@@ -17,7 +17,7 @@
  */
 import { createMlRuntime, type MlRuntime } from './factory.ts';
 import type { ModelStorageOptions, TrainableModel, ModelMetadata, PredictionResult, FeedbackSignal, TrainingSample } from './types.ts';
-import type { AppSettings, Advisory, RemediationPlaybook, Finding } from '../../src/types/index.ts';
+import type { AppSettings, Advisory, RemediationPlaybook, Finding, FeedType } from '../../src/types/index.ts';
 import type { MetricFeatures as TelemetryMetric } from './models/metricAnomalyDetector.ts';
 import { extractMetricFeatures } from './models/metricAnomalyDetector.ts';
 import { extractFindingFeatures } from './models/reviewRanker.ts';
@@ -157,7 +157,10 @@ export function shouldAutoDispatch(confidence: number, settings: Pick<AppSetting
  *
  * Falls back to sorting by match confidence when untrained.
  */
-export function rankReviewFindings(findings: Finding[]): Finding[] {
+export function rankReviewFindings(
+  findings: Finding[],
+  feedTypesById?: ReadonlyMap<string, FeedType>,
+): Finding[] {
   const model = ctx.runtime?.reviewRanker;
   if (!model?.isTrained()) {
     void logMlEvent('ml.review_rank.fallback', 'Review ranker untrained — sorting by confidence', {
@@ -166,7 +169,7 @@ export function rankReviewFindings(findings: Finding[]): Finding[] {
     return [...findings].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
   }
 
-  const features = findings.map((f) => extractFindingFeatures(findingFeatures(f)));
+  const features = findings.map((f) => extractFindingFeatures(findingFeatures(f, feedTypesById)));
 
   const predictions = model.predictBatch(features);
   void logMlEvent('ml.review_rank', 'Review findings ranked by true-positive probability', {

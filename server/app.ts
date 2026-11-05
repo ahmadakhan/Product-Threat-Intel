@@ -43,7 +43,7 @@ import { runRetention, previewRetention } from './retention';
 import { buildAliasMap } from '../src/utils/cpeMatcher.ts';
 import { runCpeSimulation } from '../src/utils/cpeSimulation.ts';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine.ts';
-import { HttpError } from './validation';
+import { feedSchema, HttpError, webhookSchema } from './validation';
 import { applyCommand, assertCommandRole } from './commands';
 import { checkPassword, passwordHash, decrypt, encryptionKeys, randomToken, secureEqual, tokenHash } from './secrets';
 import { createRequester, resolvePublic } from './network';
@@ -65,6 +65,7 @@ import {
 import { createHash } from 'node:crypto';
 import { stableJson } from '../src/utils/deduplicator.ts';
 import { advisoryEmail } from './advisoryEmail';
+import { currentAdvisoryBody } from './advisoryRebuild.ts';
 import { renderAdvisoryPdf } from './pdf';
 import {
   effectiveSubject,
@@ -1758,6 +1759,7 @@ export function createApp(
             throw new HttpError(400, 'AlienVault OTX requires its subscribed-pulses API endpoint and an API key');
           testUrl.searchParams.set('limit', '1');
         }
+        const osvProbe = feed.type === 'OSV_API';
         const requestOptions =
           feed.type === 'NVD_API'
             ? { headers, timeoutMs: 25000, socketTimeoutMs: 20000, maxResponseBytes: 256 * 1024 }
@@ -1779,7 +1781,17 @@ export function createApp(
                         socketTimeoutMs: Math.min((feed.requestTimeoutSeconds || 60) * 1000, 30000),
                         maxResponseBytes: 8 * 1024 * 1024,
                       }
-                  : { headers };
+                    : osvProbe
+                      ? {
+                          method: 'POST' as const,
+                          headers: { ...headers, 'content-type': 'application/json' },
+                          body: JSON.stringify({
+                            queries: [{ package: { purl: 'pkg:npm/vulnstream-connectivity-check@1.0.0' } }],
+                          }),
+                          timeoutMs: 25000,
+                          maxResponseBytes: 256 * 1024,
+                        }
+                      : { headers };
         response = await request(testUrl.href, requestOptions);
         if (response.status >= 200 && response.status < 300) {
           if (feed.type === 'RSS_ATOM') parseSyndication(response.body, feed.id, 2880);
@@ -1796,6 +1808,14 @@ export function createApp(
             if (feed.type === 'OTX_API') {
               const page = parseOtxPulsePage(data, feed.id, Number.NEGATIVE_INFINITY);
               if (page.next) validateOtxNextUrl(page.next, testUrl.href);
+            }
+            if (osvProbe) {
+              const result = (data as { results?: unknown })?.results;
+              if (!Array.isArray(result) || result.length !== 1 || !result[0] || typeof result[0] !== 'object')
+                throw new Error('OSV querybatch returned an invalid response');
+              const vulns = (result[0] as { vulns?: unknown }).vulns;
+              if (vulns !== undefined && !Array.isArray(vulns))
+                throw new Error('OSV querybatch returned an invalid response');
             }
           }
         }
@@ -1867,8 +1887,12 @@ export function createApp(
     '/api/test-email',
     requireRole('ADMIN'),
     asyncRoute(async (req, res) => {
-      const { email, forceReview } = z
-        .object({ email: z.email().max(254), forceReview: z.boolean().optional() })
+      const { email, forceReview, html } = z
+        .object({
+          email: z.email().max(254),
+          forceReview: z.boolean().optional(),
+          html: z.string().min(1).max(200_000).optional(),
+        })
         .parse(req.body);
       const id = await transaction(pool, async (db) => {
         const emailConfig =
@@ -1895,7 +1919,7 @@ export function createApp(
           'test',
           'TEST',
           {
-            ...advisoryEmail(testAdvisory, renderAdvisory(data.advisoryTemplate, testAdvisory)),
+            ...advisoryEmail(testAdvisory, html ?? renderAdvisory(data.advisoryTemplate, testAdvisory)),
             recipientEmail: email,
             cveIds: [],
           },
@@ -2458,30 +2482,45 @@ export function createApp(
         // on a scheduled retry can be sent now without losing its attempt
         // history. Jobs that are already due (or in flight) are left to the
         // worker so a manual retry cannot double-send.
-        const row = await db.query(
-          `WITH target AS (
-             SELECT id, status FROM outbox
-              WHERE id=$1 AND channel='email'
-                AND (status='FAILED' OR (status='QUEUED' AND next_attempt>now()))
-              FOR UPDATE
-           )
-           UPDATE outbox o
-              SET status='QUEUED',
-                  attempts=CASE WHEN target.status='FAILED' THEN 0 ELSE o.attempts END,
-                  next_attempt=now(),
-                  error=NULL,
-                  locked_at=NULL,
-                  lock_token=NULL,
-                  updated_at=now()
-             FROM target
-            WHERE o.id=target.id
-           RETURNING target.status AS "previousStatus", o.attempts, o.advisory_id`,
+        const target = await db.query<{
+          status: string;
+          attempts: number;
+          advisory_id: string | null;
+          payload: Record<string, unknown> | null;
+        }>(
+          `SELECT status, attempts, advisory_id, payload FROM outbox
+            WHERE id=$1 AND channel='email'
+              AND (status='FAILED' OR (status='QUEUED' AND next_attempt>now()))
+            FOR UPDATE`,
           [id],
         );
-        if (!row.rowCount) throw new HttpError(409, 'Only failed or scheduled deliveries may be retried');
-        const previousStatus = String(row.rows[0].previousStatus);
-        const attempts = Number(row.rows[0].attempts);
-        const advisoryId = String(row.rows[0].advisory_id);
+        if (!target.rowCount) throw new HttpError(409, 'Only failed or scheduled deliveries may be retried');
+        const queued = target.rows[0];
+        const previousStatus = queued.status;
+        const advisoryId = queued.advisory_id || '';
+        let payload = queued.payload || {};
+        const currentCardMarker = 'border:1px solid #e2e8f0;border-left:4px solid';
+        if (advisoryId && !String(payload.html || '').includes(currentCardMarker)) {
+          const advisory = await get<Advisory>(db, 'advisories', advisoryId);
+          if (advisory?.findingIds?.length) {
+            const findingRows = await getMany<Finding>(db, 'findings', advisory.findingIds);
+            const findings = advisory.findingIds
+              .map((findingId) => findingRows.get(findingId))
+              .filter((finding): finding is Finding => !!finding);
+            if (findings.length) {
+              const refreshedBody = await currentAdvisoryBody(db, advisory, findings);
+              if (refreshedBody.html) payload = { ...payload, html: refreshedBody.html };
+            }
+          }
+        }
+        const attempts = previousStatus === 'FAILED' ? 0 : Number(queued.attempts);
+        await db.query(
+          `UPDATE outbox
+              SET status='QUEUED', attempts=$2, next_attempt=now(), error=NULL,
+                  locked_at=NULL, lock_token=NULL, payload=$3::jsonb, updated_at=now()
+            WHERE id=$1`,
+          [id, attempts, JSON.stringify(payload)],
+        );
         const log = await getForUpdate<any>(db, 'emailLogs', id);
         if (log)
           await put(db, 'emailLogs', id, {
@@ -2984,18 +3023,17 @@ export function createApp(
       // check that rejects unknown actions before they reach the dispatcher.
       assertCommandRole(action, req.operator!.role);
       // Resolve URLs outside the database transaction. They are validated again at connection time.
-      if (['feed.save', 'webhook.save'].includes(action)) {
-        const url = (data as any)?.url;
-        if (typeof url !== 'string') throw new HttpError(400, 'URL required');
+      if (action === 'feed.save' || action === 'webhook.save') {
+        const feed = action === 'feed.save' ? feedSchema.parse(data) : undefined;
+        const webhook = action === 'webhook.save' ? webhookSchema.parse(data) : undefined;
+        const url = feed?.url ?? webhook?.url;
+        if (!url) throw new HttpError(400, 'URL required');
+        const configuredHosts = config.EGRESS_ALLOWED_HOSTS.split(',').map((s) => s.trim().toLowerCase());
+        const allowedHosts = feed
+          ? feedEgressHosts(feed.type, feed.url, configuredHosts)
+          : configuredHosts;
         try {
-          await resolvePublic(
-            new URL(url),
-            feedEgressHosts(
-              (data as { type?: unknown })?.type,
-              url,
-              config.EGRESS_ALLOWED_HOSTS.split(',').map((s) => s.trim().toLowerCase()),
-            ),
-          );
+          await resolvePublic(new URL(url), allowedHosts);
         } catch {
           throw new HttpError(
             400,
