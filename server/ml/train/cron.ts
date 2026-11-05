@@ -172,7 +172,11 @@ export async function runScheduledTraining(
     lockAcquired = true;
 
     const data = await dataCollector(client);
-    const orchestrator = new TrainingOrchestrator({ directory: options.directory, signingKey: options.signingKey });
+    const orchestrator = new TrainingOrchestrator({
+      directory: options.directory,
+      signingKey: options.signingKey,
+      database: options.database,
+    });
     const summary = await orchestrator.trainAll(data);
 
     // Log summary
@@ -227,6 +231,7 @@ export async function main(): Promise<void> {
     const summary = await runScheduledTraining(pool, {
       directory: mlDir,
       signingKey: process.env.ML_SIGNING_KEY,
+      ...(process.env.ML_STORAGE_MODE === 'database' ? { database: pool } : {}),
       lookbackDays,
     });
 

@@ -29,6 +29,7 @@ export async function grantRuntimePrivileges(db: Db, role = 'vulnstream_app'): P
     -- never produced and no advisory emails are queued.
     GRANT SELECT,INSERT,UPDATE,DELETE ON match_asset_index,match_cve_index TO ${target};
     GRANT SELECT,UPDATE ON correlation_policy TO ${target};
+    GRANT SELECT,INSERT,UPDATE,DELETE ON ml_model_artifacts TO ${target};
     GRANT USAGE,SELECT ON SEQUENCE audit_seq_seq,operational_events_id_seq TO ${target};
     GRANT EXECUTE ON FUNCTION consume_rate_limit_token(text,double precision,double precision) TO ${target};`);
 }

@@ -72,6 +72,20 @@ test('configuration rejects malformed database URLs and trust-all proxy settings
   assert.equal(loadConfig(baseEnv).TRUST_PROXY, '');
 });
 
+test('database storage modes are validated and retain filesystem defaults outside Compose', () => {
+  const defaults = loadConfig(baseEnv);
+  assert.equal(defaults.ML_STORAGE_MODE, 'filesystem');
+  assert.equal(defaults.CORRELATION_DLQ_STORAGE_MODE, 'filesystem');
+  const productionModes = loadConfig({
+    ...baseEnv,
+    ML_STORAGE_MODE: 'database',
+    CORRELATION_DLQ_STORAGE_MODE: 'database',
+  });
+  assert.equal(productionModes.ML_STORAGE_MODE, 'database');
+  assert.equal(productionModes.CORRELATION_DLQ_STORAGE_MODE, 'database');
+  assert.throws(() => loadConfig({ ...baseEnv, ML_STORAGE_MODE: 'invalid' }), /ML_STORAGE_MODE/);
+});
+
 test('the default egress allowlist covers every redirect target of the recommended feeds', () => {
   const hosts = new Set(loadConfig(baseEnv).EGRESS_ALLOWED_HOSTS.split(','));
   // Probed over the network: each of these answers the feed URL with a

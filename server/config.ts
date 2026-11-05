@@ -194,7 +194,9 @@ const schema = z.object({
   // world-readable on shared hosts. The DeadLetterQueue creates this directory
   // with mode 0o700 at startup.
   CORRELATION_DLQ_DIRECTORY: z.string().default('data/correlation-dlq'),
+  CORRELATION_DLQ_STORAGE_MODE: z.enum(['database', 'filesystem']).default('filesystem'),
   ML_DIRECTORY: z.string().default('/var/lib/vulnstream/ml'),
+  ML_STORAGE_MODE: z.enum(['database', 'filesystem']).default('filesystem'),
   ML_SIGNING_KEY: z.string().optional(),
   ML_LOOKBACK_DAYS: z.coerce.number().int().min(1).max(90).default(7),
   // Controls stdout verbosity for structured operational logs. 'standard' keeps

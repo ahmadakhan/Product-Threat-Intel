@@ -68,11 +68,12 @@ export class CorrelationRuntime {
       intervalSeconds: number;
       logLevel?: 'standard' | 'verbose';
       scheduledStateRefreshIntervalSeconds?: number;
+      deadLetterStorageMode?: 'database' | 'filesystem';
     } = { url: '', intervalSeconds: 60 },
   ) {
     const telemetry = new CorrelationTelemetry();
     telemetry.verbosity = options.logLevel ?? 'standard';
-    const queue = new DeadLetterQueue(directory, keys, telemetry);
+    const queue = new DeadLetterQueue(directory, keys, telemetry, options.deadLetterStorageMode === 'database');
     this.supervisor = new PipelineSupervisor(pool, new AdvisoryIngestor(telemetry, queue));
     this.processor = new AdvisoryStreamProcessor(this.supervisor);
     this.heartbeat = new Heartbeat({
@@ -125,6 +126,9 @@ export class CorrelationRuntime {
       void this.refreshSchedulerState();
     }, this.scheduledStateRefreshIntervalSeconds * 1000);
     this.schedulerTimer.unref();
+  }
+  async flushLegacyDeadLetters(): Promise<void> {
+    await this.supervisor.ingestor.flushDeadLetters(this.pool);
   }
   private async refreshSchedulerState(): Promise<void> {
     try {

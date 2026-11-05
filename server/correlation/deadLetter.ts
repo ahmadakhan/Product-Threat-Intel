@@ -33,6 +33,7 @@ export class DeadLetterQueue {
     private readonly directory: string,
     private readonly keys: string[],
     private readonly telemetry: CorrelationTelemetry,
+    private readonly databaseOnly = false,
   ) {
     if (!keys.length || keys.some((key) => Buffer.from(key, 'base64').length !== 32))
       throw new Error('DLQ_KEY_REQUIRED');
@@ -51,7 +52,7 @@ export class DeadLetterQueue {
     errorCode: string,
     trackingId: string,
     pool: Pool,
-  ): Promise<'SPOOLED' | 'capacity'> {
+  ): Promise<'SPOOLED' | 'DATABASE' | 'capacity' | 'unavailable'> {
     // JSON inputs from HTTP/NDJSON are bounded upstream. Never serialize arbitrary
     // class instances, cycles, or unlimited object-mode inputs into the fallback.
     const serialized = boundedJson(raw) ?? '"[unsafe or oversized input omitted]"';
@@ -61,6 +62,24 @@ export class DeadLetterQueue {
       errorCode,
       encryptedPayload: encrypt(serialized, this.keys, 'correlation-dlq'),
     };
+    if (this.databaseOnly) {
+      try {
+        await pool.query(
+          timedQuery(
+            `INSERT INTO correlation_dead_letters(id,tracking_id,error_code,encrypted_payload)
+             VALUES($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING`,
+            [letter.id, letter.trackingId, letter.errorCode, letter.encryptedPayload],
+            2000,
+          ),
+        );
+        this.telemetry.deadLetters++;
+        this.telemetry.log('WARN', 'dead_letter.persisted_database', { trackingId });
+        return 'DATABASE';
+      } catch {
+        this.telemetry.log('CRITICAL', 'dead_letter.database_unavailable', { trackingId });
+        return 'unavailable';
+      }
+    }
     const persist = async (): Promise<'SPOOLED' | 'capacity'> => {
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
       const files = await readdir(this.directory);
@@ -142,7 +161,7 @@ export class DeadLetterQueue {
       return false;
     }
   }
-  async flush(pool: Pool): Promise<void> {
+  async flush(pool: Pool): Promise<number> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const files = (await readdir(this.directory))
       .filter((file) => /^[a-f0-9-]{36}\.json$/.test(file))
@@ -223,5 +242,6 @@ export class DeadLetterQueue {
       }
     }
     this.telemetry.deadLetterSpoolFiles = spoolEntryCount(await readdir(this.directory));
+    return flushed;
   }
 }

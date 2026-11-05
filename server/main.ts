@@ -45,6 +45,11 @@ import { reconcileRecommendedFeeds } from './feedBootstrap.ts';
 
 const config = loadConfig(),
   pool = createPool(config.DATABASE_URL);
+const mlStorageOptions = {
+  directory: config.ML_DIRECTORY,
+  signingKey: config.ML_SIGNING_KEY,
+  ...(config.ML_STORAGE_MODE === 'database' ? { database: pool } : {}),
+};
 const VERBOSE = config.LOG_LEVEL === 'verbose';
 const verboseLog = (event: string, context: Record<string, unknown> = {}) => {
   if (VERBOSE) console.log(JSON.stringify({ level: 'info', event, ...context }));
@@ -103,15 +108,15 @@ const request = createRequester(config),
       intervalSeconds: config.HEARTBEAT_INTERVAL_SECONDS,
       logLevel: config.LOG_LEVEL === 'verbose' ? 'verbose' : 'standard',
       scheduledStateRefreshIntervalSeconds: 60,
+      deadLetterStorageMode: config.CORRELATION_DLQ_STORAGE_MODE,
     },
   );
+  if (config.CORRELATION_DLQ_STORAGE_MODE === 'database') await correlation.flushLegacyDeadLetters();
 if (config.WORKER_ENABLED === 'true') correlation.start();
 else correlation.supervisor.start();
 
-const mlRuntime = await initMlRuntime(pool, {
-  directory: config.ML_DIRECTORY,
-  signingKey: config.ML_SIGNING_KEY,
-}).catch((error) => { console.error('ML runtime init failed:', error); return undefined; });
+const mlRuntime = await initMlRuntime(pool, mlStorageOptions)
+  .catch((error) => { console.error('ML runtime init failed:', error); return undefined; });
 const app = createApp(pool, config, request, { correlation, mlRuntime,
   // The liveness probe only performs the stall check where the probe timeout is
   // comfortably above the block threshold; see the option's documentation.
@@ -510,6 +515,7 @@ const mlTrainingTick = () => {
     const summary = await runScheduledTraining(pool, {
       directory: config.ML_DIRECTORY,
       signingKey: config.ML_SIGNING_KEY,
+      ...(config.ML_STORAGE_MODE === 'database' ? { database: pool } : {}),
       lookbackDays: config.ML_LOOKBACK_DAYS,
     }).catch((error) => {
       // Release the claim on failure so the next tick (or another replica) can
@@ -528,7 +534,7 @@ const mlTrainingTick = () => {
     });
     if (!summary) return;
     if (summary.summary.saved > 0) {
-      await initMlRuntime(pool, { directory: config.ML_DIRECTORY, signingKey: config.ML_SIGNING_KEY });
+      await initMlRuntime(pool, mlStorageOptions);
     }
     await pool.query(
       "UPDATE records SET data=jsonb_set(data,'{\"lastRun\"}',to_jsonb(now())) || jsonb_build_object('claimedAt',NULL,'claimToken',NULL) WHERE kind='systemState' AND id=$1 AND data->>'claimToken'=$2",

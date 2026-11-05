@@ -9,8 +9,10 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, renameSync } from 'node:fs';
 import { createHmac } from 'node:crypto';
 import { join } from 'node:path';
+import type { Pool } from 'pg';
 import type { ModelArtifact, ModelMetadata, ModelRegistryEntry, ModelStorageOptions, TrainableModel, PredictionResult, FeedbackSignal } from './types.ts';
 import { secureEqual } from '../secrets.ts';
+import { transaction } from '../db.ts';
 
 interface ManifestArtifactEntry {
   version: string;
@@ -39,14 +41,18 @@ export class ModelRegistry {
   private manifest: ModelManifest = {};
   private directory: string;
   private signingKey: string | undefined;
+  private database?: Pool;
 
   constructor(options: ModelStorageOptions) {
     this.directory = options.directory;
     this.signingKey = options.signingKey;
-    if (!existsSync(this.directory)) {
-      mkdirSync(this.directory, { recursive: true });
+    this.database = options.database;
+    if (this.database) {
+      if (existsSync(this.directory)) this.loadManifest();
+    } else {
+      if (!existsSync(this.directory)) mkdirSync(this.directory, { recursive: true });
+      this.loadManifest();
     }
-    this.loadManifest();
   }
 
   private loadManifest(): void {
@@ -61,6 +67,7 @@ export class ModelRegistry {
   }
 
   private saveManifest(): void {
+    if (this.database) return;
     const path = join(this.directory, MANIFEST_FILE);
     // Atomic replace: a crash or full disk mid-write previously truncated the
     // manifest, which silently reset every model to "untrained" on next load.
@@ -114,6 +121,7 @@ export class ModelRegistry {
    * Returns false if no artifact exists or all artifacts fail to load.
    */
   async loadArtifact(model: { load(artifact: ModelArtifact): void }, modelId: string): Promise<boolean> {
+    if (this.database) return this.loadDatabaseArtifact(model, modelId);
     const entry = this.manifest[modelId];
     if (!entry) return false;
 
@@ -138,7 +146,170 @@ export class ModelRegistry {
      } catch {
        return this.rollback(model, modelId, 'LOAD_FAILURE');
      }
-   }
+  }
+
+  private async loadDatabaseArtifact(
+    model: { load(artifact: ModelArtifact): void },
+    modelId: string,
+  ): Promise<boolean> {
+    const database = this.database!;
+    let result = await database.query<{
+      version: string;
+      artifact: ModelArtifact | string;
+      status: ManifestArtifactEntry['status'];
+      rollback_trigger: string | null;
+    }>(
+      `SELECT version,artifact,status,rollback_trigger
+       FROM ml_model_artifacts WHERE model_id=$1 ORDER BY trained_at DESC,version DESC`,
+      [modelId],
+    );
+    if (!result.rows.length && this.manifest[modelId]) {
+      await this.migrateLegacyArtifacts(modelId);
+      result = await database.query(
+        `SELECT version,artifact,status,rollback_trigger
+         FROM ml_model_artifacts WHERE model_id=$1 ORDER BY trained_at DESC,version DESC`,
+        [modelId],
+      );
+    }
+    if (!result.rows.length) return false;
+
+    const artifacts = result.rows;
+    const active = artifacts.find((entry) => entry.status === 'ACTIVE');
+    if (active) {
+      try {
+        const artifact = typeof active.artifact === 'string'
+          ? JSON.parse(active.artifact) as ModelArtifact
+          : active.artifact;
+        if (!this.hasValidSignature(artifact)) throw new Error('INVALID_SIGNATURE');
+        model.load(artifact);
+        this.models.set(modelId, {
+          model: model as TrainableModel,
+          metadata: artifact.metadata,
+          loadedAt: new Date().toISOString(),
+          status: 'ACTIVE',
+        });
+        return true;
+      } catch {
+        await this.setDatabaseArtifactStatus(modelId, active.version, 'DEGRADED', 'LOAD_FAILURE');
+      }
+    }
+
+    for (const candidate of artifacts.filter((entry) => entry.status !== 'DEGRADED' && entry.version !== active?.version)) {
+      try {
+        const artifact = typeof candidate.artifact === 'string'
+          ? JSON.parse(candidate.artifact) as ModelArtifact
+          : candidate.artifact;
+        if (!this.hasValidSignature(artifact)) throw new Error('INVALID_SIGNATURE_ROLLBACK');
+        model.load(artifact);
+        await this.setDatabaseArtifactStatus(modelId, candidate.version, 'STANDBY_ROLLBACK');
+        this.models.set(modelId, {
+          model: model as TrainableModel,
+          metadata: artifact.metadata,
+          loadedAt: new Date().toISOString(),
+          status: 'STANDBY_ROLLBACK',
+        });
+        return true;
+      } catch {
+        await this.setDatabaseArtifactStatus(modelId, candidate.version, 'DEGRADED', 'INVALID_OR_UNLOADABLE_ROLLBACK');
+      }
+    }
+    return false;
+  }
+
+  private async migrateLegacyArtifacts(modelId: string): Promise<void> {
+    const manifestEntry = this.manifest[modelId];
+    if (!manifestEntry || !this.database) return;
+    const artifacts: Array<{ entry: ManifestArtifactEntry; artifact: ModelArtifact }> = [];
+    for (const entry of manifestEntry.artifacts) {
+      try {
+        const artifact = JSON.parse(readFileSync(join(this.directory, entry.path), 'utf8')) as ModelArtifact;
+        if (this.hasValidSignature(artifact)) artifacts.push({ entry, artifact });
+      } catch {
+        // A bad legacy artifact is not imported; remaining versions can still recover the model.
+      }
+    }
+    if (!artifacts.length) return;
+
+    await transaction(this.database, async (db) => {
+      const current = await db.query('SELECT 1 FROM ml_model_artifacts WHERE model_id=$1 LIMIT 1', [modelId]);
+      if (current.rows.length) return;
+      for (const { entry, artifact } of artifacts) {
+        const status = entry.version === manifestEntry.activeVersion
+          ? 'ACTIVE'
+          : entry.status === 'DEGRADED' ? 'DEGRADED' : 'STANDBY_ROLLBACK';
+        await db.query(
+          `INSERT INTO ml_model_artifacts(model_id,version,trained_at,artifact,status,rollback_trigger)
+           VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(model_id,version) DO NOTHING`,
+          [modelId, entry.version, entry.trainedAt, JSON.stringify(artifact), status, entry.rollbackTrigger ?? null],
+        );
+      }
+    }, undefined, { locks: [`ml-model-artifact:${modelId}`] });
+
+    for (const { entry } of artifacts) {
+      try {
+        unlinkSync(join(this.directory, entry.path));
+      } catch {
+        // The committed database copy is authoritative; cleanup is best effort.
+      }
+    }
+    delete this.manifest[modelId];
+    try {
+      if (Object.keys(this.manifest).length) {
+        writeFileSync(join(this.directory, MANIFEST_FILE), JSON.stringify(this.manifest, null, 2), 'utf8');
+      } else {
+        unlinkSync(join(this.directory, MANIFEST_FILE));
+      }
+    } catch {
+      // Stale legacy metadata is harmless after every artifact has been stored in PostgreSQL.
+    }
+  }
+
+  private async setDatabaseArtifactStatus(
+    modelId: string,
+    version: string,
+    status: ManifestArtifactEntry['status'],
+    rollbackTrigger?: string,
+  ): Promise<void> {
+    await transaction(this.database!, async (db) => {
+      await db.query(
+        'UPDATE ml_model_artifacts SET status=$3,rollback_trigger=$4 WHERE model_id=$1 AND version=$2',
+        [modelId, version, status, rollbackTrigger ?? null],
+      );
+    }, undefined, { locks: [`ml-model-artifact:${modelId}`] });
+  }
+
+  private async persistDatabaseArtifact(modelId: string, artifact: ModelArtifact): Promise<void> {
+    await transaction(this.database!, async (db) => {
+      await db.query(
+        "UPDATE ml_model_artifacts SET status='STANDBY_ROLLBACK' WHERE model_id=$1 AND status='ACTIVE'",
+        [modelId],
+      );
+      await db.query(
+        `INSERT INTO ml_model_artifacts(model_id,version,trained_at,artifact,status)
+         VALUES($1,$2,$3,$4,'ACTIVE')
+         ON CONFLICT(model_id,version) DO UPDATE SET trained_at=EXCLUDED.trained_at,
+           artifact=EXCLUDED.artifact,status='ACTIVE',rollback_trigger=NULL`,
+        [modelId, artifact.metadata.version, artifact.metadata.trainedAt, JSON.stringify(artifact)],
+      );
+      await db.query(
+        `DELETE FROM ml_model_artifacts WHERE model_id=$1 AND version NOT IN (
+           SELECT version FROM ml_model_artifacts WHERE model_id=$1
+           ORDER BY trained_at DESC,version DESC LIMIT $2
+         )`,
+        [modelId, MAX_ARTIFACTS_PER_MODEL],
+      );
+    }, undefined, { locks: [`ml-model-artifact:${modelId}`] });
+  }
+
+  private signArtifact(model: TrainableModel | { serialize: () => ModelArtifact }, metadata: ModelMetadata): ModelArtifact {
+    const artifact: ModelArtifact = { ...model.serialize(), metadata };
+    delete artifact.signature;
+    if (this.signingKey) {
+      const payload = JSON.stringify({ metadata: artifact.metadata, weights: artifact.weights }, null, 2);
+      artifact.signature = createHmac('sha256', this.signingKey).update(payload).digest('hex');
+    }
+    return artifact;
+  }
 
   private async rollback(
     model: { load(artifact: ModelArtifact): void },
@@ -208,17 +379,16 @@ export class ModelRegistry {
   }
 
   async save(model: TrainableModel, modelId: string, metadata: ModelMetadata): Promise<void> {
+    const artifact = this.signArtifact(model, metadata);
+    if (this.database) {
+      await this.persistDatabaseArtifact(modelId, artifact);
+      return;
+    }
     const dir = join(this.directory, modelId);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
-    const artifact: ModelArtifact = { ...model.serialize(), metadata };
-    delete artifact.signature;
     const filename = `${metadata.version}.json`;
     const path = join(dir, filename);
-    if (this.signingKey) {
-      const payload = JSON.stringify({ metadata: artifact.metadata, weights: artifact.weights }, null, 2);
-      artifact.signature = createHmac('sha256', this.signingKey).update(payload).digest('hex');
-    }
     writeFileSync(path, JSON.stringify(artifact, null, 2), 'utf8');
 
     const manifestEntry = this.manifest[modelId] ?? {
@@ -253,17 +423,16 @@ export class ModelRegistry {
    * implement TrainableModel but can serialize/load (e.g. AutoDispatchThresholdModel).
    */
   async saveArtifact(model: TrainableModel | { serialize: () => ModelArtifact }, modelId: string, metadata: ModelMetadata): Promise<void> {
-    const artifact = { ...model.serialize(), metadata };
-    delete artifact.signature;
+    const artifact = this.signArtifact(model, metadata);
+    if (this.database) {
+      await this.persistDatabaseArtifact(modelId, artifact);
+      return;
+    }
     const dir = join(this.directory, modelId);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
     const filename = `${metadata.version}.json`;
     const path = join(dir, filename);
-    if (this.signingKey) {
-      const payload = JSON.stringify({ metadata: artifact.metadata, weights: artifact.weights }, null, 2);
-      artifact.signature = createHmac('sha256', this.signingKey).update(payload).digest('hex');
-    }
     writeFileSync(path, JSON.stringify(artifact, null, 2), 'utf8');
 
     const manifestEntry = this.manifest[modelId] ?? {
@@ -386,7 +555,14 @@ export class ModelRegistry {
     return { promoted: true, challengerError: challengerAvgError };
   }
 
-  clear(modelId: string): void {
+  async clear(modelId: string): Promise<void> {
+    if (this.database) {
+      await transaction(this.database, async (db) => {
+        await db.query('DELETE FROM ml_model_artifacts WHERE model_id=$1', [modelId]);
+      }, undefined, { locks: [`ml-model-artifact:${modelId}`] });
+      this.models.delete(modelId);
+      return;
+    }
     const entry = this.manifest[modelId];
     if (!entry) return;
     for (const artifact of entry.artifacts) {

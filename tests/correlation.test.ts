@@ -266,6 +266,53 @@ test('a full dead-letter spool must not silently discard the advisory', async ()
   }
 });
 
+test('database-only dead-letter mode stores encrypted payloads without creating spool files', async () => {
+  const directory = join(tmpdir(), 'correlation-dlq-db-' + randomBytes(6).toString('hex'));
+  let inserted: unknown[] | undefined;
+  const pool = {
+    query: async (query: string | { text: string; values?: unknown[] }, values: unknown[] = []) => {
+      const sql = typeof query === 'string' ? query : query.text;
+      assert.match(sql, /INSERT INTO correlation_dead_letters/);
+      inserted = typeof query === 'string' ? values : query.values;
+      return { rows: [] };
+    },
+  } as unknown as pg.Pool;
+  const queue = new DeadLetterQueue(directory, [key], silent(), true);
+  try {
+    assert.equal(await queue.capture({ secret: 'private payload' }, 'VALIDATION_FAILED', randomUUID(), pool), 'DATABASE');
+    assert.ok(inserted);
+    assert.notEqual(inserted[3], JSON.stringify({ secret: 'private payload' }));
+    assert.deepEqual(await readdir(directory).catch(() => []), []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('database startup migration drains all bounded legacy dead-letter batches', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'correlation-dlq-migrate-'));
+  let inserted = 0;
+  const pool = {
+    query: async (query: string | { text: string; values?: unknown[] }) => {
+      const sql = typeof query === 'string' ? query : query.text;
+      assert.match(sql, /INSERT INTO correlation_dead_letters/);
+      inserted++;
+      return { rows: [] };
+    },
+  } as unknown as pg.Pool;
+  const telemetry = silent();
+  const queue = new DeadLetterQueue(directory, [key], telemetry);
+  const ingestor = new AdvisoryIngestor(telemetry, queue);
+  try {
+    for (let index = 0; index < 12; index++)
+      await queue.capture({ index }, 'VALIDATION_FAILED', randomUUID(), pool);
+    assert.equal(await ingestor.flushDeadLetters(pool), 12);
+    assert.equal(inserted, 12);
+    assert.equal((await readdir(directory)).filter((file) => file.endsWith('.json')).length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test(
   'native correlation transactions, schema coexistence and stream concurrency',
   { skip: !process.env.TEST_DATABASE_URL },

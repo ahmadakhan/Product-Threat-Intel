@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
@@ -265,6 +266,82 @@ describe('runScheduledTraining', () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('stores signed model versions in PostgreSQL and reloads the active version', async () => {
+    type Stored = { model_id: string; version: string; artifact: ModelArtifact; status: string };
+    const stored: Stored[] = [];
+    const query = async (sql: string, params: unknown[] = []) => {
+      if (sql.includes('SELECT version,artifact,status,rollback_trigger')) {
+        return { rows: stored.filter((row) => row.model_id === params[0]).map((row) => ({
+          version: row.version,
+          artifact: row.artifact,
+          status: row.status,
+          rollback_trigger: null,
+        })) };
+      }
+      if (sql.includes("UPDATE ml_model_artifacts SET status='STANDBY_ROLLBACK'")) {
+        for (const row of stored)
+          if (row.model_id === params[0] && row.status === 'ACTIVE') row.status = 'STANDBY_ROLLBACK';
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO ml_model_artifacts')) {
+        const [model_id, version, , rawArtifact] = params as [string, string, unknown, string];
+        const artifact = JSON.parse(rawArtifact) as ModelArtifact;
+        const current = stored.find((row) => row.model_id === model_id && row.version === version);
+        if (current) Object.assign(current, { artifact, status: 'ACTIVE' });
+        else stored.push({ model_id, version, artifact, status: 'ACTIVE' });
+        return { rows: [] };
+      }
+      if (sql.includes('DELETE FROM ml_model_artifacts')) {
+        const keep = Number(params[1]);
+        const versions = stored.filter((row) => row.model_id === params[0]).slice(-keep);
+        const retained = new Set(versions.map((row) => row.version));
+        for (let index = stored.length - 1; index >= 0; index--)
+          if (stored[index].model_id === params[0] && !retained.has(stored[index].version)) stored.splice(index, 1);
+        return { rows: [] };
+      }
+      return { rows: [] };
+    };
+    const poolClient = Object.assign(new EventEmitter(), { query, release: () => undefined });
+    const pool = { query, connect: async () => poolClient } as unknown as pgPool;
+    const directory = tmpDir();
+    const signingKey = 'database-model-test-key';
+    const metadata: ModelMetadata = {
+      id: 'database-probe',
+      type: 'logistic',
+      version: '1',
+      trainedAt: new Date().toISOString(),
+      featureSchema: [],
+      description: 'Database persistence test',
+    };
+    const model = { serialize: () => ({ metadata, weights: { value: 1 } }) };
+    const registry = new ModelRegistry({ directory, signingKey, database: pool });
+    await registry.saveArtifact(model, metadata.id, metadata);
+
+    const loaded: ModelArtifact[] = [];
+    assert.equal(await registry.loadArtifact({ load: (artifact) => loaded.push(artifact) }, metadata.id), true);
+    assert.equal(stored.length, 1);
+    assert.equal(stored[0].status, 'ACTIVE');
+    assert.equal(typeof loaded[0].signature, 'string');
+
+    const legacyDirectory = join(directory, 'legacy');
+    const legacyMetadata = { ...metadata, id: 'legacy-database-probe', version: '2' };
+    await new ModelRegistry({ directory: legacyDirectory, signingKey }).saveArtifact(
+      { serialize: () => ({ metadata: legacyMetadata, weights: { value: 2 } }) },
+      legacyMetadata.id,
+      legacyMetadata,
+    );
+    const migrated = new ModelRegistry({ directory: legacyDirectory, signingKey, database: pool });
+    const legacyLoaded: ModelArtifact[] = [];
+    assert.equal(
+      await migrated.loadArtifact({ load: (artifact) => legacyLoaded.push(artifact) }, legacyMetadata.id),
+      true,
+    );
+    assert.equal(stored.find((row) => row.model_id === legacyMetadata.id)?.status, 'ACTIVE');
+    assert.equal(fs.existsSync(join(legacyDirectory, legacyMetadata.id, `${legacyMetadata.version}.json`)), false);
+    assert.equal(fs.existsSync(join(legacyDirectory, 'model-manifest.json')), false);
+    await fs.promises.rm(directory, { recursive: true, force: true });
   });
 
   it('skips models when database has no training data', async () => {

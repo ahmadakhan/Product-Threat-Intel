@@ -44,6 +44,7 @@ services:
       APP_ORIGIN: https://${APP_HOST:?Set public hostname}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set a base64 32-byte encryption key}
       ENCRYPTION_KEYS: ${ENCRYPTION_KEYS:-}
+      ML_SIGNING_KEY: ${ML_SIGNING_KEY:-}
       EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS-raw.githubusercontent.com,services.nvd.nist.gov,api.osv.dev,www.googleapis.com,www.cisa.gov,cisa.gov,api.first.org,api.github.com,app.opencve.io,api.vulncheck.com,otx.alienvault.com,send.api.mailtrap.io,sandbox.api.mailtrap.io,api.sendgrid.com,smtp.sendgrid.net,api.postmarkapp.com,smtp.maileroo.com,smtp.lettr.com,api.mailgun.net,api.eu.mailgun.net,in-v3.mailjet.com,api.mailjet.com,smtp.gmail.com,www.bleepingcomputer.com,isc.sans.edu,api.msrc.microsoft.com,www.fortiguard.com,filestore.fortinet.com,www.kb.cert.org,kb.cert.org,thehackernews.com,feeds.feedburner.com,www.securityweek.com,www.rapid7.com,googleprojectzero.blogspot.com,projectzero.google,krebsonsecurity.com,tools.cisco.com,sec.cloudapps.cisco.com,security.paloaltonetworks.com,labs.watchtowr.com,www.talosintelligence.com,blog.talosintelligence.com,www.thezdi.com,www.exploit-db.com,www.debian.org,www.cisecurity.com,cisecurity.com,cisecurity.org,www.cisecurity.org,seclists.org,blog.sucuri.net,www.welivesecurity.com,wordpress.org,www.darkreading.com,blog.google,cloud.google.com,docs.cloud.google.com,workspace.google.com,www.greynoise.io,www.malwarebytes.com,cloudblog.withgoogle.com,www.sophos.com,therecord.media,blog.twitter.com,blog.x.com,github.com,github.blog,www.pentestpartners.com,www.forbes.com,www.theregister.com,api.theregister.com,news.google.com,www.cve.org,cve.org,support.apple.com,helpx.adobe.com,access.redhat.com,security.redhat.com,usn.ubuntu.com,www.crowdstrike.com,crowdstrike.com,securelist.com,www.securelist.com}
       # Redirect targets of the feeds above (for example www.cisecurity.com ->
       # cisecurity.org -> www.cisecurity.org). Each hop is re-validated against
@@ -59,8 +60,11 @@ services:
       METRICS_TOKEN: ${METRICS_TOKEN:-}
       WORKER_ENABLED: 'true'
       CORRELATION_DLQ_DIRECTORY: /var/lib/vulnstream/deadletters
+      CORRELATION_DLQ_STORAGE_MODE: database
       ML_DIRECTORY: /var/lib/vulnstream/ml
+      ML_STORAGE_MODE: database
     volumes:
+      # Legacy sources are imported and pruned after their PostgreSQL copy commits.
       - correlation-deadletters:/var/lib/vulnstream/deadletters
       - ml-models:/var/lib/vulnstream/ml
     deploy:

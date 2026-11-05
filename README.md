@@ -6,6 +6,10 @@ Vulnerability inventory correlation and advisory delivery with a React interface
 
 Requires Docker Compose, a public hostname pointing to the host, ports 80/443 available, and outbound access to configured feeds and SMTP. The included Caddy proxy obtains HTTPS certificates. PostgreSQL and the application are not published directly.
 
+For a new Linux host with Docker Engine, Docker Compose v2, and Bash already installed, run `bash ./install.sh`. The installer generates protected database/encryption/metrics secrets, starts PostgreSQL and waits for migrations before starting the application, then prompts for the initial administrator password. It refuses to overwrite an existing `.env.production`.
+
+Products, threat feeds, settings, users, findings, queues, audit events, dead letters, and ML model versions are persisted in PostgreSQL. Existing ML artifacts and dead-letter spool files on the legacy named volumes are imported into PostgreSQL on first startup in database mode; the source files are removed after the database copy succeeds. Caddy certificates/configuration and optional Prometheus metrics remain in their own infrastructure volumes.
+
 1. Copy `.env.example` to `.env.production` and restrict it with `chmod 600 .env.production`.
 2. Set `APP_HOST`, two different random hexadecimal database passwords, and a random 32-byte base64 `ENCRYPTION_KEY`. Generation commands are in the example. Retain the encryption key in your secret manager: losing it makes saved feed/webhook credentials unrecoverable.
 3. Configure SMTP and add any custom SMTP, feed, or webhook hostname to `EGRESS_ALLOWED_HOSTS`. Feed/webhook endpoints must use public HTTPS on port 443; SMTP hosts use TLS or STARTTLS on the configured SMTP port. Secrets belong in credential fields, not feed URLs.

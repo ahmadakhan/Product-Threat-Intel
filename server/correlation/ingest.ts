@@ -45,6 +45,15 @@ export class AdvisoryIngestor {
     readonly deadLetterQueue: DeadLetterQueue,
     private readonly engine = new TextCorrelationEngine(),
   ) {}
+  async flushDeadLetters(pool: Pool): Promise<number> {
+    let totalFlushed = 0;
+    for (let batch = 0; batch < 26; batch++) {
+      const flushed = await this.deadLetterQueue.flush(pool);
+      totalFlushed += flushed;
+      if (flushed < 10) break;
+    }
+    return totalFlushed;
+  }
   /** Refresh from the settings record at most once per second. */
   private async refreshVerbosity(pool: Pool): Promise<void> {
     const now = Date.now();
@@ -423,14 +432,16 @@ export class AdvisoryIngestor {
     trackingId: string,
     dbPool: Pool,
   ): Promise<boolean> {
+    let outcome: 'SPOOLED' | 'DATABASE' | 'capacity' | 'unavailable' = 'capacity';
     try {
-      const outcome = await this.deadLetterQueue.capture(raw, errorCode, trackingId, dbPool);
-      if (outcome === 'SPOOLED') return true;
+      outcome = await this.deadLetterQueue.capture(raw, errorCode, trackingId, dbPool);
+      if (outcome === 'SPOOLED' || outcome === 'DATABASE') return true;
     } catch (error) {
       this.telemetry.log('CRITICAL', 'dead_letter.spool_failed', { trackingId });
     }
-    if (await this.deadLetterQueue.captureToDatabase(raw, errorCode, trackingId, dbPool)) return true;
-    // Both stores are unavailable. This is the only remaining loss window, so
+    if (outcome !== 'unavailable' &&
+      await this.deadLetterQueue.captureToDatabase(raw, errorCode, trackingId, dbPool)) return true;
+    // The durable store is unavailable. This is the only remaining loss window, so
     // the caller must NOT treat the record as durably handled. It is logged at
     // CRITICAL with enough identifiers to reconstruct the record from the
     // source feed, and the ingest outcome is UNDURABLE so a pending row is not

@@ -7,6 +7,7 @@
  * - Training is offline; inference runs in-process during pipeline ticks.
  * - Every model carries a version + trainedAt timestamp for rollback safety.
  */
+import type { Pool } from 'pg';
 
 export type ModelType =
   | 'logistic'
@@ -107,11 +108,13 @@ export interface Scaler {
   getFeatureNames(): string[];
 }
 
-/** Options for the local persistence layer. */
+/** Options for model persistence. Production may store artifacts in PostgreSQL. */
 export interface ModelStorageOptions {
   directory: string;
   /** HMAC-SHA256 key used to sign artifacts on save and verify on load. */
   signingKey?: string;
+  /** When set, model artifacts and rollback state are persisted in PostgreSQL. */
+  database?: Pool;
 }
 
 /**
