@@ -38,6 +38,20 @@ case "$APP_HOST" in
     ;;
 esac
 
+printf 'Initial administrator password (14-128 characters): '
+IFS= read -r -s ADMIN_PASSWORD
+printf '\n'
+if [ "${#ADMIN_PASSWORD}" -lt 14 ] || [ "${#ADMIN_PASSWORD}" -gt 128 ]; then
+  printf '%s\n' 'The administrator password must contain 14-128 characters.' >&2
+  exit 1
+fi
+case "$ADMIN_PASSWORD" in
+  *[[:space:]])
+    printf '%s\n' 'The administrator password cannot end with whitespace.' >&2
+    exit 1
+    ;;
+esac
+
 POSTGRES_PASSWORD=$(openssl rand -hex 32)
 APP_DB_PASSWORD=$(openssl rand -hex 32)
 ENCRYPTION_KEY=$(openssl rand -base64 32 | tr -d '\n')
@@ -71,16 +85,9 @@ chmod 600 .runtime/metrics.token
 unset POSTGRES_PASSWORD APP_DB_PASSWORD ENCRYPTION_KEY METRICS_TOKEN ML_SIGNING_KEY
 
 docker compose --env-file .env.production config --quiet
-docker compose --env-file .env.production up -d --build --scale app=2
+docker compose --env-file .env.production up -d --build --scale app=2 --wait --wait-timeout 300
 
-printf 'Initial administrator password: '
-IFS= read -r -s ADMIN_PASSWORD
-printf '\n'
-if [ -z "$ADMIN_PASSWORD" ]; then
-  printf '%s\n' 'A non-empty administrator password is required.' >&2
-  exit 1
-fi
-printf '%s' "$ADMIN_PASSWORD" | docker compose --env-file .env.production run --rm --no-deps -T app \
+printf '%s' "$ADMIN_PASSWORD" | docker compose --env-file .env.production exec -T app \
   node server-dist/create-user.js admin ADMIN
 unset ADMIN_PASSWORD
 
