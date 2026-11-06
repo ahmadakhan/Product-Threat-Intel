@@ -153,6 +153,7 @@ test(
       WORKER_ENABLED: 'false',
       ATTACH_ADVISORY_PDF: 'false',
       EGRESS_ALLOWED_HOSTS: 'api.sendgrid.com',
+      MAIL_CONFIRM_BEFORE_SEND: 'false',
     });
     const cpe = 'cpe:2.3:a:example:widget:1.5:*:*:*:*:*:*:*';
     const asset: WatchListItem = {
@@ -262,7 +263,7 @@ test(
         'confirm-lookup',
       );
       assert.ok(jobId);
-      await pool.query('UPDATE outbox SET attempts=2 WHERE id=$1', [jobId]);
+      await pool.query('UPDATE outbox SET attempts=2, review_approved=true WHERE id=$1', [jobId]);
 
       // Round 1: the provider reports the message with no terminal event, so the
       // outcome is unresolved and the job must be deferred, not sent or failed.

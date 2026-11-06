@@ -168,9 +168,8 @@ const schema = z.object({
   // Rendering converts advisory HTML to text and generates a PDF server-side;
   // set ATTACH_ADVISORY_PDF=false to deliver HTML-only messages.
   ATTACH_ADVISORY_PDF: z.enum(['true', 'false']).default('true'),
-  // Before re-sending an email whose previous attempt failed with an unknown
-  // outcome, ask the provider whether it already delivered the message. Prevents
-  // duplicate advisories when a send succeeded but its response was lost.
+  // Deprecated compatibility setting. Automatic retries always confirm whether
+  // an earlier attempt was delivered; this flag can no longer disable that guard.
   MAIL_CONFIRM_BEFORE_SEND: z.enum(['true', 'false']).default('true'),
   FEED_MAX_DURATION_SECONDS: z.coerce.number().int().min(1).max(7200).default(1800),
   WORKER_ENABLED: z.enum(['true', 'false']).default('true'),

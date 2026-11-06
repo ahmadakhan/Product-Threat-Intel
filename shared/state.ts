@@ -74,7 +74,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoDispatchNewsToSecurityTeam: false,
   reviewUnverifiableMatches: false,
   deferEveryoneUntilSecurityDelivered: false,
-  digestBatchingEnabled: false,
+  digestBatchingEnabled: true,
   digestWindowMinutes: 5,
   emailRetryEnabled: true,
   emailRetryMaxAttempts: 6,

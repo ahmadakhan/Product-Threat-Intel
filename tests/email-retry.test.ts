@@ -104,6 +104,6 @@ test('settings schema applies digestWindowMinutes default for legacy settings', 
     digestBatchingEnabled: undefined,
     digestWindowMinutes: undefined,
   });
-  assert.equal(legacy.digestBatchingEnabled, false);
+  assert.equal(legacy.digestBatchingEnabled, true);
   assert.equal(legacy.digestWindowMinutes, 5);
 });

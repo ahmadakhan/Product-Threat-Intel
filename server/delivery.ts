@@ -1861,8 +1861,9 @@ export async function deliverNext(
       // worker crash left the attempt count advanced) is sent again by a retry.
       // HTML advisory bodies do not carry the delivery id, so this confirmation
       // is the only way to prevent a duplicate alert. The check never blocks a
-      // first attempt or an operator-approved send.
-      if (job.attempts > 1 && !job.review_approved && config.MAIL_CONFIRM_BEFORE_SEND === 'true') {
+      // first attempt. On retries it is mandatory: approval authorizes content,
+      // not a duplicate send when a prior transport outcome is still unknown.
+      if (job.attempts > 1) {
         const confirmation = await confirmPriorDelivery(pool, job, config, request);
         if (confirmation === 'delivered') {
           providerId = 'CONFIRMED_PRIOR_DELIVERY';

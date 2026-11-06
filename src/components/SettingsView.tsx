@@ -28,9 +28,11 @@ import { DEFAULT_TIMEZONE } from '../../shared/state';
 
 const field = 'ui-field';
 
-/** Older persisted settings may predate the retry policy fields. */
-const withEmailRetryDefaults = (value: AppSettings): AppSettings => ({
+/** Older persisted settings may predate processing defaults. */
+const withProcessingDefaults = (value: AppSettings): AppSettings => ({
   ...value,
+  digestBatchingEnabled: value.digestBatchingEnabled ?? true,
+  digestWindowMinutes: value.digestWindowMinutes ?? 5,
   emailEnabled: value.emailEnabled ?? true,
   emailRetryEnabled: value.emailRetryEnabled ?? true,
   emailRetryMaxAttempts: value.emailRetryMaxAttempts ?? 6,
@@ -246,7 +248,7 @@ export function SettingsView() {
     resetUserPassword,
     pending,
   } = useApp();
-  const [form, setForm] = useState<AppSettings>(() => withEmailRetryDefaults(settings));
+  const [form, setForm] = useState<AppSettings>(() => withProcessingDefaults(settings));
   const [securityForm, setSecurityForm] = useState<AppSettings['securityPolicy']>(settings.securityPolicy);
   const [message, setMessage] = useState('');
   const [processingSaveError, setProcessingSaveError] = useState(false);
@@ -301,7 +303,7 @@ export function SettingsView() {
     form.advisoryPrefix !== settings.advisoryPrefix ||
     (form.logVerbosity ?? 'standard') !== (settings.logVerbosity ?? 'standard') ||
     form.schedulerEnabled !== settings.schedulerEnabled ||
-    (form.digestBatchingEnabled ?? false) !== (settings.digestBatchingEnabled ?? false) ||
+    form.digestBatchingEnabled !== (settings.digestBatchingEnabled ?? true) ||
     (form.digestWindowMinutes ?? 5) !== (settings.digestWindowMinutes ?? 5) ||
     (form.autoDispatchNewsToSecurityTeam ?? false) !== (settings.autoDispatchNewsToSecurityTeam ?? false) ||
     (form.deferEveryoneUntilSecurityDelivered ?? false) !==
@@ -863,7 +865,7 @@ export function SettingsView() {
                         id="processing-batching"
                         title="Combine threats into one email"
                         description="Send one combined email per recipient, containing only findings permitted by their subscription."
-                        checked={form.digestBatchingEnabled ?? false}
+                        checked={form.digestBatchingEnabled ?? true}
                         disabled={processingConfirmPending}
                         onChange={(checked) =>
                           setConfirmProcessingToggle({
@@ -1182,7 +1184,7 @@ export function SettingsView() {
                         className="ui-secondary"
                         disabled={pending > 0}
                         onClick={() => {
-                          setForm(withEmailRetryDefaults(settings));
+                          setForm(withProcessingDefaults(settings));
                           setMessage('');
                           setProcessingSaveError(false);
                         }}
