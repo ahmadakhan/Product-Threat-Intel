@@ -1437,3 +1437,95 @@ body {
     min-width: 36px;
   }
 }
+
+/* Email Editor Styles */
+.editor-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  color: var(--ui-muted);
+  background: transparent;
+  border: none;
+  transition: all 0.15s ease;
+}
+.editor-btn:hover {
+  color: var(--ui-text);
+  background: var(--ui-control-hover);
+}
+.editor-btn:active {
+  background: var(--ui-control);
+}
+.editor-btn:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 1px;
+}
+
+[contenteditable] {
+  outline: none;
+}
+[contenteditable]:empty:before {
+  content: attr(data-placeholder);
+  color: var(--ui-placeholder);
+  pointer-events: none;
+}
+[contenteditable]:focus {
+  outline: none;
+}
+
+/* Ensure contenteditable elements are properly styled */
+[contenteditable] p {
+  margin: 0 0 1em 0;
+}
+[contenteditable] p:last-child {
+  margin-bottom: 0;
+}
+[contenteditable] ul, [contenteditable] ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+[contenteditable] h1, [contenteditable] h2, [contenteditable] h3 {
+  margin: 1em 0 0.5em 0;
+  font-weight: 600;
+}
+[contenteditable] h1 { font-size: 1.5em; }
+[contenteditable] h2 { font-size: 1.25em; }
+[contenteditable] h3 { font-size: 1.1em; }
+[contenteditable] blockquote {
+  margin: 1em 0;
+  padding: 0.5em 1em;
+  border-left: 3px solid var(--ui-accent);
+  background: var(--ui-subtle);
+  font-style: italic;
+  color: var(--ui-muted);
+}
+[contenteditable] hr {
+  border: none;
+  border-top: 1px solid var(--ui-divider);
+  margin: 1em 0;
+}
+[contenteditable] a {
+  color: var(--ui-accent);
+  text-decoration: underline;
+}
+[contenteditable] code {
+  background: var(--ui-subtle);
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+[contenteditable] pre {
+  background: var(--ui-control);
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  padding: 1em;
+  overflow-x: auto;
+  margin: 1em 0;
+}
+[contenteditable] pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 0.85em;
+}

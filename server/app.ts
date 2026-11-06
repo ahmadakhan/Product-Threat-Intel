@@ -1509,6 +1509,106 @@ export function createApp(
       });
     }),
   );
+
+  app.post(
+    '/api/audit/cleanup',
+    requireRole('ADMIN'),
+    asyncRoute(async (req, res) => {
+      const { days } = z
+        .object({ days: z.number().int().min(1).max(3650) })
+        .parse(req.body);
+      const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+      await transaction(pool, async (db) => {
+        const deletedResult = await db.query(
+          `DELETE FROM audit WHERE data->>'timestamp' < $1 RETURNING seq`,
+          [cutoff],
+        );
+        const deleted = deletedResult.rowCount ?? 0;
+        // Recalculate hash chain for remaining entries to maintain integrity
+        if (deleted > 0) {
+          const remaining = await db.query<{ seq: number; data: any }>(
+            `SELECT seq, data FROM audit ORDER BY seq ASC`,
+          );
+          let previousHash = '0'.repeat(64);
+          for (const row of remaining.rows) {
+            const log = row.data;
+            log.prevHash = previousHash;
+            // Recompute hash using the same logic as hashAuditLog
+            const hashInput = stableJson([
+              log.prevHash,
+              log.id,
+              log.timestamp,
+              log.category,
+              log.level,
+              log.event,
+              log.details,
+              log.actor,
+              log.ipAddress,
+              ...(log.context === undefined ? [] : [log.context]),
+            ]);
+            log.hash = createHash('sha256').update(hashInput).digest('hex');
+            previousHash = log.hash;
+            await db.query('UPDATE audit SET data=$1 WHERE seq=$2', [JSON.stringify(log), row.seq]);
+          }
+        }
+        await appendAudit(
+          db,
+          'Audit cleanup',
+          `Deleted ${deleted} audit log entries older than ${days} days`,
+          req.operator!.username,
+          'SECURITY',
+          'INFO',
+          req.ip || '',
+        );
+        res.json({ deleted, cutoff });
+      });
+    }),
+  );
+
+  app.post(
+    '/api/events/cleanup',
+    requireRole('ADMIN'),
+    asyncRoute(async (req, res) => {
+      const { days, scope } = z
+        .object({
+          days: z.number().int().min(1).max(3650),
+          scope: z.enum(['OPERATIONS', 'ML', 'SYSTEM']).default('OPERATIONS'),
+        })
+        .parse(req.body);
+      const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+      let deleted = 0;
+      if (scope === 'OPERATIONS') {
+        const result = await pool.query(
+          `DELETE FROM operational_events WHERE category NOT IN ('ML','SYSTEM') AND occurred_at < $1`,
+          [cutoff],
+        );
+        deleted = result.rowCount ?? 0;
+      } else if (scope === 'ML') {
+        const result = await pool.query(
+          `DELETE FROM operational_events WHERE category = 'ML' AND occurred_at < $1`,
+          [cutoff],
+        );
+        deleted = result.rowCount ?? 0;
+      } else if (scope === 'SYSTEM') {
+        const result = await pool.query(
+          `DELETE FROM operational_events WHERE category = 'SYSTEM' AND occurred_at < $1`,
+          [cutoff],
+        );
+        deleted = result.rowCount ?? 0;
+      }
+      await appendAudit(
+        pool,
+        'Event cleanup',
+        `Deleted ${deleted} ${scope} event entries older than ${days} days`,
+        req.operator!.username,
+        'SECURITY',
+        'INFO',
+        req.ip || '',
+      );
+      res.json({ deleted, cutoff });
+    }),
+  );
+
   app.post(
     '/api/correlation/simulate',
     // Read-only by construction: matches against the cached corpus and the
@@ -1601,6 +1701,43 @@ export function createApp(
          ORDER BY created_at DESC, id DESC LIMIT 1000`,
       );
       res.json(rows.rows);
+    }),
+  );
+  app.delete(
+    '/api/email-queue',
+    requireRole('ADMIN', 'OPERATOR'),
+    asyncRoute(async (req, res) => {
+      const result = await transaction(pool, async (db) => {
+        const deleted = await db.query<{ id: string }>(
+          "DELETE FROM outbox WHERE channel='email' AND status IN ('QUEUED','FAILED','REVIEW') RETURNING id",
+        );
+        const ids = deleted.rows.map((row) => row.id);
+        for (const id of ids) {
+          const log = await getForUpdate<any>(db, 'emailLogs', id);
+          if (log)
+            await put(db, 'emailLogs', id, {
+              ...log,
+              status: 'CANCELLED',
+              nextRetryTime: null,
+              errorMessage: 'Removed from the delivery queue by an operator',
+            });
+        }
+        const sending = await db.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM outbox WHERE channel='email' AND status='SENDING'",
+        );
+        if (ids.length)
+          await appendAudit(
+            db,
+            'Email delivery queue cleared',
+            `${ids.length} queued, failed, or review jobs cancelled; ${sending.rows[0].count} sending jobs left untouched`,
+            req.operator!.username,
+            'EMAIL',
+            'WARNING',
+            req.ip || '',
+          );
+        return { removed: ids.length, inFlight: sending.rows[0].count };
+      });
+      res.json({ success: true, ...result });
     }),
   );
   app.get('/api/ml/status', requireRole('ADMIN', 'OPERATOR', 'VIEWER'), asyncRoute(async (_req, res) => {

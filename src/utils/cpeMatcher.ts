@@ -949,9 +949,9 @@ export function matchesWatchlistItem(
           });
           continue;
         }
-        // An unknown inventory component cannot prove a constrained criterion,
-        // including explicit versions, editions, target OS, language or updates.
-        // All-version registration does not waive platform or identity constraints.
+        // A complete product-wide registration declares every version and
+        // remaining CPE component in scope. Partial patterns and inferred
+        // identities still require review when criteria are unknown.
         const contextFields = [
           'part',
           'vendor',
@@ -965,7 +965,18 @@ export function matchesWatchlistItem(
           'targetHw',
           'other',
         ] as const;
-        const contextNeedsReview =
+        const productWideAllVersions =
+          versionUnasserted &&
+          !genericIdentity &&
+          asset.part !== '*' &&
+          asset.vendor !== '*' &&
+          asset.product !== '*' &&
+          !hasUnescapedCpeWildcard(asset.vendor) &&
+          !hasUnescapedCpeWildcard(asset.product) &&
+          (['update', 'edition', 'language', 'swEdition', 'targetSw', 'targetHw', 'other'] as const).every(
+            (field) => asset[field] === '*' || asset[field] === '-',
+          );
+        const contextNeedsReview = !productWideAllVersions && (
           contextFields.some(
             (field) =>
               (asset[field as keyof ParsedCPE] as string) === '*' &&
@@ -975,7 +986,7 @@ export function matchesWatchlistItem(
             (field) =>
               hasUnescapedCpeWildcard(asset[field as keyof ParsedCPE] as string) ||
               hasUnescapedCpeWildcard(vuln[field as keyof ParsedCPE] as string),
-          );
+          ));
         const requiresReview = rangeNeedsReview || contextNeedsReview || genericIdentity ||
           (Boolean(matchRes.unverifiedVersion) && !versionUnasserted);
         retain({

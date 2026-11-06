@@ -710,6 +710,7 @@ function useApplication() {
       ),
     listEmailQueue: () => safely(() => request<EmailQueueItem[]>('/email-queue')),
     deleteEmailQueueItem: (id: string) => call(`/email/${encodeURIComponent(id)}`, {}, 'DELETE'),
+    clearEmailQueue: () => call<{ success: boolean; removed: number; inFlight: number }>('/email-queue', {}, 'DELETE'),
     isPipelineRunning: !!activeExecution,
     currentPipelinePhase: activeExecution ? `${activeExecution.status}: ${activeExecution.id}` : null,
     latestExecution: snapshot.executions[0] || null,

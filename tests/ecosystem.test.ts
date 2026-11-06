@@ -70,10 +70,10 @@ const asset: WatchListItem = {
   createdAt: '2026-01-01T00:00:00Z',
 };
 
-test('unknown constrained inventory fields require review; later confirmed evidence wins', () => {
+test('product-wide CPE wildcards cover constrained platforms; later confirmed evidence wins', () => {
   for (const [criteria, expected] of [
     [cpe('1.0'), 'QUEUED_FOR_DISPATCH'],
-    [cpe('*').replace(':*:*:*:*:*:*:*', ':*:*:*:*:windows:*:*'), 'REVIEW_REQUIRED'],
+    [cpe('*').replace(':*:*:*:*:*:*:*', ':*:*:*:*:windows:*:*'), 'QUEUED_FOR_DISPATCH'],
   ] as const) {
     const finding = runVulnerabilityPipeline(
       [],

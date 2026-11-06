@@ -9,6 +9,7 @@ import { createUser } from '../server/auth.ts';
 import { loadConfig } from '../server/config.ts';
 import { createPool, migrate } from '../server/db.ts';
 import { describeError, describeFailureSummary } from '../server/events.ts';
+import { enqueue } from '../server/delivery.ts';
 
 /**
  * Operator delivery actions driven by a URL parameter, and the failure label
@@ -92,6 +93,53 @@ test(
         "SELECT count(*)::int AS count FROM operational_events WHERE code='http.request_failed'",
       );
       assert.equal(incidents.rows[0].count, 0, 'a client error must not be recorded as a server failure');
+    });
+    assert.notEqual(outcome, null);
+  },
+);
+
+test(
+  'bulk queue clear cancels queued, failed, and review emails but leaves sending jobs alone',
+  { skip: !process.env.TEST_DATABASE_URL },
+  async () => {
+    const outcome = await withDatabase(async (pool) => {
+      const { agent, csrf, origin } = await adminAgent(pool);
+      const createJob = async (dedupe: string, initialStatus: 'QUEUED' | 'REVIEW' = 'QUEUED') => {
+        const id = await enqueue(pool, 'email', 'test', 'TEST', {
+          subject: dedupe,
+          text: 'fixture',
+          cveIds: [],
+          recipientEmail: 'queue-test@example.invalid',
+        }, dedupe, initialStatus);
+        assert.ok(id);
+        return id;
+      };
+      const queued = await createJob('bulk-clear-queued');
+      const failed = await createJob('bulk-clear-failed');
+      const review = await createJob('bulk-clear-review', 'REVIEW');
+      const sending = await createJob('bulk-clear-sending');
+      await pool.query("UPDATE outbox SET status='FAILED' WHERE id=$1", [failed]);
+      await pool.query("UPDATE outbox SET status='SENDING' WHERE id=$1", [sending]);
+
+      const response = await agent
+        .delete('/api/email-queue')
+        .set('Origin', origin)
+        .set('x-csrf-token', csrf)
+        .send({});
+      assert.equal(response.status, 200);
+      assert.deepEqual(response.body, { success: true, removed: 3, inFlight: 1 });
+      const remaining = await pool.query<{ id: string; status: string }>(
+        "SELECT id,status FROM outbox WHERE channel='email' ORDER BY id",
+      );
+      assert.deepEqual(remaining.rows, [{ id: sending, status: 'SENDING' }]);
+      for (const id of [queued, failed, review]) {
+        const log = (await pool.query<{ data: { status: string; errorMessage: string } }>(
+          "SELECT data FROM records WHERE kind='emailLogs' AND id=$1",
+          [id],
+        )).rows[0].data;
+        assert.equal(log.status, 'CANCELLED');
+        assert.match(log.errorMessage, /removed from the delivery queue/i);
+      }
     });
     assert.notEqual(outcome, null);
   },

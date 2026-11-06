@@ -608,6 +608,64 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         }
       }
     });
+    await t.test('all-version and exact SonicWall CPEs both queue email delivery', async () => {
+      await reset();
+      await save('settings', 'main', {
+        ...DEFAULT_SETTINGS,
+        autoDispatchEnabled: true,
+        autoDispatchConfidenceThreshold: 90,
+        digestBatchingEnabled: false,
+      });
+      await save('recipients', 'sonicwall-recipient', {
+        id: 'sonicwall-recipient',
+        name: 'SonicWall test recipient',
+        email: 'sonicwall@example.invalid',
+        enabled: true,
+        deliveryGroup: 'SECURITY_TEAM',
+        subscriptionTier: 'ALL_SEVERITIES',
+      });
+      const product = 'cpe:2.3:a:sonicwall:network_security_manager';
+      const affected = `${product}:4.3.1:*:*:*:*:*:*:*`;
+      await save('watchlist', 'sonicwall-all', {
+        ...asset('*'),
+        id: 'sonicwall-all',
+        assetTag: 'SW-ALL',
+        vendor: 'sonicwall',
+        product: 'network_security_manager',
+        version: '*',
+        cpes: [`${product}:*:*:*:*:*:*:*:*`],
+      });
+      await save('watchlist', 'sonicwall-exact', {
+        ...asset('4.3.1'),
+        id: 'sonicwall-exact',
+        assetTag: 'SW-4.3.1',
+        vendor: 'sonicwall',
+        product: 'network_security_manager',
+        version: '4.3.1',
+        cpes: [affected],
+      });
+      await save('cveData', 'CVE-2026-98002', {
+        ...vulnerability(),
+        cveId: 'CVE-2026-98002',
+        cpeMatches: [affected],
+        versionRange: undefined,
+      });
+
+      await run();
+
+      const findings = await list<Finding>(pool, 'findings');
+      assert.equal(findings.length, 2);
+      assert.ok(findings.every((finding) => finding.notificationStatus === 'QUEUED_FOR_DISPATCH'));
+      const advisories = await list<Advisory>(pool, 'advisories');
+      assert.equal(advisories.length, 1);
+      assert.deepEqual(new Set(advisories[0].findingIds), new Set(findings.map((finding) => finding.id)));
+      const jobs = await pool.query<{ status: string; advisory_id: string }>(
+        "SELECT status, advisory_id FROM outbox WHERE channel='email'",
+      );
+      assert.equal(jobs.rows.length, 1);
+      assert.equal(jobs.rows[0].status, 'QUEUED');
+      assert.equal(jobs.rows[0].advisory_id, advisories[0].id);
+    });
     await t.test(
       'delivery rechecks current inventory before sending an already queued advisory',
       async () => {

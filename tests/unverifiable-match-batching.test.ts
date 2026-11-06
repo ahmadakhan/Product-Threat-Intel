@@ -337,7 +337,11 @@ test('zero-day digest job delivers without an advisory row', { skip: !process.en
 
 test('unverifiable match email is stamped reviewNotifiedAt on transport acceptance', { skip: !process.env.TEST_DATABASE_URL }, async () => {
   const outcome = await withDatabase(async (pool) => {
-    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: true });
+    await put(pool, 'settings', 'main', {
+      ...DEFAULT_SETTINGS,
+      reviewUnverifiableMatches: true,
+      timezone: 'Pacific/Honolulu',
+    });
     await put(pool, 'emailConfig', 'main', {
       provider: 'SMTP',
       host: 'localhost',

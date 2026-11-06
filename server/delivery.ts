@@ -1628,7 +1628,7 @@ export async function deliverNext(
         }
         fresh.push({ ...current, id });
       }
-      if (renderUnverifiableReviewEmail(fresh).html !== job.payload.html) {
+      if (renderUnverifiableReviewEmail(fresh, job.payload.unverifiableMatch.timezone).html !== job.payload.html) {
         permanent = true;
         throw new Error('Review notification content changed; a refreshed review is required');
       }

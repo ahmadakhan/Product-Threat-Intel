@@ -18,9 +18,51 @@ import {
   FileText,
   Mail,
   Eye,
+  Bold,
+  Italic,
+  Underline,
+  Strikethrough,
+  Code,
+  List,
+  ListOrdered,
+  Heading1,
+  Heading2,
+  Heading3,
+  Link,
+  Unlink,
+  Undo,
+  Redo,
+  Minus,
+  Quote,
+  AlignLeft,
+  AlignCenter,
+  AlignRight,
+  Superscript,
+  Subscript,
+  Save,
+  Copy,
+  RotateCcw,
+  RotateCw,
+  ChevronDown,
+  Image,
+  Table,
+  Trash2,
 } from 'lucide-react';
 import { Pagination } from './Pagination';
 import { sanitizeEmailHtml } from '../utils/sanitizeEmailHtml';
+
+function editableEmailBody(html: string): string {
+  return new DOMParser().parseFromString(sanitizeEmailHtml(html), 'text/html').body.innerHTML;
+}
+
+function emailDocumentWithBody(sourceHtml: string, bodyHtml: string): string {
+  const document = new DOMParser().parseFromString(
+    sourceHtml || '<!doctype html><html><body></body></html>',
+    'text/html',
+  );
+  document.body.innerHTML = bodyHtml;
+  return `<!DOCTYPE html>\n${document.documentElement.outerHTML}`;
+}
 import { formatDateTime as fmtDateTime } from '../utils/dateTime';
 import type { EmailDeliveryLog, ReviewEdits } from '../types';
 import { PageHeading } from './PageHeading';
@@ -113,16 +155,19 @@ export const ActionCenter: React.FC = () => {
   // the backend already escapes untrusted values, this is defence in depth.
   const sanitizedPreviewHtml = useMemo(() => sanitizeEmailHtml(previewHtml), [previewHtml]);
   const [previewLoading, setPreviewLoading] = useState(false);
-  const [previewTab, setPreviewTab] = useState<'email' | 'pdf'>('email');
+  const [previewTab, setPreviewTab] = useState<'email' | 'pdf' | 'html'>('email');
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [pdfError, setPdfError] = useState<string | null>(null);
   const [editBusy, setEditBusy] = useState(false);
+  const [htmlContent, setHtmlContent] = useState<string>('');
+  const [htmlMode, setHtmlMode] = useState<'visual' | 'source'>('visual');
   const editDialogRef = useDialogFocus(() => {
     if (!editBusy) setEditing(null);
   }, !!editing);
   const [livePreviewDebounce, setLivePreviewDebounce] = useState<ReturnType<typeof setTimeout> | null>(null);
   const pdfUrlRef = useRef<string | null>(null);
+  const editorRef = useRef<HTMLDivElement>(null);
   const [resending, setResending] = useState<{ id: string; advisoryId: string; mode: RecipientMode; email: string; reason: string } | null>(null);
   const [resendBusy, setResendBusy] = useState(false);
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
@@ -492,12 +537,15 @@ export const ActionCenter: React.FC = () => {
       setRecipientMode('SECURITY_TEAM');
       setCustomEmail(log.recipientEmail);
       setPreviewTab('email');
+      setHtmlMode('visual');
+      setHtmlContent('');
       setPdfError(null);
       revokePdf();
       setPreviewLoading(true);
       void previewEmailReview(log.id).then((preview) => {
         if (preview) {
           setPreviewHtml(preview.html);
+          setHtmlContent(preview.edits.customBodyOverride || preview.html);
           setEdits(preview.edits);
           // A saved subject override is what the recipient actually sees.
           setSubjectDraft(preview.subject || log.subject);
@@ -509,6 +557,65 @@ export const ActionCenter: React.FC = () => {
     },
     [previewEmailReview, revokePdf],
   );
+
+  useEffect(() => {
+    if (!editing || previewLoading || htmlMode !== 'visual' || !editorRef.current) return;
+    editorRef.current.innerHTML = editableEmailBody(htmlContent);
+  }, [editing?.id, previewLoading, htmlMode]);
+
+  // HTML Editor Functions
+  const commitVisualBody = useCallback((bodyHtml: string) => {
+    const updatedHtml = emailDocumentWithBody(htmlContent, bodyHtml);
+    const updatedEdits = { ...edits, customBodyOverride: updatedHtml };
+    setHtmlContent(updatedHtml);
+    setEdits(updatedEdits);
+    triggerLivePreview(updatedEdits, subjectDraft);
+  }, [htmlContent, edits, subjectDraft, triggerLivePreview]);
+
+  const execCommand = useCallback((command: string, value?: string) => {
+    if (editorRef.current) {
+      editorRef.current.focus();
+      document.execCommand(command, false, value);
+      setTimeout(() => {
+        if (editorRef.current) commitVisualBody(editorRef.current.innerHTML);
+      }, 0);
+    }
+  }, [commitVisualBody]);
+
+  const handleHtmlInput = useCallback(() => {
+    if (editorRef.current) commitVisualBody(editorRef.current.innerHTML);
+  }, [commitVisualBody]);
+
+  const insertHtml = useCallback((html: string) => {
+    if (editorRef.current) {
+      editorRef.current.focus();
+      document.execCommand('insertHTML', false, html);
+      setTimeout(() => {
+        if (editorRef.current) commitVisualBody(editorRef.current.innerHTML);
+      }, 0);
+    }
+  }, [commitVisualBody]);
+
+  const formatBlock = useCallback((tag: string) => {
+    if (editorRef.current) {
+      editorRef.current.focus();
+      document.execCommand('formatBlock', false, tag);
+      setTimeout(() => {
+        if (editorRef.current) commitVisualBody(editorRef.current.innerHTML);
+      }, 0);
+    }
+  }, [commitVisualBody]);
+
+  const createLink = useCallback(() => {
+    const url = window.prompt('Enter URL:', 'https://');
+    if (url) {
+      execCommand('createLink', url);
+    }
+  }, [execCommand]);
+
+  const updatePreviewFromHtml = useCallback(() => {
+    if (editorRef.current) commitVisualBody(editorRef.current.innerHTML);
+  }, [commitVisualBody]);
 
   const handleAcknowledge = useCallback(
     async (log: EmailDeliveryLog) => {
@@ -1152,7 +1259,7 @@ export const ActionCenter: React.FC = () => {
               <div className="min-h-0 flex-1 overflow-y-auto xl:overflow-hidden">
                 <div className="grid grid-cols-1 gap-7 p-6 xl:h-full xl:min-h-0 xl:grid-cols-[minmax(0,0.88fr)_minmax(0,1.12fr)] xl:grid-rows-[minmax(0,1fr)]">
                   <div className="min-w-0 xl:min-h-0 xl:overflow-y-auto xl:overscroll-contain xl:border-r xl:border-zinc-800/80 xl:pr-7 light:xl:border-zinc-200">
-                    <div className="space-y-6">
+                    <div className="space-y-4">
                       <section aria-labelledby="email-content-heading" className="space-y-4">
                         <div className="border-b border-zinc-800/70 pb-2 light:border-zinc-200">
                           <h3
@@ -1189,107 +1296,146 @@ export const ActionCenter: React.FC = () => {
                             {subjectDraft.length}/200
                           </p>
                         </div>
-
-                        <div>
-                          <label
-                            htmlFor="audience-notice"
-                            className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
-                          >
-                            Audience notice
-                          </label>
-                          <textarea
-                            id="audience-notice"
-                            rows={4}
-                            placeholder="Notice shown above the advisory body for all recipients"
-                            value={edits.audienceNotice || ''}
-                            onChange={(e) => {
-                              const updated = { ...edits, audienceNotice: e.target.value || undefined };
-                              setEdits(updated);
-                              triggerLivePreview(updated);
-                            }}
-                            className="mt-1 w-full resize-y font-mono text-xs"
-                          />
-                        </div>
-
-                        <div>
-                          <label
-                            htmlFor="reviewer-comment"
-                            className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
-                          >
-                            Reviewer comment
-                          </label>
-                          <textarea
-                            id="reviewer-comment"
-                            rows={3}
-                            placeholder="Optional context added at the bottom of the email"
-                            value={edits.reviewerComment || ''}
-                            onChange={(e) => {
-                              const updated = { ...edits, reviewerComment: e.target.value || undefined };
-                              setEdits(updated);
-                              triggerLivePreview(updated);
-                            }}
-                            className="mt-1 w-full resize-y font-mono text-xs"
-                          />
-                        </div>
-
-                        <div>
-                          <label
-                            htmlFor="reviewer-name"
-                            className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
-                          >
-                            Reviewer name
-                          </label>
-                          <input
-                            id="reviewer-name"
-                            type="text"
-                            maxLength={100}
-                            placeholder="Name attached to the reviewer comment"
-                            value={edits.reviewerName || ''}
-                            onChange={(e) => {
-                              const updated = { ...edits, reviewerName: e.target.value || undefined };
-                              setEdits(updated);
-                              triggerLivePreview(updated);
-                            }}
-                            className="mt-1 w-full text-xs"
-                          />
-                        </div>
                       </section>
 
                       <section
-                        aria-labelledby="custom-body-heading"
+                        aria-labelledby="html-editor-heading"
                         className="space-y-3 rounded-xl border border-zinc-800/80 bg-zinc-900/50 p-4 light:border-zinc-200 light:bg-zinc-50"
                       >
-                        <div>
-                          <h3
-                            id="custom-body-heading"
-                            className="text-xs font-semibold text-zinc-200 light:text-zinc-800"
-                          >
-                            Advanced content
-                          </h3>
-                          <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
-                            Replace the template body only when a fully custom HTML message is needed.
-                          </p>
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <h3
+                              id="html-editor-heading"
+                              className="text-xs font-semibold text-zinc-200 light:text-zinc-800"
+                            >
+                              Email body editor
+                            </h3>
+                            <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
+                              Edit the HTML content directly. Changes reflect instantly in the preview.
+                            </p>
+                          </div>
+                          <div className="inline-flex rounded-lg border border-zinc-800/80 bg-zinc-900 p-0.5 light:border-zinc-200 light:bg-zinc-100">
+                            <button
+                              type="button"
+                              role="tab"
+                              aria-selected={htmlMode === 'visual'}
+                              tabIndex={htmlMode === 'visual' ? 0 : -1}
+                              onClick={() => setHtmlMode('visual')}
+                              className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
+                                htmlMode === 'visual'
+                                  ? 'bg-sky-600 text-white shadow-sm'
+                                  : 'text-zinc-400 hover:text-zinc-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-500 light:text-zinc-600 light:hover:text-zinc-900'
+                              }`}
+                            >
+                              <Code className="mr-1 inline h-3 w-3" /> Visual
+                            </button>
+                            <button
+                              type="button"
+                              role="tab"
+                              aria-selected={htmlMode === 'source'}
+                              tabIndex={htmlMode === 'source' ? 0 : -1}
+                              onClick={() => setHtmlMode('source')}
+                              className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
+                                htmlMode === 'source'
+                                  ? 'bg-sky-600 text-white shadow-sm'
+                                  : 'text-zinc-400 hover:text-zinc-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-500 light:text-zinc-600 light:hover:text-zinc-900'
+                              }`}
+                            >
+                              <FileText className="mr-1 inline h-3 w-3" /> Source
+                            </button>
+                          </div>
                         </div>
-                        <div>
-                          <label
-                            htmlFor="custom-body"
-                            className="block text-xs font-medium text-zinc-300 light:text-zinc-700"
-                          >
-                            Custom body override (advanced)
-                          </label>
-                          <textarea
-                            id="custom-body"
-                            rows={6}
-                            placeholder="Override the entire HTML body — leave empty to keep the template"
-                            value={edits.customBodyOverride || ''}
-                            onChange={(e) => {
-                              const updated = { ...edits, customBodyOverride: e.target.value || undefined };
-                              setEdits(updated);
-                              triggerLivePreview(updated);
-                            }}
-                            className="mt-1 w-full resize-y font-mono text-xs"
-                          />
+
+                        {/* Editor Toolbar */}
+                        <div
+                          className="flex flex-wrap gap-1 p-2 bg-zinc-900/50 dark:bg-zinc-900/50 light:bg-zinc-100 rounded-lg border border-zinc-800/50 light:border-zinc-200"
+                          role="toolbar"
+                          aria-label="Editor formatting tools"
+                        >
+                          <div className="flex items-center gap-1">
+                            <button type="button" onClick={() => formatBlock('h1')} title="Heading 1" className="editor-btn"><Heading1 className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => formatBlock('h2')} title="Heading 2" className="editor-btn"><Heading2 className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => formatBlock('h3')} title="Heading 3" className="editor-btn"><Heading3 className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => formatBlock('p')} title="Paragraph" className="editor-btn"><span className="text-xs font-medium">¶</span></button>
+                          </div>
+                          <div className="w-px h-6 bg-zinc-700 mx-1" />
+                          <div className="flex items-center gap-1">
+                            <button type="button" onClick={() => execCommand('bold')} title="Bold (Ctrl+B)" className="editor-btn"><Bold className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => execCommand('italic')} title="Italic (Ctrl+I)" className="editor-btn"><Italic className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => execCommand('underline')} title="Underline (Ctrl+U)" className="editor-btn"><Underline className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => execCommand('strikeThrough')} title="Strikethrough" className="editor-btn"><Strikethrough className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => execCommand('subscript')} title="Subscript" className="editor-btn"><Subscript className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => execCommand('superscript')} title="Superscript" className="editor-btn"><Superscript className="h-3.5 w-3.5" /></button>
+                          </div>
+                          <div className="w-px h-6 bg-zinc-700 mx-1" />
+                          <div className="flex items-center gap-1">
+                            <button type="button" onClick={() => execCommand('insertUnorderedList')} title="Bullet list" className="editor-btn"><List className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => execCommand('insertOrderedList')} title="Numbered list" className="editor-btn"><ListOrdered className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => execCommand('indent')} title="Increase indent" className="editor-btn"><ChevronDown className="h-3.5 w-3.5 rotate-90" /></button>
+                            <button type="button" onClick={() => execCommand('outdent')} title="Decrease indent" className="editor-btn"><ChevronDown className="h-3.5 w-3.5 -rotate-90" /></button>
+                          </div>
+                          <div className="w-px h-6 bg-zinc-700 mx-1" />
+                          <div className="flex items-center gap-1">
+                            <button type="button" onClick={() => execCommand('justifyLeft')} title="Align left" className="editor-btn"><AlignLeft className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => execCommand('justifyCenter')} title="Align center" className="editor-btn"><AlignCenter className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => execCommand('justifyRight')} title="Align right" className="editor-btn"><AlignRight className="h-3.5 w-3.5" /></button>
+                          </div>
+                          <div className="w-px h-6 bg-zinc-700 mx-1" />
+                          <div className="flex items-center gap-1">
+                            <button type="button" onClick={createLink} title="Insert link" className="editor-btn"><Link className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => execCommand('unlink')} title="Remove link" className="editor-btn"><Unlink className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => execCommand('formatBlock', 'blockquote')} title="Quote" className="editor-btn"><Quote className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => insertHtml('<hr />')} title="Horizontal rule" className="editor-btn"><Minus className="h-3.5 w-3.5" /></button>
+                          </div>
+                          <div className="w-px h-6 bg-zinc-700 mx-1" />
+                          <div className="flex items-center gap-1">
+                            <button type="button" onClick={() => execCommand('undo')} title="Undo (Ctrl+Z)" className="editor-btn"><Undo className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => execCommand('redo')} title="Redo (Ctrl+Y)" className="editor-btn"><Redo className="h-3.5 w-3.5" /></button>
+                          </div>
+                          <div className="w-px h-6 bg-zinc-700 mx-1" />
+                          <div className="flex items-center gap-1 ml-auto">
+                            <button type="button" onClick={updatePreviewFromHtml} title="Update preview" className="editor-btn"><RotateCcw className="h-3.5 w-3.5" /></button>
+                            <button type="button" onClick={() => {
+                              void navigator.clipboard.writeText(htmlContent).catch(() => {});
+                            }} title="Copy HTML" className="editor-btn"><Copy className="h-3.5 w-3.5" /></button>
+                          </div>
                         </div>
+
+                        {/* Editor Content Area */}
+                        <div className="relative">
+                          {htmlMode === 'visual' ? (
+                            <div
+                              ref={editorRef}
+                              contentEditable
+                              suppressContentEditableWarning
+                              onInput={handleHtmlInput}
+                              onBlur={updatePreviewFromHtml}
+                              className="min-h-[320px] max-h-[480px] overflow-y-auto p-4 bg-white rounded-lg border border-zinc-800/80 light:border-zinc-200 text-zinc-900 light:text-zinc-900 text-sm leading-relaxed focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent"
+                              style={{
+                                fontFamily: 'inherit',
+                                lineHeight: '1.6',
+                              }}
+                              data-placeholder="Start typing your email content..."
+                            />
+                          ) : (
+                            <textarea
+                              ref={(el) => { if (el) editorRef.current = el as any; }}
+                              value={htmlContent}
+                              onChange={(e) => {
+                                const updatedEdits = { ...edits, customBodyOverride: e.target.value };
+                                setHtmlContent(e.target.value);
+                                setEdits(updatedEdits);
+                                triggerLivePreview(updatedEdits, subjectDraft);
+                              }}
+                              className="min-h-[320px] max-h-[480px] w-full p-4 bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-lg font-mono text-xs text-zinc-100 dark:text-zinc-100 light:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent resize-y"
+                              spellCheck={false}
+                              placeholder="Edit HTML source..."
+                            />
+                          )}
+                        </div>
+                        <p className="mt-2 text-[10px] text-zinc-500">
+                          {htmlMode === 'visual' ? 'Visual editing mode — click to edit directly' : 'Source editing mode — write raw HTML'}
+                        </p>
                       </section>
 
                       <section aria-labelledby="delivery-audience-heading" className="space-y-4">

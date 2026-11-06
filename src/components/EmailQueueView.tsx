@@ -33,6 +33,7 @@ export function EmailQueueView() {
     listEmailQueue,
     retryEmailDelivery,
     deleteEmailQueueItem,
+    clearEmailQueue,
     approveEmailDelivery,
     rejectEmailDelivery,
      editEmailReview,
@@ -46,6 +47,8 @@ export function EmailQueueView() {
   const [loadError, setLoadError] = useState(false);
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<EmailQueueItem | null>(null);
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
+  const [clearAllBusy, setClearAllBusy] = useState(false);
   const [reviewing, setReviewing] = useState<EmailQueueItem | null>(null);
   const [rejecting, setRejecting] = useState<EmailQueueItem | null>(null);
   /** Pending confirmation: { id, action } for manual email sends. */
@@ -173,6 +176,20 @@ export function EmailQueueView() {
     setDeleteBusy(false);
   };
 
+  const clearAllQueued = async () => {
+    if (clearAllBusy) return;
+    setClearAllBusy(true);
+    try {
+      const result = await clearEmailQueue();
+      if (result?.success) {
+        setConfirmClearAll(false);
+        await refresh();
+      }
+    } finally {
+      setClearAllBusy(false);
+    }
+  };
+
   const decideReview = async (item: EmailQueueItem, decision: 'approve' | 'reject') => {
     setReviewing(null);
     setRejecting(null);
@@ -208,6 +225,17 @@ export function EmailQueueView() {
         <PageHeading page="email-queue">
           Review notifications for everyone before delivery, and track pending and failed email jobs.
         </PageHeading>
+        {canManage && (
+          <button
+            type="button"
+            onClick={() => setConfirmClearAll(true)}
+            disabled={clearAllBusy || loading}
+            title="Cancel all queued, failed, and review emails; emails already sending are left untouched"
+            className="inline-flex min-h-9 items-center gap-2 rounded-lg border border-rose-500/30 px-3 text-xs font-medium text-rose-300 hover:bg-rose-500/10 disabled:opacity-50 light:text-rose-700"
+          >
+            <Trash2 className="h-3.5 w-3.5" aria-hidden="true" /> Remove all
+          </button>
+        )}
         <button
           type="button"
           onClick={() => void refresh()}
@@ -475,6 +503,49 @@ export function EmailQueueView() {
               >
                 <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                 {deleteBusy ? 'Deleting…' : 'Delete job'}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {confirmClearAll && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !clearAllBusy) setConfirmClearAll(false);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="clear-email-queue-title"
+            className={`${panel} w-full max-w-md p-5`}
+          >
+            <h2 id="clear-email-queue-title" className="text-sm font-semibold">
+              Remove all pending email jobs?
+            </h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              This cancels all queued, failed, and review email jobs and marks their delivery history as cancelled.
+              Emails already sending are left untouched; provider-accepted emails cannot be recalled.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                className="ui-secondary"
+                disabled={clearAllBusy}
+                onClick={() => setConfirmClearAll(false)}
+              >
+                Keep queue
+              </button>
+              <button
+                type="button"
+                className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 text-xs font-semibold text-rose-300 hover:bg-rose-500/20 disabled:opacity-50 light:text-rose-700"
+                disabled={clearAllBusy}
+                onClick={() => void clearAllQueued()}
+              >
+                <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                {clearAllBusy ? 'Removing…' : 'Remove all'}
               </button>
             </div>
           </section>

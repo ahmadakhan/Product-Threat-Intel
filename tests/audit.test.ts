@@ -19,6 +19,7 @@ import { quickHash, generateHmacSignature, SortedMerkleAccumulator, merkleRoot, 
 import { auditContext, auditText, commandAudit } from '../server/audit.ts';
 import { runVulnerabilityPipeline, validateSsrfSafety } from '../src/engine/pipelineEngine';
 import { reconcileFindings } from '../src/engine/reconcileFindings';
+import { registrationAssetsFromCpes } from '../src/utils/watchlist.ts';
 import {
   INITIAL_NORMALIZED_CVES,
   INITIAL_WATCHLIST,
@@ -228,6 +229,23 @@ test('all-version product registration is dispatchable without the unverifiable 
   assert.equal(findings[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
   const held = runVulnerabilityPipeline([], [{ ...cve, applicabilityPolicy: 'REVIEW_ONLY' }], [product], [], [], policy).newFindings;
   assert.equal(held[0].notificationStatus, 'REVIEW_REQUIRED');
+});
+
+test('registered product-wide CPE dispatches a matching platform-specific advisory', () => {
+  const { cve, settings } = fixture();
+  cve.cveId = 'CVE-2026-12346';
+  cve.cpeMatches = ['cpe:2.3:o:microsoft:windows_server_2022:20348:*:*:*:*:*:x64:*'];
+  cve.cpeMatchDetails = [];
+  cve.versionRange = { versionStartIncluding: '20348' };
+  cve.applicabilityRequiresReview = false;
+  const [registered] = registrationAssetsFromCpes(
+    ['cpe:2.3:o:microsoft:windows_server_2022:*:*:*:*:*:*:*:*'],
+    { assetTag: 'WIN-01', ownerGroup: 'SOC', notes: '', purls: [] },
+  );
+  const asset = { ...registered, id: 'asset-windows-server', createdAt: new Date().toISOString() };
+  const finding = runVulnerabilityPipeline([], [cve], [asset], [], [], settings).newFindings[0];
+  assert.ok(finding);
+  assert.equal(finding.notificationStatus, 'QUEUED_FOR_DISPATCH');
 });
 
 test('autoDispatchUnverifiableMatches releases the version-uncertain hold at threshold 0', () => {
