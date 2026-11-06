@@ -19,6 +19,7 @@ import {
   Clock3,
   Brain,
   Server,
+  Trash2,
 } from 'lucide-react';
 import { Pagination } from './Pagination';
 import { csvCell } from '../utils/csv';
@@ -51,7 +52,8 @@ const auditLevel = (level: AuditLog['level']) => (
 );
 
 const AuditTrailView: React.FC = () => {
-  const { fetchCollection, verifyAuditChainRemote, settings } = useApp();
+  const { fetchCollection, verifyAuditChainRemote, settings, csrfToken, session } = useApp();
+  const canDeleteLogs = session?.role === 'ADMIN';
   const [searchTerm, setSearchTerm] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [categoryFilter, setCategoryFilter] = useState<string>('ALL');
@@ -242,6 +244,43 @@ const AuditTrailView: React.FC = () => {
     }
   };
 
+  const [deleteDropdownOpen, setDeleteDropdownOpen] = useState(false);
+  const [deleteDays, setDeleteDays] = useState<string>('30');
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+  const [deleteSuccess, setDeleteSuccess] = useState('');
+
+  const handleDeleteLogs = async () => {
+    if (!canDeleteLogs || deleting || total === 0) return;
+    const days = parseInt(deleteDays, 10);
+    if (!Number.isFinite(days) || days <= 0) {
+      setDeleteError('Please select a valid number of days');
+      return;
+    }
+    setDeleting(true);
+    setDeleteError('');
+    setDeleteSuccess('');
+    try {
+      const response = await fetch('/api/audit/cleanup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
+        body: JSON.stringify({ days }),
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ message: 'Failed to delete logs' }));
+        throw new Error(error.message || 'Failed to delete logs');
+      }
+      const result = await response.json();
+      setDeleteSuccess(`Deleted ${result.deleted} audit log entries older than ${days} days`);
+      reload();
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : 'Failed to delete logs. Please retry.');
+    } finally {
+      setDeleting(false);
+      setDeleteDropdownOpen(false);
+    }
+  };
+
   return (
     <div
       id="logs-audit-panel"
@@ -289,6 +328,52 @@ const AuditTrailView: React.FC = () => {
           >
             Export JSON
           </SecondaryButton>
+          <div className="relative" role="group" aria-label="Delete audit logs" hidden={!canDeleteLogs}>
+            <SecondaryButton
+              title="Delete audit logs older than selected days"
+              disabled={total === 0 || logsLoading || deleting}
+              icon={<Trash2 className="h-3.5 w-3.5" />}
+              onClick={() => setDeleteDropdownOpen(!deleteDropdownOpen)}
+              className="text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 light:hover:bg-rose-500/10"
+            >
+              Delete logs
+            </SecondaryButton>
+            {deleteDropdownOpen && (
+              <div className="absolute right-0 top-full mt-1 z-20 rounded-xl border border-zinc-700 bg-zinc-900 py-1.5 shadow-lg min-w-[180px] light:border-zinc-200 light:bg-white">
+                <div className="px-3 py-2 border-b border-zinc-700 light:border-zinc-200">
+                  <p className="text-xs font-medium text-zinc-400 light:text-zinc-600">Delete logs older than</p>
+                </div>
+                <select
+                  value={deleteDays}
+                  onChange={(e) => setDeleteDays(e.target.value)}
+                  onBlur={() => setTimeout(() => setDeleteDropdownOpen(false), 100)}
+                  className="w-full px-3 py-2 text-xs text-zinc-100 bg-zinc-900 border-none focus:outline-none light:text-zinc-900 light:bg-white"
+                >
+                  <option value="7">7 days</option>
+                  <option value="30">30 days</option>
+                  <option value="90">90 days</option>
+                  <option value="365">1 year</option>
+                </select>
+                <div className="px-3 py-2 border-t border-zinc-700 light:border-zinc-200 flex gap-1.5">
+                  <SecondaryButton
+                    disabled={deleting}
+                    loading={deleting}
+                    onClick={handleDeleteLogs}
+                    className="flex-1 text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 light:hover:bg-rose-500/10"
+                  >
+                    {deleting ? 'Deleting…' : 'Confirm delete'}
+                  </SecondaryButton>
+                  <SecondaryButton
+                    disabled={deleting}
+                    onClick={() => setDeleteDropdownOpen(false)}
+                    className="flex-1"
+                  >
+                    Cancel
+                  </SecondaryButton>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -358,6 +443,16 @@ const AuditTrailView: React.FC = () => {
       {exportError && (
         <p role="alert" className="investigation-error">
           {exportError}
+        </p>
+      )}
+      {deleteError && (
+        <p role="alert" className="investigation-error">
+          {deleteError}
+        </p>
+      )}
+      {deleteSuccess && (
+        <p role="status" className="investigation-success">
+          {deleteSuccess}
         </p>
       )}
 
@@ -691,7 +786,8 @@ const AuditTrailView: React.FC = () => {
 };
 
 export const OperationalLogsView: React.FC = () => {
-  const { fetchEvents, settings } = useApp();
+  const { fetchEvents, settings, csrfToken, session } = useApp();
+  const canDeleteLogs = session?.role === 'ADMIN';
   const [tab, setTab] = useState<'events' | 'audit' | 'ml' | 'system'>('events');
   const [category, setCategory] = useState('');
   const [level, setLevel] = useState('');
@@ -703,8 +799,44 @@ export const OperationalLogsView: React.FC = () => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [refresh, setRefresh] = useState(0);
+  const [eventsDeleteDropdownOpen, setEventsDeleteDropdownOpen] = useState(false);
+  const [eventsDeleteDays, setEventsDeleteDays] = useState<string>('30');
+  const [eventsDeleting, setEventsDeleting] = useState(false);
+  const [eventsDeleteError, setEventsDeleteError] = useState('');
+  const [eventsDeleteSuccess, setEventsDeleteSuccess] = useState('');
   const validRunId = !runId || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(runId);
   const [selectedEvent, setSelectedEvent] = useState<OperationalEvent | null>(null);
+
+  const handleEventsDeleteLogs = async () => {
+    if (!canDeleteLogs || eventsDeleting || events.length === 0) return;
+    const days = parseInt(eventsDeleteDays, 10);
+    if (!Number.isFinite(days) || days <= 0) {
+      setEventsDeleteError('Please select a valid number of days');
+      return;
+    }
+    setEventsDeleting(true);
+    setEventsDeleteError('');
+    setEventsDeleteSuccess('');
+    try {
+      const response = await fetch('/api/events/cleanup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
+        body: JSON.stringify({ days, scope: 'OPERATIONS' }),
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ message: 'Failed to delete logs' }));
+        throw new Error(error.message || 'Failed to delete logs');
+      }
+      const result = await response.json();
+      setEventsDeleteSuccess(`Deleted ${result.deleted} operational event entries older than ${days} days`);
+      setRefresh((value) => value + 1);
+    } catch (error) {
+      setEventsDeleteError(error instanceof Error ? error.message : 'Failed to delete logs. Please retry.');
+    } finally {
+      setEventsDeleting(false);
+      setEventsDeleteDropdownOpen(false);
+    }
+  };
   useEffect(() => {
     if (tab !== 'events' || !validRunId) {
       setLoading(false);
@@ -794,7 +926,7 @@ export const OperationalLogsView: React.FC = () => {
           onClick={() => setTab('audit')}
           className={`rounded-lg px-3.5 py-2 text-xs font-medium transition ${tab === 'audit' ? 'bg-zinc-800 text-zinc-100 shadow-sm light:bg-blue-50 light:text-blue-800' : 'text-zinc-400 hover:text-zinc-200 light:text-zinc-600 light:hover:text-zinc-900'}`}
         >
-          <ShieldCheck size={16} aria-hidden="true" /> Audit trail
+          <ShieldCheck size={16} aria-hidden="true" /> Audit logs
         </button>
         <button
           role="tab"
@@ -851,6 +983,52 @@ export const OperationalLogsView: React.FC = () => {
                 </>
               )}
               <span>{loading ? 'Loading events…' : `${events.length} events in this view`}</span>
+            </div>
+            <div className="relative" role="group" aria-label="Delete operational events" hidden={!canDeleteLogs}>
+              <SecondaryButton
+                title="Delete operational events older than selected days"
+                disabled={events.length === 0 || loading || eventsDeleting}
+                icon={<Trash2 className="h-3.5 w-3.5" />}
+                onClick={() => setEventsDeleteDropdownOpen(!eventsDeleteDropdownOpen)}
+                className="text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 light:hover:bg-rose-500/10"
+              >
+                Delete logs
+              </SecondaryButton>
+              {eventsDeleteDropdownOpen && (
+                <div className="absolute right-0 top-full mt-1 z-20 rounded-xl border border-zinc-700 bg-zinc-900 py-1.5 shadow-lg min-w-[180px] light:border-zinc-200 light:bg-white">
+                  <div className="px-3 py-2 border-b border-zinc-700 light:border-zinc-200">
+                    <p className="text-xs font-medium text-zinc-400 light:text-zinc-600">Delete logs older than</p>
+                  </div>
+                  <select
+                    value={eventsDeleteDays}
+                    onChange={(e) => setEventsDeleteDays(e.target.value)}
+                    onBlur={() => setTimeout(() => setEventsDeleteDropdownOpen(false), 100)}
+                    className="w-full px-3 py-2 text-xs text-zinc-100 bg-zinc-900 border-none focus:outline-none light:text-zinc-900 light:bg-white"
+                  >
+                    <option value="7">7 days</option>
+                    <option value="30">30 days</option>
+                    <option value="90">90 days</option>
+                    <option value="365">1 year</option>
+                  </select>
+                  <div className="px-3 py-2 border-t border-zinc-700 light:border-zinc-200 flex gap-1.5">
+                    <SecondaryButton
+                      disabled={eventsDeleting}
+                      loading={eventsDeleting}
+                      onClick={handleEventsDeleteLogs}
+                      className="flex-1 text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 light:hover:bg-rose-500/10"
+                    >
+                      {eventsDeleting ? 'Deleting…' : 'Confirm delete'}
+                    </SecondaryButton>
+                    <SecondaryButton
+                      disabled={eventsDeleting}
+                      onClick={() => setEventsDeleteDropdownOpen(false)}
+                      className="flex-1"
+                    >
+                      Cancel
+                    </SecondaryButton>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
           <div className="ui-panel operational-events-filter">
@@ -964,6 +1142,16 @@ export const OperationalLogsView: React.FC = () => {
                 <p className="mt-0.5 opacity-80">{error}</p>
               </div>
             </div>
+          )}
+          {eventsDeleteError && (
+            <p role="alert" className="investigation-error">
+              {eventsDeleteError}
+            </p>
+          )}
+          {eventsDeleteSuccess && (
+            <p role="status" className="investigation-success">
+              {eventsDeleteSuccess}
+            </p>
           )}
           <div aria-busy={loading} className="space-y-3">
             {loading && events.length === 0 && (

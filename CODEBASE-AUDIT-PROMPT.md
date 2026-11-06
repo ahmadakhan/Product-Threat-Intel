@@ -1,42 +1,38 @@
-# VulnStream-Enterprise — Complete Codebase Audit Prompt
+# VulnStream-Enterprise — Complete Codebase Audit Prompt (Accuracy-Verified)
 
 You are a senior full-stack SRE, security engineer, production-readiness reviewer, and UI/UX auditor. Audit the VulnStream-Enterprise codebase to determine whether it is safe to deploy and operate in production, and whether every page of the user interface works and looks professional. Audit and fix the whole codebase: server, database, delivery, ML, search, pipeline, and the React SPA. Focus on deployability, operability, resilience, security, data integrity, observability, and feature completeness of implemented features. Do not report missing features; evaluate existing code quality and completeness of implemented features.
 
-## System Overview
+## System Overview (verified against package.json, src/design/pages.ts, server/db.ts, server/migrations/)
 
-- **React 19 + Vite SPA** (`src/`), **Node.js 26 + Express API/worker** (`server/`), **PostgreSQL 17**, Docker Compose + Caddy TLS proxy
-- **Bootstrap**: `server/main.ts`; router: `server/app.ts` (~2967 lines); health: `/live`, `/ready`, `/metrics`
-- **Migrations**: `server/migrate.ts`, `server/migrations/001..035` + `server/migrations/indexes/`
-- **Env validation**: `server/config.ts` (Zod schemas, `ENCRYPTION_KEY` base64 32-byte, production-gated checks)
-- **Database**: `server/db.ts` (pg pool, `statement_timeout`, audit hash chain `chainAuditLogs`, `transaction` with advisory locks)
-- **ML subsystem**: `server/ml/` (algorithms, models, runtime, train, integration, cron) — 18 models
+- **React 19 + Vite SPA** (`src/`), **Node.js >=26.0.0 + Express API/worker** (`server/`), **PostgreSQL 17**, Docker Compose + Caddy TLS proxy
+- **Bootstrap**: `server/main.ts`; router: `server/app.ts`; health: `/live`, `/ready`, `/metrics`
+- **Migrations**: `server/migrate.ts`, **`server/migrations/001..037`** + **`server/migrations/indexes/`** (concurrent index files). `REQUIRED_SCHEMA_VERSION = 37` (`server/db.ts:124`) enforced at production startup; must match the highest `NNN_*.sql` file.
+- **Env validation**: `server/config.ts` (Zod schemas, `ENCRYPTION_KEY` base64 32-byte via regex `/^[A-Za-z0-9+/]{43}=$/`, production-gated checks). Production requires HTTPS `APP_ORIGIN` unless `ALLOW_INSECURE_HTTP` for private/Tailscale IPv4 origin; `FAULT_SIMULATION_ENABLED` blocked in production; `HEARTBEAT_URL` https-only in production, no embedded credentials; `TRUST_PROXY` rejects trust-all values.
+- **Database**: `server/db.ts` (pg pool, `statement_timeout`, audit hash chain `chainAuditLogs`, `transaction` with advisory locks, `state_metrics` table for bounded counts)
+- **ML subsystem**: `server/ml/` (algorithms, models — 18 models, runtime, train, integration, cron)
 - **Email delivery**: `server/delivery.ts`, `server/emailProviders.ts`, `server/dailyDigest.ts`
 - **Vulnerability search**: `server/vulnerabilitySearch.ts`, `server/googleCse.ts`, `shared/vulnerability.ts`
 - **Correlation engine**: `server/correlation/` (inventory, runtime, operations, stream, heartbeat, metrics)
 - **Pipeline engine**: `server/pipeline.ts`, `src/engine/pipelineEngine.ts`
-- **Frontend**: `src/components/` (48+ views), `src/design/pages.ts` (route catalog), `src/context/`, `src/hooks/`, `src/utils/`, `src/engine/`, `src/types/index.ts`
+- **Frontend**: `src/components/` (48+ views), **`src/design/pages.ts` (exactly 24 pages)**, `src/context/`, `src/hooks/`, `src/utils/`, `src/engine/`, `src/types/index.ts`
 - **Shared**: `shared/correlation.ts`, `shared/state.ts`, `shared/vulnerability.ts`, `shared/watchlistIdentity.ts`
-- **Tests**: 80+ test files under `tests/` (Vitest + node --test), `tests/fixtures/`
-- **Config/ops**: `.env`, `.env.example`, `.env.test`, `compose.yaml`, `Dockerfile`, `Dockerfile.test`, `OPERATIONS.md`, `AGENTS.md`
+- **Tests**: **69 test files** under `tests/` (node --test + vitest), `tests/fixtures/`
+- **Config/ops**: `.env`, `.env.example`, `.env.test`, `compose.yaml`, `Dockerfile`, `Dockerfile.test`, `docker-compose.test.yml`, `OPERATIONS.md`, `AGENTS.md`
 
 ## Running the app for UI verification
 
-- **API server**: port 8080 (`npm run dev:server` → `tsx watch --env-file=.env server/main.ts`)
+- **API server**: port 8080 (`npm run dev:server` → `node scripts/free-port.mjs 8080 && tsx watch --env-file=.env server/main.ts`)
 - **SPA**: port 3000 (`npm run dev`), which **proxies `/api` to 8080** (`vite.config.ts`). `APP_ORIGIN=http://127.0.0.1:3000` in `.env` — the API rejects mutations whose `Origin` is not `APP_ORIGIN`, so **login through :8080 directly fails with 403**; always drive the app through :3000.
-- **Every page is client-side rendered** behind one login. There is no URL routing: navigation is by clicking sidebar labels from `src/design/pages.ts`. To audit all pages, log in with a real account (create one with an elevated connection if none exists, then delete it afterwards) and click through every sidebar entry.
+- **Every page is client-side rendered** behind one login. Navigation is by clicking sidebar labels from `src/design/pages.ts`. To audit all pages, log in with a real account (create one with an elevated connection if none exists, then delete it afterwards) and click through every sidebar entry.
 - Verify with a headless browser: console errors, failed network requests, stuck loaders, crashed views, horizontal overflow at 390/820/1024/1280/1440/1920 px, and screenshots you actually look at. Geometric claims (overlap, clipping) must be measured with `getBoundingClientRect` — a screenshot crop is not proof of a layout bug.
 
-## Recent Change Context
+## 24 pages registered in src/design/pages.ts (audit every one)
 
-- Commit `f9e57c6` → `78d35f9` pushed to `main`.
-- **Feeds (commit 78d35f9)**: four fixes — legacy 4-part ciphertext envelope now decrypts (`server/secrets.ts`); bootstrap repairs seeded feed URLs from the catalog so corrected URLs reach existing installations (`server/main.ts`, `server/recommendedFeeds.ts`); the RSS XXE guard no longer decodes character references before checking, so feeds embedding escaped HTML doctypes (Google Workspace/Cloud) parse (`server/rss.ts`); `queueRun`/recovery/queued-selector no longer scan the whole executions table, backed by partial index migration 035 (`server/pipeline.ts`, `REQUIRED_SCHEMA_VERSION = 35`). Cisco and Forbes feeds are disabled with documented reasons (their hosts cannot serve a machine-readable feed). Remaining feed failures are environmental: exploit-db CDN-blocks the deployment IP, app.opencve.io 429s the anonymous tier, malwarebytes/pentestpartners TLS is reset by the host network.
-- **UI (commit 8cdad2b)**: findings table column collapse fixed (min-width raised, nowrap on identifier/date/CVSS cells, product cell bounded with tooltips); Action Center subject readable (two lines + title attribute) and action buttons no longer wrap; Email Queue advisory ids use `break-all`. All 24 pages verified with zero console errors and no horizontal overflow at any breakpoint.
-- **Security (commit 5561eea)**: `/api/state` requires auth + role; resend path enforces `recipientAllows`; webhook blank-keeps restored with a required-secret rule for new GENERIC_HMAC endpoints; Action Center preview HTML sanitised via `src/utils/sanitizeEmailHtml.ts`; `/api/health` null-safe on missing `scheduler_state` row.
-- **Known open MEDIUMs (from prior passes, not yet fixed)**: `/api/state` runs several `count(*)` aggregates per refresh (`server/db.ts` `attachCounts`); `/api/audit/verify` walks the whole audit table in memory; the PDF renderer (`server/pdf.ts`) does not intercept requests from rendered HTML (remote `img`/`link` could bypass the egress allowlist); `processPipeline` has no AbortSignal wiring for the stuck-promise backstop; `mergeAllowedHosts` cannot remove a default egress host.
+dashboard, watchlist, findings, threat-intelligence-search, vulnerability-search, threat-data, threat-analytics, cpe-matcher, advisories, correlation, pipeline, alerted-cves, feeds, recipients, template, daily-digest, emails, email-queue, action-center, archive, logs, health, aliases, settings
 
-## Prior Audit Context (do not re-report already-fixed items unless they regress)
+## Prior audit context (do not re-report already-fixed items unless they regress)
 
-The codebase has undergone multiple audit passes (AUDIT-2026-10-30.md, PIPELINE-FIXES.md, CODEBASE-UI-AUDIT-2026-10-21.md, ECOSYSTEM-AUDIT-2026-10-21.md, CODEBASE-AUDIT-PROMPT-PRODUCTION.md, PRODUCTION-READY-AUDIT-PROMPT.md). Known fixed areas include: delivery false positives/negatives, stale-bundle recovery, CPE wildcard bypass, provider confirmation, real cancellation via AbortSignal, digest-window index, outbox isolation, concurrent-query-on-single-client fix, template XSS escaping, retention advisory-lock fix, stuck-promise guard releases, ML quality gate, pipeline hardening, fail-closed command authorization, unauthenticated `/api/state`, resend subscription governance, retention claim TTL, ML training cross-replica claim, digest lock-connection failure flags, daily-digest lock-event spam, Mailgun egress hosts, legacy ciphertext envelopes, stale seeded feed URLs, RSS XXE-guard false positives, unbounded execution-table scans, webhook blank-keeps, findings/ActionCenter/EmailQueue layout defects. Verify these fixes still hold and look for regressions, edge cases, and uncovered paths.
+The codebase has undergone multiple audit passes. Known fixed areas include: delivery false positives/negatives, stale-bundle recovery, CPE wildcard bypass, provider confirmation, real cancellation via AbortSignal, digest-window index, outbox isolation, concurrent-query-on-single-client fix, template XSS escaping, retention advisory-lock fix, stuck-promise guard releases, ML quality gate, pipeline hardening, fail-closed command authorization, unauthenticated `/api/state`, resend subscription governance, retention claim TTL, ML training cross-replica claim, digest lock-connection failure flags, daily-digest lock-event spam, Mailgun egress hosts, legacy ciphertext envelopes, stale seeded feed URLs, RSS XXE-guard false positives, unbounded execution-table scans, webhook blank-keeps, findings/ActionCenter/EmailQueue layout defects. Verify these fixes still hold and look for regressions, edge cases, and uncovered paths.
 
 ## Audit Dimensions
 
@@ -56,22 +52,22 @@ The codebase has undergone multiple audit passes (AUDIT-2026-10-30.md, PIPELINE-
 ### 2. Configuration & Secrets (`server/config.ts`, `.env.example`, `server/secrets.ts`)
 
 - All required env vars documented; defaults safe for production
-- No hardcoded secrets; `ENCRYPTION_KEY` validation (base64 32-byte); credential blank-keeps behavior
-- Ciphertext envelope compatibility: `decrypt()` must accept both the current 5-part `v1.<keyIndex>.<iv>.<tag>.<body>` and the legacy 4-part `v1.<iv>.<tag>.<body>` form
+- No hardcoded secrets; `ENCRYPTION_KEY` validation (base64 32-byte via Zod regex); `ENCRYPTION_KEYS` (up to 16 comma-separated keys); credential blank-keeps behavior
+- Ciphertext envelope compatibility: `decrypt()` must accept both current and legacy envelope forms
 - `METRICS_TOKEN` 32+ chars in production
-- Egress allowlist `EGRESS_ALLOWED_HOSTS` enforcement; redirect target SSRF re-validation
+- Egress allowlist `EGRESS_ALLOWED_HOSTS` + `EGRESS_ALLOWED_HOSTS_EXTRA`; `DEFAULT_EGRESS_HOSTS`; redirect target SSRF re-validation
 - `TRUST_PROXY` rejects trust-all values (`true`, `*`, `0.0.0.0/0`, `::/0`)
 - CORS restrictive, origin validation, CSRF
 - Rate limiters DB-backed shared across replicas (reset quotas, mutation quota, ingest quota)
 - SMTP/API provider config validation; encrypted creds at rest; `decrypt()` failure handling
 - `FAULT_SIMULATION_ENABLED` blocked in production; `HEARTBEAT_URL` https-only in production, no embedded credentials
-- `APP_ORIGIN` HTTPS in production, origin without path
+- `APP_ORIGIN` HTTPS in production, origin without path (Zod validates `origin.origin === APP_ORIGIN`)
 - `POOL_STATEMENT_TIMEOUT_MS`, pool sizing, idle/max lifetime
 
 ### 3. Database & Migrations (`server/db.ts`, `server/migrate.ts`, `server/migrations/`)
 
 - Migration job owns DDL; runtime role no DDL; idempotent migrations; reversible where feasible
-- `REQUIRED_SCHEMA_VERSION = 35` enforced at production startup, and matching the highest `NNN_*.sql` file
+- `REQUIRED_SCHEMA_VERSION = 37` enforced at production startup, matching highest `NNN_*.sql` file
 - Connection pooling: size, timeout, leak prevention, `release()` in finally with failure flag
 - Transactions for critical ops (outbox, findings, aliases); advisory locks scoped per schema
 - Index coverage for hot queries; `CREATE INDEX CONCURRENTLY` outside transaction (index files live in `migrations/indexes/`, version markers in `migrations/`)
@@ -82,7 +78,7 @@ The codebase has undergone multiple audit passes (AUDIT-2026-10-30.md, PIPELINE-
 - `statement_timeout` per pool (15s default); migrations use 300s local timeout
 - `transaction()` with `AbortSignal` cancels backend from second connection; drops socket when cancel undeliverable
 - One client, one query at a time (no `Promise.all` over queries on a single transaction client)
-- No unbounded `list(kind)` scans on hot paths — active/queued record lookups must be bounded queries with supporting indexes
+- No unbounded `list(kind)` scans on hot paths — active/queued record lookups must be bounded queries with supporting indexes; `state_metrics` used for `/api/state` counts
 
 ### 4. Security (all server routes, `server/auth.ts`, `server/validation.ts`, `server/network.ts`)
 
@@ -120,7 +116,7 @@ The codebase has undergone multiple audit passes (AUDIT-2026-10-30.md, PIPELINE-
 ### 6. Performance & Scale
 
 - Memory leaks: listeners, timers, buffers, model history; `timer.unref()` on interval timers
-- Bundle size; code splitting; Vite build
+- Bundle size; code splitting; Vite build (manualChunks for react/lucide/motion)
 - Pagination on all list endpoints; cursor pagination for logs
 - Query performance; indexes; `ROW_NUMBER()` window for bounded heavy collections
 - Concurrency limits (`workLimiter`); mutation rate limiter shared across replicas
@@ -128,7 +124,7 @@ The codebase has undergone multiple audit passes (AUDIT-2026-10-30.md, PIPELINE-
 - Feed max duration; request timeouts; socket timeouts
 - `unref()` on non-critical timers to allow process exit
 - Digest-window index bound on `created_at` (not just `kind`)
-- Table scans driven by JSONB status predicates are indexed (see migration 035)
+- Table scans driven by JSONB status predicates are indexed (see migration 035 / indexes dir)
 
 ### 7. Observability (`server/events.ts`, `server/logging.ts`)
 
@@ -140,7 +136,7 @@ The codebase has undergone multiple audit passes (AUDIT-2026-10-30.md, PIPELINE-
 - Event log pagination; cursor-based; category filtering
 - DB severance detection; memory-shedding HIGH-lane floor; hang detection
 - Dead-letter queue spool capacity alert (`dead_letter.spool_exhausted`)
-- No per-tick no-op event spam (daily-digest lock events were 2,880/day/replica before the unlocked pre-check)
+- No per-tick no-op event spam
 
 ### 8. Delivery & Email (`server/delivery.ts`, `server/emailProviders.ts`, `server/dailyDigest.ts`, `src/components/EmailQueueView.tsx`, `EmailHistoryView.tsx`, `ActionCenter.tsx`)
 
@@ -169,7 +165,7 @@ The codebase has undergone multiple audit passes (AUDIT-2026-10-30.md, PIPELINE-
 
 ### 10. Frontend Production & UI Page Audit (`src/`) — every page, in a real browser
 
-The SPA has 24 pages registered in `src/design/pages.ts`. Audit **every one of them** by driving the running app (see "Running the app for UI verification" above), not by reading JSX:
+The SPA has exactly **24 pages** registered in `src/design/pages.ts`. Audit **every one of them** by driving the running app (see "Running the app for UI verification" above), not by reading JSX:
 
 - **Functional**: each page renders real content (no stuck loader, no ErrorBoundary crash, no zero-content main region), and its data loads from the API without failed requests
 - **Console & network**: zero console errors beyond the expected pre-login `/api/session` 401 probe; zero failed requests
@@ -180,7 +176,7 @@ The SPA has 24 pages registered in `src/design/pages.ts`. Audit **every one of t
 - React 19; strict mode considerations
 - CSRF token handling on mutation endpoints; session expiry handling (401 → login flow)
 - Cursor pagination in UI tables; real-time SLA monitoring (ActionCenter)
-- When a defect is found: fix it, then **re-screenshot the same page** to confirm the fix — and check the fix did not introduce a new defect in an adjacent column (a previous pass fixed a collapsed column with `table-fixed` and created two new ones before settling on min-width + nowrap)
+- When a defect is found: fix it, then **re-screenshot the same page** to confirm the fix — and check the fix did not introduce a new defect in an adjacent column
 
 ### 11. Deployment (`Dockerfile`, `compose.yaml`, `Dockerfile.test`, `docker-compose.test.yml`, `scripts/`)
 
@@ -212,15 +208,15 @@ The SPA has 24 pages registered in `src/design/pages.ts`. Audit **every one of t
 - Correlation schema contract (migrations 023-028)
 - Match quality gate; precision/recall regression test
 - Pre-CVE disposition inheritance; two whole-table scans removed; retention takeover loop fixed
-- **Applicability matching time-bound**: `scopeHours` from run settings now bounds matching (reverted hardcoded `scopeHours: 0` override). Verify all callers pass the correct `scopeHours` — note the deliberate exceptions: delivery revalidation and the daily digest rematch use `scopeHours: 0` because cached applicability must not expire with the run window
+- Applicability matching time-bound: `scopeHours` from run settings bounds matching; deliberate exceptions use `scopeHours: 0` (delivery revalidation, daily digest rematch)
 
 ### 14. Threat Feeds & Recommended Catalog (`server/recommendedFeeds.ts`, `server/ingestion.ts`, `server/rss.ts`)
 
-- The bootstrap repairs seeded feed URLs from the catalog (feeds whose id exists but whose source URL was corrected get the new URL, credentials preserved); verify the reconciliation runs at boot and that DB URLs match `RECOMMENDED_FEEDS`
-- Every recommended feed URL must be verified live before being committed: a URL that returns HTML, 404, or 403 to the service user agent must not ship enabled; document the reason in a comment and leave the feed disabled rather than seeding it broken
-- RSS parser XXE guard: character references must NOT be decoded before the declaration check (escaped doctypes in entry bodies are data); live `<!ENTITY` and `<!DOCTYPE … SYSTEM/PUBLIC` are still refused — regression tests cover both
-- New feed hosts must be added to the default egress allowlist (`server/config.ts` `DEFAULT_EGRESS_HOSTS`) or the feed fails at connect time
-- Distinguish code defects from environmental failures before "fixing": probe the URL from the deployment host, test with both the service UA and a browser UA, and check TCP vs TLS (a connection reset right after ClientHello is network egress, not the app)
+- Bootstrap repairs seeded feed URLs from the catalog (feeds whose id exists but whose source URL was corrected get the new URL, credentials preserved); verify reconciliation runs at boot and DB URLs match `RECOMMENDED_FEEDS`
+- Every recommended feed URL verified live before commit: HTML/404/403 to service user agent must not ship enabled; document reason and leave disabled rather than seeding broken
+- RSS parser XXE guard: character references must NOT be decoded before declaration check; live `<!ENTITY` and `<!DOCTYPE … SYSTEM/PUBLIC` refused
+- New feed hosts added to default egress allowlist (`server/config.ts` `DEFAULT_EGRESS_HOSTS`) or feed fails at connect time
+- Distinguish code defects from environmental failures before "fixing": probe URL from deployment host, test service UA vs browser UA, check TCP vs TLS
 
 ## Output Format
 
@@ -251,19 +247,19 @@ For each finding:
 - Linter-handled style (prettier)
 - Generated migration content
 - Missing features not in the codebase
-- Environmental failures proven not to be code: CDN IP blocks, upstream 429s requiring paid tiers, and network-level TLS interception — report them as operator notes, not defects, after ruling the app out with the probes above
+- Environmental failures proven not to be code: CDN IP blocks, upstream 429s requiring paid tiers, network-level TLS interception — report as operator notes, not defects, after ruling the app out with the probes above
 
 ## Verification Commands
 
 - `npm run lint` — `tsc --noEmit` (run before every commit)
-- `npm test` — `node --import tsx --test` (all tests)
-- `npm run test:unit` — `vitest run --no-coverage --reporter=verbose`
+- `npm test` — `node --import tsx --test --test-concurrency=1 tests/*.test.ts` (all tests)
+- `npm run test:unit` — alias of `npm test`
+- `npm run test:ci` — requires `TEST_DATABASE_URL`
 - `npm run build` — client + server build
 - `npm audit` — dependency vulnerabilities
-- `TEST_DATABASE_URL=… npm run test:integration` — full DB-backed suite
 - `npx vitest run tests/ml-*.test.ts --no-coverage --reporter=verbose` — ML subsystem only
 - `node --import tsx server/ml/train/cron.ts` — ML training cron (standalone)
-- UI: drive `http://127.0.0.1:3000` in a headless browser through the login and all 24 pages; capture console errors, failed requests, per-breakpoint overflow, and screenshots
+- UI: drive `http://127.0.0.1:3000` in a headless browser through login and all 24 pages; capture console errors, failed requests, per-breakpoint overflow, screenshots
 
 ## Deliverable
 

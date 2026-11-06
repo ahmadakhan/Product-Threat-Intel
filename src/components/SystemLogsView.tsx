@@ -12,6 +12,7 @@ import {
   RotateCw,
   Search,
   Server,
+  Trash2,
   X,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
@@ -79,7 +80,8 @@ function systemCorrelations(event: OperationalEvent) {
 }
 
 export const SystemLogsView: React.FC = () => {
-  const { fetchEvents, settings } = useApp();
+  const { fetchEvents, settings, csrfToken, session } = useApp();
+  const canDeleteLogs = session?.role === 'ADMIN';
   const [query, setQuery] = useState('');
   const [level, setLevel] = useState('');
   const [history, setHistory] = useState<string[]>([]);
@@ -98,6 +100,43 @@ export const SystemLogsView: React.FC = () => {
     setQuery('');
     setLevel('');
     setHistory([]);
+  };
+
+  const [deleteDropdownOpen, setDeleteDropdownOpen] = useState(false);
+  const [deleteDays, setDeleteDays] = useState<string>('30');
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+  const [deleteSuccess, setDeleteSuccess] = useState('');
+
+  const handleDeleteLogs = async () => {
+    if (!canDeleteLogs || deleting || events.length === 0) return;
+    const days = parseInt(deleteDays, 10);
+    if (!Number.isFinite(days) || days <= 0) {
+      setDeleteError('Please select a valid number of days');
+      return;
+    }
+    setDeleting(true);
+    setDeleteError('');
+    setDeleteSuccess('');
+    try {
+      const response = await fetch('/api/events/cleanup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
+        body: JSON.stringify({ days, scope: 'SYSTEM' }),
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ message: 'Failed to delete logs' }));
+        throw new Error(error.message || 'Failed to delete logs');
+      }
+      const result = await response.json();
+      setDeleteSuccess(`Deleted ${result.deleted} system log entries older than ${days} days`);
+      setRefresh((value) => value + 1);
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : 'Failed to delete logs. Please retry.');
+    } finally {
+      setDeleting(false);
+      setDeleteDropdownOpen(false);
+    }
   };
 
   useEffect(() => {
@@ -168,6 +207,53 @@ export const SystemLogsView: React.FC = () => {
           <span aria-hidden="true" />
           {cursor ? 'History · auto-refresh paused' : 'Auto-refresh · every 10s'}
         </span>
+        <div className="relative" role="group" aria-label="Delete system logs" hidden={!canDeleteLogs}>
+          <button
+            type="button"
+            className="system-logs-button text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 light:hover:bg-rose-500/10"
+            disabled={events.length === 0 || loading || deleting}
+            onClick={() => setDeleteDropdownOpen(!deleteDropdownOpen)}
+          >
+            <Trash2 size={15} aria-hidden="true" />
+            Delete logs
+          </button>
+          {deleteDropdownOpen && (
+            <div className="absolute right-0 top-full mt-1 z-20 rounded-xl border border-zinc-700 bg-zinc-900 py-1.5 shadow-lg min-w-[180px] light:border-zinc-200 light:bg-white">
+              <div className="px-3 py-2 border-b border-zinc-700 light:border-zinc-200">
+                <p className="text-xs font-medium text-zinc-400 light:text-zinc-600">Delete logs older than</p>
+              </div>
+              <select
+                value={deleteDays}
+                onChange={(e) => setDeleteDays(e.target.value)}
+                onBlur={() => setTimeout(() => setDeleteDropdownOpen(false), 100)}
+                className="w-full px-3 py-2 text-xs text-zinc-100 bg-zinc-900 border-none focus:outline-none light:text-zinc-900 light:bg-white"
+              >
+                <option value="7">7 days</option>
+                <option value="30">30 days</option>
+                <option value="90">90 days</option>
+                <option value="365">1 year</option>
+              </select>
+              <div className="px-3 py-2 border-t border-zinc-700 light:border-zinc-200 flex gap-1.5">
+                <button
+                  type="button"
+                  className="system-logs-button flex-1 text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 light:hover:bg-rose-500/10"
+                  disabled={deleting}
+                  onClick={() => void handleDeleteLogs()}
+                >
+                  {deleting ? 'Deleting…' : 'Confirm delete'}
+                </button>
+                <button
+                  type="button"
+                  className="system-logs-button flex-1"
+                  disabled={deleting}
+                  onClick={() => setDeleteDropdownOpen(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       </header>
 
       <div className="ui-panel system-logs-filters">
@@ -263,6 +349,16 @@ export const SystemLogsView: React.FC = () => {
             Try again
           </button>
         </div>
+      )}
+      {deleteError && (
+        <p role="alert" className="system-logs-error-text" style={{ color: 'var(--ui-danger)', fontSize: '13px', padding: '12px 16px', background: 'rgba(244, 63, 94, 0.05)', borderRadius: '8px', border: '1px solid rgba(244, 63, 94, 0.2)' }}>
+          {deleteError}
+        </p>
+      )}
+      {deleteSuccess && (
+        <p role="status" className="system-logs-success-text" style={{ color: 'var(--ui-success)', fontSize: '13px', padding: '12px 16px', background: 'rgba(34, 197, 94, 0.05)', borderRadius: '8px', border: '1px solid rgba(34, 197, 94, 0.2)' }}>
+          {deleteSuccess}
+        </p>
       )}
 
       <div className="ui-panel system-logs-events" aria-busy={loading}>

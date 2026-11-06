@@ -47,7 +47,7 @@ export const pages = {
    'email-queue': { section: 'Autonomous pipeline', title: 'Email queue', icon: Inbox },
    'action-center': { section: 'Autonomous pipeline', title: 'Email delivery action center', icon: Activity },
    archive: { section: 'Archive & retention', title: 'Archives & retention', icon: Archive },
-  logs: { section: 'System & audit', title: 'Audit trail', icon: FileCode2 },
+  logs: { section: 'System & audit', title: 'Audit logs', icon: FileCode2 },
   health: { section: 'System & audit', title: 'System health', icon: Cpu },
   aliases: { section: 'System & audit', title: 'Alias thesaurus', icon: Tags },
   settings: { section: 'System & audit', title: 'Settings', icon: Settings },

@@ -89,6 +89,14 @@
   color: var(--ui-text);
   font-size: 13px;
 }
+.investigation-success {
+  padding: 16px;
+  border: 1px solid #22c55e55;
+  border-radius: 12px;
+  background: #22c55e0d;
+  color: var(--ui-text);
+  font-size: 13px;
+}
 .cpe-workspace .ui-panel {
   padding: 24px;
 }
