@@ -6,7 +6,7 @@ import { advisoryFilename, unverifiableMatchFilename } from '../server/pdf.ts';
 import { compileCustomizedTemplate, DEFAULT_TEMPLATE_CUSTOMIZATION } from '../src/utils/templateCompiler.ts';
 import { DEFAULT_EMAIL_CONFIG } from '../shared/state.ts';
 import { sendProviderEmail } from '../server/emailProviders.ts';
-import type { Advisory, EmailConfiguration } from '../src/types/index.ts';
+import type { Advisory, EmailConfiguration, Finding } from '../src/types/index.ts';
 import { applyJobEdits, type Job } from '../server/delivery.ts';
 
 test('advisory HTML conversion preserves readable content and skips executable/resource markup', () => {
@@ -34,15 +34,11 @@ test('PDF blocks preserve each email CVE card and its severity accent', () => {
   assert.ok(cards[1].text.includes('CVE-2026-67890'));
 });
 
-test('advisoryFilename is a ddMMMyyyyHHMM timestamp in the workspace timezone', () => {
-  const at = new Date('2026-10-05T13:42:00Z');
-  assert.match(advisoryFilename('ADV-05Oct2026-A1B2C3D4', at, 'UTC'), /^05Oct2026\d{4}\.pdf$/);
-  assert.equal(advisoryFilename('ADV-05Oct2026-A1B2C3D4', at, 'UTC'), '05Oct20261342.pdf');
-  // A timezone shift moves the local hour, not the shape of the name.
-  assert.equal(advisoryFilename('ADV-05Oct2026-A1B2C3D4', at, 'Europe/Berlin'), '05Oct20261542.pdf');
+test('advisoryFilename uses the real advisory ID', () => {
+  assert.equal(advisoryFilename('ADV-05Oct2026-A1B2C3D4'), 'ADV-05Oct2026-A1B2C3D4.pdf');
 });
 
-test('unverifiableMatchFilename shares the advisory attachment shape', () => {
+test('unverifiableMatchFilename remains timestamped without an advisory ID', () => {
   assert.equal(
     unverifiableMatchFilename(new Date('2026-03-09T08:05:00Z'), 'UTC'),
     '09Mar20260805.pdf',
@@ -62,12 +58,49 @@ const advisory = {
 
 test('renderAdvisoryPdf renders the compiled advisory HTML to a PDF without a browser', async () => {
   const template = compileCustomizedTemplate(DEFAULT_TEMPLATE_CUSTOMIZATION);
-  const html = renderAdvisory(template, advisory);
+  const findings = [
+    {
+      cveId: 'CVE-2026-12345',
+      cve: {
+        cvss: { severity: 'HIGH', score: 7.1 },
+        description: 'High-severity finding description.',
+        cisaKev: { isKev: false },
+        remediation: { vendorAdvisoryRef: 'https://vendor.example/security/advisory' },
+        cpeMatches: [],
+      },
+      matchedAssetVendor: 'Dell',
+      matchedAssetProduct: 'OpenManage Enterprise',
+      matchedAssetName: 'Dell OpenManage Enterprise',
+    },
+    {
+      cveId: 'CVE-2026-67890',
+      cve: {
+        cvss: { severity: 'MEDIUM', score: 6.8 },
+        description: 'Medium-severity finding description.',
+        cisaKev: { isKev: false },
+        remediation: {},
+        cpeMatches: [],
+      },
+      matchedAssetVendor: 'Dell',
+      matchedAssetProduct: 'OpenManage Enterprise',
+      matchedAssetName: 'Dell OpenManage Enterprise',
+    },
+  ] as unknown as Finding[];
+  const html = renderAdvisory(template, advisory, findings);
   assert.ok(html.includes('CVE-2026-12345'));
   assert.ok(!html.includes('{{advisory_id}}'));
+  assert.match(template, />Advisory link<\/a>/);
+  assert.match(html, /href="https:\/\/vendor\.example\/security\/advisory"[^>]*>Advisory link<\/a>/);
+  assert.match(html, /<div style="margin:0 0 8px;padding:0;font-size:12px;line-height:19px;color:#334155;">/);
+  const emailCards = [...html.matchAll(/<table class="vulnstream-pdf-card" data-pdf-accent="([^"]+)"/g)];
+  assert.equal(emailCards.length, advisory.cveIds.length);
+  assert.deepEqual(emailCards.map((card) => card[1]), ['#f59e0b', '#eab308']);
+  assert.equal([...html.matchAll(/<td width="4" bgcolor="#[0-9a-f]{6}"/g)].length, emailCards.length);
+  assert.equal([...html.matchAll(/border:1px solid #e2e8f0;border-left:0/g)].length, emailCards.length);
+  assert.equal([...html.matchAll(/<td width="1%" align="right"/g)].length, emailCards.length);
   const cveCards = advisoryHtmlToPdfBlocks(html).filter((block) => block.kind === 'cve-card');
   assert.equal(cveCards.length, advisory.cveIds.length);
-  assert.deepEqual(cveCards.map((block) => block.kind === 'cve-card' && block.accent), ['#ef4444', '#ef4444']);
+  assert.deepEqual(cveCards.map((block) => block.kind === 'cve-card' && block.accent), ['#f59e0b', '#eab308']);
   assert.ok(cveCards[0].text.includes('CVE-2026-12345'));
   assert.ok(cveCards[1].text.includes('CVE-2026-67890'));
 
@@ -75,6 +108,17 @@ test('renderAdvisoryPdf renders the compiled advisory HTML to a PDF without a br
   try {
     assert.equal(Buffer.from(pdf).slice(0, 5).toString(), '%PDF-');
     assert.ok(pdf.length > 2000, 'PDF should contain rendered content');
+  } finally {
+    await closePdfRenderer();
+  }
+});
+
+test('PDF footer does not create an empty page for short content', async () => {
+  const pdf = await renderAdvisoryPdf('<html><body><p>Short advisory</p></body></html>');
+  try {
+    const pdfText = Buffer.from(pdf).toString('latin1');
+    const pageCount = [...pdfText.matchAll(/\/Type\s*\/Page\b/g)].length;
+    assert.equal(pageCount, 1);
   } finally {
     await closePdfRenderer();
   }
@@ -118,8 +162,7 @@ test('rendered advisory PDF is attached to provider messages', async () => {
   assert.ok(capturedBody);
   const payload = JSON.parse(capturedBody!);
   assert.equal(payload.attachments[0].type, 'application/pdf');
-  // Timestamped attachment name: ddMMMyyyyHHMM.pdf.
-  assert.match(payload.attachments[0].filename, /^\d{2}[A-Z][a-z]{2}\d{4}\d{4}\.pdf$/);
+  assert.equal(payload.attachments[0].filename, 'ADV-05Oct2026-A1B2C3D4.pdf');
   assert.equal(payload.attachments[0].disposition, 'attachment');
   assert.equal(payload.attachments[0].content, base64);
   assert.ok(base64.length > 1000);

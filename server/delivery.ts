@@ -523,7 +523,7 @@ async function buildPdfAttachment(job: Job, config: Config, db?: Db): Promise<Em
       : undefined;
     const filename = job.advisory_id?.startsWith('UNVERIFIABLE:')
       ? unverifiableMatchFilename(new Date(), timezone)
-      : advisoryFilename(job.advisory_id, new Date(), timezone);
+        : advisoryFilename(job.advisory_id);
     return {
       filename,
       content: Buffer.from(pdf),

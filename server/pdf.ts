@@ -31,17 +31,13 @@ export type AdvisoryPdfBlock =
   | { kind: 'text'; text: string }
   | { kind: 'cve-card'; text: string; accent: string };
 
-/**
- * Attachment filename: `ddMMMyyyyHHMM.pdf`, e.g. `03Nov20261435.pdf`.
- *
- * Derived from the dispatch instant in the workspace timezone rather than the
- * server's local zone, so the filename matches the `Generated` timestamp on the
- * advisory the recipient is reading, and a file saved by two operators in
- * different offices still tells them when it was produced.
- */
-export function advisoryFilename(advisoryId: string, at: Date = new Date(), timezone?: string): string {
-  // Kept for signature compatibility and to make a malformed id obvious.
+/** Use the advisory's real ID so the attachment is easy to identify and file. */
+export function advisoryFilename(advisoryId: string): string {
   const safeId = /^[A-Za-z0-9._-]+$/.test(advisoryId) ? advisoryId : 'advisory';
+  return `${safeId}.pdf`;
+}
+
+function timestampedFilename(at: Date, timezone?: string): string {
   const tz = resolveTimezone(timezone);
   const parts = new Intl.DateTimeFormat('en-GB', {
     timeZone: tz,
@@ -54,14 +50,13 @@ export function advisoryFilename(advisoryId: string, at: Date = new Date(), time
   }).formatToParts(at);
   const pick = (type: string) => parts.find((part) => part.type === type)?.value || '';
   const month = pick('month');
-  if (!month) return `${safeId}.pdf`;
+  if (!month) return 'unverifiable.pdf';
   return `${pick('day')}${month}${pick('year')}${pick('hour')}${pick('minute')}.pdf`;
 }
 
 export function unverifiableMatchFilename(at: Date = new Date(), timezone?: string): string {
-  // Same shape as an advisory attachment so a mailbox sorted by filename keeps
-  // every report from this platform together.
-  return advisoryFilename('unverifiable', at, timezone);
+  // These reports have no advisory ID to use as the filename.
+  return timestampedFilename(at, timezone);
 }
 
 export function advisoryHtmlToText(html: string): string {
@@ -91,6 +86,7 @@ export function advisoryHtmlToPdfBlocks(html: string): AdvisoryPdfBlock[] {
     selectors: [
       ...(HTML_TO_TEXT_OPTIONS.selectors ?? []),
       { selector: 'div.vulnstream-pdf-card', format: 'pdfCveCard' },
+      { selector: 'table.vulnstream-pdf-card', format: 'pdfCveCard' },
       { selector: 'tr.vulnstream-pdf-card', format: 'pdfCveCard' },
     ],
   });
@@ -173,6 +169,8 @@ async function renderPdfBlocks(blocks: AdvisoryPdfBlock[]): Promise<Uint8Array> 
     for (let pageIndex = pages.start; pageIndex < pages.start + pages.count; pageIndex++) {
       document.switchToPage(pageIndex);
       const footerY = document.page.height - 32;
+      const bottomMargin = document.page.margins.bottom;
+      document.page.margins.bottom = 0;
       document.font('Helvetica').fontSize(8).fillColor('#667085')
         .text('BA Threat Intel | Security advisory', 48, footerY, { lineBreak: false });
       document.text(`Page ${pageIndex - pages.start + 1} of ${pages.count}`, 48, footerY, {
@@ -180,6 +178,7 @@ async function renderPdfBlocks(blocks: AdvisoryPdfBlock[]): Promise<Uint8Array> 
         align: 'right',
         lineBreak: false,
       });
+      document.page.margins.bottom = bottomMargin;
     }
     document.end();
   });

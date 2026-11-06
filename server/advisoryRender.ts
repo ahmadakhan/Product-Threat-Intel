@@ -237,7 +237,7 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
       .join('\n'),
     vendor_products: productEntries.join('\n'),
     vendor_products_html: productEntries
-      .map((entry) => `<div style="margin:0 0 8px;padding:0 0 8px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:19px;color:#334155;">${escape(entry)}</div>`)
+      .map((entry) => `<div style="margin:0 0 8px;padding:0;font-size:12px;line-height:19px;color:#334155;">${escape(entry)}</div>`)
       .join('\n'),
     remediation_steps: `<p style="margin:0 0 10px;font-size:12px;line-height:19px;color:#334155;">${escape(composedRemediation)}</p>${remediationBlocks}`,
     vendor_link: safeHttpHref(advisory.vendorLink || ''),
@@ -300,15 +300,17 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
         sources.push(
           `<a href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">CISA KEV</a>`,
         );
-        return `<div class="vulnstream-pdf-card" data-pdf-accent="${colour}" style="margin:0 0 16px;padding:16px;border:1px solid #e2e8f0;border-left:4px solid ${colour};border-radius:4px;background:#ffffff;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+        return `<table class="vulnstream-pdf-card" data-pdf-accent="${colour}" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 12px;border-collapse:collapse;background:#ffffff;">
+  <tbody><tr>
+    <td width="4" bgcolor="${colour}" style="width:4px;min-width:4px;padding:0;background:${colour};font-size:0;line-height:0;">&nbsp;</td>
+    <td style="padding:12px 14px;border:1px solid #e2e8f0;border-left:0;background:#ffffff;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
     <tr>
       <td style="padding:0;vertical-align:top;">
         <div style="font-size:14px;font-weight:bold;color:#0f172a;line-height:20px;">
           <a href="${nvdHref}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">${escape(cve)}</a>
         </div>
       </td>
-      <td align="right" style="padding:0 0 0 12px;white-space:nowrap;vertical-align:top;">
+      <td width="1%" align="right" style="padding:0 0 0 12px;white-space:nowrap;vertical-align:top;">
         <span style="display:inline-block;background:${colour};color:#ffffff;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:bold;letter-spacing:0.3px;">${escape(severity)} \u00b7 CVSS ${scoreLabel}</span>
         ${kev ? '<span style="display:inline-block;margin-left:6px;background:#7f1d1d;color:#ffffff;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:bold;letter-spacing:0.3px;">KEV</span>' : ''}
       </td>
@@ -319,8 +321,9 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
     <tr>
       <td colspan="2" style="padding:8px 0 0;font-size:11px;line-height:16px;color:#64748b;text-align:left;">Sources: ${sources.join(' <span style="color:#cbd5e1;">&middot;</span> ')}</td>
     </tr>
-  </table>
-</div>`;
+  </table></td>
+  </tr></tbody>
+</table>`;
       })
       .join('\n'),
     // Prose blocks instead of bullets: a numbered step list reads as an ordered

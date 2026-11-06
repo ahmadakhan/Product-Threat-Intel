@@ -273,7 +273,7 @@ export function compileCustomizedTemplate(config: TemplateCustomization): string
                     </td>
                     <td style="padding:12px;border:1px solid #e2e8f0;text-align:left;vertical-align:top;">
                         {{#if references_link}}<div style="font-size:12px;line-height:18px;text-align:left;">
-                            <a href="{{references_link}}" target="_blank" rel="noopener noreferrer" style="color:#2563eb;text-decoration:none;">Vendor Security Advisory</a>
+                            <a href="{{references_link}}" target="_blank" rel="noopener noreferrer" style="color:#2563eb;text-decoration:underline;">Advisory link</a>
                         </div>{{/if}}
                     </td>
                 </tr>
