@@ -271,6 +271,22 @@ export const AdvisoryTemplateView: React.FC = () => {
     setSavingTemplate(true);
     try {
       if (!(await saveTemplate(isCustomTemplate ? customTemplate : undefined))) return;
+      // The save committed to the server and refresh() reloaded the snapshot.
+      // Re-seed the local editor draft from the committed context so the
+      // preview renders the server-canonical template (with saved settings /
+      // body) rather than a stale pre-save draft.
+      //
+      // Do NOT read customAdvisoryTemplate / advisoryTemplate here: React has
+      // not yet committed the post-save snapshot refresh, so those context
+      // values are still stale. For a base-template (settings-only) save,
+      // dropping isCustomTemplate lets the next render read the refreshed,
+      // settings-embedded advisoryTemplate. For a custom-body save, local
+      // customTemplate already equals the saved body, so keep it.
+      if (!isCustomTemplate) {
+        setCustomTemplate('');
+        setIsCustomTemplate(false);
+      }
+      setViewFormat('preview');
       setConfirmSave(false);
       setSaveToast(true);
       setTimeout(() => setSaveToast(false), 2500);

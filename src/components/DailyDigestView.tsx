@@ -283,6 +283,21 @@ export const DailyDigestView: React.FC = () => {
     if (!confirmSave) return;
     try {
       if (!(await saveDailyDigestTemplate(isCustomTemplate ? customTemplate : null))) return;
+      // The save committed to the server and refresh() reloaded the snapshot.
+      // Re-seed the local editor draft so the preview renders the committed
+      // template rather than a stale pre-save draft.
+      //
+      // Do NOT read dailyDigestTemplate here: React has not yet committed the
+      // post-save snapshot refresh, so that context value is still stale.
+      // For a settings-only save (no custom body), dropping isCustomTemplate
+      // lets the next render read the refreshed dailyDigestTemplate (which
+      // embeds the saved customization via compileDailyDigestTemplate).
+      // For a custom-body save, local customTemplate already equals the saved
+      // body, so keep it.
+      if (!isCustomTemplate) {
+        setCustomTemplate('');
+        setIsCustomTemplate(false);
+      }
       setSaveToast(true);
       setTimeout(() => setSaveToast(false), 2500);
     } finally {

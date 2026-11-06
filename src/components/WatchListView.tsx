@@ -1397,7 +1397,7 @@ export const WatchListView: React.FC = () => {
                         {/* Arch / Context */}
                         <td className="py-3 px-4 font-mono text-[11px] text-zinc-400 dark:text-zinc-400 light:text-zinc-600">
                           <span className="bg-zinc-900 dark:bg-zinc-900 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 px-2 py-0.5 rounded">
-                            {asset.targetHw || 'Unknown'}
+                            {asset.targetHw && asset.targetHw !== '*' ? asset.targetHw : 'Any'}
                           </span>
                         </td>
 

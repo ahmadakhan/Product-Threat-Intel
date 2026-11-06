@@ -22,6 +22,7 @@ export const ThreatFeedsView: React.FC = () => {
     useApp();
 
   const [searchTerm, setSearchTerm] = useState('');
+  const [filterStatus, setFilterStatus] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testingAll, setTestingAll] = useState(false);
   const [testAllProgress, setTestAllProgress] = useState<{ completed: number; total: number } | null>(null);
@@ -53,9 +54,10 @@ export const ThreatFeedsView: React.FC = () => {
 
   const filteredFeeds = feeds.filter(
     (feed) =>
-      feed.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      feed.type.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      feed.url.toLowerCase().includes(searchTerm.toLowerCase()),
+      (filterStatus === 'all' || (filterStatus === 'enabled' && feed.enabled) || (filterStatus === 'disabled' && !feed.enabled)) &&
+      (feed.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        feed.type.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        feed.url.toLowerCase().includes(searchTerm.toLowerCase())),
   );
   const activeFeedCount = feeds.filter((feed) => feed.enabled).length;
 
@@ -254,6 +256,23 @@ export const ThreatFeedsView: React.FC = () => {
         </PageHeading>
 
         <div className="flex items-center gap-2">
+          {/* Filter Toggle */}
+          <div className="flex items-center gap-1 bg-zinc-800 dark:bg-zinc-800 light:bg-zinc-200 rounded-xl p-0.5 border border-zinc-700 dark:border-zinc-700 light:border-zinc-300">
+            {(['all', 'enabled', 'disabled'] as const).map((status) => (
+              <button
+                key={status}
+                onClick={() => setFilterStatus(status)}
+                className={`text-[10px] font-mono px-2.5 py-1 rounded-lg transition ${
+                  filterStatus === status
+                    ? 'bg-zinc-100 dark:bg-zinc-100 light:bg-zinc-900 text-zinc-900 dark:text-zinc-900 light:text-zinc-50 shadow-sm'
+                    : 'text-zinc-400 dark:text-zinc-400 light:text-zinc-600 hover:text-zinc-200 dark:hover:text-zinc-200 light:hover:text-zinc-800'
+                }`}
+                title={status === 'all' ? 'Show all feeds' : status === 'enabled' ? 'Show only enabled feeds' : 'Show only disabled feeds'}
+              >
+                {status === 'all' ? 'All' : status === 'enabled' ? 'Enabled' : 'Disabled'}
+              </button>
+            ))}
+          </div>
           <button
             onClick={() => void handleTestAll()}
             disabled={testingAll || feeds.length === 0}

@@ -481,7 +481,7 @@ export async function ingestFeed(
     };
     let after: string | undefined;
     const cursors = new Set<string>();
-    for (let page = 1; page <= 5; page++) {
+    for (let page = 1; page <= 10; page++) {
       const url = new URL(GITHUB_ADVISORIES_URL);
       url.searchParams.set('modified', `>=${start.toISOString().slice(0, 10)}`);
       url.searchParams.set('sort', 'updated');
@@ -513,8 +513,8 @@ export async function ingestFeed(
       if (!after) throw new Error('GitHub advisories returned a next page without a cursor');
       if (cursors.has(after)) throw new Error('GitHub advisories repeated a pagination cursor');
       cursors.add(after);
-      if (page === 5)
-        throw new Error('GitHub advisories exceed the five-page ingestion bound; retry with a narrower window');
+      if (page === 10)
+        throw new Error('GitHub advisories exceed the ten-page ingestion bound; retry with a narrower window');
       await sleep(Math.max(1000, 60000 / feed.rateLimitPerMin));
     }
     return {

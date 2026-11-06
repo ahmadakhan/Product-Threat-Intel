@@ -215,6 +215,19 @@ test('GitHub global advisories reject a repeated pagination cursor', async () =>
   assert.equal(requests, 2);
 });
 
+test('GitHub global advisories stop at the ten-page run bound', async () => {
+  let requests = 0;
+  await assert.rejects(ingestFeed(feed('GITHUB_ADVISORIES'), 24, async () => {
+    requests++;
+    return {
+      status: 200,
+      headers: { link: `<https://api.github.com/advisories?after=cursor-${requests}>; rel="next"` },
+      body: '[]',
+    };
+  }, config, sleep), /ten-page ingestion bound/);
+  assert.equal(requests, 10);
+});
+
 test('advisory parsers reject malformed records and preserve withdrawal data', () => {
   assert.throws(() => parseOsvVulnerability({ ...osv(), modified: 'not-a-date' }, 'osv', []), /Invalid OSV modified timestamp/);
   assert.throws(() => parseGitHubAdvisories([github({ ghsa_id: 'not-ghsa' })], 'gh', new Date(0), now), /ghsa_id/);

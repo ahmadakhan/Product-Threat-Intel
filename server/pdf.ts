@@ -100,6 +100,8 @@ function getBrowser(): Promise<Browser> {
           '--disable-dev-shm-usage',
           '--disable-gpu',
           '--no-zygote',
+          '--disable-crash-reporter',
+          '--disable-crashpad',
         ],
       })
       .catch((error: unknown) => {
