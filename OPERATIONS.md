@@ -25,6 +25,12 @@ The runtime's `/live` endpoint reports process availability and `/ready` checks 
 
 The header displays total/enabled feed counts. Its "Online for" indicator is the current API process uptime, refreshed every minute via `/api/system-uptime`; it resets on API restart and is not host uptime or a historical availability guarantee. Failed uptime checks display "Uptime unavailable".
 
+## Daily digest
+
+The daily digest counts eligible findings created in the last 24 hours that match each recipient's subscriptions, not all open vulnerabilities. Resolved, inapplicable and held-for-review findings are excluded from the total; the review section reports held findings separately. Counts represent CVE-to-asset findings, so one CVE affecting multiple assets can count more than once. Remediation guidance reflects only severities present in that recipient's digest.
+
+Health details are a snapshot at generation time, not live delivery-time metrics. Worker process uptime resets on restart and is not an availability percentage. Delivery counts cover retained outbox jobs across channels: queued, sending, awaiting review, provider accepted and failed; provider acceptance does not confirm inbox delivery. "Next Delivery Attempt" is the next future queued attempt, while "Next Scheduled Digest" is the next calendar day's configured send time in the workspace timezone, including daylight-saving changes.
+
 ## Operational logs
 
 The Logs workspace separates event ownership: **Operational events** contains pipeline, feed, matching, email, issue and general event activity, and intentionally excludes `ML` and `SYSTEM`; **ML logs** contains only `ML` events; **System logs** contains only `SYSTEM` events. **Audit trail** is a separate record of audited operator actions. An event missing from one view may belong to another tab rather than being absent from retention.

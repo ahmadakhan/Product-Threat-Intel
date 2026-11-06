@@ -348,11 +348,11 @@ export interface DigestHealth {
   workerStatus: string;
   workerHeartbeatAgeSeconds: number | null;
   nextScheduledAttempt: string | null;
+  nextDailyDigestAt?: string | null;
   backlog: { status: string; count: number }[];
   checkedAt: string;
   systemUptime: string;
-  /** Availability is not measured by this application (audit L-5): null renders
-   * as "unmeasured" instead of the fabricated process-uptime formula. */
+  /** Legacy availability field; not displayed because process uptime is not availability. */
   systemUptimePercentage: number | null;
 }
 
@@ -697,12 +697,12 @@ export function renderDailyFindingSummary(findings: DigestFinding[], config: Tem
     .join('\n');
 }
 
-export function renderDailyHealthReport(health: DigestHealth | null, config: TemplateCustomization): string {
+export function renderDailyHealthReport(health: DigestHealth | null, config: TemplateCustomization & { timezone?: string }): string {
   if (!health) return '';
   const safe = normalizeDigestConfig(config);
   // Workspace timezone for every timestamp in this table. The digest body is
   // rendered on the server, so it cannot rely on the viewer's browser zone.
-  const outputTimezone = resolveTimezone((config as { timezone?: string }).timezone);
+  const outputTimezone = resolveTimezone(config.timezone);
   const workerStatusLabel: Record<string, string> = {
     HEALTHY: 'Healthy',
     DISABLED: 'Disabled',
@@ -723,13 +723,16 @@ export function renderDailyHealthReport(health: DigestHealth | null, config: Tem
     health.workerHeartbeatAgeSeconds !== null
       ? `${health.workerHeartbeatAgeSeconds} seconds ago`
       : 'N/A';
-  const pendingCount = health.backlog
-    .filter((b) => ['QUEUED', 'SENDING', 'REVIEW'].includes(b.status))
-    .reduce((sum, b) => sum + b.count, 0);
-  const processedCount = health.backlog
-    .filter((b) => ['ACCEPTED', 'FAILED'].includes(b.status))
-    .reduce((sum, b) => sum + b.count, 0);
-  const deliveryQueueLabel = `${pendingCount} Pending | ${processedCount} Processed`;
+  const deliveryQueueLabel = [
+    ['QUEUED', 'Queued'],
+    ['SENDING', 'Sending'],
+    ['REVIEW', 'Awaiting review'],
+    ['ACCEPTED', 'Provider accepted'],
+    ['FAILED', 'Failed'],
+  ].map(([status, label]) => {
+    const count = health.backlog.filter((b) => b.status === status).reduce((sum, b) => sum + b.count, 0);
+    return `${count} ${label}`;
+  }).join(' | ');
   const formatHealthDate = (iso: string): string => {
     const date = new Date(iso);
     if (Number.isNaN(date.getTime())) return '—';
@@ -752,9 +755,12 @@ export function renderDailyHealthReport(health: DigestHealth | null, config: Tem
     const minute = parts.find((p) => p.type === 'minute')?.value || '';
     return `${day} ${month} ${year} ${hour}:${minute} ${utcOffsetLabel(date, outputTimezone)}`;
   };
-  const nextDigest = health.nextScheduledAttempt
+  const nextDigest = health.nextDailyDigestAt
+    ? formatHealthDate(health.nextDailyDigestAt)
+    : 'Not scheduled';
+  const nextDelivery = health.nextScheduledAttempt
     ? formatHealthDate(health.nextScheduledAttempt)
-    : 'none pending';
+    : 'No future delivery attempt scheduled';
   const lastCheck = formatHealthDate(health.checkedAt);
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
 
@@ -769,7 +775,7 @@ export function renderDailyHealthReport(health: DigestHealth | null, config: Tem
 
                 <tr>
                     <td style="padding:10px;border:1px solid #e2e8f0;font-size:12px;">
-                        Platform Connectivity
+                        Database Connectivity
                     </td>
                     <td style="padding:10px;border:1px solid #e2e8f0;color:${dbColor};font-size:12px;">
                         ${dbLabel}
@@ -778,10 +784,10 @@ export function renderDailyHealthReport(health: DigestHealth | null, config: Tem
 
                 <tr>
                     <td style="padding:10px;border:1px solid #e2e8f0;font-size:12px;">
-                        System Uptime
+                        Worker Process Uptime
                     </td>
                     <td style="padding:10px;border:1px solid #e2e8f0;color:#16a34a;font-size:12px;">
-                        ${health.systemUptimePercentage == null ? 'unmeasured' : health.systemUptimePercentage.toFixed(2) + '%'} | ${digestEscapeHtml(health.systemUptime)}
+                        ${digestEscapeHtml(health.systemUptime)} (since restart)
                     </td>
                 </tr>
 
@@ -805,10 +811,19 @@ export function renderDailyHealthReport(health: DigestHealth | null, config: Tem
 
                 <tr>
                     <td style="padding:10px;border:1px solid #e2e8f0;font-size:12px;">
-                        Delivery Queue
+                        Delivery Queue (retained jobs)
                     </td>
                     <td style="padding:10px;border:1px solid #e2e8f0;font-size:12px;">
                         ${digestEscapeHtml(deliveryQueueLabel)}
+                    </td>
+                </tr>
+
+                <tr>
+                    <td style="padding:10px;border:1px solid #e2e8f0;font-size:12px;">
+                        Next Delivery Attempt
+                    </td>
+                    <td style="padding:10px;border:1px solid #e2e8f0;font-size:12px;">
+                        ${digestEscapeHtml(nextDelivery)}
                     </td>
                 </tr>
 
@@ -884,6 +899,10 @@ export const digestSeverityKpi = (
 };
 
 export const formatExecutiveSummary = (total: number, counts: Record<string, number>): string => {
+  const overview = `A total of <strong>${total} ${total === 1 ? 'finding' : 'findings'}</strong> matched your subscriptions in the last 24 hours`;
+  if (total === 0) {
+    return `${overview}. This does not mean there are no open vulnerabilities. Findings held for review are excluded from this total.`;
+  }
   const parts: string[] = [];
   for (const severity of ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'] as const) {
     if (counts[severity] > 0) {
@@ -892,13 +911,19 @@ export const formatExecutiveSummary = (total: number, counts: Record<string, num
       );
     }
   }
-   const summary =
-     parts.length > 1
-       ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
-       : parts.length === 1
-         ? parts[0]
-         : 'no';
-  return `A total of <strong>${total} ${total === 1 ? 'vulnerability' : 'vulnerabilities'}</strong> were identified during the latest monitoring cycle, including ${summary} severity findings across monitored assets. Immediate remediation of critical findings is recommended while medium and low severity items should be addressed according to established risk treatment and vulnerability management procedures.`;
+  const summary =
+    parts.length > 1
+      ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+      : parts.length === 1
+        ? parts[0]
+        : 'no';
+  const guidance: string[] = [];
+  if (counts.CRITICAL > 0) guidance.push('Prioritize immediate remediation of critical findings.');
+  if (counts.HIGH > 0) guidance.push('Address high-severity findings promptly through your change management process.');
+  const routineSeverities = ['MEDIUM', 'LOW'].filter((severity) => counts[severity] > 0);
+  if (routineSeverities.length) guidance.push(`Address ${routineSeverities.map((severity) => severity.toLowerCase()).join(' and ')} severity findings according to established risk treatment procedures.`);
+  if (counts.UNKNOWN > 0) guidance.push('Assess findings with unknown severity before assigning remediation priority.');
+  return `${overview}, including ${summary} severity findings across monitored assets. ${guidance.join(' ')}`;
 }
 
 export const formatExecutiveSummaryText = (total: number, counts: Record<string, number>): string =>
@@ -909,7 +934,8 @@ export const stripGeneratedExecutiveSummaryMarkup = (value: string): string =>
 
 /**
  * The daily digest's executive summary is trusted HTML only when it is exactly
- * the sentence this module generates. Anything else is data and is escaped.
+ * the sentence this module generates or a legacy generated sentence.
+ * Anything else is data and is escaped.
  *
  * The comparison is made against the generated sentence itself rather than a
  * hand-written pattern: a pattern has to be kept in step with the wording by
@@ -917,6 +943,14 @@ export const stripGeneratedExecutiveSummaryMarkup = (value: string): string =>
  * loosened, starts trusting injected markup).
  */
 function digestSafeExecutiveSummary(value: string): string {
+  const total = /^A total of <strong>(\d+) findings?<\/strong>/.exec(value);
+  if (total) {
+    const counts: Record<string, number> = {};
+    for (const match of value.matchAll(/<strong>(\d+) (Critical|High|Medium|Low|Unknown)<\/strong>/g)) {
+      counts[match[2].toUpperCase()] = Number(match[1]);
+    }
+    if (value === formatExecutiveSummary(Number(total[1]), counts)) return value;
+  }
   // A generated sentence contains `<strong>` around a total and around each
   // severity count, and no other markup at all. Both halves are required: the
   // tag inventory alone would still allow arbitrary text inside the tags, and
@@ -925,8 +959,7 @@ function digestSafeExecutiveSummary(value: string): string {
    // The list separator accepts an Oxford comma as well as the generated form, so
   // a hand-authored summary that only differs in punctuation still renders.
   const element = '<strong>\\d+ [A-Z][a-z]+<\\/strong>';
-  // When every severity count is 0, formatExecutiveSummary emits "no" in place
-  // of the severity list; accept that as a trusted shape as well.
+  // Older generated summaries used "no" in place of an empty severity list.
   const generatedShape = new RegExp(
     `^A total of <strong>\\d+ vulnerabilit(?:y|ies)<\\/strong> were identified during the latest monitoring cycle, including (?:no|(?:${element})(?:,(?: and)? | and )?(?:${element}(?:,(?: and)? | and )?)*) severity findings across monitored assets\\. Immediate remediation of critical findings is recommended while medium and low severity items should be addressed according to established risk treatment and vulnerability management procedures\\.$`,
   );

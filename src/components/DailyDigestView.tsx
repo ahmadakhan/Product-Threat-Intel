@@ -10,6 +10,7 @@ import {
   renderDailyHealthReport,
   digestSeveritySummary,
   digestSeverityKpi,
+  formatExecutiveSummary,
   type DigestFinding,
   type DigestHealth,
 } from '../utils/templateCompiler';
@@ -27,14 +28,15 @@ const SAMPLE_HEALTH: DigestHealth = {
   databaseLatencyMs: 12,
   workerStatus: 'HEALTHY',
   workerHeartbeatAgeSeconds: 4,
-  nextScheduledAttempt: '2026-10-30T09:00:00.000Z',
+  nextScheduledAttempt: null,
+  nextDailyDigestAt: '2026-10-30T09:00:00.000Z',
   backlog: [
     { status: 'QUEUED', count: 0 },
     { status: 'ACCEPTED', count: 12 },
   ],
   checkedAt: '2026-10-29T08:00:00.000Z',
   systemUptime: '187 Days 14 Hours',
-  systemUptimePercentage: 99.98,
+  systemUptimePercentage: null,
 };
 
 export const DailyDigestView: React.FC = () => {
@@ -163,8 +165,8 @@ export const DailyDigestView: React.FC = () => {
     [dailyDigestCustomization],
   );
   const healthReport = useMemo(
-    () => renderDailyHealthReport(SAMPLE_HEALTH, dailyDigestCustomization),
-    [dailyDigestCustomization],
+    () => renderDailyHealthReport(SAMPLE_HEALTH, { ...dailyDigestCustomization, timezone: displayTimezone }),
+    [dailyDigestCustomization, displayTimezone],
   );
 
   const getRenderedHtml = useMemo(() => () => {
@@ -187,7 +189,9 @@ export const DailyDigestView: React.FC = () => {
       .replace(/{{severity_counts}}/g, '2 critical, 1 high, 1 medium, 1 low')
       .replace(/{{dispatch_date}}/g, previewTimestamp)
       .replace(/{{severity}}/g, 'HIGH')
-      .replace(/{{executive_summary}}/g, 'A total of <strong>5 vulnerabilities</strong> were identified during the latest monitoring cycle, including <strong>2 Critical</strong>, <strong>1 High</strong>, <strong>1 Medium</strong>, and <strong>1 Low</strong> severity findings across monitored assets. Immediate remediation of critical findings is recommended while medium and low severity items should be addressed according to established risk treatment and vulnerability management procedures.')
+      .replace(/{{executive_summary}}/g, formatExecutiveSummary(SAMPLE_FINDINGS.length, {
+        CRITICAL: criticalCount, HIGH: highCount, MEDIUM: mediumCount, LOW: lowCount,
+      }))
       .replace(/{{findings_summary}}/g, findingsSummary)
       .replace(/{{health_report}}/g, healthReport)
       .replace(/{{critical_summary}}/g, digestSeveritySummary('CRITICAL', criticalCount, dailyDigestCustomization))

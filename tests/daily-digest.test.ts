@@ -29,6 +29,7 @@ const HEALTH: DigestHealth = {
   workerStatus: 'HEALTHY',
   workerHeartbeatAgeSeconds: 4,
   nextScheduledAttempt: '2026-10-30T09:00:00.000Z',
+  nextDailyDigestAt: '2026-10-31T05:00:00.000Z',
   backlog: [
     { status: 'QUEUED', count: 0 },
     { status: 'ACCEPTED', count: 12 },
@@ -53,8 +54,7 @@ const PARTS: DailyDigestParts = {
   medium_count: 1,
   low_count: 1,
   asset_count: 5,
-  executive_summary:
-    'A total of <strong>5 vulnerabilities</strong> were identified during the latest monitoring cycle, including <strong>2 Critical</strong>, <strong>1 High</strong>, <strong>1 Medium</strong>, and <strong>1 Low</strong> severity findings across monitored assets. Immediate remediation of critical findings is recommended while medium and low severity items should be addressed according to established risk treatment and vulnerability management procedures.',
+  executive_summary: formatExecutiveSummary(5, { CRITICAL: 2, HIGH: 1, MEDIUM: 1, LOW: 1 }),
   report_generated: '29 October 2026 | 22:48 GMT+4',
   critical_summary: digestSeveritySummary('CRITICAL', 2, DEFAULT_DAILY_DIGEST_CUSTOMIZATION),
   high_summary: digestSeveritySummary('HIGH', 1, DEFAULT_DAILY_DIGEST_CUSTOMIZATION),
@@ -126,11 +126,11 @@ test('renderDailyHealthReport returns HTML containing the database status', () =
 
 test('renderDailyHealthReport renders Platform Health Status table rows', () => {
   const html = renderDailyHealthReport(HEALTH, DEFAULT_DAILY_DIGEST_CUSTOMIZATION);
-  assert.ok(html.includes('Platform Connectivity'));
+  assert.ok(html.includes('Database Connectivity'));
   assert.ok(html.includes('Operational (12 ms)'));
   assert.ok(html.includes('Healthy'));
   assert.ok(html.includes('Delivery Queue'));
-  assert.ok(html.includes('0 Pending | 12 Processed'));
+  assert.ok(html.includes('0 Queued | 0 Sending | 0 Awaiting review | 12 Provider accepted | 0 Failed'));
 });
 
 test('renderDailyHealthReport returns empty string when health is null', () => {
@@ -158,18 +158,20 @@ test('renderDailyDigest embeds executive summary and report generated date', () 
   const html = renderDailyDigest(DEFAULT_DAILY_DIGEST_CUSTOMIZATION, PARTS);
   assert.ok(html.includes('Report Generated: 29 October 2026 | 22:48 GMT+4'));
   assert.ok(html.includes('Vulnerability Overview'));
-  assert.ok(html.includes('<strong>5 vulnerabilities</strong>'));
+  assert.ok(html.includes('<strong>5 findings</strong>'));
   assert.ok(html.includes('<strong>2 Critical</strong>'));
   assert.ok(html.includes('<strong>1 High</strong>'));
   assert.ok(html.includes('<strong>1 Medium</strong>'));
   assert.ok(html.includes('<strong>1 Low</strong>'));
 });
 
-test('renderDailyHealthReport renders System Uptime row', () => {
+test('renderDailyHealthReport reports process uptime without claiming availability', () => {
   const html = renderDailyHealthReport(HEALTH, DEFAULT_DAILY_DIGEST_CUSTOMIZATION);
-  assert.ok(html.includes('System Uptime'));
-  assert.ok(html.includes('99.98%'));
+  assert.ok(html.includes('Worker Process Uptime'));
+  assert.ok(!html.includes('99.98%'));
   assert.ok(html.includes('187 Days 14 Hours'));
+  assert.ok(html.includes('(since restart)'));
+  assert.ok(!html.includes('unmeasured'));
 });
 
 test('renderDailyDigest contains no leftover template placeholders', () => {
@@ -195,17 +197,20 @@ test('renderDailyDigest omits zero-count severity sections', () => {
   assert.ok(!html.includes('{{'), 'no unreplaced placeholders');
 });
 
-test('formatExecutiveSummary produces "no" when all severity counts are zero', () => {
+test('formatExecutiveSummary explains the zero-finding scope without remediation advice', () => {
   const summary = formatExecutiveSummary(0, { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, UNKNOWN: 0 });
-  assert.ok(summary.includes('<strong>0 vulnerabilities</strong>'));
-  assert.ok(summary.includes('including no severity findings'));
+  assert.ok(summary.includes('<strong>0 findings</strong>'));
+  assert.ok(summary.includes('matched your subscriptions in the last 24 hours'));
+  assert.ok(summary.includes('does not mean there are no open vulnerabilities'));
+  assert.ok(summary.includes('held for review are excluded'));
+  assert.doesNotMatch(summary, /remediation|critical|medium|low severity/i);
   assert.ok(!summary.includes('undefined'));
 });
 
 test('formatExecutiveSummaryText emits plain text for advisory records', () => {
   const summary = formatExecutiveSummaryText(1, { CRITICAL: 1, HIGH: 0, MEDIUM: 0, LOW: 0, UNKNOWN: 0 });
   assert.ok(!summary.includes('<strong>'));
-  assert.ok(summary.includes('1 vulnerability'));
+  assert.ok(summary.includes('1 finding'));
   assert.ok(summary.includes('1 Critical'));
 });
 
@@ -237,7 +242,7 @@ test('renderDailyDigest does not escape HTML when all findings are zero', () => 
     executive_summary: formatExecutiveSummary(0, { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, UNKNOWN: 0 }),
   };
   const html = renderDailyDigest(DEFAULT_DAILY_DIGEST_CUSTOMIZATION, zeroParts);
-  assert.ok(html.includes('<strong>0 vulnerabilities</strong>'), 'strong tags preserved, not escaped');
+  assert.ok(html.includes('<strong>0 findings</strong>'), 'strong tags preserved, not escaped');
   assert.ok(!html.includes('&lt;strong&gt;'), 'no escaped strong tags');
   assert.ok(!html.includes('undefined'), 'no literal "undefined" text');
 });
@@ -278,11 +283,7 @@ test('digest header has no coloured top rule', () => {
   assert.doesNotMatch(html, /border-top:\s*\d+px\s+solid\s+\$\{/, 'no templated accent-coloured top rule');
 });
 
-/**
- * The backlog query must include ACCEPTED, otherwise the health table reports
- * `0 processed` beside a non-zero queue.
- */
-test('health report counts processed deliveries and labels times with a UTC offset', () => {
+test('health report separates accepted and failed deliveries and labels times with a UTC offset', () => {
   const health = {
     database: 'connected',
     databaseLatencyMs: 3,
@@ -301,7 +302,47 @@ test('health report counts processed deliveries and labels times with a UTC offs
     ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
     timezone: 'Europe/Berlin',
   } as unknown as Parameters<typeof renderDailyHealthReport>[1]);
-  assert.match(html, /15\b/, 'processed count must sum ACCEPTED + FAILED');
+  assert.match(html, /14 Provider accepted \| 1 Failed/);
+  assert.doesNotMatch(html, /Processed/);
   assert.doesNotMatch(html, /\bUTC<|\bUTC\s/, 'timestamps must be labelled with an offset, not bare UTC');
   assert.match(html, /UTC[+-]\d/, 'timestamps must carry a UTC offset');
+});
+
+test('remediation guidance refers only to the severities present', () => {
+  for (const severity of ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']) {
+    const summary = formatExecutiveSummary(1, { [severity]: 1 });
+    for (const absent of ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'].filter((s) => s !== severity)) {
+      assert.ok(!summary.toLowerCase().includes(absent.toLowerCase()), `${severity} summary mentions absent ${absent}`);
+    }
+    const html = renderDailyDigest(DEFAULT_DAILY_DIGEST_CUSTOMIZATION, { ...PARTS, executive_summary: summary });
+    assert.ok(html.includes('<strong>1 finding</strong>'));
+    assert.ok(!html.includes('&lt;strong&gt;'));
+    const injected = renderDailyDigest(DEFAULT_DAILY_DIGEST_CUSTOMIZATION, {
+      ...PARTS, executive_summary: summary + '<img src=x onerror=alert(1)>',
+    });
+    assert.ok(!injected.includes('<img src=x'));
+  }
+});
+
+test('daily schedule and queued delivery attempts render independently in the workspace timezone', () => {
+  const html = renderDailyHealthReport({
+    ...HEALTH,
+    backlog: [
+      { status: 'QUEUED', count: 100 },
+      { status: 'SENDING', count: 3 },
+      { status: 'REVIEW', count: 55 },
+      { status: 'ACCEPTED', count: 750 },
+      { status: 'FAILED', count: 7 },
+    ],
+  }, { ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION, timezone: 'Asia/Dubai' });
+  assert.match(html, /Next Delivery Attempt[\s\S]*?30 Oct 2026 13:00 UTC\+4/);
+  assert.match(html, /Next Scheduled Digest[\s\S]*?31 Oct 2026 09:00 UTC\+4/);
+  assert.ok(html.includes('100 Queued | 3 Sending | 55 Awaiting review | 750 Provider accepted | 7 Failed'));
+
+  const noRetries = renderDailyHealthReport({
+    ...HEALTH, nextScheduledAttempt: null,
+  }, { ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION, timezone: 'Asia/Dubai' });
+  assert.ok(noRetries.includes('31 Oct 2026 09:00 UTC+4'));
+  assert.ok(noRetries.includes('No future delivery attempt scheduled'));
+  assert.ok(!noRetries.includes('none pending'));
 });

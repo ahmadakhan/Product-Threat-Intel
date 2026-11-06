@@ -227,11 +227,11 @@ const findingsWithVendorLinks: Finding[] = [
   } as unknown as Finding,
 ];
 
-test('renderAdvisory shows View Vendor Guidance and Vendor Security Advisory links from finding remediation data', () => {
+test('renderAdvisory shows View Vendor Guidance and Advisory link from finding remediation data', () => {
   const template = compileCustomizedTemplate(testCustomization);
   const html = renderAdvisory(template, baseAdvisory, findingsWithVendorLinks);
   assert.ok(html.includes('View Vendor Guidance'), 'view vendor guidance should appear with a link');
-  assert.ok(html.includes('Vendor Security Advisory'), 'vendor security advisory should appear with a link');
+  assert.ok(html.includes('Advisory link'), 'vendor security advisory should appear with a link');
   assert.ok(html.includes('href="https://vendor.com/patch/CVE-2026-12345"'), 'view vendor guidance should point to the patch URL');
   assert.ok(html.includes('href="https://vendor.com/advisory/CVE-2026-12345"'), 'vendor security advisory should point to the advisory URL');
   assert.ok(!html.includes('href=""'), 'no empty href should remain');

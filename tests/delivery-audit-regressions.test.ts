@@ -241,6 +241,47 @@ test(
         assert.ok(!html.includes('<img src=x'));
         assert.ok(html.includes('&lt;img src=x'));
       });
+      await t.test('daily digest counts new subscribed findings, not the older open backlog', async () => {
+        await reset();
+        const [older, recent] = await seed([makeCve('CVE-2026-98201'), makeCve('CVE-2026-98202')]);
+        await pool.query(
+          "UPDATE records SET created_at=now()-interval '25 hours' WHERE kind='findings' AND id=$1",
+          [older.id],
+        );
+        await put(pool, 'recipients', 'all', recipient('all'));
+        assert.equal(await runDailyDigest(pool), 1);
+        const payload = (await pool.query('SELECT payload FROM outbox')).rows[0].payload;
+        assert.deepEqual(payload.includedFindingIds, [recent.id]);
+        assert.ok(payload.html.includes('<strong>1 finding</strong> matched your subscriptions in the last 24 hours'));
+        assert.ok(!payload.html.includes(older.cveId));
+        assert.ok(!payload.html.includes('remediation of critical'));
+      });
+      await t.test('daily digest shows the next local daily schedule with no queued retries, including DST changes', async () => {
+        for (const [timezone, instant, expected] of [
+          ['Asia/Dubai', '2026-11-06T05:00:00Z', '07 Nov 2026 09:00 UTC+4'],
+          ['Europe/Berlin', '2026-03-28T08:00:00Z', '29 Mar 2026 09:00 UTC+2'],
+          ['Europe/Berlin', '2026-10-24T07:00:00Z', '25 Oct 2026 09:00 UTC+1'],
+        ]) {
+          await reset();
+          await put(pool, 'settings', 'main', {
+            ...settings, timezone,
+            dailyDigest: { enabled: true, time: '09:00', includeHealthReport: true },
+          });
+          await put(pool, 'recipients', 'all', recipient('all'));
+          const clock = t.mock.method(Date, 'now', () => Date.parse(instant));
+          try {
+            assert.equal(await runDailyDigest(pool), 1);
+            const html = (await pool.query('SELECT payload FROM outbox')).rows[0].payload.html;
+            assert.ok(html.includes(expected), `${timezone} next daily schedule: ${expected}`);
+            assert.ok(html.includes('No future delivery attempt scheduled'));
+            assert.ok(html.includes('<strong>0 findings</strong>'));
+            assert.ok(!html.includes('remediation of critical'));
+            assert.ok(!html.includes('unmeasured'));
+          } finally {
+            clock.mock.restore();
+          }
+        }
+      });
       await t.test('a digest key cannot override a newly held applicability verdict', async () => {
         await reset();
         const [f] = await seed([makeCve('CVE-2026-98104')]);
@@ -608,8 +649,16 @@ test(
             { subject: 'Old', text: 'Old', cveIds: [cve.cveId], recipientEmail: 'all@example.invalid' },
             'failed-original',
           );
-          await pool.query("UPDATE outbox SET status='FAILED',error='no longer applicable' WHERE id=$1", [
-            id,
+          const duplicateId = await enqueue(
+            pool,
+            'email',
+            'all',
+            advisory.id,
+            { subject: 'Old', text: 'Old', cveIds: [cve.cveId], recipientEmail: 'all@example.invalid' },
+            'failed-original-duplicate',
+          );
+          await pool.query("UPDATE outbox SET status='FAILED',error='no longer applicable' WHERE id=ANY($1::uuid[])", [
+            [id, duplicateId],
           ]);
           await rebuildFromCurrentInventory(pool, advisory.id, 'no longer applicable');
           const count = (await list<Advisory>(pool, 'advisories')).length;

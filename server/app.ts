@@ -131,6 +131,7 @@ import {
   type DigestHealth,
   digestSeveritySummary,
   digestSeverityKpi,
+  formatExecutiveSummary,
 } from '../src/utils/templateCompiler.ts';
 function publicState(data: AppState): AppState {
   return {
@@ -1998,7 +1999,10 @@ export function createApp(
         if (!emailIsConfigured(emailConfig, config))
           throw new HttpError(409, 'Configure an email provider in Settings before sending a test');
         const data = await state(db);
-        const dailyConfig = data.dailyDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION;
+        const dailyConfig = {
+          ...(data.dailyDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION),
+          timezone: data.settings.timezone,
+        };
         const dailyDigestTemplate = data.dailyDigestCustomTemplate;
         const sampleFindings: DigestFinding[] = [
           { cveId: 'CVE-2026-0001', severity: 'CRITICAL', assetName: 'edge-router-01', vendor: 'VendorX', sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0001' },
@@ -2012,14 +2016,15 @@ export function createApp(
           databaseLatencyMs: 12,
           workerStatus: 'HEALTHY',
           workerHeartbeatAgeSeconds: 4,
-          nextScheduledAttempt: new Date(Date.now() + 86400000).toISOString(),
+          nextScheduledAttempt: null,
+          nextDailyDigestAt: new Date(Date.now() + 86400000).toISOString(),
           backlog: [
             { status: 'QUEUED', count: 0 },
             { status: 'ACCEPTED', count: 12 },
           ],
           checkedAt: new Date().toISOString(),
           systemUptime: '5 Days 3 Hours',
-          systemUptimePercentage: 99.98,
+          systemUptimePercentage: null,
         };
         const severityCounts = { CRITICAL: 2, HIGH: 1, MEDIUM: 1, LOW: 1, UNKNOWN: 0 };
         const reportGenerated = new Date().toLocaleString('en-GB', {
@@ -2029,7 +2034,7 @@ export function createApp(
           hour: '2-digit',
           minute: '2-digit',
         });
-        const executiveSummary = `A total of <strong>5 vulnerabilities</strong> were identified during the latest monitoring cycle, including <strong>2 Critical</strong>, <strong>1 High</strong>, <strong>1 Medium</strong>, and <strong>1 Low</strong> severity findings across monitored assets. Immediate remediation of critical findings is recommended while medium and low severity items should be addressed according to established risk treatment and vulnerability management procedures.`;
+        const executiveSummary = formatExecutiveSummary(sampleFindings.length, severityCounts);
          const parts: DailyDigestParts = {
            advisory_id: `${data.settings.advisoryPrefix}DAILY-PREVIEW`,
            advisory_title: 'Daily Vulnerability Digest — preview',

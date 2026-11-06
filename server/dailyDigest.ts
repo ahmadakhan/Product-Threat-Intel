@@ -4,7 +4,7 @@ import { writeEvent } from './events';
 import { advisoryRevision, enqueue, findingRevision, revision, recipientAllows } from './delivery';
 import { advisoryEmail } from './advisoryEmail';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine';
-import { mlComposeAdvisoryEmail, shouldSelectForDigest } from './ml/integration';
+import { shouldSelectForDigest } from './ml/integration';
 import { buildAliasMap } from '../src/utils/cpeMatcher';
 import { resolveTimezone as resolveSettingsTimezone } from '../src/utils/dateTime';
 import { DEFAULT_SETTINGS } from '../shared/state';
@@ -216,6 +216,7 @@ interface HealthSnapshot {
   workerStatus: 'DISABLED' | 'NOT_OBSERVED' | 'STALE' | 'HEALTHY';
   workerHeartbeatAgeSeconds: number | null;
   nextScheduledAttempt: string | null;
+  nextDailyDigestAt: string | null;
   backlog: { status: string; count: number }[];
   checkedAt: string;
   systemUptime: string;
@@ -226,6 +227,9 @@ async function computeHealth(
   db: Db,
   workerEnabled: boolean,
   workerHeartbeat: string | null,
+  timezone: string,
+  time: string,
+  now: number,
 ): Promise<HealthSnapshot> {
   const start = performance.now();
   let database: HealthSnapshot['database'] = 'connected';
@@ -282,26 +286,27 @@ async function computeHealth(
   const dayWord = uptimeDays === 1 ? 'Day' : 'Days';
   const hourWord = uptimeHours === 1 ? 'Hour' : 'Hours';
   const systemUptime = `${uptimeDays} ${dayWord} ${uptimeHours} ${hourWord}`;
-  // Audit L-5: the old formula (100 minus a fudge term derived from
-  // process.uptime()) presented an unmeasured number as an availability
-  // percentage. The worker's health status is already a real, evaluated signal
-  // — reporting it as `null` (unknown/unmeasured) is more honest than a
-  // fabricated 99.99. The field stays optional so old digests still render.
-  const systemUptimePercentage: number | null = null;
+  // Today's digest is already claimed. Use the next local calendar day, not
+  // 24 elapsed hours, so DST changes preserve the configured send time.
+  const { hour, minute } = parseTime(time);
+  const nextDailyDigestAt = (
+    await db.query<{ nextDailyDigestAt: Date }>(
+      `SELECT (($1::timestamptz AT TIME ZONE $2)::date + 1 + $3::time)
+         AT TIME ZONE $2 AS "nextDailyDigestAt"`,
+      [new Date(now).toISOString(), timezone, `${hour}:${String(minute).padStart(2, '0')}`],
+    )
+  ).rows[0].nextDailyDigestAt.toISOString();
   return {
     database,
     databaseLatencyMs,
     workerStatus,
     workerHeartbeatAgeSeconds,
     nextScheduledAttempt: deliveryQueue?.nextScheduledAttempt ?? null,
+    nextDailyDigestAt,
     backlog,
     checkedAt: new Date().toISOString(),
     systemUptime, // worker-process uptime, kept for continuity
-    // Audit L-5: no fabricated availability number. Real availability is not
-    // measured anywhere in this codebase (the old formula was 100 minus a
-    // fudge term derived from process.uptime()); reporting an honest null lets
-    // the digest template show "unmeasured" instead of a fake 99.99.
-    systemUptimePercentage,
+    systemUptimePercentage: null,
   };
 }
 
@@ -481,7 +486,7 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
 
         // Attach the workspace timezone so the server-rendered timestamps match
         // every other view in the product instead of hard-coding UTC.
-        const dailyConfig = { ...(await readDailyDigestConfig(db)), timezone } as TemplateCustomization;
+        const dailyConfig = { ...(await readDailyDigestConfig(db)), timezone };
         const dailyDigestTemplate = await readDailyDigestTemplate(db);
         const advisory = buildDailyDigestAdvisory(findings, settings, todayKey);
         // The review-queue figure is a global count of held findings in today's
@@ -493,7 +498,7 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
         ).length;
         const worker = (await db.query('SELECT heartbeat FROM scheduler_state WHERE id=1')).rows[0];
         const health = daily.includeHealthReport
-          ? await computeHealth(db, settings.schedulerEnabled, worker?.heartbeat ?? null)
+          ? await computeHealth(db, settings.schedulerEnabled, worker?.heartbeat ?? null, timezone, daily.time, now)
           : null;
         const healthReportHtml = health ? renderDailyHealthReport(health, dailyConfig) : '';
         // No findings and no health report means there is nothing to email. Skip
@@ -533,18 +538,10 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
           const highCount = severityCounts.HIGH ?? 0;
           const mediumCount = severityCounts.MEDIUM ?? 0;
           const lowCount = severityCounts.LOW ?? 0;
-          const uniqueAssets = new Set(included.map((finding) => finding.matchedAssetName));
+          const uniqueAssets = new Set(included.map((finding) => finding.matchedAssetId));
           const reportGenerated = formatReportGenerated(new Date(), timezone);
-          // ML-guided narrative. The composer model rewrites the executive
-          // summary for the actual finding mix (prioritisation, remediation
-          // emphasis); when the model is untrained `mlComposeAdvisoryEmail`
-          // falls back to the rule-based text, so the digest never loses its
-          // summary. The advisory argument supplies severity/CVE context to the
-          // model, not a stored row.
-          const composed = included.length
-            ? mlComposeAdvisoryEmail(included, view)
-            : null;
-          const executiveSummary = composed?.executiveSummary || formatExecutiveSummary(included.length, severityCounts);
+          // Keep the narrative's scope and counts identical to the recipient's KPIs.
+          const executiveSummary = formatExecutiveSummary(included.length, severityCounts);
           const parts: DailyDigestParts = {
              advisory_id: view.id,
              advisory_title: view.title,

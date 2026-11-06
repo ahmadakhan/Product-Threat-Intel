@@ -70,7 +70,7 @@ export interface UnverifiableMatchPayload {
 }
 import { buildAliasMap, parseCPE23 } from '../src/utils/cpeMatcher';
 import { randomUUID, createHmac, createHash } from 'node:crypto';
-import { stableJson } from '../src/utils/deduplicator';
+import { mergeCveRecords, stableJson } from '../src/utils/deduplicator';
 import nodemailer from 'nodemailer';
 import type { Config } from './config';
 import { transaction, get, getMany, list, put, appendAudit, schemaLockKey } from './db';
@@ -303,25 +303,27 @@ export const emailRetrySchedule = (policy: EmailRetryPolicy) =>
  * changed" failure when the pipeline correctly treats the refresh as a
  * no-op.
  */
-export const revision = (cve: NormalizedCVE) =>
-  createHash('sha256')
+export const revision = (cve: NormalizedCVE) => {
+  const canonical = mergeCveRecords([cve]).get(cve.cveId) || cve;
+  return createHash('sha256')
     .update(
       stableJson({
-        cveId: cve.cveId,
-        title: cve.title,
-        description: cve.description,
-        cvss: cve.cvss,
-        cpeMatches: cve.cpeMatches,
-        cpeMatchDetails: cve.cpeMatchDetails,
-        versionRange: cve.versionRange,
-        purls: cve.purls,
-        applicabilityRequiresReview: cve.applicabilityRequiresReview,
-        applicabilityPolicy: cve.applicabilityPolicy,
-        remediation: cve.remediation,
-        isKev: cve.cisaKev?.isKev ?? false,
+        cveId: canonical.cveId,
+        title: canonical.title,
+        description: canonical.description,
+        cvss: canonical.cvss,
+        cpeMatches: canonical.cpeMatches,
+        cpeMatchDetails: canonical.cpeMatchDetails,
+        versionRange: canonical.versionRange,
+        purls: canonical.purls,
+        applicabilityRequiresReview: canonical.applicabilityRequiresReview,
+        applicabilityPolicy: canonical.applicabilityPolicy,
+        remediation: canonical.remediation,
+        isKev: canonical.cisaKev?.isKev ?? false,
       }),
     )
     .digest('hex');
+};
 /**
  * Finding fingerprint for delivery staleness checks and advisory content
  * revision (dedupe key).

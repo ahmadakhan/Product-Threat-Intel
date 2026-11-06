@@ -427,13 +427,19 @@ export async function regroupStaleAdvisory(
         digestKey: isDigest ? `${job.payload.digestKey}:regrouped` : undefined,
       };
       // Preserve the failed attempt and its log. A deterministic rebuild key
-      // prevents the same failed job from creating multiple replacement sends.
+      // coalesces equivalent failed jobs for the same recipient. Keying by the
+      // source job id lets repeated stale-bundle recovery create one replacement
+      // per retrying row and send the same content repeatedly.
       if ((job as Job & { status?: string }).status === 'FAILED') {
-        const fingerprint = createHash('sha256').update(stableJson({
-          cveRevisions: payload.cveRevisions, findingRevisions, included,
-        })).digest('hex');
+        const fingerprint = createHash('sha256')
+          .update(stableJson({
+            cveRevisions: payload.cveRevisions,
+            findingRevisions,
+            included,
+          }))
+          .digest('hex');
         const inserted = await enqueue(db, job.channel, job.target_id, replacement.id, payload,
-          `rebuild:${job.id}:${fingerprint}`, 'QUEUED', job.priority || 0);
+          `rebuild:${job.channel}:${job.target_id}:${fingerprint}`, 'QUEUED', job.priority || 0);
         if (!inserted) continue;
       } else {
       await db.query(
@@ -719,15 +725,22 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     if (!execution) {
       const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
       const last = (await pool.query('SELECT last_run FROM scheduler_state WHERE id=1')).rows[0];
+      const schedulerNow = Date.now();
+      const catchUpDue = settings.schedulerEnabled && (await list<FeedCursor>(pool, 'feedCursors')).some((cursor) => {
+        if (!cursor.hasMore) return false;
+        const nextCatchupAt = cursor.next_catchup_at ? Date.parse(cursor.next_catchup_at) : NaN;
+        return !Number.isFinite(nextCatchupAt) || nextCatchupAt <= schedulerNow;
+      });
       const recoveryProbeDue = !settings.schedulerEnabled &&
-        (await list<ThreatFeed>(pool, 'feeds')).some((feed) => recoveryDue(feed));
+        (await list<ThreatFeed>(pool, 'feeds')).some((feed) => recoveryDue(feed, schedulerNow));
       if (
         shouldStartAutomaticRun({
           schedulerEnabled: settings.schedulerEnabled,
           recoveryProbeDue,
+          catchUpDue,
           lastRun: last?.last_run ? new Date(last.last_run).toISOString() : null,
           intervalMinutes: settings.schedulerIntervalMinutes,
-        })
+        }, schedulerNow)
       )
         execution = await queueRun(pool, undefined, 'scheduler', undefined, lock);
     }

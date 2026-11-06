@@ -1153,9 +1153,9 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
           assert.match(job.payload.text, /Findings:/);
         }
         const all = jobs.find((job) => job.target_id === 'ALL_SEVERITIES')!;
-        assert.match(all.payload.subject, /Vulnerability Notification:/);
-        assert.equal((all.payload.html.match(/border-left:4px solid #f59e0b/g) || []).length, 1);
-        assert.equal((all.payload.html.match(/border-left:4px solid #10b981/g) || []).length, 1);
+        assert.match(all.payload.subject, /Vulnerability digest:/);
+        assert.equal((all.payload.html.match(/data-pdf-accent="#f59e0b"/g) || []).length, 1);
+        assert.equal((all.payload.html.match(/data-pdf-accent="#10b981"/g) || []).length, 1);
         assert.match(all.payload.text, new RegExp(high.cveId));
         assert.match(all.payload.text, new RegExp(low.cveId));
 
