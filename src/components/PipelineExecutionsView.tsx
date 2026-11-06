@@ -21,7 +21,7 @@ import { useApp } from '../context/AppContext';
 import type { Finding, PipelineExecution, PipelinePhase } from '../types';
 import { Pagination } from './Pagination';
 import { useCollection } from '../hooks/useCollection';
-import { DEFAULT_INGESTION_WINDOW_HOURS } from '../utils/scopePresets';
+import { DEFAULT_INGESTION_WINDOW_HOURS, formatScopeLabel } from '../utils/scopePresets';
 import { formatExecutionName } from '../utils/executionName';
 import { useDialogFocus } from '../hooks/useDialogFocus';
 
@@ -79,9 +79,11 @@ export const PipelineExecutionsView: React.FC = () => {
     stopPipelineRun,
     session,
     pending,
+    settings,
   } = useApp();
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const scopeHours = DEFAULT_INGESTION_WINDOW_HOURS;
+  const scopeHours = settings.scopeHours ?? DEFAULT_INGESTION_WINDOW_HOURS;
+  const scopeLabel = formatScopeLabel(scopeHours);
   const [incrementalFeeds, setIncrementalFeeds] = useState(true);
   const [selectedStage, setSelectedStage] = useState<string | null>(null);
   const [page, setPage] = useState(1);
@@ -179,10 +181,10 @@ export const PipelineExecutionsView: React.FC = () => {
         </PageHeading>
         <div className="flex flex-wrap items-center gap-2">
           <div
-            aria-label="Ingestion window: 1 day"
+            aria-label={`Ingestion window: ${scopeLabel}`}
             className="rounded-lg border border-zinc-700 light:border-zinc-300 bg-zinc-950 light:bg-white px-3 py-2 text-xs text-zinc-400 light:text-zinc-600"
           >
-            Ingestion window <span className="ml-1 font-semibold text-zinc-100 light:text-zinc-900">1 day</span>
+            Ingestion window <span className="ml-1 font-semibold text-zinc-100 light:text-zinc-900">{scopeLabel}</span>
           </div>
           <label className="flex items-center gap-2 text-xs text-zinc-400 light:text-zinc-600">
             <input

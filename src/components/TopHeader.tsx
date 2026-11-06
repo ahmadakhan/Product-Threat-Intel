@@ -1,6 +1,6 @@
 import { pages, type PageId } from '../design/pages';
 import { formatDateTime } from '../utils/dateTime';
-import { DEFAULT_INGESTION_WINDOW_HOURS } from '../utils/scopePresets';
+import { DEFAULT_INGESTION_WINDOW_HOURS, formatScopeLabel } from '../utils/scopePresets';
 import React, { useEffect, useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { RotateCw, Play, Clock, Cpu, Sun, Moon, Menu, KeyRound } from 'lucide-react';
@@ -24,6 +24,8 @@ export const TopHeader: React.FC = () => {
     systemUptime,
     health,
   } = useApp();
+  const scopeHours = settings.scopeHours ?? DEFAULT_INGESTION_WINDOW_HOURS;
+  const scopeLabel = formatScopeLabel(scopeHours);
 
   const [nextScheduledRun, setNextScheduledRun] = useState<string | null>(null);
   useEffect(() => {
@@ -52,7 +54,7 @@ export const TopHeader: React.FC = () => {
   }, !!confirmingAction);
 
   const handleRunPipeline = () => {
-    setConfirmingAction({ type: 'pipeline', label: 'Run Pipeline (1 day)' });
+    setConfirmingAction({ type: 'pipeline', label: `Run Pipeline (${scopeLabel})` });
   };
 
   const executeRunPipeline = async () => {
@@ -60,7 +62,7 @@ export const TopHeader: React.FC = () => {
     confirmActionInProgress.current = true;
     setConfirmActionBusy(true);
     try {
-      await triggerPipelineRun(DEFAULT_INGESTION_WINDOW_HOURS);
+      await triggerPipelineRun(scopeHours);
     } finally {
       confirmActionInProgress.current = false;
       setConfirmActionBusy(false);
@@ -163,8 +165,8 @@ export const TopHeader: React.FC = () => {
             <button
               onClick={handleRunPipeline}
               disabled={isPipelineRunning || confirmingAction !== null}
-              aria-label="Run pipeline for the past 1 day"
-              title="Ingestion window: 1 day"
+              aria-label={`Run pipeline for the past ${scopeLabel}`}
+              title={`Ingestion window: ${scopeLabel}`}
               className={`ui-pipeline-action inline-flex items-center space-x-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold transition shadow-sm border border-zinc-700/80 dark:border-zinc-700/80 light:border-zinc-300 ${
                 isPipelineRunning || confirmingAction?.type === 'pipeline'
                   ? 'bg-zinc-800 dark:bg-zinc-800 light:bg-zinc-200 text-zinc-400 cursor-not-allowed'
@@ -179,7 +181,7 @@ export const TopHeader: React.FC = () => {
               ) : (
                 <>
                   <Play className="w-3 h-3 fill-current" />
-                  <span className="hidden sm:inline">Run Pipeline (1 day)</span>
+                  <span className="hidden sm:inline">Run Pipeline ({scopeLabel})</span>
                   <span className="sm:hidden">Run</span>
                 </>
               )}
