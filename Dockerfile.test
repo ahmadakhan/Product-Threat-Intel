@@ -1,12 +1,15 @@
-FROM node:22-alpine AS test-base
+FROM node:26-alpine3.22 AS test-base
 
 WORKDIR /app
 
 RUN apk add --no-cache \
+    chromium \
     postgresql-client \
     python3 \
     make \
     g++
+
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 COPY package*.json ./
 

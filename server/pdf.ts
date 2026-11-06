@@ -1,17 +1,21 @@
-import { createHash, randomUUID } from 'node:crypto';
-import PDFDocument from 'pdfkit';
-import { convert, type FormatCallback, type HtmlToTextOptions } from 'html-to-text';
+import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import puppeteer, { type Browser } from 'puppeteer-core';
+import { convert, type HtmlToTextOptions } from 'html-to-text';
 import { resolveTimezone } from '../src/utils/dateTime.ts';
 
 const PDF_CACHE_TTL_MS = 5 * 60_000;
 const PDF_CACHE_MAX = 64;
+const PDF_MAX_HTML_BYTES = 2_000_000;
 const pdfCache = new Map<string, { content: Uint8Array; expires: number }>();
 let pdfQueue: Promise<void> = Promise.resolve();
+let browserPromise: Promise<Browser> | undefined;
 let cacheAccess = 0;
 const HTML_TO_TEXT_OPTIONS: HtmlToTextOptions = {
   baseElements: { selectors: ['body'], returnDomByDefault: false },
   wordwrap: 92,
-  limits: { maxInputLength: 2_000_000 },
+  limits: { maxInputLength: PDF_MAX_HTML_BYTES },
   selectors: [
     { selector: 'script', format: 'skip' },
     { selector: 'style', format: 'skip' },
@@ -26,10 +30,6 @@ export interface PdfAttachment {
   content: Uint8Array;
   contentType: 'application/pdf';
 }
-
-export type AdvisoryPdfBlock =
-  | { kind: 'text'; text: string }
-  | { kind: 'cve-card'; text: string; accent: string };
 
 /** Use the advisory's real ID so the attachment is easy to identify and file. */
 export function advisoryFilename(advisoryId: string): string {
@@ -55,134 +55,133 @@ function timestampedFilename(at: Date, timezone?: string): string {
 }
 
 export function unverifiableMatchFilename(at: Date = new Date(), timezone?: string): string {
-  // These reports have no advisory ID to use as the filename.
   return timestampedFilename(at, timezone);
 }
 
 export function advisoryHtmlToText(html: string): string {
-  if (Buffer.byteLength(html, 'utf8') > 2_000_000) throw new Error('Advisory HTML exceeds the PDF size limit');
+  if (Buffer.byteLength(html, 'utf8') > PDF_MAX_HTML_BYTES)
+    throw new Error('Advisory HTML exceeds the PDF size limit');
   return convert(html, HTML_TO_TEXT_OPTIONS).trim();
 }
 
-export function advisoryHtmlToPdfBlocks(html: string): AdvisoryPdfBlock[] {
-  if (Buffer.byteLength(html, 'utf8') > 2_000_000) throw new Error('Advisory HTML exceeds the PDF size limit');
-  const marker = `VULNSTREAMPDF${randomUUID().replaceAll('-', '')}`;
-  const accents: string[] = [];
-  const pdfCveCard: FormatCallback = (element, walk, builder) => {
-    const index = accents.length;
-    const candidate = String(element.attribs?.['data-pdf-accent'] || '');
-    accents.push(/^#[0-9a-f]{6}$/i.test(candidate) ? candidate.toLowerCase() : '#64748b');
-    builder.openBlock({ leadingLineBreaks: 1 });
-    builder.addInline(`[[[${marker}_${index}_START]]]`, { noWordTransform: true });
-    builder.addLineBreak();
-    walk(element.children, builder);
-    builder.addLineBreak();
-    builder.addInline(`[[[${marker}_${index}_END]]]`, { noWordTransform: true });
-    builder.closeBlock({ trailingLineBreaks: 1 });
-  };
-  const text = convert(html, {
-    ...HTML_TO_TEXT_OPTIONS,
-    formatters: { pdfCveCard },
-    selectors: [
-      ...(HTML_TO_TEXT_OPTIONS.selectors ?? []),
-      { selector: 'div.vulnstream-pdf-card', format: 'pdfCveCard' },
-      { selector: 'table.vulnstream-pdf-card', format: 'pdfCveCard' },
-      { selector: 'tr.vulnstream-pdf-card', format: 'pdfCveCard' },
-    ],
-  });
-  const blocks: AdvisoryPdfBlock[] = [];
-  const startPattern = new RegExp(`\\[\\[\\[${marker}_(\\d+)_START\\]\\]\\]`, 'g');
-  let cursor = 0;
-  for (let match = startPattern.exec(text); match; match = startPattern.exec(text)) {
-    const index = Number(match[1]);
-    const endMarker = `[[[${marker}_${index}_END]]]`;
-    const end = text.indexOf(endMarker, startPattern.lastIndex);
-    if (end < 0) continue;
-    const before = text.slice(cursor, match.index).trim();
-    const cardText = text.slice(startPattern.lastIndex, end).trim();
-    if (before) blocks.push({ kind: 'text', text: before });
-    if (cardText) blocks.push({ kind: 'cve-card', text: cardText, accent: accents[index] || '#64748b' });
-    cursor = end + endMarker.length;
-    startPattern.lastIndex = cursor;
+function resolveChromiumExecutable(): string {
+  const candidates = [
+    process.env.PUPPETEER_EXECUTABLE_PATH,
+    process.env.CHROME_EXECUTABLE_PATH,
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    process.env.ProgramFiles &&
+      join(process.env.ProgramFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    process.env['ProgramFiles(x86)'] &&
+      join(process.env['ProgramFiles(x86)'], 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    process.env.LOCALAPPDATA &&
+      join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    process.env.ProgramFiles &&
+      join(process.env.ProgramFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+  ];
+  const executable = candidates.find((candidate): candidate is string => !!candidate && existsSync(candidate));
+  if (!executable) {
+    throw new Error(
+      'Chromium is required for advisory PDF rendering; set PUPPETEER_EXECUTABLE_PATH to its executable.',
+    );
   }
-  const remaining = text.slice(cursor).trim();
-  if (remaining) blocks.push({ kind: 'text', text: remaining });
-  return blocks;
+  return executable;
 }
 
-async function renderPdfBlocks(blocks: AdvisoryPdfBlock[]): Promise<Uint8Array> {
-  const content = await new Promise<Uint8Array>((resolve, reject) => {
-    const document = new PDFDocument({
-      size: 'A4',
-      margin: 48,
-      bufferPages: true,
-      info: { Title: 'Security advisory', Author: 'BA Threat Intel', Creator: 'VulnStream' },
+function getBrowser(): Promise<Browser> {
+  if (!browserPromise) {
+    browserPromise = puppeteer
+      .launch({
+        executablePath: resolveChromiumExecutable(),
+        headless: true,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--no-zygote',
+        ],
+      })
+      .catch((error: unknown) => {
+        browserPromise = undefined;
+        throw new Error(
+          `Unable to launch Chromium for advisory PDF rendering: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      });
+  }
+  return browserPromise;
+}
+
+async function renderHtmlPdf(html: string): Promise<Uint8Array> {
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+  try {
+    await page.setJavaScriptEnabled(false);
+    await page.setRequestInterception(true);
+    page.on('request', (request) => {
+      void request.abort('blockedbyclient').catch(() => undefined);
     });
-    const chunks: Buffer[] = [];
-    document.on('data', (chunk: Buffer) => chunks.push(chunk));
-    document.once('error', reject);
-    document.once('end', () => resolve(new Uint8Array(Buffer.concat(chunks))));
+    await page.setViewport({ width: 816, height: 1056, deviceScaleFactor: 1 });
+    await page.emulateMediaType('print');
+    await page.setContent(html, { waitUntil: 'load', timeout: 15_000 });
 
-    const left = document.page.margins.left;
-    const width = document.page.width - left - document.page.margins.right;
-    const contentBottom = document.page.height - document.page.margins.bottom - 28;
-    for (const block of blocks) {
-      if (block.kind === 'text') {
-        document.font('Helvetica').fontSize(9).fillColor('#202a38').text(block.text, {
-          width,
-          lineGap: 3,
-          paragraphGap: 5,
-        });
-        document.moveDown(0.3);
-        continue;
-      }
-
-      document.font('Helvetica').fontSize(9).fillColor('#202a38');
-      const innerWidth = width - 28;
-      const cardHeight = Math.max(54, document.heightOfString(block.text, {
-        width: innerWidth,
-        lineGap: 3,
-        paragraphGap: 4,
-      }) + 22);
-      if (cardHeight > document.page.height - document.page.margins.top - document.page.margins.bottom - 28) {
-        document.moveTo(left + 3, document.y).lineTo(left + 3, document.y + 12).lineWidth(4).strokeColor(block.accent).stroke();
-        document.font('Helvetica').fontSize(9).fillColor('#202a38').text(block.text, { width: innerWidth, indent: 12, lineGap: 3, paragraphGap: 4 });
-        document.moveDown(0.4);
-        continue;
-      }
-      if (document.y + cardHeight > contentBottom) document.addPage();
-      const top = document.y;
-      document.save();
-      document.roundedRect(left, top, width, cardHeight, 4).fillAndStroke('#ffffff', '#dfe4e8');
-      document.moveTo(left + 2, top + 5).lineTo(left + 2, top + cardHeight - 5)
-        .lineWidth(4).strokeColor(block.accent).stroke();
-      document.restore();
-      document.font('Helvetica').fontSize(9).fillColor('#202a38').text(block.text, left + 14, top + 11, {
-        width: innerWidth,
-        lineGap: 3,
-        paragraphGap: 4,
+    await page.evaluate(() => {
+      document.querySelectorAll('script, iframe, frame, object, embed, applet, base, form').forEach((node) => node.remove());
+      document.querySelectorAll('link[rel~="import"], link[rel~="stylesheet"]').forEach((node) => node.remove());
+      document.querySelectorAll('*').forEach((element) => {
+        for (const attribute of [...element.attributes]) {
+          if (/^on/i.test(attribute.name) || ['src', 'srcset', 'poster', 'background', 'action', 'formaction'].includes(attribute.name.toLowerCase())) {
+            element.removeAttribute(attribute.name);
+          }
+        }
       });
-      document.y = Math.max(document.y, top + cardHeight) + 10;
-    }
-
-    const pages = document.bufferedPageRange();
-    for (let pageIndex = pages.start; pageIndex < pages.start + pages.count; pageIndex++) {
-      document.switchToPage(pageIndex);
-      const footerY = document.page.height - 32;
-      const bottomMargin = document.page.margins.bottom;
-      document.page.margins.bottom = 0;
-      document.font('Helvetica').fontSize(8).fillColor('#667085')
-        .text('BA Threat Intel | Security advisory', 48, footerY, { lineBreak: false });
-      document.text(`Page ${pageIndex - pages.start + 1} of ${pages.count}`, 48, footerY, {
-        width: document.page.width - 96,
-        align: 'right',
-        lineBreak: false,
+      document.querySelectorAll('a[href]').forEach((anchor) => {
+        const href = anchor.getAttribute('href') || '';
+        if (href.startsWith('#')) return;
+        try {
+          const url = new URL(href);
+          if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password)
+            anchor.removeAttribute('href');
+          else
+            anchor.setAttribute('href', url.href);
+        } catch {
+          anchor.removeAttribute('href');
+        }
+        anchor.removeAttribute('target');
       });
-      document.page.margins.bottom = bottomMargin;
-    }
-    document.end();
-  });
-  return content;
+      const policy = document.createElement('meta');
+      policy.httpEquiv = 'Content-Security-Policy';
+      policy.content = "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline' data:; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
+      document.head.prepend(policy);
+      const printStyle = document.createElement('style');
+      printStyle.textContent = `
+        @page { size: A4; margin: 0; }
+        html, body { width: auto !important; min-width: 0 !important; margin: 0 !important; }
+        *, *::before, *::after { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+        table, tr, td, .vulnstream-pdf-card { break-inside: avoid; page-break-inside: avoid; }
+      `;
+      document.head.append(printStyle);
+    });
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+      document.documentElement.getBoundingClientRect();
+    });
+    return new Uint8Array(await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      preferCSSPageSize: true,
+      displayHeaderFooter: false,
+      margin: { top: '0', right: '0', bottom: '0', left: '0' },
+    }));
+  } catch (error) {
+    throw new Error(
+      `Chromium advisory PDF rendering failed: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  } finally {
+    await page.close().catch(() => undefined);
+  }
 }
 
 function serializePdf<T>(operation: () => Promise<T>): Promise<T> {
@@ -192,14 +191,14 @@ function serializePdf<T>(operation: () => Promise<T>): Promise<T> {
 }
 
 export async function renderAdvisoryPdf(html: string): Promise<Uint8Array> {
-  if (Buffer.byteLength(html, 'utf8') > 2_000_000) throw new Error('Advisory HTML exceeds the PDF size limit');
+  if (Buffer.byteLength(html, 'utf8') > PDF_MAX_HTML_BYTES)
+    throw new Error('Advisory HTML exceeds the PDF size limit');
   const key = createHash('sha256').update(html).digest('hex');
   const content = await serializePdf(async () => {
     const cached = pdfCache.get(key);
     if (cached && cached.expires > Date.now()) return cached.content;
-    const blocks = advisoryHtmlToPdfBlocks(html);
-    if (!blocks.length) throw new Error('Advisory HTML contains no printable content');
-    const rendered = await renderPdfBlocks(blocks);
+    const rendered = await renderHtmlPdf(html);
+    if (!rendered.length) throw new Error('Chromium returned an empty advisory PDF');
     pdfCache.set(key, { content: rendered, expires: Date.now() + PDF_CACHE_TTL_MS });
     return rendered;
   });
@@ -210,7 +209,7 @@ export async function renderAdvisoryPdf(html: string): Promise<Uint8Array> {
 function evictPdfCache(): void {
   const now = Date.now();
   cacheAccess = 0;
-  for (const [k, v] of pdfCache) if (v.expires < now) pdfCache.delete(k);
+  for (const [key, value] of pdfCache) if (value.expires < now) pdfCache.delete(key);
   while (pdfCache.size > PDF_CACHE_MAX) {
     const first = pdfCache.keys().next().value;
     if (first === undefined) break;
@@ -220,4 +219,9 @@ function evictPdfCache(): void {
 
 export async function closePdfRenderer(): Promise<void> {
   pdfCache.clear();
+  if (browserPromise) {
+    const currentBrowser = await browserPromise.catch(() => undefined);
+    browserPromise = undefined;
+    if (currentBrowser?.connected) await currentBrowser.close();
+  }
 }

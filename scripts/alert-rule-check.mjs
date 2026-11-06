@@ -291,7 +291,7 @@ async function runScenario(scenario, index) {
   // permanently down and every scenario reports "instance unavailable".
   sh(
     `docker run -d --name ${id}-exp --network ${net} --network-alias exporter ` +
-      `-v ${dir}:/data:ro node:22-alpine node -e "` +
+      `-v ${dir}:/data:ro node:26-alpine3.22 node -e "` +
       // Read the scenario state per request and ramp the two counters that
       // rules integrate over (`dead_letters`, `dropped_logs`). `items` is a
       // completion counter and must NOT ramp: a rising value means progress,

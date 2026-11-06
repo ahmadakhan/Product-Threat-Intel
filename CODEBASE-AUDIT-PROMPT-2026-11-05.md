@@ -4,13 +4,27 @@ You are a senior security engineer and SRE. Audit the VulnStream-Enterprise code
 
 ## Scope
 
-- Focus on the last three commits: `4373410` (Email Delivery Action Center + ML pipeline), `f4157ae` and `c914777` (UI confirmation dialogs).
+- Focus on the last three commits: `4373410` (Email Delivery Action Center + ML pipeline), `f4157ae` and `c914777` (UI confirmation dialogs), plus the **uncommitted working-tree changes** listed under "Working-tree defects" below.
 - The UI dialog commits are large mechanical changes (~2,400 insertions across 15 components). Spot-audit them for regressions; the substantive risk is in the server/ML changes from `4373410`.
 - Exclusions: `node_modules/`, `dist/`, `server-dist/`, generated migrations, style-only issues.
 
+## Working-tree defects — fix FIRST (the tree does not typecheck)
+
+The uncommitted digest refactor broke the build. These three errors are verified:
+
+- `src/components/DailyDigestView.tsx:168` — passes `timezone` in a `TemplateCustomization` literal, but the interface (`src/types/index.ts:230-245`) has no such field.
+- `tests/daily-digest.test.ts:341` and `:348` — same mismatch in test fixtures.
+
+The server side of the same refactor added the timezone context correctly (`server/app.ts:2002-2005` merges `data.settings.timezone` into the digest config; `server/dailyDigest.ts` `computeHealth` now takes `timezone`, `time`, `now` and computes a DST-safe `nextDailyDigestAt` via SQL). The client/types were never updated to match. Fix by either adding `timezone?: string` to `TemplateCustomization` (if the render path genuinely uses it — verify in `src/utils/templateCompiler.ts` before assuming) or removing the property at all three sites (if the template only reads the server-computed timestamps). Then confirm `formatExecutiveSummary` is called identically at the preview path (`app.ts:2037`) and the real digest path (`dailyDigest.ts:555`) — the refactor correctly replaced the ML-composed narrative with the deterministic one in both places.
+
+After that fix passes lint, audit the digest refactor itself for correctness:
+
+1. **`nextDailyDigestAt` SQL** (`server/dailyDigest.ts:300-310`): the expression `(($1::timestamptz AT TIME ZONE $2)::date + 1 + $3::time) AT TIME ZONE $2` computes the next local calendar day's send time. Verify it handles a digest time later than the current local time the same day (should it return today, not tomorrow? The implementation always returns tomorrow — confirm that matches the "next scheduled digest" semantics used in the UI) and that DST spring-forward gaps do not shift the time by an hour (the `tests/delivery-audit-regressions.test.ts` DST cases at `:257-283` cover Berlin spring/fall — keep them green).
+2. **Finding-window change** (`dailyDigest.ts:495-505`): eligible findings are now filtered to the last 24 hours via `created_at`. Verify the regression test asserting `includedFindingIds: [recent.id]` (`:245-255`) also covers the boundary (finding exactly 24h old) and that the old `systemUptimePercentage` removal is propagated to every renderer (search for `systemUptimePercentage` across `src/utils/templateCompiler.ts` and the digest views — the field is now `null`; any code path that formats it as a percentage must handle null).
+
 ## System map
 
-- **Server**: Node 22 + Express (`server/app.ts` router, `server/main.ts` bootstrap), PostgreSQL 17, migrations `001..036`, `REQUIRED_SCHEMA_VERSION = 36`.
+- **Server**: Node 26 + Express (`server/app.ts` router, `server/main.ts` bootstrap), PostgreSQL 17, migrations `001..036`, `REQUIRED_SCHEMA_VERSION = 36`.
 - **ML subsystem**: `server/ml/` — `integration.ts` (pipeline wrappers + `initMlRuntime`), `feedback.ts` (zod schemas), `train/` (cron orchestrator, dataProvider, qualityGates), `models/` (18 models), `runtime.ts` (ModelRegistry with manifest + rollback).
 - **Delivery**: `server/delivery.ts` (outbox worker, retry policy), `server/emailProviders.ts`.
 - **Pipeline**: `server/pipeline.ts` (server worker), `src/engine/pipelineEngine.ts`, `src/engine/reconcileFindings.ts`.
@@ -90,12 +104,12 @@ For each, report findings in the standard format (File:line, Severity, Category,
 6. **Shutdown/lifecycle**: `mlTelemetryRunning` is awaited in `shutdown()` (`main.ts:600-602`) — confirm no other new timer/await pair was missed.
 7. **Frontend dialogs**: as in Regression-verify #2.
 
-## Verified baseline (as of 2026-11-05, commit `c914777`)
+## Verified baseline (as of 2026-11-05, commit `c914777` + uncommitted digest refactor)
 
 Recorded so you can distinguish pre-existing failures from regressions introduced by your fixes:
 
-- `npm run lint` — clean, exit 0.
-- `npm test` — **857 tests: 794 pass, 0 fail, 63 skipped** (skips are DB/CI-dependent suites that require `TEST_DATABASE_URL`).
+- `npm run lint` — **FAILING (3 errors)** from the uncommitted digest refactor listed under "Working-tree defects". Fix those first; after the fix, lint must be clean before you touch anything else.
+- `npm test` (at commit `c914777`, before the digest refactor) — **857 tests: 794 pass, 0 fail, 63 skipped** (skips are DB/CI-dependent suites that require `TEST_DATABASE_URL`).
 - The full CI matrix (`npm run test:ci`, 991 tests) is documented green in `AUDIT-2026-11-04-PRODUCTION.md` and requires a disposable PostgreSQL instance.
 
 ## Verification gates (must all pass after fixes)
@@ -119,9 +133,10 @@ Add one regression test per fixed finding (F-1 through F-7 minimum). Do not weak
 
 | Status | IDs | Severity |
 | --- | --- | --- |
+| Working-tree — fix first, blocks all gates | Digest timezone mismatch (3 sites) | HIGH (build-breaking) |
 | Confirmed — implement | F-1, F-2, F-3 | HIGH ×3 |
 | Confirmed — implement | F-4, F-5, F-6, F-7 | MEDIUM ×4 |
 | Confirmed — implement | F-9, F-10 | LOW ×2 |
 | Verified not a defect — do not change | F-8 | — |
 
-The finding count to close is **9 fixes (3 HIGH, 4 MEDIUM, 2 LOW)**, each with one regression test.
+The finding count to close is **10 fixes (1 build-breaking + 3 HIGH, 4 MEDIUM, 2 LOW)**, each with one regression test (the digest type fix is closed by a clean `npm run lint`).

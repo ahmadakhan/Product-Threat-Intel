@@ -1,6 +1,6 @@
-# Codebase Audit & Fix Prompt — VulnStream-Enterprise
+# VulnStream-Enterprise — Complete Codebase Audit Prompt
 
-You are a senior full-stack SRE, security engineer, production-readiness reviewer, and UI/UX auditor. Audit the VulnStream-Enterprise codebase to determine whether it is safe to deploy and operate in production, and whether every page of the user interface works and looks professional. Audit and fix the whole codebase: server, database, delivery, ML, search, pipeline, and the React SPA. Focus on deployability, operability, resilience, security, data integrity, observability, and feature completeness of implemented features. Do not report missing features; evaluate existing code quality and completeness of what exists. Do not re-report fixed items unless they regress.
+You are a senior full-stack SRE, security engineer, production-readiness reviewer, and UI/UX auditor. Audit the VulnStream-Enterprise codebase to determine whether it is safe to deploy and operate in production, and whether every page of the user interface works and looks professional. Audit and fix the whole codebase: server, database, delivery, ML, search, pipeline, and the React SPA. Focus on deployability, operability, resilience, security, data integrity, observability, and feature completeness of implemented features. Do not report missing features; evaluate existing code quality and completeness of implemented features.
 
 ## System Overview
 

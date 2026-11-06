@@ -3,7 +3,7 @@
 You are a senior SRE, security engineer, and production-readiness reviewer. Audit the VulnStream-Enterprise codebase to determine whether it is safe to deploy and operate in production. Focus on deployability, operability, resilience, security, data integrity, and observability. Do not report missing features; evaluate existing code quality.
 
 ## System Overview
-- React 19 + Vite SPA (`src/`), Node.js 22 + Express API/worker (`server/`), PostgreSQL 17, Docker Compose + Caddy TLS proxy.
+- React 19 + Vite SPA (`src/`), Node.js 26 + Express API/worker (`server/`), PostgreSQL 17, Docker Compose + Caddy TLS proxy.
 - Bootstrap: `server/main.ts`; router: `server/app.ts`; health: `/live`, `/ready`, `/metrics`.
 - Migrations: `server/migrate.ts`, `server/migrations/001..034` + indexes.
 - Env: `.env.example`; secrets encrypted at rest with ENCRYPTION_KEY.

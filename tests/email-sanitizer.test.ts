@@ -37,7 +37,11 @@ test('email preview sanitization fails closed without a browser DOM', () => {
 test('email preview sanitization blocks encoded execution and UI/resource injection', { skip: !chrome }, async () => {
   const bundle = await build({ entryPoints: ['src/utils/sanitizeEmailHtml.ts'], bundle: true, write: false,
     platform: 'browser', format: 'iife', globalName: 'EmailSanitizer' });
-  const browser = await puppeteer.launch({ executablePath: chrome, headless: true });
+  const browser = await puppeteer.launch({
+    executablePath: chrome,
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
   try {
     const page = await browser.newPage();
     await page.setRequestInterception(true);

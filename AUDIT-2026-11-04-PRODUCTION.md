@@ -80,7 +80,7 @@ The small deployment-only model-volume correction followed the full CI freeze. A
 ## Remaining release requirements
 
 1. Apply migration 036 with the migration-owner connection in a maintenance window, grant the runtime role, and deploy the tested server/client together. Existing context-aware audit writers/verifiers must be compatible.
-2. Build/start the image on the target Docker host and verify persistent-volume ownership, two-replica file-lease behavior, resource limits, probes and graceful shutdown. Validate Node 22 runtime behavior there; audit tests ran on local Node 26.
+2. Build/start the image on the target Docker host and verify persistent-volume ownership, two-replica file-lease behavior, resource limits, probes and graceful shutdown. Validate Node 26 runtime behavior there; audit tests also ran on Node 26.
 3. Perform a backup/restore drill with protected encryption keys and shared dead-letter/model data. Do not drop retained keys until all protected records, spools and required backups are migrated.
 4. Perform controlled provider sandbox/staging delivery tests and confirm inbound provider telemetry. Automated CI uses mocks/local transports and does not certify external delivery or TLS/account configuration.
 5. Load-test representative retained history, inventory/CVE volume and concurrent operators. The full suite and curated corpus are not a capacity or fuzzing certification.

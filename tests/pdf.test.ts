@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { advisoryHtmlToPdfBlocks, advisoryHtmlToText, renderAdvisoryPdf, closePdfRenderer } from '../server/pdf.ts';
+import { createServer } from 'node:http';
+import { advisoryHtmlToText, renderAdvisoryPdf, closePdfRenderer } from '../server/pdf.ts';
 import { renderAdvisory } from '../server/advisoryRender.ts';
 import { advisoryFilename, unverifiableMatchFilename } from '../server/pdf.ts';
 import { compileCustomizedTemplate, DEFAULT_TEMPLATE_CUSTOMIZATION } from '../src/utils/templateCompiler.ts';
@@ -19,19 +20,6 @@ test('advisory HTML conversion preserves readable content and skips executable/r
   assert.match(text, /Patch the affected application/);
   assert.match(text, /Vendor guidance/);
   assert.doesNotMatch(text, /Ignored title|secret|EXECUTABLE_SENTINEL|tracker\.example|SVG_SENTINEL/);
-});
-
-test('PDF blocks preserve each email CVE card and its severity accent', () => {
-  const blocks = advisoryHtmlToPdfBlocks(
-    '<html><body><p>Security advisory</p>' +
-      '<div class="vulnstream-pdf-card" data-pdf-accent="#f59e0b" style="border-left:4px solid #f59e0b"><h2>CVE-2026-12345</h2><p>High description</p></div>' +
-      '<div class="vulnstream-pdf-card" data-pdf-accent="#10b981" style="border-left:4px solid #10b981"><h2>CVE-2026-67890</h2><p>Low description</p></div>' +
-      '</body></html>',
-  );
-  const cards = blocks.filter((block) => block.kind === 'cve-card');
-  assert.deepEqual(cards.map((card) => card.kind === 'cve-card' && card.accent), ['#f59e0b', '#10b981']);
-  assert.ok(cards[0].text.includes('CVE-2026-12345'));
-  assert.ok(cards[1].text.includes('CVE-2026-67890'));
 });
 
 test('advisoryFilename uses the real advisory ID', () => {
@@ -56,7 +44,7 @@ const advisory = {
   vendorLink: 'https://example.com/advisory/2026-0001',
 } as unknown as Advisory;
 
-test('renderAdvisoryPdf renders the compiled advisory HTML to a PDF without a browser', async () => {
+test('renderAdvisoryPdf renders matching clean cards, badges, metadata and links', async () => {
   const template = compileCustomizedTemplate(DEFAULT_TEMPLATE_CUSTOMIZATION);
   const findings = [
     {
@@ -92,35 +80,57 @@ test('renderAdvisoryPdf renders the compiled advisory HTML to a PDF without a br
   assert.match(template, />Advisory link<\/a>/);
   assert.match(html, /href="https:\/\/vendor\.example\/security\/advisory"[^>]*>Advisory link<\/a>/);
   assert.match(html, /<div style="margin:0 0 8px;padding:0;font-size:12px;line-height:19px;color:#334155;">/);
-  const emailCards = [...html.matchAll(/<table class="vulnstream-pdf-card" data-pdf-accent="([^"]+)"/g)];
+  const emailCards = [...html.matchAll(/<table class="vulnstream-pdf-card" data-pdf-cve="([^"]+)"/g)];
   assert.equal(emailCards.length, advisory.cveIds.length);
-  assert.deepEqual(emailCards.map((card) => card[1]), ['#f59e0b', '#eab308']);
-  assert.equal([...html.matchAll(/<td width="4" bgcolor="#[0-9a-f]{6}"/g)].length, emailCards.length);
-  assert.equal([...html.matchAll(/border:1px solid #e2e8f0;border-left:0/g)].length, emailCards.length);
-  assert.equal([...html.matchAll(/<td width="1%" align="right"/g)].length, emailCards.length);
-  const cveCards = advisoryHtmlToPdfBlocks(html).filter((block) => block.kind === 'cve-card');
-  assert.equal(cveCards.length, advisory.cveIds.length);
-  assert.deepEqual(cveCards.map((block) => block.kind === 'cve-card' && block.accent), ['#f59e0b', '#eab308']);
-  assert.ok(cveCards[0].text.includes('CVE-2026-12345'));
-  assert.ok(cveCards[1].text.includes('CVE-2026-67890'));
-
+  assert.deepEqual(emailCards.map((card) => card[1]), advisory.cveIds);
+  assert.ok(html.includes('margin:0 0 16px;border-collapse:separate'));
+  assert.ok(html.includes('border:1px solid #e2e8f0;border-radius:4px'));
+  assert.doesNotMatch(html, /data-pdf-accent|border-left:\s*0|<td width="4"/);
+  assert.match(html, /Affected version\(s\):<\/strong> Unavailable; confirm with vendor/);
+  assert.match(html, /Published:<\/strong> Unavailable/);
+  assert.match(html, /Last modified:<\/strong> Unavailable/);
   const pdf = await renderAdvisoryPdf(html);
   try {
     assert.equal(Buffer.from(pdf).slice(0, 5).toString(), '%PDF-');
     assert.ok(pdf.length > 2000, 'PDF should contain rendered content');
+    assert.ok(Buffer.from(pdf).toString('latin1').includes('https://vendor.example/security/advisory'), 'PDF keeps a clickable email vendor link');
   } finally {
     await closePdfRenderer();
   }
 });
 
-test('PDF footer does not create an empty page for short content', async () => {
-  const pdf = await renderAdvisoryPdf('<html><body><p>Short advisory</p></body></html>');
+test('Chromium PDF renders final HTML without executing scripts or fetching remote resources', async () => {
+  let requests = 0;
+  const server = createServer((_request, response) => {
+    requests++;
+    response.writeHead(200, { 'content-type': 'text/plain' }).end('unexpected remote response');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const remoteOrigin = `http://127.0.0.1:${address.port}`;
+  const html = `<html><head>
+      <link rel="stylesheet" href="${remoteOrigin}/style.css">
+      <script>fetch('${remoteOrigin}/script-fetch'); document.body.dataset.scriptExecuted='true';</script>
+      <style>.remote{background-image:url('${remoteOrigin}/css-image')}</style>
+    </head><body>
+      <h1>Browser-rendered security advisory</h1>
+      <div class="remote">No remote styling should load.</div>
+      <img src="${remoteOrigin}/image.png">
+      <a href="https://vendor.example/advisory">Vendor source</a>
+      <a href="javascript:window.__badLinkExecuted=true">Unsafe script link</a>
+      <script src="${remoteOrigin}/external-script.js"></script>
+    </body></html>`;
   try {
+    const pdf = await renderAdvisoryPdf(html);
     const pdfText = Buffer.from(pdf).toString('latin1');
-    const pageCount = [...pdfText.matchAll(/\/Type\s*\/Page\b/g)].length;
-    assert.equal(pageCount, 1);
+    assert.equal(pdfText.slice(0, 5), '%PDF-');
+    assert.ok(pdfText.includes('/Producer (Skia/PDF'), 'PDF is produced by Chromium print rendering');
+    assert.ok(pdfText.includes('https://vendor.example/advisory'), 'safe source links remain clickable in PDF');
+    assert.equal(requests, 0, 'scripts and remote resource requests are blocked');
   } finally {
     await closePdfRenderer();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
 

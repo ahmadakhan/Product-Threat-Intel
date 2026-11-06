@@ -266,9 +266,89 @@ test('renderAdvisory uses styled CVE links, affected version bounds, and per-CVE
   assert.match(html, /color:#1d4ed8;text-decoration:underline/);
   assert.ok(html.includes('Northstar Networks - Edge Gateway'));
   assert.ok(html.includes('Affected versions: &gt;= 1.2.0 and &lt; 2.0.0'));
-  assert.ok(html.includes(`Confirm the affected versions of Northstar Networks - Edge Gateway against the vendor guidance for ${first.cveId}.`));
+  assert.ok(html.includes('Product:</strong> Northstar Networks - Edge Gateway'));
+  assert.ok(html.includes('Affected version(s):</strong> &gt;= 1.2.0 and &lt; 2.0.0'));
+  assert.ok(html.includes('Published:</strong> 30 Oct 2026'));
+  assert.ok(html.includes('Last modified:</strong> 30 Oct 2026'));
+  assert.ok(html.includes('Operator-provided note (unverified):</strong> Apply the vendor patch immediately.'));
+  assert.ok(html.includes('This note is not evidence that a patch or fix is available.'));
   assert.ok(html.includes('Disable the vulnerable feature until patched.'));
   assert.ok(html.includes(`href="https://vendor.com/patch/${secondCve}"`));
+});
+
+test('renderAdvisory uses cautious remediation fallback and explicit unavailable finding metadata', () => {
+  const finding: Finding = {
+    ...findingsWithVendorLinks[0],
+    cve: {
+      ...findingsWithVendorLinks[0].cve,
+      publishedDate: undefined,
+      modifiedDate: undefined,
+      remediation: { immediateActions: [], stepByStep: [], workarounds: [] },
+    },
+    matchedAssetVendor: '',
+    matchedAssetProduct: '',
+    matchedAssetName: '',
+  } as unknown as Finding;
+  const html = renderAdvisory(
+    compileCustomizedTemplate(testCustomization),
+    baseAdvisory,
+    [finding],
+  );
+
+  assert.ok(html.includes('No vendor patch or fix guidance is supplied for this finding, so availability must not be assumed.'));
+  assert.ok(html.includes('Published:</strong> Unavailable'));
+  assert.ok(html.includes('Last modified:</strong> Unavailable'));
+  assert.ok(html.includes('Product:</strong> vendor - product'));
+  assert.ok(html.includes('Affected version(s):</strong> &gt;= 1.2.0 and &lt; 2.0.0'));
+  assert.ok(html.includes('Operator-provided note (unverified)'));
+  assert.ok(!html.includes('Apply a vendor-supported fix'));
+  assert.ok(!html.includes('Apply vendor patches immediately'));
+});
+
+test('renderAdvisory keeps per-product remediation guidance scoped to its finding', () => {
+  const first: Finding = {
+    ...findingsWithVendorLinks[0],
+    cve: {
+      ...findingsWithVendorLinks[0].cve,
+      remediation: {
+        ...findingsWithVendorLinks[0].cve.remediation,
+        immediateActions: ['Isolate the Northstar gateway pending vendor guidance.'],
+      },
+    },
+  };
+  const second: Finding = {
+    ...first,
+    id: 'finding-other-product',
+    matchedAssetVendor: 'Contoso',
+    matchedAssetProduct: 'Gateway',
+    matchedAssetName: 'Contoso Gateway',
+    cve: {
+      ...first.cve,
+      remediation: {
+        ...first.cve.remediation,
+        patchUrl: 'https://contoso.example/patch',
+        vendorAdvisoryRef: 'https://contoso.example/advisory',
+        immediateActions: ['Isolate the Contoso gateway pending vendor guidance.'],
+        stepByStep: [],
+        workarounds: [],
+        rollbackPlan: '',
+      },
+    },
+  };
+  const html = renderAdvisory(
+    compileCustomizedTemplate(testCustomization),
+    baseAdvisory,
+    [first, second],
+  );
+  const northstar = html.indexOf('Northstar Networks - Edge Gateway');
+  const northstarAction = html.indexOf('Isolate the Northstar gateway pending vendor guidance.');
+  const contoso = html.indexOf('Contoso - Gateway', northstarAction);
+  const contosoAction = html.indexOf('Isolate the Contoso gateway pending vendor guidance.');
+
+  assert.ok(northstar >= 0 && northstarAction > northstar);
+  assert.ok(contoso > northstarAction && contosoAction > contoso);
+  assert.ok(html.includes('https://vendor.com/patch/CVE-2026-12345'));
+  assert.ok(html.includes('https://contoso.example/patch'));
 });
 
 test('renderAdvisory hides View Vendor Guidance and Vendor Security Advisory when no vendor link is present in findings', () => {
@@ -276,5 +356,6 @@ test('renderAdvisory hides View Vendor Guidance and Vendor Security Advisory whe
   const html = renderAdvisory(template, baseAdvisory);
   assert.ok(!html.includes('View Vendor Guidance'), 'view vendor guidance should be hidden without a vendor link in findings');
   assert.ok(!html.includes('Vendor Security Advisory'), 'vendor security advisory should be hidden without a vendor link in findings');
+  assert.ok(html.includes('Apply the vendor patch immediately.'), 'manual operator remediation remains unchanged when no findings are supplied');
   assert.ok(!html.includes('#if'), 'no unrendered conditional tokens should remain');
 });

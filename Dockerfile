@@ -1,4 +1,4 @@
-FROM node:22-alpine3.22 AS build
+FROM node:26-alpine3.22 AS build
 RUN apk upgrade --no-cache
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -6,9 +6,10 @@ RUN npm ci
 COPY . .
 RUN npm run lint && npm run build
 
-FROM node:22-alpine3.22 AS runtime
+FROM node:26-alpine3.22 AS runtime
 ENV NODE_ENV=production PORT=8080
-RUN apk upgrade --no-cache
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+RUN apk upgrade --no-cache && apk add --no-cache chromium
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force \

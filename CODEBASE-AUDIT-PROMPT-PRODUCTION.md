@@ -4,7 +4,7 @@ You are a senior SRE, security engineer, and production-readiness reviewer. Audi
 
 ## System Overview
 
-- **React 19 + Vite SPA** (`src/`), **Node.js 22 + Express API/worker** (`server/`), **PostgreSQL 17**, Docker Compose + Caddy TLS proxy
+- **React 19 + Vite SPA** (`src/`), **Node.js 26 + Express API/worker** (`server/`), **PostgreSQL 17**, Docker Compose + Caddy TLS proxy
 - **Bootstrap**: `server/main.ts`; router: `server/app.ts`; health: `/live`, `/ready`, `/metrics`
 - **Migrations**: `server/migrate.ts`, `server/migrations/001..034` + `migrations/indexes/`
 - **Env**: `.env.example`; secrets encrypted at rest with `ENCRYPTION_KEY`

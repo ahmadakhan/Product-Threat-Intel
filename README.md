@@ -53,7 +53,7 @@ The migration job owns schema changes. The runtime database role has no DDL priv
 
 ## Develop and validate
 
-Node.js 22.12+ and PostgreSQL 17 are used for validation. Set `DATABASE_URL`, `APP_ORIGIN=http://127.0.0.1:8080`, and a generated `ENCRYPTION_KEY` in the process environment; environment files are not loaded implicitly. For the built application:
+Node.js 26+ and PostgreSQL 17 are used for validation. Set `DATABASE_URL`, `APP_ORIGIN=http://127.0.0.1:8080`, and a generated `ENCRYPTION_KEY` in the process environment; environment files are not loaded implicitly. For the built application:
 
 ```sh
 npm ci

@@ -171,7 +171,8 @@ test(
 
       assert.equal((await retry(legacyHtmlEmail)).status, 200);
       const refreshed = (await pool.query('SELECT payload FROM outbox WHERE id=$1', [legacyHtmlEmail])).rows[0].payload;
-      assert.match(refreshed.html, /<td width="4" bgcolor="#f59e0b"/);
+      assert.match(refreshed.html, new RegExp(`data-pdf-cve="${legacyCveId}"`));
+      assert.match(refreshed.html, /data-pdf-severity="HIGH"/);
       assert.match(refreshed.html, new RegExp(legacyCveId));
 
       // A job waiting on a scheduled retry can be pulled forward, but its

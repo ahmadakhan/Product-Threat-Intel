@@ -1,5 +1,6 @@
 import type { Advisory, Finding, ReviewEdits } from '../src/types/index.ts';
 import { parseCPE23 } from '../src/utils/cpeMatcher.ts';
+import { formatDate } from '../src/utils/dateTime.ts';
 import { stripGeneratedExecutiveSummaryMarkup } from '../src/utils/templateCompiler.ts';
 import { mlComposeAdvisoryEmail } from './ml/integration';
 
@@ -130,6 +131,22 @@ function affectedVersionLabel(finding: Finding): string | undefined {
   return versions.size ? [...versions].join('; ') : undefined;
 }
 
+function findingProductLabel(finding?: Finding): string {
+  if (!finding) return 'Unavailable';
+  const parsed = parseCPE23(finding.matchedCpe || '');
+  const cpeVendor = parsed.isValid && !['*', '-'].includes(parsed.vendor) ? parsed.vendor : '';
+  const cpeProduct = parsed.isValid && !['*', '-'].includes(parsed.product) ? parsed.product : '';
+  const vendor = finding.matchedAssetVendor || cpeVendor;
+  const product = finding.matchedAssetProduct || cpeProduct;
+  if (vendor && product) return `${vendor} - ${product}`;
+  return product || finding.matchedAssetName || 'Unavailable';
+}
+
+function formattedDate(value?: string | null): string {
+  const date = formatDate(value);
+  return date === '—' ? 'Unavailable' : date;
+}
+
 export function renderAdvisory(template: string, advisory: Advisory, findings?: Finding[]): string {
   const validation = validateAdvisoryFields(advisory);
   if (!validation.valid) {
@@ -143,28 +160,26 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
       (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!,
     );
   const edits: ReviewEdits = advisory.edits || {};
-  // ML-guided prose. The composer rewrites the executive summary and
-  // remediation guidance for the actual finding mix (severity weighting, KEV
-  // emphasis, exploitation context). It falls back to the stored text when the
-  // model is untrained, so this cannot blank a field — and an operator's
-  // explicit edit always wins.
+  // ML-guided summary uses the actual finding mix. Remediation stays tied to
+  // supplied vendor guidance and playbooks rather than model-selected claims.
   let composedSummary = advisory.executiveSummary;
-  let composedRemediation = advisory.remediationInstructions;
+  const composedRemediation =
+    'Confirm affected-system and version applicability against current vendor guidance. Follow only documented remediation or playbook steps; patch availability is not assumed.';
+  const operatorRemediationNote = advisory.remediationInstructions.trim()
+    ? `<div style="margin:10px 0 0;padding:9px 11px;border:1px solid #e2e8f0;background:#f8fafc;font-size:12px;line-height:19px;color:#334155;"><strong>Operator-provided note (unverified):</strong> ${escape(advisory.remediationInstructions)}<br/>This note is not evidence that a patch or fix is available. Confirm its instructions against current vendor guidance before acting.</div>`
+    : '';
   if (findings?.length) {
     try {
       const composed = mlComposeAdvisoryEmail(findings, advisory);
       if (!edits.customBodyOverride && composed.executiveSummary)
         composedSummary = composed.executiveSummary;
-      if (composed.remediationInstructions) composedRemediation = composed.remediationInstructions;
     } catch {
       // Rendering must never fail because the ML layer is unavailable.
     }
   }
   const productEntries = findings
     ? [...new Map(findings.map((finding) => {
-        const vendor = finding.matchedAssetVendor || '';
-        const product = finding.matchedAssetProduct || '';
-        const name = vendor && product ? `${vendor} - ${product}` : finding.matchedAssetName;
+        const name = findingProductLabel(finding);
         const versions = affectedVersionLabel(finding);
         const line = `${name}${versions ? ` | Affected versions: ${versions}` : ' | Version applicability: confirm with vendor'}`;
         return [line, line];
@@ -172,50 +187,52 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
     : advisory.affectedSystems;
   const remediationBlocks = (advisory.cveIds.length ? advisory.cveIds : ['Advisory']).map((cveId) => {
     const cveFindings = findings?.filter((finding) => finding.cveId === cveId) || [];
-    const remediation = cveFindings[0]?.cve.remediation;
-    const immediateActions = remediation?.immediateActions || [];
-    const stepByStep = remediation?.stepByStep || [];
-    const workarounds = remediation?.workarounds || [];
-    const actions = [...new Set([...immediateActions, ...stepByStep].filter((action) => action.trim()))];
-    const patchHref = safeHttpHref(remediation?.patchUrl || '');
-    const vendorHref = safeHttpHref(remediation?.vendorAdvisoryRef || '');
-    const productNames = [...new Set(cveFindings.map((finding) => {
-      const vendor = finding.matchedAssetVendor || '';
-      const product = finding.matchedAssetProduct || '';
-      return vendor && product ? `${vendor} - ${product}` : finding.matchedAssetName;
-    }))];
-    const targetLabel = productNames.length ? productNames.join(', ') : 'the affected products listed above';
-    const fallbackActions = [
-      `Confirm the affected versions of ${targetLabel} against the vendor guidance for ${cveId}.`,
-      'Apply a vendor-supported fix after testing it in a representative environment.',
-      'Rescan affected systems and record the remediation outcome.',
-    ];
-    const actionList = actions.length ? actions : fallbackActions;
-    const actionHtml = actionList
-      .map((action) => `<li style="margin:0 0 5px;padding:0;">${escape(action)}</li>`)
-      .join('');
-    const workaroundHtml = workarounds.length
-      ? `<div style="margin:10px 0 0;"><strong>Workarounds</strong><ul style="margin:5px 0 0;padding-left:20px;">${workarounds.map((item) => `<li style="margin:0 0 5px;">${escape(item)}</li>`).join('')}</ul></div>`
-      : '';
-    const rollbackHtml = remediation?.rollbackPlan?.trim()
-      ? `<p style="margin:10px 0 0;"><strong>Rollback:</strong> ${escape(remediation.rollbackPlan)}</p>`
-      : '';
-    const guidanceLinks = [
-      patchHref
-        ? `<a href="${escape(patchHref)}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">Vendor patch</a>`
-        : '',
-      vendorHref
-        ? `<a href="${escape(vendorHref)}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">Security advisory</a>`
-        : '',
-    ].filter(Boolean);
     const heading = cveId === 'Advisory'
       ? 'General remediation guidance'
       : `<a href="https://nvd.nist.gov/vuln/detail/${encodeURIComponent(cveId)}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">${escape(cveId)}</a>`;
+    const targets = cveFindings.length ? cveFindings : [undefined];
+    const targetGuidance = targets.map((finding) => {
+      const remediation = finding?.cve.remediation;
+      const actions = [...new Set([
+        ...(remediation?.immediateActions || []),
+        ...(remediation?.stepByStep || []),
+      ].filter((action) => action.trim()))];
+      const patchHref = safeHttpHref(remediation?.patchUrl || '');
+      const vendorHref = safeHttpHref(remediation?.vendorAdvisoryRef || '');
+      const targetLabel = finding ? findingProductLabel(finding) : 'the affected products listed above';
+      const actionList = actions.length
+        ? actions
+        : [
+            `Confirm the affected versions of ${targetLabel} against current vendor guidance for ${cveId}. ${patchHref || vendorHref ? 'Follow only remediation steps documented by the vendor after confirming applicability.' : 'No vendor patch or fix guidance is supplied for this finding, so availability must not be assumed.'}`,
+            'Use documented compensating controls only where appropriate, and monitor for further vendor guidance.',
+          ];
+      const actionHtml = actionList
+        .map((action) => `<li style="margin:0 0 5px;padding:0;">${escape(action)}</li>`)
+        .join('');
+      const workarounds = [...new Set(remediation?.workarounds || [])];
+      const workaroundHtml = workarounds.length
+        ? `<div style="margin:10px 0 0;"><strong>Workarounds</strong><ul style="margin:5px 0 0;padding-left:20px;">${workarounds.map((item) => `<li style="margin:0 0 5px;">${escape(item)}</li>`).join('')}</ul></div>`
+        : '';
+      const rollbackHtml = remediation?.rollbackPlan?.trim()
+        ? `<p style="margin:10px 0 0;"><strong>Rollback:</strong> ${escape(remediation.rollbackPlan)}</p>`
+        : '';
+      const guidanceLinks = [
+        patchHref
+          ? `<a href="${escape(patchHref)}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">Vendor patch</a>`
+          : '',
+        vendorHref
+          ? `<a href="${escape(vendorHref)}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">Security advisory</a>`
+          : '',
+      ].filter(Boolean);
+      const versionLabel = finding ? affectedVersionLabel(finding) : undefined;
+      const targetHeading = finding
+        ? `<div style="margin:8px 0 5px;font-size:12px;line-height:18px;font-weight:700;color:#334155;">${escape(targetLabel)}${versionLabel ? ` · ${escape(versionLabel)}` : ''}</div>`
+        : '';
+      return `${targetHeading}<ul style="margin:0;padding-left:20px;font-size:12px;line-height:19px;color:#334155;">${actionHtml}</ul>${workaroundHtml}${rollbackHtml}${guidanceLinks.length ? `<div style="margin:9px 0 0;font-size:12px;line-height:19px;">${guidanceLinks.join(' <span style="color:#94a3b8;padding:0 5px;">|</span> ')}</div>` : ''}`;
+    }).join('');
     return `<div style="margin:0 0 12px;padding:12px 14px;border:1px solid #e2e8f0;border-radius:4px;background:#ffffff;">
   <div style="margin:0 0 7px;font-size:13px;line-height:19px;font-weight:700;color:#0f172a;">${heading}</div>
-  <ul style="margin:0;padding-left:20px;font-size:12px;line-height:19px;color:#334155;">${actionHtml}</ul>
-  ${workaroundHtml}${rollbackHtml}
-  ${guidanceLinks.length ? `<div style="margin:9px 0 0;font-size:12px;line-height:19px;">${guidanceLinks.join(' <span style="color:#94a3b8;padding:0 5px;">|</span> ')}</div>` : ''}
+  ${targetGuidance}
 </div>`;
   }).join('');
   const values: Record<string, string> = {
@@ -239,7 +256,7 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
     vendor_products_html: productEntries
       .map((entry) => `<div style="margin:0 0 8px;padding:0;font-size:12px;line-height:19px;color:#334155;">${escape(entry)}</div>`)
       .join('\n'),
-    remediation_steps: `<p style="margin:0 0 10px;font-size:12px;line-height:19px;color:#334155;">${escape(composedRemediation)}</p>${remediationBlocks}`,
+    remediation_steps: `<p style="margin:0 0 10px;font-size:12px;line-height:19px;color:#334155;">${escape(composedRemediation)}</p>${remediationBlocks}${operatorRemediationNote}`,
     vendor_link: safeHttpHref(advisory.vendorLink || ''),
     remediation_link:
       safeHttpHref(
@@ -289,36 +306,45 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
           rawDescription.length > 600 ? `${rawDescription.slice(0, 597).trimEnd()}…` : rawDescription;
         const colour = SEVERITY_COLORS[severity] || SEVERITY_COLORS.UNKNOWN;
         const scoreLabel = typeof score === 'number' ? score.toFixed(1) : 'N/A';
+        const productMetadata = (cveFindings.length ? cveFindings : [undefined])
+          .map((finding) => {
+            const productName = findingProductLabel(finding);
+            const version = finding ? affectedVersionLabel(finding) || 'Unavailable; confirm with vendor' : 'Unavailable';
+            return `<div style="margin:5px 0 0;font-size:11px;line-height:17px;color:#475569;"><strong>Product:</strong> ${escape(productName)} &nbsp; <strong>Affected version(s):</strong> ${escape(version)}<br/><strong>Published:</strong> ${escape(formattedDate(finding?.cve.publishedDate))} &nbsp; <strong>Last modified:</strong> ${escape(formattedDate(finding?.cve.modifiedDate))}</div>`;
+          })
+          .join('');
         // NVD is the authoritative, always-available source for a CVE id; it is
         // the link the reader needs from the CVE ID itself.
         const nvdHref = `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(cve)}`;
-        const sources = [`<a href="${nvdHref}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">NVD</a>`];
+        const sources = [`<a data-pdf-source="NVD" href="${nvdHref}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">NVD</a>`];
         if (vendorHref)
           sources.push(
-            `<a href="${escape(vendorHref)}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">Vendor advisory</a>`,
+            `<a data-pdf-source="Vendor advisory" href="${escape(vendorHref)}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">Vendor advisory</a>`,
           );
         sources.push(
-          `<a href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">CISA KEV</a>`,
+          `<a data-pdf-source="CISA KEV" href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">CISA KEV</a>`,
         );
-        return `<table class="vulnstream-pdf-card" data-pdf-accent="${colour}" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 12px;border-collapse:collapse;background:#ffffff;">
+        return `<table class="vulnstream-pdf-card" data-pdf-cve="${escape(cve)}" data-pdf-severity="${escape(severity)}" data-pdf-score="${scoreLabel}" data-pdf-kev="${kev}" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 16px;border-collapse:separate;border-spacing:0;background:#ffffff;">
   <tbody><tr>
-    <td width="4" bgcolor="${colour}" style="width:4px;min-width:4px;padding:0;background:${colour};font-size:0;line-height:0;">&nbsp;</td>
-    <td style="padding:12px 14px;border:1px solid #e2e8f0;border-left:0;background:#ffffff;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
-    <tr>
+    <td style="padding:14px;border:1px solid #e2e8f0;border-radius:4px;background:#ffffff;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+    <tr class="vulnstream-pdf-header">
       <td style="padding:0;vertical-align:top;">
         <div style="font-size:14px;font-weight:bold;color:#0f172a;line-height:20px;">
           <a href="${nvdHref}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">${escape(cve)}</a>
         </div>
       </td>
       <td width="1%" align="right" style="padding:0 0 0 12px;white-space:nowrap;vertical-align:top;">
-        <span style="display:inline-block;background:${colour};color:#ffffff;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:bold;letter-spacing:0.3px;">${escape(severity)} \u00b7 CVSS ${scoreLabel}</span>
-        ${kev ? '<span style="display:inline-block;margin-left:6px;background:#7f1d1d;color:#ffffff;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:bold;letter-spacing:0.3px;">KEV</span>' : ''}
+        <span style="display:inline-block;background:${colour};color:#ffffff;padding:3px 9px;border-radius:4px;font-size:11px;font-weight:bold;letter-spacing:0.3px;">${escape(severity)} \u00b7 CVSS ${scoreLabel}</span>
+        ${kev ? '<span style="display:inline-block;margin-left:6px;background:#7f1d1d;color:#ffffff;padding:3px 9px;border-radius:4px;font-size:11px;font-weight:bold;letter-spacing:0.3px;">KEV</span>' : ''}
       </td>
     </tr>
     <tr>
       <td colspan="2" style="padding:8px 0 0;font-size:12px;line-height:19px;color:#334155;text-align:left;">${escape(description)}</td>
     </tr>
     <tr>
+      <td colspan="2" style="padding:6px 0 0;text-align:left;">${productMetadata}</td>
+    </tr>
+    <tr class="vulnstream-pdf-sources">
       <td colspan="2" style="padding:8px 0 0;font-size:11px;line-height:16px;color:#64748b;text-align:left;">Sources: ${sources.join(' <span style="color:#cbd5e1;">&middot;</span> ')}</td>
     </tr>
   </table></td>
@@ -329,14 +355,14 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
     // Prose blocks instead of bullets: a numbered step list reads as an ordered
     // procedure and survives plain-text clients without a bullet glyph.
     mitigation_steps: `<div style="font-size:12px;line-height:20px;color:#334155;">
-  <div style="margin:0 0 6px;"><strong>1.</strong>&nbsp; Review and limit administrative access to trusted networks.</div>
-  <div style="margin:0 0 6px;"><strong>2.</strong>&nbsp; Monitor affected services for anomalous activity following the advisory window.</div>
-  <div style="margin:0;"><strong>3.</strong>&nbsp; Apply compensating controls if vendor patches are not yet deployable.</div>
+  <div style="margin:0 0 6px;"><strong>1.</strong>&nbsp; Confirm affected products and versions with current vendor guidance.</div>
+  <div style="margin:0 0 6px;"><strong>2.</strong>&nbsp; Use vendor-documented workarounds or compensating controls only when appropriate.</div>
+  <div style="margin:0;"><strong>3.</strong>&nbsp; Monitor affected services for relevant vendor updates and validate any remediation through change management.</div>
 </div>`,
     recommended_actions: `<div style="font-size:12px;line-height:20px;color:#334155;">
   <div style="margin:0 0 6px;"><strong>1.</strong>&nbsp; Inventory all affected systems identified in this advisory.</div>
-  <div style="margin:0 0 6px;"><strong>2.</strong>&nbsp; Apply vendor patches immediately following your change management process.</div>
-  <div style="margin:0;"><strong>3.</strong>&nbsp; Validate backup, restore, and operational functionality after remediation.</div>
+  <div style="margin:0 0 6px;"><strong>2.</strong>&nbsp; Confirm applicability and available remediation with the current vendor guidance.</div>
+  <div style="margin:0;"><strong>3.</strong>&nbsp; Validate backup, restore, and operational functionality after any documented remediation.</div>
 </div>`,
     audience_notice: edits.audienceNotice
       ? escape(edits.audienceNotice).replace(/\n/g, '<br/>')
