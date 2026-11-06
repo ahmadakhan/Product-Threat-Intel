@@ -1070,7 +1070,7 @@ export const WatchListView: React.FC = () => {
                   <label className="min-w-0 text-xs font-medium text-zinc-300 dark:text-zinc-300 light:text-zinc-700">
                     CPE part
                     <select
-                      className="mt-1.5 block w-full"
+                      className="mt-1.5 block w-full px-3"
                       value={simPart}
                       onChange={(e) => setSimPart(e.target.value as 'a' | 'o' | 'h')}
                     >
@@ -1082,7 +1082,7 @@ export const WatchListView: React.FC = () => {
                   <label className="min-w-0 text-xs font-medium text-zinc-300 dark:text-zinc-300 light:text-zinc-700">
                     Vendor
                     <input
-                      className="mt-1.5 block w-full"
+                      className="mt-1.5 block w-full px-3"
                       value={simVendor}
                       onChange={(e) => setSimVendor(e.target.value)}
                       required
@@ -1091,7 +1091,7 @@ export const WatchListView: React.FC = () => {
                   <label className="min-w-0 text-xs font-medium text-zinc-300 dark:text-zinc-300 light:text-zinc-700 sm:col-span-2 xl:col-span-1">
                     Product
                     <input
-                      className="mt-1.5 block w-full"
+                      className="mt-1.5 block w-full px-3"
                       value={simProduct}
                       onChange={(e) => setSimProduct(e.target.value)}
                       required
@@ -1108,7 +1108,7 @@ export const WatchListView: React.FC = () => {
                   <label className="min-w-0 text-xs font-medium text-zinc-300 dark:text-zinc-300 light:text-zinc-700">
                     Installed version
                     <input
-                      className="mt-1.5 block w-full"
+                      className="mt-1.5 block w-full px-3"
                       value={simVersion}
                       onChange={(e) => setSimVersion(e.target.value)}
                       required
@@ -1117,7 +1117,7 @@ export const WatchListView: React.FC = () => {
                   <label className="min-w-0 text-xs font-medium text-zinc-300 dark:text-zinc-300 light:text-zinc-700">
                     Architecture
                     <input
-                      className="mt-1.5 block w-full"
+                      className="mt-1.5 block w-full px-3"
                       value={simHw}
                       onChange={(e) => setSimHw(e.target.value)}
                       required
@@ -1126,7 +1126,7 @@ export const WatchListView: React.FC = () => {
                   <label className="min-w-0 text-xs font-medium text-zinc-300 dark:text-zinc-300 light:text-zinc-700 sm:col-span-2">
                     Package URL <span className="font-normal text-zinc-500">(optional)</span>
                     <input
-                      className="mt-1.5 block w-full"
+                      className="mt-1.5 block w-full px-3"
                       value={simPurl}
                       onChange={(e) => setSimPurl(e.target.value)}
                     />
