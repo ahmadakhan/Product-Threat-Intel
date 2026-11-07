@@ -119,17 +119,22 @@ async function alreadyNotified(
        FROM outbox o
        CROSS JOIN LATERAL jsonb_array_elements(CASE
          WHEN jsonb_typeof(o.payload->'newsEvidence'->'articles')='array'
-         THEN o.payload->'newsEvidence'->'articles' ELSE '[]'::jsonb END) entry
+           THEN o.payload->'newsEvidence'->'articles'
+         WHEN jsonb_typeof(o.payload->'newsEvidence'->'article')='object'
+           THEN jsonb_build_array(o.payload->'newsEvidence'->'article')
+         ELSE '[]'::jsonb END) entry
      WHERE o.channel='email' AND o.status=ANY($1::text[])
-       AND o.target_id=ANY($2::text[])
-       AND (entry->>'id'=ANY($3::text[]) OR entry->>'identity'=ANY($4::text[]))`,
-    [['QUEUED', 'SENDING', 'ACCEPTED'], [...recipientIds], articleIds, identities],
+       AND o.target_id=ANY($2::text[]) AND o.payload ? 'newsEvidence'`,
+    [['QUEUED', 'SENDING', 'ACCEPTED'], [...recipientIds]],
   );
+  const currentIds = new Set(articleIds);
+  const currentIdentities = new Set(identities);
   for (const row of queued.rows) {
+    const identity = row.identity || newsArticleIdentity({ id: row.article_id || '', url: row.url || '' });
+    if (!currentIds.has(row.article_id) && !currentIdentities.has(identity)) continue;
     const set = notified.get(row.target_id);
     if (row.article_id) set?.add(newsNotifiedKey(row.target_id, row.article_id));
-    if (row.identity) set?.add(newsNotifiedKey(row.target_id, row.identity));
-    else if (row.article_id) set?.add(newsNotifiedKey(row.target_id, newsArticleIdentity({id:row.article_id,url:row.url || ''})));
+    set?.add(newsNotifiedKey(row.target_id, identity));
   }
   return notified;
 }

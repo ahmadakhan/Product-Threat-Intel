@@ -264,3 +264,16 @@ test('syndicated URLs with different article ids and query strings are one story
   assert.equal(selectUnnotifiedArticles(items, 'r1', ledger).length, 0);
   assert.equal(selectUnnotifiedArticles(items, 'r2', ledger).length, 1);
 });
+
+test('a previously queued legacy article URL suppresses a new syndication id', () => {
+  const oldArticle = article('old-id', 'https://example.com/story-1?utm_source=old', 'Earlier syndication');
+  const newer = article('new-id', 'https://example.com/story-1?utm_source=new', 'Same story');
+  const items = consolidateNewsMatches(
+    [match('m1', 'asset-1', ['new-id'])],
+    new Map([[newer.id, newer]]),
+    () => 'server-1',
+  );
+  const legacyReceipt = new Set([newsNotifiedKey('r1', newsArticleIdentity(oldArticle))]);
+  assert.equal(selectUnnotifiedArticles(items, 'r1', legacyReceipt).length, 0);
+  assert.equal(selectUnnotifiedArticles(items, 'r2', legacyReceipt).length, 1);
+});

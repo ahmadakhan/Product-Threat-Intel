@@ -1193,12 +1193,35 @@ export async function queueConsolidatedFindingNotifications(
   const recipients = (options.recipients ?? (await list<EmailRecipient>(db, 'recipients'))).filter(
     (recipient) => recipient.enabled,
   );
-  if (!recipients.length) return 0;
+if (!recipients.length) return 0;
+  // The content-revision dedupe key is not enough: a batch [A] and a later
+  // batch [A, B] have different keys. Exclude A before building the later mail.
+  // Scope this to each recipient so one recipient's pending mail cannot hide
+  // another recipient's finding. Include older advisory/digest jobs too.
+  const claimed = await db.query<{ target_id: string; finding_id: string }>(
+    `SELECT DISTINCT o.target_id, entries.finding_id
+       FROM outbox o
+       CROSS JOIN LATERAL jsonb_array_elements_text(
+         CASE WHEN jsonb_typeof(o.payload->'includedFindingIds')='array'
+           THEN o.payload->'includedFindingIds' ELSE '[]'::jsonb END
+       ) AS entries(finding_id)
+      WHERE o.channel='email' AND o.status IN ('QUEUED','SENDING','ACCEPTED')
+        AND o.target_id=ANY($1::text[]) AND entries.finding_id=ANY($2::text[])`,
+    [recipients.map((r) => r.id), unique.map((f) => f.id)],
+  );
+  const claimedByRecipient = new Map<string, Set<string>>();
+  for (const row of claimed.rows) {
+    const ids = claimedByRecipient.get(row.target_id) ?? new Set<string>();
+    ids.add(row.finding_id);
+    claimedByRecipient.set(row.target_id, ids);
+  }
   let queued = 0;
   const generatedAt = new Date();
   const documentCache = new Map<string, { payload: Job['payload']; priority: number }>();
   for (const recipient of recipients) {
-    const permitted = unique.filter((finding) => recipientAllows(recipient, finding));
+    const claimedIds = claimedByRecipient.get(recipient.id) ?? new Set<string>();
+    const permitted = unique.filter((finding) =>
+      recipientAllows(recipient, finding) && !claimedIds.has(finding.id));
     if (!permitted.length) continue;
     const findingIds = permitted.map((finding) => finding.id);
     const bucket = consolidatedFindingBatchId(findingIds);
