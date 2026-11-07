@@ -1073,25 +1073,28 @@ export interface AppSettings {
    */
   autoDispatchUnverifiableMatches: boolean;
   /**
-   * When true, news/advisory evidence (IntelligenceMatch records) that matches
-   * the monitored vendor + product inventory is automatically sent to the
-   * Security team recipients instead of being held as review-only evidence.
-   * Opt-in so existing deployments keep their default review-only behavior.
+   * Retained for settings compatibility.
+   *
+   * News evidence (IntelligenceMatch records) matching the monitored inventory
+   * is now always consolidated and sent to the Security team — one email per
+   * run, with articles already delivered to a recipient removed. There is no
+   * review-only holding of news.
    */
   autoDispatchNewsToSecurityTeam: boolean;
   /**
-   * When true, unverifiable matches (version range cannot be confirmed) found
-   * during correlation are sent to the Security team recipients for review
-   * instead of being held silently. The notification header reads
-   * "for Review - Unverifiable matches".
+   * Retained for settings compatibility.
+   *
+   * Findings whose version range or applicability cannot be confirmed were
+   * previously sent as a separate "for Review - Unverifiable matches" bulletin.
+   * All findings are now dispatched in one consolidated email and each limited -
+   * confidence finding states its confidence and the reason on the finding
+   * itself. This flag no longer gates delivery.
    */
   reviewUnverifiableMatches: boolean;
   /**
    * When true, advisory emails are first delivered to the Security team group.
    * The same email is queued for the Everyone group only after a Security-team
-   * delivery is confirmed ACCEPTED by the transport, placed in REVIEW status so
-   * an operator can preview, apply live edits (audience notice, reviewer
-   * comments, body overrides), and approve the broadcast. Opt-in so existing
+   * delivery is confirmed ACCEPTED by the transport. Opt-in so existing
    * deployments keep their default simultaneous distribution.
    */
   deferEveryoneUntilSecurityDelivered: boolean;

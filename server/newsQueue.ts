@@ -145,9 +145,11 @@ export async function recordNewsDeliveries(
   recipientId: string,
   advisoryId: string,
   articles: ReadonlyArray<Pick<IntelligenceArticle, 'id' | 'url'>>,
+  /** Shared across the batch so one delivery cannot look like several. */
+  deliveredAt: string = new Date().toISOString(),
 ): Promise<void> {
   if (!articles.length) return;
-  const now = new Date().toISOString();
+  const now = deliveredAt;
   for (const article of articles) {
     const id = newsLedgerRecordId(recipientId, article);
     const existing = await get<NewsLedgerEntry>(db, NEWS_LEDGER_KIND, id);
@@ -197,6 +199,9 @@ export async function queueConsolidatedNews(
   if (!items.length) return result;
   const articleRecord = new Map(items.map((item) => [item.article.id, item.article] as const));
   const notified = await alreadyNotified(db, selected.map((recipient) => recipient.id), articleRecord);
+  // One instant for every recipient of this run, so each ledger row records the
+  // delivery it actually belongs to.
+  const deliveredAt = new Date().toISOString();
   for (const recipient of selected) {
     const own = selectUnnotifiedArticles(items, recipient.id, notified.get(recipient.id) || new Set());
     if (!own.length) {
@@ -234,7 +239,13 @@ export async function queueConsolidatedNews(
     result.emailsQueued++;
     result.articlesIncluded += batch.length;
     result.articlesSuppressed += overflow.length;
-    await recordNewsDeliveries(db, recipient.id, advisoryId, batch.map((item) => item.article));
+    await recordNewsDeliveries(
+      db,
+      recipient.id,
+      advisoryId,
+      batch.map((item) => item.article),
+      deliveredAt,
+    );
     await writeEvent(db, {
       category: 'MATCHING',
       level: 'INFO',

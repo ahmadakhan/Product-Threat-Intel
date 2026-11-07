@@ -40,7 +40,6 @@ import {
 } from '../src/utils/aliasLifecycle';
 import { mergeCveRecords, normalizeCveId, stableJson } from '../src/utils/deduplicator';
 import { countNewFindings, findingIdentity, reconcileFindings } from '../src/engine/reconcileFindings';
-import { eligibleForReviewNotification } from '../src/utils/findingDelivery.ts';
 import {
   applyVexSuppression,
   determineExploitRisk,
@@ -76,13 +75,14 @@ import {
   deliveryRevisionEvidence,
   findingRevision,
   queueAdvisory,
-  queueNewsEvidenceNotifications,
-  queueUnverifiableMatchNotification,
+  queueConsolidatedFindingNotifications,
   queueZeroDayDigestNotification,
+  recipientAllows,
   revision,
   type Job,
 } from './delivery';
 import { bufferFindingsForDigest } from './digest';
+import { loadNewsRecipients, queueConsolidatedNews } from './newsQueue';
 import { renderAdvisory } from './advisoryRender';
 import { HttpError } from './validation';
 import { advisoryEmail } from './advisoryEmail';
@@ -1821,87 +1821,125 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         advisoriesQueued = 0,
         digestBuffered = 0,
         newsNotificationsQueued = 0,
-        unverifiableNotificationsQueued = 0;
-      if (settings.autoDispatchNewsToSecurityTeam && rateLimitedMatches.length) {
-        const articleMap = new Map(
-          articles.map((article) => [article.id, article] as [string, IntelligenceArticle]),
-        );
-        const assetMap = new Map(
-          snapshot.watchlist.map((item) => [item.id, item] as [string, WatchListItem]),
-        );
-        const securityRecipients = (await list<EmailRecipient>(db, 'recipients')).filter(
-          (r) => r.enabled && (r.deliveryGroup === 'SECURITY_TEAM' || r.deliveryGroup === undefined),
-        );
+        newsArticlesQueued = 0,
+        manualReviewFindingsQueued = 0;
+      // Security news is consolidated into ONE email per recipient per run, and an
+      // article already delivered to a recipient is never delivered again. The
+      // per-match queue could not guarantee that: the matcher re-keys a match on
+      // `hash(cveId || articleId)`, so the same story produced new rows (and new
+      // emails) whenever it was re-correlated or syndicated through another feed.
+      if (rateLimitedMatches.length) {
+        const securityRecipients = await loadNewsRecipients(db);
         if (securityRecipients.length) {
-          for (const match of rateLimitedMatches) {
-            const evidenceArticles = match.articleIds
-              .map((articleId) => articleMap.get(articleId))
-              .filter((article): article is IntelligenceArticle => Boolean(article))
-              .sort((a, b) => a.id.localeCompare(b.id));
-            if (!evidenceArticles.length) continue;
-            const assetItem = assetMap.get(match.assetId);
-            newsNotificationsQueued += await queueNewsEvidenceNotifications(
-              db,
-              match,
-              evidenceArticles,
-              {
-                name: match.assetName,
-                vendor: assetItem?.vendor || undefined,
-                product: assetItem?.product || undefined,
-              },
-              securityRecipients,
-            );
-          }
+          const articleMap = new Map(
+            articles.map((article) => [article.id, article] as [string, IntelligenceArticle]),
+          );
+          const news = await queueConsolidatedNews(db, rateLimitedMatches, articleMap, securityRecipients, {
+            enqueue: async (input) =>
+              enqueue(
+                input.db,
+                'email',
+                input.recipient.id,
+                input.advisoryId,
+                {
+                  subject: input.subject,
+                  text: input.text,
+                  html: input.html,
+                  cveIds: input.cveIds,
+                  newsEvidence: {
+                    matchId: input.articles.flatMap((item) => item.matchIds).sort()[0] || input.advisoryId,
+                    article: {
+                      id: input.articles[0].article.id,
+                      title: input.articles[0].article.title,
+                      url: input.articles[0].article.url,
+                      sourceFeeds: [...input.articles[0].article.sourceFeeds],
+                      publishedDate: input.articles[0].article.publishedDate,
+                    },
+                    articles: input.articles.map((item) => ({
+                      id: item.article.id,
+                      title: item.article.title,
+                      url: item.article.url,
+                      sourceFeeds: [...item.article.sourceFeeds],
+                      publishedDate: item.article.publishedDate,
+                    })),
+                    assets: [...new Set(input.articles.flatMap((item) => item.assets))].sort(),
+                    asset: { name: input.articles.flatMap((item) => item.assets).sort()[0] || 'unknown asset' },
+                    cveIds: input.cveIds,
+                    evidence: input.articles.flatMap((item) => item.evidence).join(' | '),
+                    zeroDay: input.articles.some((item) => item.zeroDay),
+                    credibilityScore: input.articles.reduce<number | undefined>(
+                      (best, item) =>
+                        typeof item.credibilityScore === 'number'
+                          ? Math.max(best ?? 0, item.credibilityScore)
+                          : best,
+                      undefined,
+                    ),
+                  },
+                  contentRevision: input.contentRevision,
+                  recipientEmail: input.recipient.email,
+                },
+                `${input.identity}:email:${input.recipient.id}`,
+                'QUEUED',
+              ),
+          });
+          newsNotificationsQueued += news.emailsQueued;
+          newsArticlesQueued += news.articlesIncluded;
           await writeEvent(db, {
             category: 'MATCHING',
             code: 'matching.news_dispatched',
-            message: 'Matching news evidence auto-dispatched to the security team',
+            message: 'Consolidated security-news email dispatched to the security team',
             runId: execution!.id,
-            context: { matches: rateLimitedMatches.length, recipientsNotified: newsNotificationsQueued },
+            context: {
+              matches: rateLimitedMatches.length,
+              recipientsNotified: news.emailsQueued,
+              articlesIncluded: news.articlesIncluded,
+              articlesAlreadySent: news.articlesSuppressed,
+            },
           });
         }
       }
-      // The filter runs against vexEnforced (the reconciled set) rather than
-      // survivingNewFindings so that findings already notified on a prior run are
-      // excluded: deliverNext stamps reviewNotifiedAt on transport acceptance, and
-      // reconcileFindings preserves it via the ...old spread. This guarantees the
-      // unverifiable-match email is sent at most once, even if the finding revision
-      // changes on a later run.
-      if (settings.reviewUnverifiableMatches) {
-        const securityRecipients = (await list<EmailRecipient>(db, 'recipients')).filter(
-          (r) => r.enabled && (r.deliveryGroup === 'SECURITY_TEAM' || r.deliveryGroup === undefined),
-        );
-        if (securityRecipients.length) {
-          const unverifiableFindings = vexEnforced.filter(
-            (f) =>
-              eligibleForReviewNotification(f, settings) && !f.reviewNotifiedAt,
-          );
-          if (unverifiableFindings.length) {
-            unverifiableNotificationsQueued += await queueUnverifiableMatchNotification(
-              db,
-              unverifiableFindings,
-              securityRecipients,
-            );
-          }
-          if (unverifiableFindings.length) {
-            await writeEvent(db, {
-              category: 'MATCHING',
-              code: 'matching.unverifiable_dispatched',
-              message: 'Unverifiable matches notified to the Security team for review',
-              runId: execution!.id,
-              context: {
-                unverifiableFindings: unverifiableFindings.length,
-                recipientsNotified: unverifiableNotificationsQueued,
-              },
-            });
-          }
-        }
+      // Findings the confidence or applicability policy could not fully confirm are
+      // dispatched like any other finding: the email states the limitation and its
+      // reason on the finding itself. There is no operator review queue, and the
+      // filter runs against the reconciled set so a finding already accepted in an
+      // email is never announced again (reconcileFindings preserves reviewNotifiedAt).
+      //
+      // Held findings go through the same consolidated document builder as the
+      // ordinary dispatch (`pending` below), never a separate review bulletin.
+      const heldForReview = vexEnforced.filter(
+        (finding) =>
+          finding.notificationStatus === 'REVIEW_REQUIRED' &&
+          !finding.reviewNotifiedAt &&
+          !finding.advisoryId &&
+          !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status),
+      );
+      if (heldForReview.length) {
+        manualReviewFindingsQueued = await queueConsolidatedFindingNotifications(db, heldForReview, {
+          // One consolidated email per recipient who is subscribed to at least one
+          // of the held findings. The queue filters each recipient's view to the
+          // findings its subscription tier permits, so a CISA_KEV_ONLY subscriber
+          // never receives an unrelated low finding.
+          recipients: (await list<EmailRecipient>(db, 'recipients')).filter(
+            (recipient) => recipient.enabled && heldForReview.some((finding) => recipientAllows(recipient, finding)),
+          ),
+        });
+        await writeEvent(db, {
+          category: 'MATCHING',
+          code: 'matching.low_confidence_dispatched',
+          message: 'Findings with limited confidence notified with their limitation stated',
+          runId: execution!.id,
+          context: {
+            findings: heldForReview.length,
+            recipientsNotified: manualReviewFindingsQueued,
+          },
+        });
       }
       // Previously queued findings also become deliverable after enabling dispatch.
       const pending = vexEnforced.filter(
         (f) =>
           (f.notificationStatus === 'QUEUED_FOR_DISPATCH' || f.notificationStatus === 'AUTO_DISPATCHED') &&
           !f.advisoryId &&
+          !f.reviewNotifiedAt &&
           !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(f.status),
       );
       // ML-guided finding order: use the trained importance ranker when
@@ -1966,9 +2004,13 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         } else {
           // A KEV-only or high-severity subscriber must never receive unrelated
           // findings merely because one other item in a bundle passes its filter.
+          // Pre-group by the exact set of subscription tiers that admit the
+          // finding, so every recipient of a bundle is subscribed to all of it.
           const groups = new Map<string, Finding[]>();
           for (const finding of pending) {
-            const key = `${finding.cve.cvss.severity}:${finding.cve.cisaKev?.isKev ?? false}`;
+            const key = ['ALL_SEVERITIES', 'CRITICAL_HIGH_ONLY', 'CISA_KEV_ONLY']
+              .filter((tier) => recipientAllows({ subscriptionTier: tier } as EmailRecipient, finding))
+              .join(',');
             const group = groups.get(key) || [];
             group.push(finding);
             groups.set(key, group);
@@ -2008,7 +2050,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       const zeroDayLog = zeroDayDigestNotificationsQueued
         ? `; ${zeroDayDigestNotificationsQueued} zero-day digest notifications queued`
         : '';
-      let deliveryLog = `${notificationsQueued} jobs queued${digestBuffered ? `; ${digestBuffered} findings buffered for the digest window` : ''}${newsNotificationsQueued ? `; ${newsNotificationsQueued} news notifications queued` : ''}${zeroDayLog}`;
+      let deliveryLog = `${notificationsQueued} jobs queued${digestBuffered ? `; ${digestBuffered} findings buffered for the digest window` : ''}${newsNotificationsQueued ? `; ${newsNotificationsQueued} consolidated news emails queued` : ''}${manualReviewFindingsQueued ? `; ${manualReviewFindingsQueued} limited-confidence emails queued` : ''}${zeroDayLog}`;
       if (pending.length && !settings.autoDispatchEnabled) {
         deliveryLog += `; ${pending.length} findings pending but autoDispatchEnabled is false`;
       }
@@ -2059,7 +2101,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             name: 'Delivery queue',
             status: 'SUCCESS',
             durationMs: Date.now() - queueStarted,
-            details: `${notificationsQueued} jobs queued${digestBuffered ? `; ${digestBuffered} findings buffered for the digest window` : ''}${pending.length && !settings.autoDispatchEnabled ? `; ${pending.length} findings pending but autoDispatchEnabled is false` : ''}${newsNotificationsQueued ? `; ${newsNotificationsQueued} news notifications queued` : ''}${unverifiableNotificationsQueued ? `; ${unverifiableNotificationsQueued} unverifiable-match notifications queued` : ''}${zeroDayLog}; transport acceptance is tracked separately`,
+            details: `${notificationsQueued} jobs queued${digestBuffered ? `; ${digestBuffered} findings buffered for the digest window` : ''}${pending.length && !settings.autoDispatchEnabled ? `; ${pending.length} findings pending but autoDispatchEnabled is false` : ''}${newsNotificationsQueued ? `; ${newsNotificationsQueued} consolidated news emails queued (${newsArticlesQueued} articles)` : ''}${manualReviewFindingsQueued ? `; ${manualReviewFindingsQueued} limited-confidence emails queued` : ''}${zeroDayLog}; transport acceptance is tracked separately`,
           },
         ],
       };
@@ -2071,7 +2113,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         advisoriesQueued,
         digestBuffered,
         newsNotificationsQueued,
-        unverifiableNotificationsQueued,
+        unverifiableNotificationsQueued: manualReviewFindingsQueued,
         zeroDayDigestNotificationsQueued,
       };
       await saveActiveExecution(db, execution);

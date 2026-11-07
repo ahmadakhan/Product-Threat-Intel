@@ -338,19 +338,16 @@ test(
               "SELECT id,status FROM outbox WHERE advisory_id=(SELECT 'NATIVE:'||id::text FROM unstructured_advisories WHERE url='https://example.org/operations/notify-medium')",
             )
           ).rows[0];
-          assert.equal(review.status, 'REVIEW');
+          // A MEDIUM-confidence native correlation is delivered like any other:
+          // there is no review queue, and the subject states the confidence.
+          assert.equal(review.status, 'QUEUED');
           assert.equal(
             await deliverNext(db, config, request, async () => {
               sends++;
               return 'mock';
             }),
-            false,
+            true,
           );
-          await db.query("UPDATE outbox SET status='QUEUED',review_approved=true WHERE id=$1", [review.id]);
-          await deliverNext(db, config, request, async () => {
-            sends++;
-            return 'mock';
-          });
           assert.equal(sends, 2);
           await ingestor.processIncomingAdvisory(
             article('notify-stale', { purls: ['pkg:generic/k8s@1.28.0'] }),

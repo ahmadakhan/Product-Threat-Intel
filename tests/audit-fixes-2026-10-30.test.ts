@@ -110,6 +110,69 @@ test('reconciliation keeps a terminal DELIVERY_FAILED finding from being auto-re
   );
 });
 
+test('reconciliation never turns an already-announced finding back into a resend', () => {
+  // The matcher rebuilds its candidate set on every run, so a refreshed CVE
+  // record re-derives the finding and the candidate always starts as
+  // QUEUED_FOR_DISPATCH. `reviewNotifiedAt` is the durable record that the
+  // finding was delivered in a consolidated email; without this guard the next
+  // run queued the same finding again (a duplicate email for content the
+  // recipient already had).
+  const cve = {
+    cveId: 'CVE-2026-70002',
+    title: 'Fixture',
+    description: '',
+    publishedDate: new Date().toISOString(),
+    modifiedDate: new Date().toISOString(),
+    cvss: { version: '3.1', score: 8, severity: 'HIGH', vector: '' },
+    cwe: [],
+    cpeMatches: [],
+    sourceFeeds: [],
+    epss: { score: 0, percentile: 0 },
+    cisaKev: { isKev: false },
+    exploitStatus: 'None',
+    remediation: {},
+  } as unknown as NormalizedCVE;
+  const announced = {
+    id: 'finding-announced',
+    cveId: cve.cveId,
+    cve,
+    matchedAssetId: 'asset',
+    matchedAssetName: 'edge (acme router)',
+    matchedAssetVendor: 'acme',
+    matchedAssetProduct: 'router',
+    matchedCpe: 'cpe:2.3:a:acme:router:1.0:*:*:*:*:*:*:*',
+    matchingEvidence: 'Structured package/version correlation',
+    confidence: 70,
+    notificationStatus: 'AUTO_DISPATCHED',
+    status: 'MONITORED',
+    autoDispatchedAt: '2026-01-01T00:00:00.000Z',
+    reviewNotifiedAt: '2026-01-02T00:00:00.000Z',
+    timeline: [],
+  } as unknown as Finding;
+  // The fresh candidate: same identity, stripped advisory, dispatchable status.
+  const candidate = {
+    ...announced,
+    id: 'finding-regenerated',
+    advisoryId: null,
+    autoDispatchedAt: null,
+    reviewNotifiedAt: null,
+    notificationStatus: 'QUEUED_FOR_DISPATCH',
+  } as Finding;
+  for (const existing of [
+    announced,
+    { ...announced, advisoryId: 'ADV-1' } as Finding,
+    { ...announced, notificationStatus: 'QUEUED_FOR_DISPATCH', advisoryId: null } as Finding,
+  ]) {
+    const [reconciled] = reconcileFindings([existing], [candidate]);
+    assert.notEqual(
+      reconciled.notificationStatus,
+      'QUEUED_FOR_DISPATCH',
+      'an announced finding must not be re-selected for dispatch',
+    );
+    assert.equal(reconciled.reviewNotifiedAt, '2026-01-02T00:00:00.000Z', 'the announcement stamp is preserved');
+  }
+});
+
 const digestParts = (executiveSummary: string): DailyDigestParts => ({
   advisory_id: 'ADV-1',
   advisory_title: 'Daily',
@@ -302,8 +365,9 @@ test(
           name: 'high-only',
           email: 'high-only@example.invalid',
           enabled: true,
-          // EVERYONE places the job in the operator review queue, which is the
-          // only state a reviewer may edit or approve.
+          // EVERYONE exercises the deferred-broadcast path. The job is queued for
+          // delivery (there is no review queue); the editor and the approve route
+          // work on a queued job, which is what this test pins.
           deliveryGroup: 'EVERYONE',
           subscriptionTier: 'CRITICAL_HIGH_ONLY',
         });
@@ -542,14 +606,14 @@ test(
           ['everyone'],
         );
         assert.equal(everyoneJob.rowCount, 1, 'EVERYONE job was queued after security delivery');
-        assert.equal(everyoneJob.rows[0].status, 'REVIEW', 'EVERYONE job enters REVIEW status');
+        assert.equal(everyoneJob.rows[0].status, 'QUEUED', 'EVERYONE job is queued for delivery, not review');
         assert.equal(everyoneJob.rows[0].payload.recipientEmail, 'everyone@example.invalid');
         assert.ok(everyoneJob.rows[0].payload.html.includes('Advisory body'), 'same email body as the security delivery');
 
         const secJob = await pool.query('SELECT status FROM outbox WHERE target_id=$1', ['sec']);
         assert.equal(secJob.rows[0].status, 'ACCEPTED');
       });
-      await t.test('deferred EVERYONE job is editable and approvable before broadcast', async () => {
+      await t.test('a deferred EVERYONE job is editable before its broadcast is delivered', async () => {
         await reset();
         await put(pool, 'settings', 'main', {
           ...DEFAULT_SETTINGS,
@@ -583,11 +647,15 @@ test(
         });
         assert.equal(sent, 1);
 
-        // The EVERYONE job should now be in REVIEW for operator editing
-        const reviewRow = await pool.query('SELECT id FROM outbox WHERE target_id=$1 AND status=$2', ['everyone', 'REVIEW']);
+        // The deferred EVERYONE job is queued for delivery; an operator may still
+        // apply live edits to it before the worker picks it up. A queued job is due
+        // immediately, so this test pins it to the future to model "edited before
+        // the broadcast worker ran" rather than depending on tick ordering.
+        const reviewRow = await pool.query('SELECT id FROM outbox WHERE target_id=$1 AND status=$2', ['everyone', 'QUEUED']);
         assert.equal(reviewRow.rowCount, 1);
+        await pool.query("UPDATE outbox SET next_attempt=now()+interval '1 hour' WHERE id=$1", [reviewRow.rows[0].id]);
 
-        // Operator can edit the review job with live changes
+        // Operator can edit the queued job with live changes
         await createUser(pool, 'everyone-admin', 'Everyone-test-password-2026!', 'OPERATOR');
         const app = createApp(pool, config, noNetwork);
         const agent = supertest.agent(app);
@@ -619,7 +687,7 @@ test(
           .send({});
         assert.equal(approved.status, 200);
 
-        // Approved job should now be QUEUED and deliverable
+        // Approval confirms the edits and leaves the job queued and deliverable.
         const approvedRow = await pool.query('SELECT status FROM outbox WHERE id=$1', [reviewRow.rows[0].id]);
         assert.equal(approvedRow.rows[0].status, 'QUEUED');
 
@@ -665,7 +733,7 @@ test(
         const secJob = jobs.rows.find((r) => r.target_id === 'sec');
         const everyoneJob = jobs.rows.find((r) => r.target_id === 'everyone');
         assert.equal(secJob.status, 'QUEUED');
-        assert.equal(everyoneJob.status, 'REVIEW');
+        assert.equal(everyoneJob.status, 'QUEUED');
       });
     } finally {
       await pool.end();

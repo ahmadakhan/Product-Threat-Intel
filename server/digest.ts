@@ -112,10 +112,24 @@ export async function bufferFindingsForDigest(
   return added.length;
 }
 
+/**
+ * A finding is deliverable when it still applies and has not been sent.
+ *
+ * `REVIEW_REQUIRED` is included deliberately: there is no operator review queue,
+ * so a finding the confidence or applicability policy could not fully confirm is
+ * delivered like any other and the email states the limitation on the finding.
+ * Excluding it left those findings undelivered forever once they entered the
+ * digest buffer.
+ */
+const DELIVERABLE_STATUSES: readonly Finding['notificationStatus'][] = [
+  'QUEUED_FOR_DISPATCH',
+  'REVIEW_REQUIRED',
+];
 const isDeliverable = (finding: Finding | undefined): finding is Finding =>
   !!finding &&
   !finding.advisoryId &&
-  finding.notificationStatus === 'QUEUED_FOR_DISPATCH' &&
+  !finding.reviewNotifiedAt &&
+  DELIVERABLE_STATUSES.includes(finding.notificationStatus) &&
   !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status);
 
 const buildDigestAdvisory = (findings: Finding[], settings: AppSettings): Advisory => {
@@ -257,8 +271,11 @@ export async function flushDueDigest(pool: pg.Pool): Promise<number> {
         }
 
         const advisory = buildDigestAdvisory(usable, settings);
+        // One pinned instant per flush: the body, the text alternative and the
+        // PDF attachment of every recipient describe the same document.
+        const generatedAt = new Date();
         const result = await queueDigestAdvisory(db, advisory, usable, (view, batchFindings) =>
-          renderAdvisory(template, view, batchFindings),
+          renderAdvisory(template, view, batchFindings, { generatedAt }),
         );
         const included = new Set(result.findingIds);
         if (result.jobs)

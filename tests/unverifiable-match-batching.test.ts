@@ -4,17 +4,15 @@ import pg from 'pg';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createPool, migrate, put, get } from '../server/db.ts';
 import {
-  queueUnverifiableMatchNotification,
-  queueZeroDayDigestNotification,
   deliverNext,
+  queueConsolidatedFindingNotifications,
+  queueZeroDayDigestNotification,
   type ZeroDayDigestPayload,
 } from '../server/delivery.ts';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
 import { loadConfig } from '../server/config.ts';
 import type { Requester } from '../server/network.ts';
 import type { Finding, EmailRecipient } from '../src/types/index.ts';
-import { eligibleForReviewNotification } from '../src/utils/findingDelivery.ts';
-import { renderUnverifiableReviewEmail } from '../server/reviewEmail.ts';
 import { settingsSchema } from '../server/validation.ts';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine.ts';
 import type { AppSettings, WatchListItem } from '../src/types/index.ts';
@@ -54,7 +52,7 @@ const finding = (cveId: string, id: string, assetName: string, vendor?: string, 
     matchedAssetProduct: product,
     matchedCpe: `cpe:2.3:a:${vendor}:${product}:*:*:*:*:*:*:*:*`,
     matchingMethod: 'exact',
-    matchingEvidence: `Evidence for ${cveId} on ${assetName}`,
+    matchingEvidence: `Evidence for ${cveId} on ${assetName} (70% confidence)`,
     confidence: 0,
     notificationStatus: 'REVIEW_REQUIRED',
     status: 'MONITORED',
@@ -108,9 +106,9 @@ async function saveReviewFinding(pool: pg.Pool, value: Finding): Promise<Finding
   return result;
 }
 
-test('unverifiable matches are batched into a single combined email per recipient', { skip: !process.env.TEST_DATABASE_URL }, async () => {
+test('limited-confidence findings are dispatched as one consolidated email per recipient', { skip: !url }, async () => {
   const outcome = await withDatabase(async (pool) => {
-    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: true });
+    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS });
     const first = finding('CVE-2026-10001', 'f1', 'server-1', 'acme', 'widget');
     const findings: Finding[] = [
       first,
@@ -122,119 +120,69 @@ test('unverifiable matches are batched into a single combined email per recipien
       recipient('r1', 'sec-1@example.com', 'SECURITY_TEAM'),
       recipient('r2', 'sec-2@example.com', 'SECURITY_TEAM'),
     ];
+    for (const target of recipients) await put(pool, 'recipients', target.id, target);
 
-    // One queued notification per recipient, NOT one per finding.
-    const queued = await queueUnverifiableMatchNotification(pool, findings, recipients);
-    assert.equal(queued, 2, 'one combined email per recipient');
+    const queued = await queueConsolidatedFindingNotifications(pool, findings);
+    assert.equal(queued, 2, 'one consolidated email per recipient');
 
     const rows = await pool.query<OutboxRow>(
-      `SELECT id, dedupe_key, advisory_id, payload FROM outbox WHERE advisory_id LIKE 'UNVERIFIABLE:%' ORDER BY target_id`,
+      `SELECT id, dedupe_key, advisory_id, payload FROM outbox WHERE advisory_id LIKE 'FINDINGS:%' ORDER BY target_id`,
     );
-    assert.equal(rows.rowCount, 2, 'exactly two combined jobs enqueued');
-
+    assert.equal(rows.rowCount, 2, 'exactly two consolidated jobs enqueued');
     for (const row of rows.rows) {
       const payload = row.payload as {
         subject: string;
         cveIds: string[];
-        unverifiableMatch: { findings: unknown[]; cveIds: string[] };
+        includedFindingIds: string[];
+        html: string;
         findingRevisions: Record<string, string>;
         contentRevision: string;
+        generatedAt: string;
       };
-      assert.equal(payload.unverifiableMatch.findings.length, 3, 'each email carries all findings');
+      assert.equal(payload.includedFindingIds.length, 3, 'each email carries all findings');
       assert.deepEqual(payload.cveIds, ['CVE-2026-10001', 'CVE-2026-10002', 'CVE-2026-10003']);
-      assert.equal(payload.subject, '[Threat intelligence] for Review - Unverifiable matches (3 findings)');
       assert.equal(Object.keys(payload.findingRevisions).length, 3, 'findingRevisions covers every finding');
       assert.ok(row.dedupe_key, 'dedupe key populated');
+      assert.ok(payload.generatedAt, 'render instant pinned for the attachment');
+      // The body states the confidence limitation instead of withholding the finding.
+      assert.match(payload.html, /Low confidence/);
+      assert.match(payload.html, /70% match confidence/);
     }
 
-    // A re-queue of the identical batch dedupes against the existing jobs instead
-    // of producing duplicates (ON CONFLICT no-ops on non-FAILED rows).
-    const requeued = await queueUnverifiableMatchNotification(pool, findings, recipients);
-    assert.equal(requeued, 0, 'identical batch does not re-queue');
-    const after = await pool.query(
-      `SELECT count(*)::int AS n FROM outbox WHERE advisory_id LIKE 'UNVERIFIABLE:%'`,
-    );
+    // A re-queue of the identical batch dedupes against the existing jobs.
+    assert.equal(await queueConsolidatedFindingNotifications(pool, findings), 0, 'identical batch does not re-queue');
+    const after = await pool.query(`SELECT count(*)::int AS n FROM outbox WHERE advisory_id LIKE 'FINDINGS:%'`);
     assert.equal(after.rows[0].n, 2, 'no additional jobs after re-queue');
     return true;
   });
   assert.ok(outcome, 'database-backed test ran');
 });
 
-test('review thresholds retain boundaries and reject invalid settings', () => {
-  const policy = { reviewUnverifiableMatches: true, reviewConfidenceThreshold: 70 };
-  for (const [confidence, expected] of [[69, false], [70, true], [90, true], [100, true], [NaN, false], [101, false]] as const) {
-    assert.equal(eligibleForReviewNotification({ ...finding('CVE-2026-10001', 'f1', 'asset'), confidence }, policy), expected);
-  }
-  const candidate = { ...finding('CVE-2026-10001', 'f1', 'asset'), confidence: 80 };
-  assert.equal(eligibleForReviewNotification({ ...candidate, notificationStatus: 'QUEUED_FOR_DISPATCH' }, policy), false);
-  assert.equal(eligibleForReviewNotification({ ...candidate, status: 'FALSE_POSITIVE' }, policy), false);
-  assert.equal(eligibleForReviewNotification(candidate, { ...policy, reviewUnverifiableMatches: false }), false);
-  for (const value of [-1, 101, 70.5, NaN]) assert.equal(settingsSchema.safeParse({ ...DEFAULT_SETTINGS, reviewConfidenceThreshold: value }).success, false);
+test('a finding already announced is never included in a second email', { skip: !url }, async () => {
+  const outcome = await withDatabase(async (pool) => {
+    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS });
+    const target = recipient('r1', 'sec@example.invalid', 'SECURITY_TEAM');
+    await put(pool, 'recipients', target.id, target);
+    const first = finding('CVE-2026-11001', 'f1', 'server-1', 'acme', 'widget');
+    assert.equal(await queueConsolidatedFindingNotifications(pool, [first]), 1);
+    // The pipeline stamps reviewNotifiedAt on transport acceptance; simulate the
+    // stamp a later run would observe.
+    await put(pool, 'findings', first.id, { ...first, reviewNotifiedAt: new Date().toISOString() });
+    const second = finding('CVE-2026-11002', 'f2', 'server-2', 'acme', 'widget');
+    assert.equal(await queueConsolidatedFindingNotifications(pool, [first, second]), 1);
+    const rows = (await pool.query('SELECT payload FROM outbox ORDER BY created_at')).rows;
+    assert.deepEqual(rows[1].payload.includedFindingIds, ['f2'], 'only the un-notified finding is included');
+    return true;
+  });
+  assert.ok(outcome, 'database-backed test ran');
+});
+
+test('review settings retain boundaries and reject invalid values', () => {
+  for (const value of [-1, 101, 70.5, NaN])
+    assert.equal(settingsSchema.safeParse({ ...DEFAULT_SETTINGS, reviewConfidenceThreshold: value }).success, false);
   assert.equal(settingsSchema.parse(DEFAULT_SETTINGS).reviewConfidenceThreshold, 0);
   assert.equal(settingsSchema.parse({ ...DEFAULT_SETTINGS, emailEnabled: false }).emailEnabled, false);
   assert.equal(settingsSchema.safeParse({ ...DEFAULT_SETTINGS, emailEnabled: 'false' }).success, false);
-});
-
-test('overlapping review batches reserve each finding once per recipient', { skip: !url }, async () => {
-  await withDatabase(async (pool) => {
-    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: true });
-    const first = finding('CVE-2026-10101', 'f1', 'first');
-    const second = finding('CVE-2026-10102', 'f2', 'second');
-    const target = recipient('r1', 'sec@example.invalid', 'SECURITY_TEAM');
-    await Promise.all([
-      queueUnverifiableMatchNotification(pool, [first], [target]),
-      queueUnverifiableMatchNotification(pool, [first, second], [target]),
-    ]);
-    const rows = (await pool.query('SELECT payload FROM outbox')).rows;
-    const ids = rows.flatMap((row) => row.payload.unverifiableMatch.findings.map((item: { findingId: string }) => item.findingId)).sort();
-    assert.deepEqual(ids, ['f1', 'f2']);
-    assert.equal(await queueUnverifiableMatchNotification(pool, [first, second], [target]), 0);
-  });
-});
-
-test('review email links sources safely and escapes evidence', () => {
-  const candidate = finding('CVE-2026-10001', 'f1', '<img src=x onerror=alert(1)>');
-  candidate.matchingEvidence = '<script>alert(1)</script>';
-  candidate.cve.remediation.vendorAdvisoryRef = 'javascript:alert(1)';
-  const rendered = renderUnverifiableReviewEmail([candidate]);
-  assert.ok(rendered.html.includes('href="https://nvd.nist.gov/vuln/detail/CVE-2026-10001"'));
-  assert.ok(rendered.text.includes('https://nvd.nist.gov/vuln/detail/CVE-2026-10001'));
-  assert.ok(!rendered.html.includes('<script>'));
-  assert.ok(!rendered.html.includes('<img src=x'));
-  candidate.cve.remediation.vendorAdvisoryRef = 'https://vendor.example/security/CVE-2026-10001?a=1&b=2';
-  assert.ok(renderUnverifiableReviewEmail([candidate]).html.includes('href="https://vendor.example/security/CVE-2026-10001?a=1&amp;b=2"'));
-  candidate.cve.remediation.vendorAdvisoryRef = 'https://user:secret@vendor.example/advisory';
-  assert.ok(!renderUnverifiableReviewEmail([candidate]).html.includes('user:secret'));
-  const timestamped = renderUnverifiableReviewEmail([candidate], 'America/Los_Angeles');
-  assert.ok(timestamped.text.includes('CVE published: 31 Dec 2025, 16:00 UTC-8 | 2026-01-01 00:00:00 UTC'));
-  assert.ok(timestamped.text.includes('Source updated: 31 Dec 2025, 16:00 UTC-8 | 2026-01-01 00:00:00 UTC'));
-  candidate.cve.versionRange = { versionEndExcluding: '1.0' };
-  candidate.cve.cpeMatchDetails = [{ criteria: candidate.matchedCpe }];
-  const criterion = renderUnverifiableReviewEmail([candidate]);
-  assert.ok(criterion.html.includes('No version bounds specified for the matched criterion'));
-  assert.ok(!criterion.html.includes('&lt; 1.0'));
-});
-
-test('review batches honor confidence and each recipient subscription', { skip: !url }, async () => {
-  await withDatabase(async (pool) => {
-    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: true, reviewConfidenceThreshold: 70 });
-    const low = { ...finding('CVE-2026-10010', 'low', 'low asset'), confidence: 70 };
-    low.cve.cvss.severity = 'LOW';
-    const high = { ...finding('CVE-2026-10011', 'high', 'high asset'), confidence: 85 };
-    high.cve.cisaKev = { ...high.cve.cisaKev, isKev: true };
-    const below = { ...finding('CVE-2026-10012', 'below', 'below asset'), confidence: 69 };
-    const queued = await queueUnverifiableMatchNotification(pool, [low, high, below], [
-      recipient('all', 'all@example.invalid', 'SECURITY_TEAM'),
-      { ...recipient('high', 'high@example.invalid', 'SECURITY_TEAM'), subscriptionTier: 'CRITICAL_HIGH_ONLY' },
-      { ...recipient('kev', 'kev@example.invalid', 'SECURITY_TEAM'), subscriptionTier: 'CISA_KEV_ONLY' },
-      recipient('everyone', 'everyone@example.invalid', 'EVERYONE'),
-    ]);
-    assert.equal(queued, 3);
-    const rows = (await pool.query('SELECT target_id,payload FROM outbox ORDER BY target_id')).rows;
-    assert.deepEqual(rows[0].payload.cveIds, [low.cveId, high.cveId]);
-    for (const row of rows.slice(1)) assert.deepEqual(row.payload.cveIds, [high.cveId]);
-    for (const row of rows) assert.ok(!row.payload.html.includes(below.cveId));
-  });
 });
 
 const digest = (overrides: Partial<ZeroDayDigestPayload> = {}): ZeroDayDigestPayload => ({
@@ -264,9 +212,6 @@ const digest = (overrides: Partial<ZeroDayDigestPayload> = {}): ZeroDayDigestPay
 });
 
 test('zero-day digests deliver one consolidated email per recipient and dedupe', { skip: !process.env.TEST_DATABASE_URL }, async () => {
-  // Audit C-3: exceeding the per-run zero-day cap used to withhold the
-  // suppressed findings from every notification path with nothing to replace
-  // them. The digest must reach the Security team, once per recipient.
   const outcome = await withDatabase(async (pool) => {
     const recipients: EmailRecipient[] = [
       recipient('r1', 'sec-1@example.com', 'SECURITY_TEAM'),
@@ -285,11 +230,8 @@ test('zero-day digests deliver one consolidated email per recipient and dedupe',
     assert.match(body.subject, /acme \/ widget/);
     assert.equal(body.zeroDayDigest.findings.length, 2, 'every withheld match is named');
 
-    // Re-queueing an unchanged digest must be a no-op.
     assert.equal(await queueZeroDayDigestNotification(pool, digest(), recipients), 0, 'identical digest dedupes');
 
-    // A digest without a CVE still delivers: that is the whole point of the
-    // zero-day path, and a payload filtered on cveIds would drop it.
     const noCve = digest({ matchIds: ['m9'], digestId: 'DIGEST_acme_gadget', findings: [payload.findings[0]] });
     assert.equal(await queueZeroDayDigestNotification(pool, noCve, recipients), 2);
     return true;
@@ -297,7 +239,7 @@ test('zero-day digests deliver one consolidated email per recipient and dedupe',
   assert.ok(outcome, 'database-backed test ran');
 });
 
-test('zero-day digest job delivers without an advisory row', { skip: !process.env.TEST_DATABASE_URL }, async () => {
+test('zero-day digest attaches the exact email document', { skip: !process.env.TEST_DATABASE_URL }, async () => {
   const outcome = await withDatabase(async (pool) => {
     await put(pool, 'emailConfig', 'main', {
       provider: 'SMTP',
@@ -335,13 +277,9 @@ test('zero-day digest job delivers without an advisory row', { skip: !process.en
   assert.ok(outcome, 'database-backed test ran');
 });
 
-test('unverifiable match email is stamped reviewNotifiedAt on transport acceptance', { skip: !process.env.TEST_DATABASE_URL }, async () => {
+test('dispatched findings are stamped with reviewNotifiedAt on transport acceptance', { skip: !process.env.TEST_DATABASE_URL }, async () => {
   const outcome = await withDatabase(async (pool) => {
-    await put(pool, 'settings', 'main', {
-      ...DEFAULT_SETTINGS,
-      reviewUnverifiableMatches: true,
-      timezone: 'Pacific/Honolulu',
-    });
+    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, timezone: 'Pacific/Honolulu' });
     await put(pool, 'emailConfig', 'main', {
       provider: 'SMTP',
       host: 'localhost',
@@ -355,15 +293,14 @@ test('unverifiable match email is stamped reviewNotifiedAt on transport acceptan
       recipient('r2', 'sec-2@example.com', 'SECURITY_TEAM'),
     ];
     for (const r of recipients) await put(pool, 'recipients', r.id, r);
-    const candidates: Finding[] = [
+    const findings: Finding[] = [];
+    for (const candidate of [
       finding('CVE-2026-20001', 'f1', 'server-1', 'acme', 'widget'),
       finding('CVE-2026-20002', 'f2', 'server-2', 'acme', 'gadget'),
-    ];
-    const findings: Finding[] = [];
-    for (const candidate of candidates) findings.push(await saveReviewFinding(pool, candidate));
+    ])
+      findings.push(await saveReviewFinding(pool, candidate));
 
-    const queued = await queueUnverifiableMatchNotification(pool, findings, recipients);
-    assert.equal(queued, 2, 'one notification per recipient');
+    assert.equal(await queueConsolidatedFindingNotifications(pool, findings), 2, 'one email per recipient');
 
     const config = loadConfig({
       NODE_ENV: 'test',
@@ -377,105 +314,82 @@ test('unverifiable match email is stamped reviewNotifiedAt on transport acceptan
     };
 
     let sent = 0;
-    const delivered = await deliverNext(pool, config, requester, async () => {
-      sent++;
-      return `msg-${randomUUID()}`;
-    });
-    assert.equal(delivered, true, 'deliverNext should process a queued job');
+    assert.equal(
+      await deliverNext(pool, config, requester, async () => {
+        sent++;
+        return `msg-${randomUUID()}`;
+      }),
+      true,
+      'deliverNext processes a queued job',
+    );
     assert.equal(sent, 1, 'mail sender called exactly once');
 
     for (const f of findings) {
       const updated = await get<Finding>(pool, 'findings', f.id);
-      assert.ok(
-        updated?.reviewNotifiedAt,
-        `finding ${f.id} should have reviewNotifiedAt set after acceptance`,
-      );
+      assert.ok(updated?.reviewNotifiedAt, `finding ${f.id} is marked as announced`);
     }
 
-    // The second recipient's job is still pending; deliver it so both email
-    // logs record ACCEPTED. The findings are already stamped — the put is
-    // an idempotent skip for the second job.
+    // The second recipient's job is still pending; deliver it. The findings are
+    // already stamped, which keeps a later run from announcing them again.
     sent = 0;
-    const delivered2 = await deliverNext(pool, config, requester, async () => {
-      sent++;
-      return `msg-${randomUUID()}`;
-    });
-    assert.equal(delivered2, true, 'second recipient job is processed');
+    assert.equal(
+      await deliverNext(pool, config, requester, async () => {
+        sent++;
+        return `msg-${randomUUID()}`;
+      }),
+      true,
+      'second recipient job is processed',
+    );
     assert.equal(sent, 1, 'mail sender called for the second recipient job');
 
-    for (const f of findings) {
-      const updated = await get<Finding>(pool, 'findings', f.id);
-      assert.ok(updated?.reviewNotifiedAt, `finding ${f.id} retains reviewNotifiedAt`);
-    }
-
-    // Re-queueing the same batch produces no new jobs: dedupe_key prevents
-    // duplicates and the findings are now marked as notified.
-    const requeued = await queueUnverifiableMatchNotification(pool, findings, recipients);
-    assert.equal(requeued, 0, 'already-notified findings do not re-queue');
-    const after = await pool.query(
-      `SELECT count(*)::int AS n FROM outbox WHERE advisory_id LIKE 'UNVERIFIABLE:%'`,
-    );
+    assert.equal(await queueConsolidatedFindingNotifications(pool, findings), 0, 'already-announced findings do not re-queue');
+    const after = await pool.query(`SELECT count(*)::int AS n FROM outbox WHERE advisory_id LIKE 'FINDINGS:%'`);
     assert.equal(after.rows[0].n, 2, 'no additional outbox rows after re-queue');
-
     return true;
   });
   assert.ok(outcome, 'database-backed test ran');
 });
 
-test('review delivery rechecks current policy and evidence before sending', { skip: !url }, async (t) => {
+test('a stale consolidated batch is rebuilt without the findings that no longer apply', { skip: !url }, async () => {
   await withDatabase(async (pool) => {
     const config = loadConfig({ NODE_ENV: 'test', DATABASE_URL: url, APP_ORIGIN: 'http://localhost', ENCRYPTION_KEY: randomBytes(32).toString('base64') });
     const request: Requester = async () => { throw new Error('No network expected'); };
-    const mutations: [string, (entry: Finding) => Promise<unknown>][] = [
-      ['review confidence raised', async () => put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: true, reviewConfidenceThreshold: 80 })],
-      ['review notices disabled', async () => put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: false })],
-      ['finding promoted', async (entry) => put(pool, 'findings', entry.id, { ...entry, notificationStatus: 'QUEUED_FOR_DISPATCH' })],
-      ['recipient changed', async () => put(pool, 'recipients', 'r1', recipient('r1', 'new@example.invalid', 'SECURITY_TEAM'))],
-      ['subscription narrowed', async () => put(pool, 'recipients', 'r1', { ...recipient('r1', 'sec@example.invalid', 'SECURITY_TEAM'), subscriptionTier: 'CISA_KEV_ONLY' })],
-      ['product removed', async () => pool.query("DELETE FROM records WHERE kind='watchlist'")],
-      ['CVE withdrawn', async (entry) => put(pool, 'cveWithdrawals', entry.cveId, { modifiedDate: '2027-01-01T00:00:00Z' })],
-      ['source evidence changed', async (entry) => put(pool, 'cveData', entry.cveId, { ...entry.cve, description: 'Updated source evidence' })],
-    ];
-    for (const [name, mutate] of mutations) await t.test(name, async () => {
-      await pool.query('DELETE FROM records; DELETE FROM outbox');
-      await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: true });
-      const target = recipient('r1', 'sec@example.invalid', 'SECURITY_TEAM');
-      await put(pool, 'recipients', target.id, target);
-      const entry = await saveReviewFinding(pool, finding('CVE-2026-20011', 'f1', 'server', 'acme', 'widget'));
-      assert.equal(await queueUnverifiableMatchNotification(pool, [entry], [target]), 1);
-      await mutate(entry);
-      let sent = 0;
-      await deliverNext(pool, config, request, async () => { sent++; return 'must-not-send'; });
-      assert.equal(sent, 0);
-      assert.equal((await pool.query('SELECT status FROM outbox')).rows[0].status, 'FAILED');
-      assert.equal((await get<Finding>(pool, 'findings', entry.id))?.reviewNotifiedAt, null);
-      if (name === 'review confidence raised') {
-        await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: true });
-        assert.equal(await queueUnverifiableMatchNotification(pool, [entry], [target]), 1);
-        await deliverNext(pool, config, request, async () => { sent++; return 'policy-restored'; });
-        assert.equal(sent, 1);
-        assert.equal((await pool.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, 1);
-        assert.equal((await pool.query('SELECT status FROM outbox')).rows[0].status, 'ACCEPTED');
-      }
+    const target = recipient('r1', 'sec@example.invalid', 'SECURITY_TEAM');
+    await put(pool, 'recipients', target.id, target);
+    const first = await saveReviewFinding(pool, finding('CVE-2026-20011', 'f1', 'server', 'acme', 'widget'));
+    const second = await saveReviewFinding(pool, finding('CVE-2026-20012', 'f2', 'server2', 'acme', 'gadget'));
+    assert.equal(await queueConsolidatedFindingNotifications(pool, [first, second]), 1);
+
+    // The first finding is resolved after queueing; the second is still valid.
+    await put(pool, 'findings', first.id, { ...first, status: 'RESOLVED' });
+    let sent = 0;
+    await deliverNext(pool, config, request, async (job) => {
+      sent++;
+      const html = job.payload.html || '';
+      assert.ok(!html.includes('CVE-2026-20011'), 'the rebuilt body no longer names the stale finding');
+      assert.ok(html.includes('CVE-2026-20012'), 'the rebuilt body still carries the applicable finding');
+      assert.deepEqual(job.payload.includedFindingIds, [second.id]);
+      return 'rebuilt-once';
     });
-    await t.test('two workers send once and acceptance preserves concurrent operator changes', async () => {
-      await pool.query('DELETE FROM records; DELETE FROM outbox');
-      await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, reviewUnverifiableMatches: true });
-      const target = recipient('r1', 'sec@example.invalid', 'SECURITY_TEAM');
-      await put(pool, 'recipients', target.id, target);
-      const entry = await saveReviewFinding(pool, finding('CVE-2026-20012', 'f1', 'server', 'acme', 'widget'));
-      await queueUnverifiableMatchNotification(pool, [entry], [target]);
-      let sent = 0;
-      const sender = async () => {
-        sent++;
-        await put(pool, 'findings', entry.id, { ...entry, status: 'FALSE_POSITIVE' });
-        return 'accepted-once';
-      };
-      await Promise.all([deliverNext(pool, config, request, sender), deliverNext(pool, config, request, sender)]);
-      assert.equal(sent, 1);
-      const saved = await get<Finding>(pool, 'findings', entry.id);
-      assert.equal(saved?.status, 'FALSE_POSITIVE');
-      assert.ok(saved?.reviewNotifiedAt);
-    });
+    assert.equal(sent, 1);
+    assert.equal((await pool.query('SELECT status FROM outbox')).rows[0].status, 'ACCEPTED');
+  });
+});
+
+test('delivery rechecks the recipient subscription before sending', { skip: !url }, async () => {
+  await withDatabase(async (pool) => {
+    const config = loadConfig({ NODE_ENV: 'test', DATABASE_URL: url, APP_ORIGIN: 'http://localhost', ENCRYPTION_KEY: randomBytes(32).toString('base64') });
+    const request: Requester = async () => { throw new Error('No network expected'); };
+    const target = recipient('r1', 'sec@example.invalid', 'SECURITY_TEAM');
+    await put(pool, 'recipients', target.id, target);
+    const entry = await saveReviewFinding(pool, finding('CVE-2026-20021', 'f1', 'server', 'acme', 'widget'));
+    assert.equal(await queueConsolidatedFindingNotifications(pool, [entry], { recipients: [target] }), 1);
+    await put(pool, 'recipients', 'r1', { ...target, subscriptionTier: 'CISA_KEV_ONLY' });
+    let sent = 0;
+    await deliverNext(pool, config, request, async () => { sent++; return 'must-not-send'; });
+    assert.equal(sent, 0);
+    const row = (await pool.query<{ status: string; error: string }>('SELECT status, error FROM outbox')).rows[0];
+    assert.equal(row.status, 'FAILED');
+    assert.match(row.error, /subscription/i);
   });
 });

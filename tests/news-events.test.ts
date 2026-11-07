@@ -447,7 +447,7 @@ test(
    },
 );
 test(
-  'matching news is auto-dispatched to the Security team when enabled',
+  'matching news is consolidated into one Security-team email and never repeated',
   { skip: !process.env.TEST_DATABASE_URL },
   async () => {
     const base = createPool(process.env.TEST_DATABASE_URL!);
@@ -497,16 +497,16 @@ test(
       await queueRun(pool, 24, 'test');
       await processPipeline(pool, config, async () => ({ status: 200, body: rssXml, headers: {} }));
       const queued = (await pool.query('SELECT count(*)::int AS n FROM outbox')).rows[0].n;
-      assert.equal(queued, 1, `expected one news job, got ${queued}`);
+      assert.equal(queued, 1, `expected one consolidated news email, got ${queued}`);
       const jobRow = (await pool.query('SELECT advisory_id, payload FROM outbox')).rows[0];
       assert.match(jobRow.advisory_id, /^NEWS:/, 'job key is a news advisory id');
-      assert.equal(jobRow.payload.subject, '[Threat intelligence] [NEWS] Acme Widget vulnerability');
+      assert.match(jobRow.payload.subject, /^\[Threat intelligence\] \[NEWS\]/);
       assert.equal(jobRow.payload.cveIds[0], 'CVE-2026-12345');
-      assert.equal(jobRow.payload.newsEvidence.asset.vendor, 'acme');
-      assert.equal(jobRow.payload.newsEvidence.asset.product, 'widget');
       assert.equal(jobRow.payload.newsEvidence.articles.length, 1);
       assert.equal(jobRow.payload.newsEvidence.articles[0].id, jobRow.payload.newsEvidence.article.id);
-      // The default (review-only) test above must still hold no jobs; this flag is opt-in.
+      // The HTML body is the same document the attachment is rendered from.
+      assert.match(jobRow.payload.html, /Matched asset/);
+      assert.match(jobRow.payload.html, /acme widget/);
       let emails = 0;
       const mail = async () => {
         emails++;
@@ -517,6 +517,14 @@ test(
       assert.equal(
         (await pool.query("SELECT count(*)::int AS n FROM outbox WHERE status='ACCEPTED'")).rows[0].n,
         1,
+      );
+      // A second run over the same (re-scoped) feed must not email the article again.
+      await queueRun(pool, 48, 'test');
+      await processPipeline(pool, config, async () => ({ status: 200, body: rssXml, headers: {} }));
+      assert.equal(
+        (await pool.query("SELECT count(*)::int AS n FROM outbox WHERE status='QUEUED'")).rows[0].n,
+        0,
+        'an article already sent to the recipient is never queued again',
       );
       assert.equal(
         (await pool.query("SELECT data->>'recipientEmail' AS value FROM records WHERE kind='emailLogs'"))
@@ -531,7 +539,7 @@ test(
   },
 );
 test(
-  'settings.save persists the opt-in news auto-dispatch flag through the schema',
+  'settings.save persists the news flag through the schema (retained for compatibility)',
   { skip: !process.env.TEST_DATABASE_URL },
   async () => {
     const base = createPool(process.env.TEST_DATABASE_URL!);

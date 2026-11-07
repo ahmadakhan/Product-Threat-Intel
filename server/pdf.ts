@@ -7,7 +7,8 @@ import { resolveTimezone } from '../src/utils/dateTime.ts';
 
 const PDF_CACHE_TTL_MS = 5 * 60_000;
 const PDF_CACHE_MAX = 64;
-const PDF_MAX_HTML_BYTES = 2_000_000;
+/** Hard input ceiling for the PDF renderer, shared with the delivery gate. */
+export const PDF_MAX_HTML_BYTES = 2_000_000;
 const pdfCache = new Map<string, { content: Uint8Array; expires: number }>();
 let pdfQueue: Promise<void> = Promise.resolve();
 let browserPromise: Promise<Browser> | undefined;
@@ -37,7 +38,14 @@ export function advisoryFilename(advisoryId: string): string {
   return `${safeId}.pdf`;
 }
 
-function timestampedFilename(at: Date, timezone?: string): string {
+/**
+ * Timestamped `ddMMMyyyyHHMM.pdf` name for a document without an advisory id.
+ *
+ * Retained for callers that snapshot a rendered document outside a delivery (the
+ * review bulletin that used it has been replaced by consolidated finding
+ * emails, which are named after their batch id).
+ */
+export function timestampedAdvisoryFilename(at: Date = new Date(), timezone?: string): string {
   const tz = resolveTimezone(timezone);
   const parts = new Intl.DateTimeFormat('en-GB', {
     timeZone: tz,
@@ -50,12 +58,8 @@ function timestampedFilename(at: Date, timezone?: string): string {
   }).formatToParts(at);
   const pick = (type: string) => parts.find((part) => part.type === type)?.value || '';
   const month = pick('month');
-  if (!month) return 'unverifiable.pdf';
+  if (!month) return 'advisory.pdf';
   return `${pick('day')}${month}${pick('year')}${pick('hour')}${pick('minute')}.pdf`;
-}
-
-export function unverifiableMatchFilename(at: Date = new Date(), timezone?: string): string {
-  return timestampedFilename(at, timezone);
 }
 
 export function advisoryHtmlToText(html: string): string {

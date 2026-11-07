@@ -43,7 +43,6 @@ export const AdvisoryTemplateView: React.FC = () => {
   } = useApp();
 
   const [testEmail, setTestEmail] = useState('');
-  const [testForceReview, setTestForceReview] = useState(false);
   const [showTestModal, setShowTestModal] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -323,7 +322,7 @@ export const AdvisoryTemplateView: React.FC = () => {
         setConfirmSendTest(false);
         return;
       }
-      const res = await sendTestEmail(testEmail, testForceReview, rendered);
+      const res = await sendTestEmail(testEmail, false, rendered);
       setTestResult(res);
       setConfirmSendTest(false);
       if (res.success) {
@@ -1336,18 +1335,8 @@ export const AdvisoryTemplateView: React.FC = () => {
                 />
               </div>
 
-              <div className="flex items-center space-x-2">
-                <input
-                  type="checkbox"
-                  id="testForceReview"
-                  checked={testForceReview}
-                  onChange={(e) => setTestForceReview(e.target.checked)}
-                  className="w-4 h-4 rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-emerald-500"
-                />
-                <label htmlFor="testForceReview" className="text-zinc-300">
-                  Force into review (simulates EVERYONE distribution)
-                </label>
-              </div>
+              {/* Findings are always dispatched: there is no review queue for a
+                  test message, so the former "Force into review" option is gone. */}
 
               <div className="flex justify-end space-x-2 pt-3 border-t border-zinc-800">
                 <button

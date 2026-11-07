@@ -54,6 +54,15 @@ export function reconcileFindings(
         : ['QUEUED_FOR_DISPATCH', 'DELIVERY_FAILED', 'SECURITY_REJECTED'].includes(old.notificationStatus)
           ? old.notificationStatus
           : 'DELIVERY_FAILED';
+    } else if (old.reviewNotifiedAt) {
+      // The finding has already been announced in a consolidated email. The
+      // matcher rebuilds its candidate set on every run (a refreshed CVE record
+      // re-derives the match), so without this the stored status was reset to the
+      // freshly-built `QUEUED_FOR_DISPATCH` and the next run queued the same
+      // finding again — a duplicate email for content the recipient already had.
+      // `reviewNotifiedAt` is stamped on transport acceptance and is the only
+      // durable record that this finding was delivered.
+      notificationStatus = 'AUTO_DISPATCHED';
     } else if (notificationStatus !== 'REVIEW_REQUIRED' && old.notificationStatus === 'DELIVERY_FAILED') {
       // A delivery failure is a terminal, operator-visible outcome. The candidate
       // is freshly built and always starts as QUEUED_FOR_DISPATCH, so without this
@@ -91,6 +100,9 @@ export function reconcileFindings(
        matchingEvidence: candidate.matchingEvidence,
        confidence: candidate.confidence,
        exposure: candidate.exposure,
+       // Announcement state is never reset by a re-evaluation: it records
+       // what was *sent*, not what currently applies.
+       reviewNotifiedAt: old.reviewNotifiedAt ?? candidate.reviewNotifiedAt ?? null,
       exploitRisk: candidate.exploitRisk,
       mlAssessment: candidate.mlAssessment,
       notificationStatus,

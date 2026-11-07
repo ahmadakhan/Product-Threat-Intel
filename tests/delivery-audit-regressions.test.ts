@@ -282,19 +282,25 @@ test(
           }
         }
       });
-      await t.test('a digest key cannot override a newly held applicability verdict', async () => {
+      await t.test('a newly held verdict does not withhold an already-queued digest', async () => {
         await reset();
         const [f] = await seed([makeCve('CVE-2026-98104')]);
         await put(pool, 'recipients', 'all', recipient('all'));
         await runDailyDigest(pool);
         await put(pool, 'settings', 'main', { ...settings, autoDispatchConfidenceThreshold: 99 });
         await put(pool, 'findings', f.id, { ...f, notificationStatus: 'REVIEW_REQUIRED' });
+        // A digest key used to exempt the bundle from the applicability verdict,
+        // and a non-exempt bundle was failed as stale. Neither applies now: the
+        // finding is delivered and its limitation is stated in the document.
         let sent = 0;
         await deliverNext(pool, config, noNetwork, async () => {
           sent++;
-          return 'must-not-send';
+          return 'accepted-held';
         });
-        assert.equal(sent, 0);
+        assert.equal(sent, 1, 'the queued digest reaches the transport');
+        const row = (await pool.query("SELECT status,payload FROM outbox WHERE status='ACCEPTED'")).rows[0];
+        assert.ok(row, 'the queued digest is accepted');
+        assert.match(row.payload.html, /Low confidence/);
       });
       await t.test('worker recovery cannot bypass the retry budget of an approved email', async () => {
         await reset();

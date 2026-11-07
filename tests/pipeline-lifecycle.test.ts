@@ -1904,17 +1904,17 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       const job = (await pool.query('SELECT status,error,payload FROM outbox')).rows[0];
       assert.equal(transports, 1, String(job.error));
       assert.equal(job.status, 'ACCEPTED');
-      // The digest carried the finding, which the current 90% policy confirms. A
-      // finding that is still held is not digest content: including it made the
-      // whole digest fail (and re-fail the next day) as a stale bundle.
+      // The digest carries every finding in the window, including one the policy
+      // still considers limited-confidence: there is no review queue, and the
+      // email states the limitation on the finding itself.
       assert.deepEqual(job.payload.includedFindingIds, [held.id]);
       assert.match(job.payload.text, new RegExp(held.cveId));
       const finding = (await list<Finding>(pool, 'findings')).find((f) => f.id === held.id)!;
       assert.equal(finding.notificationStatus, 'AUTO_DISPATCHED');
       assert.ok(finding.autoDispatchedAt);
 
-      // A held finding is still refused on a non-digest bundle, so the digest
-      // exemption does not weaken the per-finding applicability gate.
+      // A held finding is dispatched on a non-digest bundle too, so the digest
+      // path is not the only one that delivers limited-confidence findings.
       await transaction(pool, (db) =>
         db.query(
           "UPDATE records SET data=(data-'autoDispatchedAt'-'advisoryId')||'{\"notificationStatus\":\"QUEUED_FOR_DISPATCH\"}'::jsonb WHERE kind='findings'",
@@ -1948,25 +1948,26 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         isDigestBatch: false,
       };
       await transaction(pool, (db) => queueAdvisory(db, advisory, [heldAgain]));
-      let refusedTransports = 0;
+      let deliveredTransports = 0;
       await deliverNext(pool, config, request, async () => {
-        refusedTransports++;
-        return 'must-not-send';
+        deliveredTransports++;
+        return 'held-delivered';
       });
-      const refused = (await pool.query('SELECT status,error,payload FROM outbox')).rows[0];
-      assert.equal(refusedTransports, 0, 'a review-held finding must not reach the transport');
-      // A deliberately held finding is routed to operator review. It must not be
-      // failed as a stale bundle: a rebuild cannot change the held verdict, so the
-      // old behaviour retried the same impossible send forever.
-      assert.equal(refused.status, 'REVIEW');
-      assert.match(refused.error, /require review/);
-      // A hold the pipeline cannot change must not trigger an endless rebuild loop.
+      const delivered = (await pool.query('SELECT status,error,payload FROM outbox')).rows[0];
+      assert.equal(deliveredTransports, 1, 'a limited-confidence finding must reach the transport');
+      assert.equal(delivered.status, 'ACCEPTED');
+      assert.equal(delivered.error, null, 'no review routing or stale-bundle failure');
+      // The document states the limitation rather than the finding being withheld.
+      assert.match(delivered.payload.html, /Low confidence/);
+      const announcedAgain = (await list<Finding>(pool, 'findings')).find((f) => f.id === finding.id)!;
+      assert.ok(announcedAgain.reviewNotifiedAt, 'the delivered finding is recorded as announced');
+      // A hold the pipeline cannot change must not trigger a rebuild loop.
       assert.equal(
         (await list<any>(pool, 'executions')).filter((execution) => execution.status === 'QUEUED').length,
         0,
       );
     });
-    await t.test('a held finding cannot withhold the still-deliverable findings of its bundle', async () => {
+    await t.test('a limited-confidence finding is delivered alongside its confirmed siblings', async () => {
       await reset();
       // Reproduces a production daily digest: one bundle per recipient that mixes a
       // finding withheld by the confidence policy with findings that are still
@@ -2033,32 +2034,21 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       let transports = 0;
       await deliverNext(pool, config, request, async () => {
         transports++;
-        return 'must-not-send';
+        return 'mixed-accepted';
       });
-      assert.equal(transports, 0, 'the held finding must not reach the transport');
-      assert.match(
-        (await pool.query("SELECT error FROM outbox WHERE status='FAILED'")).rows[0].error,
-        /no longer applicable/,
-      );
-
-      // The recovery run rebuilds the bundle from current inventory: the still
-      // deliverable finding is regrouped under a new advisory and delivered, and
-      // the policy-held finding is retained for review without being re-bundled.
-      await processPipeline(pool, config, request);
-      const regrouped = (await pool.query("SELECT advisory_id,payload FROM outbox WHERE status='QUEUED'")).rows;
-      assert.equal(regrouped.length, 1, JSON.stringify(regrouped.map((row) => row.payload?.includedFindingIds)));
-      assert.notEqual(regrouped[0].advisory_id, advisory.id);
-      assert.deepEqual(regrouped[0].payload.includedFindingIds, [confirmed.id]);
-      assert.equal(await queuedRuns(), 0, 'a regrouped bundle must not schedule another rebuild');
-      await deliverNext(pool, config, request, async () => {
-        transports++;
-        return 'accepted-regrouped';
-      });
-      assert.equal(transports, 1, 'only the regrouped job may reach the transport');
-      const heldAfter = (await list<Finding>(pool, 'findings')).find((finding) => finding.id === held.id)!;
-      assert.notEqual(heldAfter.notificationStatus, 'AUTO_DISPATCHED', 'the held finding was delivered');
+      assert.equal(transports, 1, 'one consolidated email carries both findings');
+      const delivered = (await pool.query("SELECT status,payload FROM outbox WHERE status='ACCEPTED'")).rows[0];
+      assert.ok(delivered, 'the mixed bundle is delivered, not failed as stale');
+      assert.deepEqual([...delivered.payload.includedFindingIds].sort(), [held.id, confirmed.id].sort());
+      // The limited-confidence finding is disclosed on its own card, not dropped.
+      assert.match(delivered.payload.html, /Low confidence/);
+      assert.equal(await queuedRuns(), 0, 'delivering a held finding must not schedule a rebuild');
+      for (const id of [held.id, confirmed.id]) {
+        const saved = (await list<Finding>(pool, 'findings')).find((finding) => finding.id === id)!;
+        assert.ok(saved.reviewNotifiedAt, `finding ${id} is recorded as announced`);
+      }
     });
-    await t.test('an operator-approved send that is held by the policy is refused and re-reviewed', async () => {
+    await t.test('an operator-approved send of a limited-confidence finding is delivered', async () => {
       await reset();
       const cve = {
         ...vulnerability(),
@@ -2080,8 +2070,9 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       await run();
       const [queued] = await list<Finding>(pool, 'findings');
       assert.equal(queued.notificationStatus, 'REVIEW_REQUIRED', queued.matchingEvidence);
-      // An approval is a manual override, not a policy override: it must not push
-      // a held finding past the confidence gate to the transport.
+      // The confidence policy no longer withholds a finding: a held finding is
+      // dispatched (with its limitation stated), and an operator approval only
+      // confirms the edits on an already-queued email.
       const advisory: Advisory = {
         id: 'ADV-approved',
         title: 'Approved notice',
@@ -2103,11 +2094,14 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       let transports = 0;
       await deliverNext(pool, config, request, async () => {
         transports++;
-        return 'must-not-send';
+        return 'approved-accepted';
       });
-      assert.equal(transports, 0, 'an approval must not bypass the confidence policy');
-      const job = (await pool.query('SELECT status,error FROM outbox')).rows[0];
-      assert.equal(job.status, 'FAILED', JSON.stringify(job));
+      assert.equal(transports, 1, 'the approved finding reaches the transport');
+      const job = (await pool.query('SELECT status,error,payload FROM outbox')).rows[0];
+      assert.equal(job.status, 'ACCEPTED', JSON.stringify(job));
+      assert.match(job.payload.html, /Low confidence/);
+      const announced = (await list<Finding>(pool, 'findings')).find((f) => f.id === queued.id)!;
+      assert.ok(announced.reviewNotifiedAt);
     });
     await t.test('NVD withdrawals invalidate cached findings and block older feed resurrection', async () => {
       await reset();

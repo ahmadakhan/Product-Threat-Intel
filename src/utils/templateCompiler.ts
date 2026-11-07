@@ -562,12 +562,12 @@ ${classificationBanner}
      </td>
  </tr>
 
-     <!-- HELD FOR REVIEW -->
+     <!-- LIMITED-CONFIDENCE FINDINGS -->
      <tr>
          <td class="mobile-padding" style="padding:0 32px 24px 32px;">
 
              <h2 style="margin:0 0 16px;font-size:18px;color:#0f172a;">
-                 Review Queue
+                 Confidence Follow-up
              </h2>
 
              {{held_for_review}}
@@ -851,9 +851,11 @@ export function renderDailyHealthReport(health: DigestHealth | null, config: Tem
 export function renderHeldForReview(count: number, config: TemplateCustomization): string {
   const safe = normalizeDigestConfig(config);
   if (count === 0) {
-    return `<p style="margin:0;font-size:12px;line-height:20px;color:#64748b;">No findings held for security-team review.</p>`;
+    return `<p style="margin:0;font-size:12px;line-height:20px;color:#64748b;">No outstanding confidence follow-ups.</p>`;
   }
-  return `<p style="margin:0;font-size:14px;line-height:24px;color:#475569;">${count} finding(s) ${count === 1 ? 'is' : 'are'} pending operator review before dispatch. These findings require manual verification of asset applicability and confidence scoring. Review the full alert details in the VulnStream dashboard to confirm or dismiss.</p>`;
+  // Every finding is dispatched; a finding counted here was delivered with a
+  // stated confidence limitation, not withheld for review.
+  return `<p style="margin:0;font-size:14px;line-height:24px;color:#475569;">${count} finding(s) were dispatched with a stated confidence limitation. Each one requires manual verification of asset applicability against current vendor guidance; the delivered email names the reason on the finding itself.</p>`;
 }
 
 const SEVERITY_KPI: Record<string, { label: string; color: string; bg: string }> = {

@@ -489,10 +489,10 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
         const dailyConfig = { ...(await readDailyDigestConfig(db)), timezone };
         const dailyDigestTemplate = await readDailyDigestTemplate(db);
         const advisory = buildDailyDigestAdvisory(findings, settings, todayKey);
-        // The review-queue figure is a global count of held findings in today's
-        // window. It is intentionally the same on every recipient's email: a
-        // held finding has no subscription tier until it is released, and the
-        // number exists to tell the team that work is waiting for review.
+        // Count of findings dispatched today with a stated confidence limitation.
+        // There is no review queue: the figure tells the team how many alerts need
+        // a follow-up applicability check, and is the same on every recipient's
+        // email because a limited-confidence finding is not tier-specific.
         const heldForReview = findingRows.rows.filter(
           (r) => r.data?.cveId && r.data.notificationStatus === 'REVIEW_REQUIRED',
         ).length;
@@ -613,7 +613,8 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
               advisory.id,
               payload,
               `daily:${todayKey}:email:${recipient.id}`,
-              recipient.deliveryGroup === 'EVERYONE' ? 'REVIEW' : 'QUEUED',
+              // Every recipient receives the digest: there is no review queue.
+              'QUEUED',
             )
           )
             jobs++;

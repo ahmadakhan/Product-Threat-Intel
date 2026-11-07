@@ -2,6 +2,18 @@ import type { Db } from '../db.ts';
 import { enqueue } from '../delivery.ts';
 import type { EmailRecipient, WebhookEndpoint } from '../../src/types/index.ts';
 import { readNativeEvidence } from './notificationEvidence.ts';
+
+/**
+ * Escapes a feed-derived value for an HTML text node or attribute.
+ *
+ * The correlation alert carries article titles, URLs and match reasons straight
+ * from ingested feeds. Rendering them uneescaped would let a hostile source
+ * inject markup into a delivered email.
+ */
+const submitSafe = (value: string) =>
+  value.replace(/[&<>"']/g, (character) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!,
+  );
 /** Runs inside a transaction: event claim and existing outbox insertion commit together. */
 export async function queueNativeNotifications(db: Db): Promise<number> {
   const policy = await db.query<{ notifications_enabled: boolean }>('SELECT notifications_enabled FROM correlation_policy WHERE id=1');
@@ -69,16 +81,46 @@ export async function queueNativeNotifications(db: Db): Promise<number> {
         /[\r\n]/g,
         ' ',
       );
+    const reasonLines = evidence.matches
+      .map((match) => `${match.vendor} / ${match.product} (${match.assetId}): ${match.reason}`)
+      .join('\n');
+    const lowConfidenceNotice =
+      'Low confidence notice: at least one correlation is a MEDIUM-confidence match. ' +
+      'Confirm the affected version against vendor guidance before remediation.';
     const text =
       `${evidence.article.title}\n\nEvidence confidence: ${evidence.confidence}\nSource: ${evidence.article.url}\n\n` +
-      evidence.matches
-        .map((match) => `${match.vendor} / ${match.product} (${match.assetId}): ${match.reason}`)
-        .join('\n') +
+      reasonLines +
+      (evidence.confidence === 'MEDIUM' ? `\n\n${lowConfidenceNotice}` : '') +
       '\n\nThis is an applicability signal. Confirm source authenticity and affected versions before remediation.';
-    const payload = { subject, text, cveIds: [], nativeCorrelation };
+    // A body is required: the worker sends `payload.html` whenever it is present,
+    // so a native alert without one shipped a message part that dropped the
+    // confidence statement entirely.
+    const html =
+      '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+      `<title>${submitSafe(subject)}</title></head>` +
+      '<body style="margin:0;padding:24px;background:#f1f3f5;font-family:Arial,Helvetica,sans-serif;">' +
+      '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #dfe4e8;border-top:4px solid #1e40af;">' +
+      '<tr><td style="padding:20px 24px;border-bottom:1px solid #dfe4e8;">' +
+      '<p style="margin:0;font-size:14px;font-weight:700;color:#17212b;">VulnStream Enterprise</p>' +
+      '<p style="margin:3px 0 0;font-size:12px;color:#52606d;">THREAT INTELLIGENCE / CORRELATION SIGNAL</p></td></tr>' +
+      '<tr><td style="padding:24px;">' +
+      `<p style="margin:0 0 12px;"><span style="display:inline-block;padding:4px 9px;border-radius:4px;background:${evidence.confidence === 'HIGH' ? '#1e40af' : '#b7791f'};color:#ffffff;font-size:11px;font-weight:700;">${submitSafe(evidence.confidence)} CONFIDENCE</span></p>` +
+      `<h1 style="margin:0 0 12px;font-size:20px;line-height:28px;color:#111827;">${submitSafe(evidence.article.title)}</h1>` +
+      `<p style="margin:0 0 4px;font-size:13px;color:#374151;"><strong>Source:</strong> ${submitSafe(evidence.article.url)}</p>` +
+      `<p style="margin:0 0 12px;font-size:13px;color:#374151;"><strong>Evidence confidence:</strong> ${submitSafe(evidence.confidence)}</p>` +
+      `<pre style="margin:0;padding:12px;background:#f7f8fa;border-left:3px solid #b7791f;font-size:13px;line-height:20px;color:#374151;white-space:pre-wrap;word-break:break-word;">${submitSafe(reasonLines)}</pre>` +
+      (evidence.confidence === 'MEDIUM'
+        ? `<p style="margin:12px 0 0;padding:8px 10px;background:#fffbeb;border-left:3px solid #b7791f;font-size:13px;line-height:19px;color:#7c2d12;"><strong>Low confidence notice:</strong> ${submitSafe(lowConfidenceNotice.replace('Low confidence notice: ', ''))}</p>`
+        : '') +
+      '<p style="margin:12px 0 0;font-size:13px;line-height:20px;color:#52606d;">This is an applicability signal. Confirm source authenticity and affected versions before remediation.</p>' +
+      '</td></tr></table></body></html>';
+    const payload = { subject, text, html, cveIds: [], nativeCorrelation };
     const identity = `native:${advisoryId}:${evidence.evidenceHash}`;
     for (const recipient of eligibleRecipients) {
-      const review = evidence.confidence === 'MEDIUM' || recipient.deliveryGroup === 'EVERYONE';
+      // Every recipient is queued for delivery, whatever the evidence confidence
+      // or delivery group: there is no review queue. The subject names the
+      // confidence and the body states that the signal needs confirmation, so a
+      // MEDIUM-confidence correlation is disclosed rather than withheld.
       if (
         await enqueue(
           db,
@@ -87,7 +129,7 @@ export async function queueNativeNotifications(db: Db): Promise<number> {
           `NATIVE:${advisoryId}`,
           { ...payload, recipientEmail: recipient.email },
           `${identity}:email:${recipient.id}`,
-          review ? 'REVIEW' : 'QUEUED',
+          'QUEUED',
         )
       )
         queued++;

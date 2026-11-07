@@ -2306,11 +2306,16 @@ export function createApp(
     asyncRoute(async (req, res) => {
       const id = outboxId(req.params.id);
       await transaction(pool, async (db) => {
+        // Findings are queued for delivery, not for review. "Approve" therefore
+        // confirms the operator's edits on a queued or previously-held email and
+        // releases it immediately; a job already in flight or delivered cannot
+        // be re-sent from here (use the follow-up resend route).
         const row = await db.query(
-          "UPDATE outbox SET status='QUEUED',review_approved=true,attempts=0,next_attempt=now(),error=NULL,locked_at=NULL,lock_token=NULL,updated_at=now() WHERE id=$1 AND channel='email' AND status='REVIEW' RETURNING advisory_id, edits, payload",
+          "UPDATE outbox SET status='QUEUED',review_approved=true,attempts=0,next_attempt=now(),error=NULL,locked_at=NULL,lock_token=NULL,updated_at=now() WHERE id=$1 AND channel='email' AND status IN ('REVIEW','QUEUED') AND locked_at IS NULL RETURNING advisory_id, edits, payload",
           [id],
         );
-        if (!row.rowCount) throw new HttpError(409, 'Only notifications awaiting review can be approved');
+        if (!row.rowCount)
+          throw new HttpError(409, 'Only a queued email or a notification awaiting review can be approved');
         const edits: ReviewEdits = row.rows[0].edits || {};
         if (Object.keys(edits).length) {
           const currentPayload = row.rows[0].payload;

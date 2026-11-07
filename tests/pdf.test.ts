@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { advisoryHtmlToText, renderAdvisoryPdf, closePdfRenderer } from '../server/pdf.ts';
 import { renderAdvisory } from '../server/advisoryRender.ts';
-import { advisoryFilename, unverifiableMatchFilename } from '../server/pdf.ts';
+import { advisoryFilename, timestampedAdvisoryFilename } from '../server/pdf.ts';
 import { compileCustomizedTemplate, DEFAULT_TEMPLATE_CUSTOMIZATION } from '../src/utils/templateCompiler.ts';
 import { DEFAULT_EMAIL_CONFIG } from '../shared/state.ts';
 import { sendProviderEmail } from '../server/emailProviders.ts';
@@ -26,9 +26,9 @@ test('advisoryFilename uses the real advisory ID', () => {
   assert.equal(advisoryFilename('ADV-05Oct2026-A1B2C3D4'), 'ADV-05Oct2026-A1B2C3D4.pdf');
 });
 
-test('unverifiableMatchFilename remains timestamped without an advisory ID', () => {
+test('a document without an advisory ID is named with its timestamp', () => {
   assert.equal(
-    unverifiableMatchFilename(new Date('2026-03-09T08:05:00Z'), 'UTC'),
+    timestampedAdvisoryFilename(new Date('2026-03-09T08:05:00Z'), 'UTC'),
     '09Mar20260805.pdf',
   );
 });
@@ -97,6 +97,41 @@ test('renderAdvisoryPdf renders matching clean cards, badges, metadata and links
   } finally {
     await closePdfRenderer();
   }
+});
+
+test('the PDF attachment contains the same low-confidence notice as the email', async () => {
+  // The attachment is rendered from the exact HTML the recipient receives, so a
+  // finding whose confidence is limited is annotated in both, not just one.
+  const template = compileCustomizedTemplate(DEFAULT_TEMPLATE_CUSTOMIZATION);
+  const limited = {
+    id: 'f-limited',
+    cveId: 'CVE-2026-55555',
+    confidence: 70,
+    matchingEvidence: 'Matched strict CPE 2.3 component tokens (70% confidence)',
+    matchedAssetVendor: 'Acme',
+    matchedAssetProduct: 'Widget',
+    matchedAssetName: 'srv-1 (Acme Widget)',
+    cve: {
+      cveId: 'CVE-2026-55555',
+      title: 'Acme widget flaw',
+      description: 'Remote code execution in Acme widget.',
+      publishedDate: '2026-01-01T00:00:00Z',
+      modifiedDate: '2026-01-01T00:00:00Z',
+      cvss: { severity: 'CRITICAL', score: 9.8 },
+      cisaKev: { isKev: false },
+      remediation: {},
+      cpeMatches: [],
+    },
+  } as unknown as Finding;
+  const view = { ...advisory, cveIds: ['CVE-2026-55555'], findingIds: ['f-limited'] };
+  const html = renderAdvisory(template, view, [limited]);
+  const text = advisoryHtmlToText(html);
+  assert.match(text, /Low confidence/);
+  assert.match(text, /70% match confidence/);
+  assert.match(text, /Matched strict CPE 2\.3 component tokens/);
+  const pdf = await renderAdvisoryPdf(html);
+  await closePdfRenderer();
+  assert.equal(Buffer.from(pdf).slice(0, 5).toString(), '%PDF-');
 });
 
 test('Chromium PDF renders final HTML without executing scripts or fetching remote resources', async () => {

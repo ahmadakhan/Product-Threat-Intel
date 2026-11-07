@@ -1284,9 +1284,9 @@ export function SettingsView() {
                       </ProcessingField>
                       <ProcessingField
                         id="processing-review-confidence"
-                        label="Review email minimum confidence"
+                        label="Limited-confidence notice threshold"
                         unit="/ 100"
-                        hint={`Findings held for review at or above this minimum can generate notices when review notifications are enabled. Lower-confidence findings remain visible without automatic review email.${!findingForm.reviewUnverifiableMatches ? " Turn on 'Notify the Security team for review' to edit." : ''}`}
+                        hint="Every finding is dispatched. Findings below this confidence are annotated in the email with their confidence and the reason applicability needs confirmation. This setting never suppresses an email."
                         error={reviewConfidenceError}
                       >
                         <input
@@ -1296,7 +1296,6 @@ export function SettingsView() {
                           max={100}
                           step={1}
                           required
-                          disabled={!findingForm.reviewUnverifiableMatches}
                           aria-invalid={Boolean(reviewConfidenceError)}
                           aria-describedby={`processing-review-confidence-hint${reviewConfidenceError ? ' processing-review-confidence-error' : ''}`}
                           className={field}
@@ -1331,8 +1330,8 @@ export function SettingsView() {
                       <div className="processing-choice-grid">
                         <ProcessingToggle
                           id="processing-unverifiable"
-                          title="Notify the Security team for review"
-                          description="Send notices for findings held for review that meet the review email minimum confidence."
+                          title="Annotate limited-confidence findings"
+                          description="Findings that cannot be fully confirmed are always dispatched; this states the limitation and its reason on the finding in the email."
                           checked={findingForm.reviewUnverifiableMatches ?? false}
                           onChange={(checked) =>
                             setFindingForm({ ...findingForm, reviewUnverifiableMatches: checked })
@@ -1351,9 +1350,9 @@ export function SettingsView() {
                       <p className="processing-policy-note">
                         <AlertCircle size={14} aria-hidden="true" />
                         <span>
-                          Hard source, complex applicability, and contradicting identifier holds cannot be
-                          bypassed by confidence thresholds or the version-uncertain dispatch toggle.
-                          No findings are deleted by these thresholds.
+                          All findings are dispatched; there is no review queue. Confidence below 100% is
+                          stated on the finding in the email, together with why applicability must be
+                          confirmed. No findings are deleted or withheld by these thresholds.
                         </span>
                       </p>
                     </div>

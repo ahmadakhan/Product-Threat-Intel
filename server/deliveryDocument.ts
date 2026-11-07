@@ -6,6 +6,7 @@ import {
 import { confidenceIsLimited, renderAdvisory } from './advisoryRender.ts';
 import { advisoryEmail } from './advisoryEmail.ts';
 import { mlComposeAdvisoryEmail } from './ml/integration.ts';
+import { PDF_MAX_HTML_BYTES } from './pdf.ts';
 
 /**
  * Canonical delivery document builder.
@@ -27,8 +28,13 @@ import { mlComposeAdvisoryEmail } from './ml/integration.ts';
  *    findings than the ones described in the body.
  */
 
-/** Max rendered HTML size accepted by the PDF renderer (matches `pdf.ts`). */
-export const DELIVERY_HTML_MAX_BYTES = 512 * 1024;
+/**
+ * Max rendered HTML size accepted by the PDF renderer.
+ *
+ * Imported from the renderer rather than duplicated so the delivery gate and the
+ * renderer can never disagree about what is attachable.
+ */
+export const DELIVERY_HTML_MAX_BYTES = PDF_MAX_HTML_BYTES;
 
 export interface DeliveryDocument {
   subject: string;

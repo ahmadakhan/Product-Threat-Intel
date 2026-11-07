@@ -2,7 +2,7 @@
 import { describeError, writeEvent } from './events';
 import { classifyDeliveryError, computeRetryDelay, getMlRuntime } from './ml/integration.ts';
 import { advisoryEmail } from './advisoryEmail';
-import { advisoryFilename, renderAdvisoryPdf, unverifiableMatchFilename } from './pdf';
+import { advisoryFilename, renderAdvisoryPdf } from './pdf';
 import {
   deliveryHtmlIsAttachable,
   renderFindingsDocument,
@@ -18,15 +18,24 @@ import type {
   IntelligenceArticle,
   IntelligenceMatch,
 } from '../src/types/index.ts';
-/** Payload carried by a news (IntelligenceMatch) delivery job. */
+/**
+ * Payload carried by a consolidated news delivery job.
+ *
+ * `articles` is the de-duplication view: `newsQueue.alreadyNotified` reads it
+ * from every queued and accepted job to decide whether an article was already
+ * delivered to a recipient. It must therefore always list every article the
+ * email carries.
+ */
 export interface NewsEvidencePayload {
-  /** IntelligenceMatch.id this job was queued from. */
+  /** First IntelligenceMatch.id consolidated into this email. */
   matchId: string;
   /** Primary article, retained for backwards-compatible consumers. */
   article: Pick<IntelligenceArticle, 'id' | 'title' | 'url' | 'sourceFeeds' | 'publishedDate'>;
-  /** Complete evidence set that contributed to this match. */
+  /** Every article carried by this consolidated email. */
   articles: Array<Pick<IntelligenceArticle, 'id' | 'title' | 'url' | 'sourceFeeds' | 'publishedDate'>>;
-  /** Asset the article was matched against. */
+  /** Assets the articles were matched against. */
+  assets: string[];
+  /** @deprecated First matched asset; use `assets`. */
   asset: { name: string; vendor?: string; product?: string };
   /** CVE identifiers referenced by the matched article, if any. */
   cveIds: string[];
@@ -64,8 +73,7 @@ import type { Config } from './config';
 import { transaction, get, getMany, list, put, appendAudit, schemaLockKey } from './db';
 import type { Db } from './db';
 import { createRequester, type Requester } from './network';
-import { isFindingDelivery, eligibleForReviewNotification } from '../src/utils/findingDelivery.ts';
-import { renderUnverifiableReviewEmail } from './reviewEmail.ts';
+import { isFindingDelivery } from '../src/utils/findingDelivery.ts';
 import {
   effectiveSubject,
   normalizeEmailSubject,
@@ -527,19 +535,10 @@ async function buildPdfAttachment(
   if (content.payload.dailyDigest) return undefined;
   try {
     const pdf = await renderAdvisoryPdf(content.payload.html);
-    // Timestamped `ddMMMyyyyHHMM.pdf` in the workspace timezone, so the
-    // attachment name matches the Generated stamp inside the advisory. The
-    // sender is also invoked without a db handle (standalone cron), in which
-    // case the renderer's default zone is used.
-    const timezone = db
-      ? ((await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS).timezone
-      : undefined;
-    const filename = content.advisory_id.startsWith('UNVERIFIABLE:')
-      ? unverifiableMatchFilename(
-          content.payload.generatedAt ? new Date(content.payload.generatedAt) : new Date(),
-          timezone,
-        )
-      : advisoryFilename(content.advisory_id);
+    // The attachment is the document the email carries, so it is named after that
+    // document's identity. Synthetic bundles (news, consolidated findings,
+    // zero-day digest) get a readable stem instead of their internal prefix.
+    const filename = advisoryFilename(deliveryAttachmentStem(content));
     return {
       filename,
       content: Buffer.from(pdf),
@@ -562,6 +561,22 @@ async function buildPdfAttachment(
     return undefined;
   }
 }
+/**
+ * Attachment stem for a delivery.
+ *
+ * Real advisories keep their id. Synthetic bundles carry an internal prefix and
+ * a potentially very long id list, which makes a poor filename and can exceed
+ * filesystem limits; those get a truncation-safe stem derived from the same id.
+ */
+function deliveryAttachmentStem(job: Job): string {
+  const id = job.advisory_id || job.id;
+  if (!/^(NEWS|FINDINGS|ZERODAY|UNVERIFIABLE|SELFHEAL|DAILY[_-])/i.test(id)) return id;
+  const [prefix] = id.split(':');
+  const label = prefix.replace(/[_-]+/g, '-').toUpperCase();
+  const fingerprint = createHash('sha256').update(id).digest('hex').slice(0, 12).toUpperCase();
+  return `${label}-${fingerprint}`;
+}
+
 export type DeliveryConfirmation = 'delivered' | 'not-delivered' | 'unknown';
 /**
  * Decides, without ever contacting the transport, whether a previous attempt
@@ -1053,20 +1068,84 @@ export async function queueBulkNotificationAdvisory(
   await put(db, 'advisories', advisory.id, advisory);
   return count;
 }
-/**
- * News evidence is queued through `server/newsQueue.ts`.
- *
- * The previous per-match email produced one message per `IntelligenceMatch`,
- * which meant the same article was emailed again whenever the matcher re-keyed
- * it (it keys matches on `hash(cveId || articleId)`), arrived from another feed,
- * or was re-correlated after a CVE was assigned. News is now consolidated into
- * one email per recipient per run, and an article already sent to a recipient
- * is never sent again (see `queueConsolidatedNews`).
- */
+// News evidence is queued through `server/newsQueue.ts` (`queueConsolidatedNews`).
+// The previous per-match email produced one message per `IntelligenceMatch`,
+// which meant the same article was emailed again whenever the matcher re-keyed
+// it (it keys matches on `hash(cveId || articleId)`), arrived from another feed,
+// or was re-correlated after a CVE was assigned. News is now consolidated into
+// one email per recipient per run, and an article already sent to a recipient is
+// never sent again.
 
 export interface ConsolidatedFindingsDispatchOptions {
   /** Recipients to notify; defaults to every enabled recipient. */
   recipients?: EmailRecipient[];
+}
+
+/**
+ * Deterministic identity of a consolidated finding batch.
+ *
+ * Derived from the finding ids, so the same set of findings always maps to the
+ * same advisory id, dedupe bucket and document. That is what makes a repeated
+ * queue pass idempotent and lets a queued batch be recognised after a restart.
+ */
+export function consolidatedFindingBatchId(findingIds: readonly string[]): string {
+  return createHash('sha256').update([...findingIds].sort().join(',')).digest('hex').slice(0, 24);
+}
+
+/**
+ * Builds the advisory view and the single document for a consolidated finding
+ * batch.
+ *
+ * Used both when the batch is queued and when a queued batch has to be rebuilt
+ * because some of its findings became stale, so the two paths can never produce
+ * differently-shaped content.
+ */
+export function consolidatedFindingsDocument(
+  findings: Finding[],
+  generatedAt: Date,
+): { advisory: Advisory; document: { subject: string; text: string; html: string } } {
+  const batchId = consolidatedFindingBatchId(findings.map((finding) => finding.id));
+  const advisory: Advisory = {
+    id: `ADV-${batchId.slice(0, 12).toUpperCase()}`,
+    title: 'Security finding notification',
+    severity: highestSeverity(findings),
+    cveIds: uniqueSorted(findings.map((finding) => finding.cveId)),
+    findingIds: findings.map((finding) => finding.id),
+    createdDate: generatedAt.toISOString(),
+    deliveryStatus: 'PENDING',
+    recipientCount: 0,
+    executiveSummary: `${findings.length} inventory correlation${findings.length === 1 ? '' : 's'} require investigation. Confirm applicability and consult the vendor before remediation.`,
+    remediationInstructions:
+      'Review vendor advisories and deploy tested remediation through your change process.',
+    vendorLink: vendorLinkFor(findings),
+    affectedSystems: uniqueSorted(findings.map((finding) => finding.matchedAssetName)),
+    isDigestBatch: findings.length > 1,
+  };
+  const document = renderFindingsDocument({ advisory, findings, generatedAt });
+  return { advisory, document: { subject: document.subject, text: document.text, html: document.html } };
+}
+
+/** Rebuilds a queued consolidated batch's payload from its surviving findings. */
+function consolidatedPayloadFor(
+  advisory: Advisory,
+  findings: Finding[],
+  cveIds: string[],
+): Job['payload'] {
+  const generatedAt = new Date();
+  const { document } = consolidatedFindingsDocument(findings, generatedAt);
+  const evidence = deliveryRevisionEvidence(findings);
+  return {
+    ...document,
+    cveIds,
+    includedFindingIds: findings.map((finding) => finding.id),
+    ...evidence,
+    contentRevision: createHash('sha256')
+      .update(stableJson({ findingIds: findings.map((finding) => finding.id).sort(), ...evidence }))
+      .digest('hex')
+      .slice(0, 20),
+    generatedAt: generatedAt.toISOString(),
+    digestKey: advisory.id,
+  };
 }
 
 /**
@@ -1103,59 +1182,43 @@ export async function queueConsolidatedFindingNotifications(
   if (!recipients.length) return 0;
   let queued = 0;
   const generatedAt = new Date();
-  const documentCache = new Map<string, { subject: string; text: string; html: string; cveIds: string[] }>();
+  const documentCache = new Map<string, { payload: Job['payload']; priority: number }>();
   for (const recipient of recipients) {
     const permitted = unique.filter((finding) => recipientAllows(recipient, finding));
     if (!permitted.length) continue;
     const findingIds = permitted.map((finding) => finding.id);
-    const bucket = createHash('sha256').update(findingIds.join(',')).digest('hex').slice(0, 24);
-    let document = documentCache.get(bucket);
-    if (!document) {
-      const advisory: Advisory = {
-        id: `ADV-${bucket.slice(0, 12).toUpperCase()}`,
-        title: 'Security finding notification',
-        severity: highestSeverity(permitted),
-        cveIds: uniqueSorted(permitted.map((finding) => finding.cveId)),
-        findingIds,
-        createdDate: generatedAt.toISOString(),
-        deliveryStatus: 'PENDING',
-        recipientCount: 0,
-        executiveSummary: `${permitted.length} inventory correlation${permitted.length === 1 ? '' : 's'} require investigation. Confirm applicability and consult the vendor before remediation.`,
-        remediationInstructions:
-          'Review vendor advisories and deploy tested remediation through your change process.',
-        vendorLink: vendorLinkFor(permitted),
-        affectedSystems: uniqueSorted(permitted.map((finding) => finding.matchedAssetName)),
-        isDigestBatch: permitted.length > 1,
+    const bucket = consolidatedFindingBatchId(findingIds);
+    let built = documentCache.get(bucket);
+    if (!built) {
+      const { advisory, document } = consolidatedFindingsDocument(permitted, generatedAt);
+      const evidence = deliveryRevisionEvidence(permitted);
+      built = {
+        payload: {
+          ...document,
+          cveIds: advisory.cveIds,
+          includedFindingIds: findingIds,
+          ...evidence,
+          contentRevision: createHash('sha256')
+            .update(stableJson({ findingIds: [...findingIds].sort(), ...evidence }))
+            .digest('hex')
+            .slice(0, 20),
+          generatedAt: generatedAt.toISOString(),
+          digestKey: advisory.id,
+        },
+        priority: advisoryPriority(permitted),
       };
-      const built = renderFindingsDocument({ advisory, findings: permitted, generatedAt });
-      document = { ...built, cveIds: advisory.cveIds };
-      documentCache.set(bucket, document);
+      documentCache.set(bucket, built);
     }
-    const evidence = deliveryRevisionEvidence(permitted);
-    const contentRevision = createHash('sha256')
-      .update(stableJson({ findingIds, ...evidence }))
-      .digest('hex')
-      .slice(0, 20);
     if (
       await enqueue(
         db,
         'email',
         recipient.id,
         `FINDINGS:${bucket}`,
-        {
-          subject: document.subject,
-          text: document.text,
-          html: document.html,
-          cveIds: document.cveIds,
-          includedFindingIds: findingIds,
-          ...evidence,
-          contentRevision,
-          generatedAt: generatedAt.toISOString(),
-          recipientEmail: recipient.email,
-        },
-        `findings:${contentRevision}:email:${recipient.id}`,
+        { ...built.payload, recipientEmail: recipient.email },
+        `findings:${built.payload.contentRevision}:email:${recipient.id}`,
         'QUEUED',
-        advisoryPriority(permitted),
+        built.priority,
       )
     )
       queued++;
@@ -1619,6 +1682,10 @@ export async function deliverNext(
       const vendorAliases = buildAliasMap(aliasEntries, 'VENDOR');
       const productAliases = buildAliasMap(aliasEntries, 'PRODUCT');
       const invalid: string[] = [];
+      // Findings whose evidence changed or that no longer apply. The document is
+      // rebuilt without them rather than delivering a body that disagrees with
+      // its own CVE list.
+      const staleIds = new Set<string>();
       let revalidationError = '';
       const findingMap = await getMany<Finding>(pool, 'findings', declaredFindingIds);
       const findings = [...findingMap.values()];
@@ -1687,42 +1754,78 @@ export async function deliverNext(
         // A finding the policy still holds for review is disclosed, not withheld.
         // Every match is dispatched; the rendered advisory annotates the finding
         // with its confidence limitation. Only a finding that no longer applies
-        // at all (removed, resolved, withdrawn, CVE changed) is invalidated.
+        // at all (removed, resolved, withdrawn, CVE changed) is dropped.
         if (match && match.notificationStatus !== 'QUEUED_FOR_DISPATCH') holdGated = true;
         const reason = !finding
           ? 'a finding was removed'
-          : ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status)
-            ? 'a finding was resolved or dismissed'
-            : cve && withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate)
-              ? 'a CVE was withdrawn'
-              : cve &&
-                  job.payload.cveRevisions?.[cve.cveId] &&
-                  job.payload.cveRevisions[cve.cveId] !== revision(cve)
-                ? 'CVE intelligence changed'
-                : !match
-                  ? 'current inventory no longer matches'
-                  : job.payload.findingRevisions?.[id] !== findingRevision(match)
-                    ? 'inventory or matching evidence changed'
-                    : undefined;
-        if (reason) invalid.push(reason);
+          : !asset
+            ? 'the matched inventory item is no longer active'
+            : ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status)
+              ? 'a finding was resolved or dismissed'
+              : cve && withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate)
+                ? 'a CVE was withdrawn'
+                : cve &&
+                    job.payload.cveRevisions?.[cve.cveId] &&
+                    job.payload.cveRevisions[cve.cveId] !== revision(cve)
+                  ? 'CVE intelligence changed'
+                  : !match
+                    ? 'current inventory no longer matches'
+                    : job.payload.findingRevisions?.[id] !== findingRevision(match)
+                      ? 'inventory or matching evidence changed'
+                      : undefined;
+        if (reason) {
+          invalid.push(reason);
+          staleIds.add(id);
+        }
       }
       // A safety-check failure defers the whole bundle: it is retried on the
       // normal backoff and can never reach the transport while unproven.
       if (revalidationError) throw new Error(revalidationError);
-      // The queued payload contains the complete advisory. Sending it after any
-      // finding becomes stale would disclose or act on invalidated inventory.
-      // Mark the bundle as stale and trigger an immediate rebuild instead of
-      // surfacing this as a hard error that requires operator intervention.
+      const surviving = currentFindings.filter((finding) => !staleIds.has(finding.id));
+      currentFindings.length = 0;
+      currentFindings.push(...surviving);
+      // A finding is dropped from the delivered document in two situations, both
+      // re-rendered from the survivors so the email still describes exactly what
+      // it carries:
+      //  - the finding is no longer applicable (removed, resolved, withdrawn,
+      //    inventory deactivated). This is true for every bundle shape, and
+      //    excluding it is what lets the remaining findings still be delivered.
+      //  - the evidence was merely re-derived. A consolidated batch is rebuilt
+      //    from its survivors; a content-revisioned advisory keeps its existing
+      //    rebuild path, because its body cannot be re-hashed here.
+      // Enumerated positively: a new or reworded reason must default to the safe
+      // whole-bundle rebuild, never to silently editing an advisory body.
+      const EVIDENCE_ONLY_REASONS = new Set([
+        'inventory or matching evidence changed',
+        'CVE intelligence changed',
+      ]);
+      const evidenceOnly = invalid.every((reason) => EVIDENCE_ONLY_REASONS.has(reason));
       if (invalid.length) {
-        // A queued document that names a finding which no longer applies (or whose
-        // evidence changed) must not be delivered. Excluding the stale finding and
-        // sending the remainder would deliver a body that disagrees with its own
-        // CVE list, so the whole bundle is rebuilt from current inventory.
-        permanent = true;
-        staleAdvisory = true;
-        throw new Error(
-          `Some advisory findings are no longer applicable; rebuild from current inventory. Reason: ${[...new Set(invalid)].join('; ')}.`,
-        );
+        if (surviving.length && (advisory.id.startsWith('FINDINGS:') || !evidenceOnly)) {
+          declaredFindingIds = surviving.map((finding) => finding.id);
+          declaredCveIds = [...new Set(surviving.map((finding) => finding.cveId))];
+          // Every shape is rebuilt with the canonical document builder so the
+          // attachment stays the email. A digest keeps its batch key so the
+          // advisory accounting still recognises the delivery.
+          job.payload = consolidatedPayloadFor(advisory, surviving, declaredCveIds);
+        } else if (!surviving.length) {
+          // Nothing in this bundle can still be delivered.
+          permanent = true;
+          staleAdvisory = true;
+          throw new Error(
+            `Some advisory findings are no longer applicable; rebuild from current inventory. Reason: ${[...new Set(invalid)].join('; ')}.`,
+          );
+        } else {
+          // A content-revisioned advisory body cannot be edited: sending it after
+          // any finding becomes stale would disclose or act on invalidated
+          // inventory. Mark the bundle as stale and rebuild it instead of
+          // surfacing a hard error that requires operator intervention.
+          permanent = true;
+          staleAdvisory = true;
+          throw new Error(
+            `Some advisory findings are no longer applicable; rebuild from current inventory. Reason: ${[...new Set(invalid)].join('; ')}.`,
+          );
+        }
       }
     }
     if (job.channel === 'email') {
