@@ -3,6 +3,11 @@ import { describeError, writeEvent } from './events';
 import { classifyDeliveryError, computeRetryDelay, getMlRuntime } from './ml/integration.ts';
 import { advisoryEmail } from './advisoryEmail';
 import { advisoryFilename, renderAdvisoryPdf, unverifiableMatchFilename } from './pdf';
+import {
+  deliveryHtmlIsAttachable,
+  renderFindingsDocument,
+  renderFindingsText,
+} from './deliveryDocument.ts';
 import type pg from 'pg';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine';
 import { DEFAULT_SETTINGS, DEFAULT_EMAIL_CONFIG } from '../shared/state.ts';
@@ -50,24 +55,7 @@ export interface ZeroDayDigestPayload {
   articles: Array<{ id: string; title: string; url: string; sourceFeeds: string[] }>;
 }
 
-/** Per-finding record inside an unverifiable-match batch. */
-export interface UnverifiableMatchFinding {
-  findingId: string;
-  asset: { name: string; vendor?: string; product?: string };
-  cveId: string;
-  evidence: string;
-  severity: string;
-  cvssScore: number;
-}
-/** Payload carried by an unverifiable-match review notification delivery job. */
-export interface UnverifiableMatchPayload {
-  /** Findings batched into this single combined notification, in display order. */
-  findings: UnverifiableMatchFinding[];
-  /** CVE identifiers referenced across the batch, de-duplicated and sorted. */
-  cveIds: string[];
-  /** Workspace timezone used for publication/update timestamps in the rendered email. */
-  timezone?: string;
-}
+
 import { buildAliasMap, parseCPE23 } from '../src/utils/cpeMatcher';
 import { randomUUID, createHmac, createHash } from 'node:crypto';
 import { mergeCveRecords, stableJson } from '../src/utils/deduplicator';
@@ -137,11 +125,20 @@ export interface Job {
      */
     newsEvidence?: NewsEvidencePayload;
     /**
-     * Unverifiable-match evidence queued for direct delivery to the Security
-     * team. The match could not verify the version range, so the finding is held
-     * for review despite a product-identity correlation.
+     * Legacy unverifiable-match review bulletin.
+     *
+     * No longer produced: findings the policy could not fully confirm are now
+     * dispatched in the ordinary consolidated finding email, annotated with
+     * their confidence limitation. The field is retained so an outbox row queued
+     * by an older build is still recognised as a standalone (advisory-less)
+     * bundle and delivered or terminally failed on its own terms instead of being
+     * mistaken for a job whose advisory vanished.
      */
-    unverifiableMatch?: UnverifiableMatchPayload;
+    unverifiableMatch?: {
+      findings: Array<{ findingId: string; cveId: string; evidence: string; severity: string }>;
+      cveIds: string[];
+      timezone?: string;
+    };
     /**
      * Zero-day digest consolidated under the per-run cap
      * (`rankAndRateLimitZeroDays`). When present, the job is a standalone summary
@@ -165,6 +162,15 @@ export interface Job {
      * itself — so the sender skips PDF rendering entirely.
      */
     dailyDigest?: boolean;
+    /**
+     * ISO instant pinned when the body was rendered.
+     *
+     * The document embeds this timestamp, and the PDF attachment is rendered
+     * from the same HTML. Pinning it proves the attachment matches the body and
+     * gives retries byte-identical content instead of a document that drifts by
+     * a second on every attempt.
+     */
+    generatedAt?: string;
   };
   attempts: number;
   prior_attempt_at?: Date | string | null;
@@ -496,23 +502,28 @@ export function webhookAllows(hook: WebhookEndpoint, finding: Finding): boolean 
     (hook.events.includes('CISA_KEV') && finding.cve.cisaKev?.isKev)
   );
 }
-/** Renders the advisory HTML to a PDF attachment for the job, or undefined when
- *  PDF delivery is disabled, the job carries no HTML body, or rendering fails.
+/** Converts the email body into a PDF attachment, or returns undefined when PDF
+ *  delivery is disabled, the job carries no HTML body, or rendering fails.
  *  Failures degrade to HTML-only delivery instead of blocking the send.
  *
- *  The caller passes the job *after* `applyJobEdits`, so the PDF is rendered
- *  from the same body the recipient receives. Rendering from `payload.html`
- *  directly left an operator's edit (or a custom body override) visible in the
- *  email but absent from its attachment. */
-async function buildPdfAttachment(job: Job, config: Config, db?: Db): Promise<EmailAttachment | undefined> {
-  // The sender may be called directly (queue test email, digest) with a job
-  // whose edits were not applied; normalise here so there is no path that
-  // renders a PDF from an unedited body.
-  const content = applyJobEdits(job);
+ *  The input is the *exact* HTML the message is sent with (the caller passes the
+ *  output of `applyJobEdits`), so the attachment is the same document as the
+ *  email — identical header, styling, colours, CVE cards, low-confidence notices
+ *  and footer. Rendering from `payload.html` directly left an operator's edit
+ *  (or a custom body override) visible in the email but absent from its
+ *  attachment. */
+async function buildPdfAttachment(
+  content: Job,
+  config: Config,
+  db?: Db,
+): Promise<EmailAttachment | undefined> {
   if (config.ATTACH_ADVISORY_PDF !== 'true' || !content.payload.html) return undefined;
+  // Only a document that is itself deliverable can be attached; the renderer
+  // has a hard size limit and an oversized body would fail the whole send.
+  if (!deliveryHtmlIsAttachable(content.payload.html)) return undefined;
   // Operational self-healing alerts are infrastructure messages, not advisories;
   // they must never carry a PDF attachment.
-  if (typeof job.advisory_id === 'string' && job.advisory_id.startsWith('SELFHEAL:')) return undefined;
+  if (typeof content.advisory_id === 'string' && content.advisory_id.startsWith('SELFHEAL:')) return undefined;
   if (content.payload.dailyDigest) return undefined;
   try {
     const pdf = await renderAdvisoryPdf(content.payload.html);
@@ -523,9 +534,12 @@ async function buildPdfAttachment(job: Job, config: Config, db?: Db): Promise<Em
     const timezone = db
       ? ((await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS).timezone
       : undefined;
-    const filename = job.advisory_id?.startsWith('UNVERIFIABLE:')
-      ? unverifiableMatchFilename(new Date(), timezone)
-        : advisoryFilename(job.advisory_id);
+    const filename = content.advisory_id.startsWith('UNVERIFIABLE:')
+      ? unverifiableMatchFilename(
+          content.payload.generatedAt ? new Date(content.payload.generatedAt) : new Date(),
+          timezone,
+        )
+      : advisoryFilename(content.advisory_id);
     return {
       filename,
       content: Buffer.from(pdf),
@@ -539,9 +553,9 @@ async function buildPdfAttachment(job: Job, config: Config, db?: Db): Promise<Em
         code: 'delivery.pdf_attachment_failed',
         message: 'Advisory PDF attachment could not be generated; delivering HTML only',
         context: {
-          jobId: job.id,
-          channel: job.channel,
-          advisoryId: job.advisory_id,
+          jobId: content.id,
+          channel: content.channel,
+          advisoryId: content.advisory_id,
           error: String((error as Error)?.message || error),
         },
       }).catch(() => undefined);
@@ -624,7 +638,10 @@ export function createMailSender(
       const settings = (db && (await get<AppSettings>(db, 'settings', 'main'))) || DEFAULT_SETTINGS;
       if (settings.emailEnabled === false) throw new Error('Email delivery is disabled by settings');
     }
-    const attachment = await buildPdfAttachment(job, config, db);
+    // Apply operator edits exactly once and build the attachment from the very
+    // body being sent, so the PDF is byte-identical to the email.
+    const content = applyJobEdits(job);
+    const attachment = await buildPdfAttachment(content, config, db);
     if (!isSmtpEmailProvider(saved.provider)) {
       const token = decrypt(saved.apiKey, encryptionKeys(config), `email-provider:${saved.provider}`);
       if (!token) throw new Error('Email provider token is missing');
@@ -637,7 +654,7 @@ export function createMailSender(
         const id = await sendProviderEmail(
           { ...saved, mailjetApiSecret: mailjetSecret },
           token,
-          job,
+          content,
           request,
           config.MAILJET_SANDBOX_MODE === 'true',
           attachment,
@@ -678,13 +695,13 @@ export function createMailSender(
     const result = await smtpTransport.sendMail({
       from: { address: fromEmail, name: saved.fromName },
       ...(saved.replyTo ? { replyTo: saved.replyTo } : {}),
-      to: job.payload.recipientEmail,
-      subject: job.payload.subject,
-      text: job.payload.text,
-      html: job.payload.html,
-      messageId: `<${job.id}@${fromDomain}>`,
+      to: content.payload.recipientEmail,
+      subject: content.payload.subject,
+      text: content.payload.text,
+      html: content.payload.html,
+      messageId: `<${content.id}@${fromDomain}>`,
       headers: {
-        'X-BA-Threat-Intel-Delivery-ID': job.id,
+        'X-BA-Threat-Intel-Delivery-ID': content.id,
         'Auto-Submitted': 'auto-generated',
         'List-Unsubscribe': saved.unsubscribeUrl || `<mailto:${fromEmail}?subject=unsubscribe>`,
         // RFC 8058 one-click is only valid for an HTTP(S) unsubscribe URL. A
@@ -697,7 +714,7 @@ export function createMailSender(
     });
     if (
       !result.accepted?.some(
-        (address) => String(address).toLowerCase() === job.payload.recipientEmail?.toLowerCase(),
+        (address) => String(address).toLowerCase() === content.payload.recipientEmail?.toLowerCase(),
       )
     )
       throw new Error('SMTP did not accept the recipient');
@@ -842,9 +859,10 @@ export async function queueAdvisory(
   const priority = advisoryPriority(findings);
   // When `deferEveryoneUntilSecurityDelivered` is enabled and at least one
   // Security-team recipient is in the batch, Everyone-group recipients are NOT
-  // queued here. They are queued in REVIEW status by the delivery worker once a
+  // queued here. They are queued for delivery by the delivery worker once a
   // Security-team delivery for this advisory is confirmed ACCEPTED, so the
-  // operator can preview and edit the same payload before the broader broadcast.
+  // Security team sees the alert first. Every recipient is queued for delivery:
+  // there is no operator review gate on the finding path.
   const settings = (await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
   const deferEveryone = settings.deferEveryoneUntilSecurityDelivered;
   const hasSecurityRecipients = selected.some((r) => r.deliveryGroup !== 'EVERYONE');
@@ -858,7 +876,7 @@ export async function queueAdvisory(
         advisory.id,
         { ...payload, recipientEmail: recipient.email },
         `${stableDispatchKey}:${contentRevision}:email:${recipient.id}`,
-        recipient.deliveryGroup === 'EVERYONE' ? 'REVIEW' : 'QUEUED',
+        'QUEUED',
         priority,
       )
     )
@@ -888,24 +906,26 @@ export async function queueAdvisory(
 }
 /**
  * After a Security-team delivery is confirmed ACCEPTED by the transport, queue
- * the same email for Everyone-group recipients in REVIEW status. This is the
- * deferred half of the `deferEveryoneUntilSecurityDelivered` setting: the
+ * the same email for Everyone-group recipients for immediate delivery. This is
+ * the deferred half of the `deferEveryoneUntilSecurityDelivered` setting: the
  * Security team sees the alert first, and once the delivery is confirmed the
- * identical payload enters the operator review queue for Everyone recipients.
+ * identical document goes out to the Everyone group.
  *
  * Reuses the accepted job's payload verbatim — apart from the per-recipient
- * address — so the Everyone group receives the same email. The enqueue dedupe
- * key is content-stable, so repeated invocations (one per Security-team
- * recipient) create at most one job set even if several deliveries succeed.
+ * address — so every group receives the same email, and the same PDF
+ * attachment (rendered from that body). The enqueue dedupe key is
+ * content-stable and an existing pending or accepted job for the recipient is
+ * skipped, so repeated invocations (one per Security-team recipient) create at
+ * most one job set even if several deliveries succeed.
  */
-export async function queueEveryoneReviewJobs(
+export async function queueEveryoneDeliveryJobs(
   db: Db,
   acceptedJob: Job,
   settings: AppSettings,
 ): Promise<number> {
   if (!settings.deferEveryoneUntilSecurityDelivered) return 0;
   // Only trigger from a Security-team (or legacy undefined) delivery, never
-  // from another Everyone job that was just approved and accepted.
+  // from another Everyone job that was just accepted.
   const securityRecipient = await get<EmailRecipient>(db, 'recipients', acceptedJob.target_id);
   if (!securityRecipient || securityRecipient.deliveryGroup === 'EVERYONE') return 0;
   const advisory = await get<Advisory>(db, 'advisories', acceptedJob.advisory_id);
@@ -919,23 +939,15 @@ export async function queueEveryoneReviewJobs(
     acceptedJob.payload.digestKey ??
     acceptedJob.dedupe_key.split(':email:')[0].split(':webhook:')[0];
   const contentRevision = sharedPayload.contentRevision ?? acceptedJob.advisory_id;
-  // Skip recipients that already have a pending or active job for this advisory.
+  // Skip recipients that already have a pending or active job for this content.
   // This guards against duplicates when the setting was toggled on after initial
-  // queuing, or when the daily-digest path already queued Everyone recipients.
+  // queuing, when the daily-digest path already queued Everyone recipients, and
+  // when this function is invoked once per accepted Security-team job.
+  //
+  // Channel-scoped (audit M-5): a webhook job for the same advisory shares
+  // nothing with an email recipient. `ACCEPTED` is included deliberately — an
+  // operator resend of the same advisory must not re-queue the broadcast.
   const pending = await db.query<{ target_id: string }>(
-    // Channel-scoped (audit M-5): a webhook job for the same advisory shares
-    // nothing with an email recipient — including the target id space is fine,
-    // but the ids are opaque strings, so a webhook row could name a target id
-    // equal to an email recipient id only by coincidence. The original query
-    // also admitted other channels' rows to the "already active" set, which is
-    // wrong for the same reason: an accepted webhook must not suppress queuing
-    // an Everyone email. Restrict to the email channel.
-    //
-    // `ACCEPTED` is included deliberately: this function is called for *every*
-    // accepted Security-team job, including an operator resend of the same
-    // advisory. With only REVIEW/QUEUED/SENDING here, resending one security
-    // email re-queued the same broadcast for everyone in the Everyone group —
-    // a duplicate email per recipient with no content change.
     "SELECT target_id FROM outbox WHERE advisory_id=$1 AND channel='email' AND status IN ('REVIEW','QUEUED','SENDING','ACCEPTED')",
     [acceptedJob.advisory_id],
   );
@@ -948,6 +960,8 @@ export async function queueEveryoneReviewJobs(
   const priority = acceptedJob.priority ?? 0;
   for (const recipient of everyoneRecipients) {
     if (activeTargets.has(recipient.id)) continue;
+    // The recipient must still be subscribed to every finding in the accepted
+    // bundle; the consolidated document is delivered as-is.
     if (
       await enqueue(
         db,
@@ -956,7 +970,7 @@ export async function queueEveryoneReviewJobs(
         acceptedJob.advisory_id,
         { ...sharedPayload, recipientEmail: recipient.email },
         `${dispatchKey}:everyone:${contentRevision}:email:${recipient.id}`,
-        'REVIEW',
+        'QUEUED',
         priority,
       )
     )
@@ -967,7 +981,7 @@ export async function queueEveryoneReviewJobs(
       category: 'EMAIL',
       level: 'INFO',
       code: 'delivery.everyone_queued_after_security',
-      message: `Queued ${queued} Everyone-group review job(s) for advisory ${acceptedJob.advisory_id} after Security-team delivery was confirmed`,
+      message: `Queued ${queued} Everyone-group delivery job(s) for advisory ${acceptedJob.advisory_id} after Security-team delivery was confirmed`,
       context: {
         advisoryId: acceptedJob.advisory_id,
         securityJobId: acceptedJob.id,
@@ -976,7 +990,7 @@ export async function queueEveryoneReviewJobs(
     });
     await appendAudit(
       db,
-      'Everyone review jobs queued',
+      'Everyone delivery jobs queued',
       `${acceptedJob.advisory_id}: ${queued} job(s) after security delivery acceptance`,
       'delivery-worker',
       'EMAIL',
@@ -1027,7 +1041,7 @@ export async function queueBulkNotificationAdvisory(
         advisory.id,
         { ...payload, recipientEmail: recipient.email },
         `${stableDispatchKey}:${contentRevision}:email:${recipient.id}`,
-        recipient.deliveryGroup === 'EVERYONE' ? 'REVIEW' : 'QUEUED',
+        'QUEUED',
         priority,
         edits,
       )
@@ -1040,300 +1054,120 @@ export async function queueBulkNotificationAdvisory(
   return count;
 }
 /**
- * Queues one email per eligible Security-team recipient for an
- * `IntelligenceMatch` (security news/advisory evidence) that matched the
- * monitored vendor + product inventory. Each job carries no Advisory row
- * and is delivered as a standalone news alert by `deliverNext`.
+ * News evidence is queued through `server/newsQueue.ts`.
  *
- * Runs inside the pipeline transaction: the outbox insert commits with the
- * match record, so a crash between match storage and dispatch cannot drop
- * evidence or double-count it on the next run — the per-match dedupe key is
- * idempotent across runs.
+ * The previous per-match email produced one message per `IntelligenceMatch`,
+ * which meant the same article was emailed again whenever the matcher re-keyed
+ * it (it keys matches on `hash(cveId || articleId)`), arrived from another feed,
+ * or was re-correlated after a CVE was assigned. News is now consolidated into
+ * one email per recipient per run, and an article already sent to a recipient
+ * is never sent again (see `queueConsolidatedNews`).
  */
-export async function queueNewsEvidenceNotifications(
-  db: Db,
-  match: IntelligenceMatch,
-  articleOrArticles: IntelligenceArticle | IntelligenceArticle[],
-  asset: { name: string; vendor?: string; product?: string },
-  recipients: EmailRecipient[],
-): Promise<number> {
-  const selected = recipients.filter(
-    (r) => r.enabled && (r.deliveryGroup === 'SECURITY_TEAM' || r.deliveryGroup === undefined),
-  );
-  if (!selected.length) return 0;
-  const articles = (Array.isArray(articleOrArticles) ? articleOrArticles : [articleOrArticles])
-    .filter((article, index, all) => all.findIndex((candidate) => candidate.id === article.id) === index)
-    .sort((a, b) => a.id.localeCompare(b.id));
-  if (!articles.length) return 0;
-  const primary = articles[0];
-  const cveIds = [...new Set([
-    ...articles.flatMap((article) => article.cveIds.filter(Boolean)),
-    ...(match.cveId ? [match.cveId] : []),
-  ])].sort();
-  const assetLine = asset.vendor && asset.product ? `${asset.vendor} / ${asset.product}` : asset.name;
-  // Article title/url/source feeds are feed-controlled. The body is plain text,
-  // so this is not HTML injection, but an unescaped CR/LF or control character
-  // lets a feed forge header-like lines in the delivered message and poison a
-  // downstream ticketing parser. Collapse the same way the subject does.
-  const safeLine = (value: string) =>
-    value.replace(/[\r\n\t]+/g, ' ').replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, '').trim();
-  const subject = `[Threat intelligence] [NEWS] ${safeLine(primary.title)}`;
-  const evidenceLines = articles.map((article) => {
-    const sourceName = article.sourceFeeds.length ? article.sourceFeeds.map(safeLine).join(', ') : 'security news';
-    const publishedAt = safeLine(article.modifiedDate || article.publishedDate);
-    return `${safeLine(article.title)}\nSource: ${safeLine(article.url)}\nPublished: ${publishedAt}\nSource feed: ${sourceName}`;
-  }).join('\n\n');
-  const text =
-    `${evidenceLines}\n\nMatched asset: ${assetLine}\n` +
-    (cveIds.length ? `CVE reference(s): ${cveIds.join(', ')}\n` : '') +
-    `Evidence: ${match.evidence}\n\n` +
-    (match.zeroDay ? '** Potential zero-day: no assigned CVE **\n' : '') +
-    'This is applicability evidence, not a confirmed advisory. Confirm source authenticity and consult the vendor before remediation.';
 
-const escapeHtml = (value: string) => value.replace(/[&<>"']/g, ch =>
-    ({ '&': '&', '<': '<', '>': '>', '"': '"', "'": String.fromCharCode(39) })[ch]!);
-  const escapeUrl = (value: string) => value.replace(/"/g, '%22');
-
-  const html = `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${escapeHtml(subject)}</title>
-</head>
-<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #1f2937; max-width: 600px; margin: 0 auto; padding: 24px;">
-  <div style="background: #f8fafc; border-radius: 8px; padding: 24px; border: 1px solid #e2e8f0;">
-    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 16px;">
-      <span style="background: #1e40af; color: white; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Threat Intelligence</span>
-      <span style="background: #dc2626; color: white; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">NEWS</span>
-    </div>
-    <h1 style="margin: 0 0 16px; font-size: 20px; font-weight: 600; color: #111827; line-height: 1.3;">${escapeHtml(primary.title)}</h1>
-    <div style="margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #e2e8f0;">
-      ${articles.map((article) => `
-        <div style="margin-bottom: 12px;">
-          <p style="margin: 0 0 4px; font-size: 14px; color: #374151;"><strong>Source:</strong> <a href="${escapeUrl(article.url)}" style="color: #2563eb; text-decoration: none;">${escapeHtml(article.url)}</a></p>
-          <p style="margin: 0 0 4px; font-size: 14px; color: #374151;"><strong>Published:</strong> ${escapeHtml(article.modifiedDate || article.publishedDate)}</p>
-          <p style="margin: 0; font-size: 14px; color: #374151;"><strong>Source feed:</strong> ${escapeHtml(article.sourceFeeds.length ? article.sourceFeeds.join(', ') : 'security news')}</p>
-        </div>
-      `).join('')}
-    </div>
-    <div style="margin-bottom: 16px; padding: 12px; background: #fff; border-radius: 6px; border: 1px solid #e2e8f0;">
-      <p style="margin: 0 0 4px; font-size: 14px; color: #374151;"><strong>Matched asset:</strong> ${escapeHtml(assetLine)}</p>
-      ${cveIds.length ? `<p style="margin: 0; font-size: 14px; color: #374151;"><strong>CVE reference(s):</strong> ${cveIds.map(cve => `<a href="https://nvd.nist.gov/vuln/detail/${escapeHtml(cve)}" style="color: #2563eb; text-decoration: none;">${escapeHtml(cve)}</a>`).join(', ')}</p>` : ''}
-    </div>
-    <div style="margin-bottom: 16px; padding: 12px; background: #fff; border-radius: 6px; border: 1px solid #e2e8f0;">
-      <p style="margin: 0 0 4px; font-size: 14px; color: #374151;"><strong>Evidence:</strong></p>
-      <p style="margin: 0; font-size: 14px; color: #374151; white-space: pre-wrap;">${escapeHtml(match.evidence)}</p>
-    </div>
-    ${match.zeroDay ? `
-    <div style="margin-bottom: 16px; padding: 12px; background: #fef3c7; border-radius: 6px; border: 1px solid #fcd34d;">
-      <p style="margin: 0; font-size: 14px; font-weight: 600; color: #92400e;">⚠ Potential zero-day: no assigned CVE</p>
-    </div>
-    ` : ''}
-    <div style="font-size: 13px; color: #6b7280; padding-top: 16px; border-top: 1px solid #e2e8f0;">
-      <p style="margin: 0;">This is applicability evidence, not a confirmed advisory. Confirm source authenticity and consult the vendor before remediation.</p>
-    </div>
-  </div>
-</body>
-</html>`;
-  const articlePayloads = articles.map((article) => ({
-    id: article.id,
-    title: article.title,
-    url: article.url,
-    sourceFeeds: [...article.sourceFeeds],
-    publishedDate: article.publishedDate,
-  }));
-  const newsEvidence: NewsEvidencePayload = {
-    matchId: match.id,
-    article: articlePayloads[0],
-    articles: articlePayloads,
-    asset,
-    cveIds,
-    evidence: match.evidence,
-    zeroDay: match.zeroDay,
-    credibilityScore: match.credibilityScore,
-  };
-  const evidenceRevision = articles.map((article) => `${article.id}:${article.modifiedDate || article.publishedDate}`).join('|');
-  const contentRevision = `${match.id}:${evidenceRevision}`;
-  // Audit finding: the dedupe identity must survive a match-id change. The
-  // matcher keys a match on `hash(cveId || articleId)`, so the same asset's
-  // evidence gets a new id once a zero-day article is later linked to a CVE —
-  // keying only on match.id re-notified the whole security team for evidence
-  // it already had. Bind the identity to the asset (and the CVE when one is
-  // known) so re-correlation of the same coverage collapses into one job.
-  const identity = `news:${match.assetId}:${match.cveId ?? 'uncve'}:${evidenceRevision}`;
-  let queued = 0;
-  for (const recipient of selected) {
-    if (
-      await enqueue(
-        db,
-        'email',
-        recipient.id,
-        `NEWS:${match.id}`,
-        {
-          subject,
-          text,
-          html,
-          cveIds,
-          newsEvidence,
-          contentRevision,
-          recipientEmail: recipient.email,
-        },
-        `${identity}:email:${recipient.id}`,
-        'QUEUED',
-      )
-    )
-      queued++;
-  }
-  return queued;
+export interface ConsolidatedFindingsDispatchOptions {
+  /** Recipients to notify; defaults to every enabled recipient. */
+  recipients?: EmailRecipient[];
 }
 
-const escapeHtml = (value: string) => value.replace(/[&<>"']/g, ch =>
-  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
-
-const stripCrlf = (value: string) => value.replace(/[\r\n]/g, ' ');
-
 /**
- * Queues a single combined review notification per eligible Security-team
- * recipient for every unverifiable finding in `findings` — product correlations
- * whose version ranges could not be confirmed. Each job carries no Advisory row
- * and is delivered as a standalone review notification by `deliverNext`.
+ * Queues ONE consolidated finding email per eligible recipient for a set of
+ * findings — including findings the matching policy could not fully confirm.
  *
- * All findings are batched into one email rather than one email per finding, so
- * a pipeline pass that produced N unverifiable matches produces M combined
- * emails (one per recipient) instead of N*M individual emails.
+ * This replaces the former "review bulletin": there is no operator review
+ * queue. A finding held by the confidence or applicability policy is dispatched
+ * like any other, and the rendered advisory states the limitation and its
+ * reason on the finding itself (see `advisoryRender`).
  *
- * The email header reads "for Review - Unverifiable matches" in bold, so the
- * security team knows the matches need manual verification before remediation.
+ * Consolidation guarantees:
+ *  - one email per recipient, whatever the number of findings in the batch;
+ *  - findings already included in an accepted email (`reviewNotifiedAt`) are
+ *    excluded, so no finding is ever announced twice;
+ *  - the body and the PDF attachment are built from the same document
+ *    (`renderFindingsDocument`).
  */
-export async function queueUnverifiableMatchNotification(
+export async function queueConsolidatedFindingNotifications(
   db: Db,
   findings: Finding[],
-  recipients: EmailRecipient[],
+  options: ConsolidatedFindingsDispatchOptions = {},
 ): Promise<number> {
-  if (!('release' in db)) {
-    return transaction(db, (client) => queueUnverifiableMatchNotification(client, findings, recipients),
-      undefined, { locks: ['review-notifications'] });
-  }
-  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1), ${schemaLockKey})`, ['review-notifications']);
-  const settings = { ...DEFAULT_SETTINGS, ...await get<AppSettings>(db, 'settings', 'main') };
-  const uniqueFindings = [...new Map(findings.map((finding) => [finding.id, finding])).values()];
-  const eligible = uniqueFindings.filter(
-    (finding) => eligibleForReviewNotification(finding, settings) && !finding.reviewNotifiedAt,
+  const unique = [...new Map(findings.filter((finding) => finding?.id).map((finding) => [finding.id, finding])).values()]
+    .filter(
+      (finding) =>
+        !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) && !finding.reviewNotifiedAt,
+    )
+    .sort((left, right) => left.cveId.localeCompare(right.cveId) || left.id.localeCompare(right.id));
+  if (!unique.length) return 0;
+  const recipients = (options.recipients ?? (await list<EmailRecipient>(db, 'recipients'))).filter(
+    (recipient) => recipient.enabled,
   );
-  const selected = recipients.filter(
-    (r) => r.enabled && (r.deliveryGroup === 'SECURITY_TEAM' || r.deliveryGroup === undefined),
-  );
-  if (eligible.length === 0 || selected.length === 0) return 0;
-  const pending = await db.query<{ target_id: string; finding_id: string }>(
-    `SELECT target_id,entry->>'findingId' AS finding_id FROM outbox
-     CROSS JOIN LATERAL jsonb_array_elements(CASE
-       WHEN jsonb_typeof(payload->'unverifiableMatch'->'findings')='array'
-       THEN payload->'unverifiableMatch'->'findings' ELSE '[]'::jsonb END) entry
-     WHERE channel='email' AND status=ANY($1::text[]) AND target_id=ANY($2::text[])
-       AND entry->>'findingId'=ANY($3::text[])
-     UNION ALL
-     SELECT target.id,records.id FROM records CROSS JOIN unnest($2::text[]) target(id)
-     WHERE kind='findings' AND records.id=ANY($3::text[])
-       AND COALESCE(data->>'reviewNotifiedAt','')<>''`,
-    [['QUEUED', 'SENDING'], selected.map((recipient) => recipient.id), eligible.map((finding) => finding.id)],
-  );
-  const reserved = new Map<string, Set<string>>();
-  for (const row of pending.rows) {
-    const ids = reserved.get(row.target_id) ?? new Set<string>();
-    ids.add(row.finding_id);
-    reserved.set(row.target_id, ids);
-  }
-  // Sort findingLines by severity in descending order: CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN
-  const findingLines = eligible
-    .map((finding) => {
-      const asset =
-        finding.matchedAssetName || finding.matchedAssetVendor || finding.matchedAssetProduct || 'unknown asset';
-      const vendor = finding.matchedAssetVendor;
-      const product = finding.matchedAssetProduct;
-      const evidence = stripCrlf(finding.matchingEvidence);
-      const cveId = finding.cveId;
-      const severity = finding.cve.cvss.severity;
-      const cvssScore = finding.cve.cvss.score;
-      const severityColor = SEVERITY_COLORS[severity] || SEVERITY_COLORS.UNKNOWN;
-      const parsedAssetCpe = parseCPE23(finding.matchedCpe);
-      const assetVersion = parsedAssetCpe.isValid && parsedAssetCpe.version !== '*'
-        ? parsedAssetCpe.version
-        : undefined;
-      const vulnRange = finding.cve.versionRange;
-      const vulnVersionRange = vulnRange
-        ? [
-            vulnRange.versionStartIncluding ? `>=${vulnRange.versionStartIncluding}` : vulnRange.versionStartExcluding ? `>${vulnRange.versionStartExcluding}` : undefined,
-            vulnRange.versionEndIncluding ? `<=${vulnRange.versionEndIncluding}` : vulnRange.versionEndExcluding ? `<${vulnRange.versionEndExcluding}` : undefined,
-          ].filter(Boolean).join(' to ') || '*'
-        : undefined;
-      return {
-        asset,
-        vendor,
-        product,
-        assetVersion,
-        vulnVersionRange,
-        evidence,
-        cveId,
-        severity,
-        cvssScore,
-        severityColor,
-        findingId: finding.id,
-        cveDescription: finding.cve.description || '',
-      };
-    })
-    .sort((a, b) => SEVERITY_ORDER.indexOf(b.severity) - SEVERITY_ORDER.indexOf(a.severity));
-  const unverifiableMatch: UnverifiableMatchPayload = {
-    findings: findingLines.map((f) => ({
-      findingId: f.findingId,
-      asset: { name: f.asset, vendor: f.vendor, product: f.product },
-      cveId: f.cveId,
-      evidence: f.evidence,
-      severity: f.severity,
-      cvssScore: f.cvssScore,
-    })),
-    cveIds: [...new Set(eligible.map((finding) => finding.cveId))].sort(),
-  };
+  if (!recipients.length) return 0;
   let queued = 0;
-  for (const recipient of selected) {
-    const ownFindings = eligible.filter((finding) => recipientAllows(recipient, finding) &&
-      !reserved.get(recipient.id)?.has(finding.id));
-    if (!ownFindings.length) continue;
-    const ownIds = new Set(ownFindings.map((finding) => finding.id));
-    const ownLines = unverifiableMatch.findings.filter((finding) => ownIds.has(finding.findingId));
-    const cveIds = [...new Set(ownFindings.map((finding) => finding.cveId))].sort();
-    const findingIds = [...ownIds].sort();
-    const findingRevisions = Object.fromEntries(ownFindings.map((finding) => [finding.id, findingRevision(finding)]));
-    const cveRevisions = Object.fromEntries(ownFindings.map((finding) => [finding.cveId, revision(finding.cve)]));
-    const { subject, text, html } = renderUnverifiableReviewEmail(ownFindings, settings.timezone);
-    const batchRevision = createHash('sha256').update(stableJson({ findingRevisions, cveRevisions, html })).digest('hex');
-    const contentRevision = `${findingIds.join(',')}:${batchRevision}`;
-    const identity = `unverifiable:${findingIds.join(',')}:${contentRevision}`;
+  const generatedAt = new Date();
+  const documentCache = new Map<string, { subject: string; text: string; html: string; cveIds: string[] }>();
+  for (const recipient of recipients) {
+    const permitted = unique.filter((finding) => recipientAllows(recipient, finding));
+    if (!permitted.length) continue;
+    const findingIds = permitted.map((finding) => finding.id);
+    const bucket = createHash('sha256').update(findingIds.join(',')).digest('hex').slice(0, 24);
+    let document = documentCache.get(bucket);
+    if (!document) {
+      const advisory: Advisory = {
+        id: `ADV-${bucket.slice(0, 12).toUpperCase()}`,
+        title: 'Security finding notification',
+        severity: highestSeverity(permitted),
+        cveIds: uniqueSorted(permitted.map((finding) => finding.cveId)),
+        findingIds,
+        createdDate: generatedAt.toISOString(),
+        deliveryStatus: 'PENDING',
+        recipientCount: 0,
+        executiveSummary: `${permitted.length} inventory correlation${permitted.length === 1 ? '' : 's'} require investigation. Confirm applicability and consult the vendor before remediation.`,
+        remediationInstructions:
+          'Review vendor advisories and deploy tested remediation through your change process.',
+        vendorLink: vendorLinkFor(permitted),
+        affectedSystems: uniqueSorted(permitted.map((finding) => finding.matchedAssetName)),
+        isDigestBatch: permitted.length > 1,
+      };
+      const built = renderFindingsDocument({ advisory, findings: permitted, generatedAt });
+      document = { ...built, cveIds: advisory.cveIds };
+      documentCache.set(bucket, document);
+    }
+    const evidence = deliveryRevisionEvidence(permitted);
+    const contentRevision = createHash('sha256')
+      .update(stableJson({ findingIds, ...evidence }))
+      .digest('hex')
+      .slice(0, 20);
     if (
       await enqueue(
         db,
         'email',
         recipient.id,
-        `UNVERIFIABLE:${findingIds.join(',')}`,
+        `FINDINGS:${bucket}`,
         {
-          subject,
-          text,
-          html,
-          cveIds,
-          findingRevisions,
-          cveRevisions,
+          subject: document.subject,
+          text: document.text,
+          html: document.html,
+          cveIds: document.cveIds,
+          includedFindingIds: findingIds,
+          ...evidence,
           contentRevision,
-          unverifiableMatch: { findings: ownLines, cveIds, timezone: settings.timezone },
+          generatedAt: generatedAt.toISOString(),
           recipientEmail: recipient.email,
         },
-        `${identity}:email:${recipient.id}`,
+        `findings:${contentRevision}:email:${recipient.id}`,
         'QUEUED',
-        advisoryPriority(ownFindings),
+        advisoryPriority(permitted),
       )
     )
       queued++;
   }
+  if (queued)
+    await writeEvent(db, {
+      category: 'EMAIL',
+      level: 'INFO',
+      code: 'delivery.findings_consolidated',
+      message: 'Consolidated finding email queued for eligible recipients',
+      context: { findings: unique.length, recipientsNotified: queued },
+    });
   return queued;
 }
 
@@ -1420,6 +1254,61 @@ export async function queueZeroDayDigestNotification(
   return queued;
 }
 
+/**
+ * Optional HTML override for a recipient's digest view.
+ *
+ * The override only replaces the *body*; the subject, plain text, version and
+ * attachment filename still come from the canonical document builder. Attaching
+ * the override's HTML verbatim is what keeps "the attachment is the email"
+ * true even when an operator template produced the body.
+ */
+export type DigestRender = (
+  advisory: Advisory,
+  findings: Finding[],
+) => string | undefined;
+
+const MAX_PLAIN_TEXT_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Builds the one document delivered for a digest view.
+ *
+ * Ordering is deterministic (severity, then CVE, then asset) so the same batch
+ * always renders the same document — including on retries, where the pinned
+ * instant guarantees byte-identical attachment input.
+ */
+function digestDocument(
+  view: Advisory,
+  findings: Finding[],
+  render: DigestRender | undefined,
+  generatedAt: Date,
+): { subject: string; text: string; html?: string; generatedAt: string } {
+  const ordered = digestOrdered(view, findings);
+  const base = renderFindingsDocument({ advisory: view, findings: ordered, generatedAt });
+  const override = render?.(view, ordered);
+  const html = override ?? base.html;
+  return {
+    subject: base.subject || view.title,
+    // The text alternative always describes the same findings as the HTML. It is
+    // bounded so a very large batch cannot produce an oversized message part.
+    text: renderFindingsText(view, ordered).slice(0, MAX_PLAIN_TEXT_BYTES) || base.text,
+    html,
+    generatedAt: generatedAt.toISOString(),
+  };
+}
+
+/** Deterministic presentation order for a digest document. */
+function digestOrdered(view: Advisory, findings: Finding[]): Finding[] {
+  const rank = (severity: string) => SEVERITY_ORDER.indexOf(severity as (typeof SEVERITY_ORDER)[number]);
+  return [...findings].sort((left, right) => {
+    const bySeverity = rank(right.cve.cvss.severity) - rank(left.cve.cvss.severity);
+    if (bySeverity) return bySeverity;
+    const byCve = left.cveId.localeCompare(right.cveId);
+    if (byCve) return byCve;
+    const byAsset = left.matchedAssetName.localeCompare(right.matchedAssetName);
+    return byAsset || left.id.localeCompare(right.id);
+  }).map((finding) => finding);
+}
+
 export interface DigestQueueResult {
   /** Persisted union advisory, or the supplied advisory when nothing was queued. */
   advisory: Advisory;
@@ -1448,7 +1337,7 @@ export async function queueDigestAdvisory(
   db: Db,
   advisory: Advisory,
   findings: Finding[],
-  render?: (advisory: Advisory, findings: Finding[]) => string | undefined,
+  render?: DigestRender,
   dispatchKey?: string,
 ): Promise<DigestQueueResult> {
   const recipients = (await list<EmailRecipient>(db, 'recipients')).filter((recipient) => recipient.enabled);
@@ -1477,12 +1366,16 @@ export async function queueDigestAdvisory(
   const priority = advisoryPriority(included);
   let jobs = 0;
   let recipientCount = 0;
+  // One render instant for the whole batch: the body, its plain-text companion
+  // and the PDF attachment of every recipient describe the same document.
+  const generatedAt = new Date();
 
   for (const [recipientId, batch] of recipientBatches) {
     const recipient = recipients.find((candidate) => candidate.id === recipientId)!;
     const view = digestView(union, batch);
+    const document = digestDocument(view, batch, render, generatedAt);
     const payload = {
-      ...advisoryEmail(view, render?.(view, batch), batch.map(findingDetail), { findings: batch }),
+      ...document,
       cveIds: view.cveIds,
       includedFindingIds: batch.map((finding) => finding.id),
       ...deliveryRevisionEvidence(batch),
@@ -1498,7 +1391,7 @@ export async function queueDigestAdvisory(
         union.id,
         payload,
         `${stableDispatchKey}:${contentRevision}:email:${recipient.id}`,
-        recipient.deliveryGroup === 'EVERYONE' ? 'REVIEW' : 'QUEUED',
+        'QUEUED',
         priority,
       )
     ) {
@@ -1510,7 +1403,7 @@ export async function queueDigestAdvisory(
   for (const [hookId, batch] of webhookBatches) {
     const view = digestView(union, batch);
     const payload = {
-      ...advisoryEmail(view, render?.(view, batch), batch.map(findingDetail), { findings: batch }),
+      ...digestDocument(view, batch, render, generatedAt),
       cveIds: view.cveIds,
       includedFindingIds: batch.map((finding) => finding.id),
       ...deliveryRevisionEvidence(batch),
@@ -1606,8 +1499,7 @@ export async function deliverNext(
   // Structured transport failure for the event log; `error` stays the short
   // message used by retry policy and the outbox row.
   let errorInfo: Record<string, unknown> = {};
-  let emailProvider: EmailDeliveryLog['provider'] | undefined,
-    routeToReview = false;
+  let emailProvider: EmailDeliveryLog['provider'] | undefined;
   // Declared outside the try block: it is assigned inside and read again by the
   // post-delivery bookkeeping below. A block-scoped `const` made that read a
   // compile error and, under a non-strict loader, a ReferenceError *after* the
@@ -1621,10 +1513,11 @@ export async function deliverNext(
   // Set when a legacy payload was rebuilt from current intelligence during this
   // attempt, so the recovery path does not rebuild the same payload twice.
   let legacyRebuilt = false;
-  // Set when the bundle is blocked by a finding that is deliberately held for
-  // review (confidence policy or unverifiable applicability) rather than one
-  // whose applicability changed. A rebuild cannot change a held verdict, so the
-  // job is routed to operator review instead of a permanent FAILED + rebuild.
+  // Set when the bundle is blocked by a finding whose *confidence policy* still
+  // holds it rather than one whose applicability changed. Retained for the
+  // rebuild decision below (a policy hold can never be resolved by rebuilding),
+  // but it no longer diverts the job to a review queue — findings are dispatched
+  // and the email states the limitation.
   let holdGated = false;
   // Set when the transport returned 2xx but the attempt could not be marked
   // ACCEPTED because the response was rejected (confirm-before-send). This only
@@ -1635,53 +1528,6 @@ export async function deliverNext(
   // log so confirmPriorDelivery does not have to re-infer it from error text.
   let transportRejected = false;
   try {
-    if (job.payload.unverifiableMatch) {
-      const currentSettings = { ...DEFAULT_SETTINGS, ...await get<AppSettings>(pool, 'settings', 'main') };
-      const ids = job.payload.unverifiableMatch.findings.map((finding) => finding.findingId);
-      const [recipient, stored, aliases] = await Promise.all([
-        get<EmailRecipient>(pool, 'recipients', job.target_id),
-        getMany<Finding>(pool, 'findings', ids),
-        list<import('../src/types/index.ts').AliasEntry>(pool, 'aliases'),
-      ]);
-      if (!recipient?.enabled ||
-          ![undefined, 'SECURITY_TEAM'].includes(recipient.deliveryGroup) ||
-          recipient.email !== job.payload.recipientEmail || !ids.length) {
-        permanent = true;
-        throw new Error('Review notification recipient is no longer eligible');
-      }
-      const [assets, cves, withdrawals] = await Promise.all([
-        getMany<WatchListItem>(pool, 'watchlist', [...stored.values()].map((finding) => finding.matchedAssetId)),
-        getMany<NormalizedCVE>(pool, 'cveData', [...stored.values()].map((finding) => finding.cveId)),
-        getMany<{ modifiedDate: string }>(pool, 'cveWithdrawals', [...stored.values()].map((finding) => finding.cveId)),
-      ]);
-      const fresh: Finding[] = [];
-      const vendorAliases = buildAliasMap(aliases, 'VENDOR');
-      const productAliases = buildAliasMap(aliases, 'PRODUCT');
-      for (const id of ids) {
-        const finding = stored.get(id);
-        const asset = finding && assets.get(finding.matchedAssetId);
-        const cve = finding && (cves.get(finding.cveId) ?? finding.cve);
-        const withdrawal = finding && withdrawals.get(finding.cveId);
-        const withdrawn = withdrawal && (!Number.isFinite(Date.parse(cve?.modifiedDate ?? '')) ||
-          !Number.isFinite(Date.parse(withdrawal.modifiedDate)) || Date.parse(cve!.modifiedDate) <= Date.parse(withdrawal.modifiedDate));
-        const current = finding && asset?.active && cve && !withdrawn
-          ? runVulnerabilityPipeline([], [cve], [asset], [], [], { ...currentSettings, scopeHours: 0 },
-              'Review revalidation', false, vendorAliases, productAliases, undefined, aliases).newFindings[0]
-          : undefined;
-        if (!finding || !current || !eligibleForReviewNotification(finding, currentSettings) ||
-            !eligibleForReviewNotification(current, currentSettings) || !recipientAllows(recipient, current) ||
-            job.payload.findingRevisions?.[id] !== findingRevision(current) ||
-            job.payload.cveRevisions?.[current.cveId] !== revision(current.cve)) {
-          permanent = true;
-          throw new Error('Review notification no longer matches current inventory, evidence or confidence policy');
-        }
-        fresh.push({ ...current, id });
-      }
-      if (renderUnverifiableReviewEmail(fresh, job.payload.unverifiableMatch.timezone).html !== job.payload.html) {
-        permanent = true;
-        throw new Error('Review notification content changed; a refreshed review is required');
-      }
-    }
     if (!retryPolicy.enabled && job.attempts > 1 && job.channel === 'email') {
       permanent = true;
       throw new Error('Automatic email retry is disabled by the current settings');
@@ -1702,10 +1548,9 @@ export async function deliverNext(
         permanent = true;
         throw new Error('Native evidence or notification policy is no longer applicable');
       }
-      if (native.confidence === 'MEDIUM' && !job.review_approved) {
-        routeToReview = true;
-        throw new Error('Native medium-confidence evidence requires security review');
-      }
+      // Native evidence is delivered regardless of confidence. The rendered
+      // advisory states the limitation on each affected finding, so suppressing
+      // the email only hid real exposure from the security team.
     }
     const advisory = await get<Advisory>(pool, 'advisories', job.advisory_id);
     const currentFindings: Finding[] = [];
@@ -1839,6 +1684,11 @@ export async function deliverNext(
           continue;
         }
         if (match) currentFindings.push(match);
+        // A finding the policy still holds for review is disclosed, not withheld.
+        // Every match is dispatched; the rendered advisory annotates the finding
+        // with its confidence limitation. Only a finding that no longer applies
+        // at all (removed, resolved, withdrawn, CVE changed) is invalidated.
+        if (match && match.notificationStatus !== 'QUEUED_FOR_DISPATCH') holdGated = true;
         const reason = !finding
           ? 'a finding was removed'
           : ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status)
@@ -1851,11 +1701,9 @@ export async function deliverNext(
                 ? 'CVE intelligence changed'
                 : !match
                   ? 'current inventory no longer matches'
-                  : match.notificationStatus !== 'QUEUED_FOR_DISPATCH'
-                    ? (holdGated = true) && 'current applicability or confidence policy requires review'
-                    : job.payload.findingRevisions?.[id] !== findingRevision(match)
-                      ? 'inventory or matching evidence changed'
-                      : undefined;
+                  : job.payload.findingRevisions?.[id] !== findingRevision(match)
+                    ? 'inventory or matching evidence changed'
+                    : undefined;
         if (reason) invalid.push(reason);
       }
       // A safety-check failure defers the whole bundle: it is retried on the
@@ -1866,18 +1714,10 @@ export async function deliverNext(
       // Mark the bundle as stale and trigger an immediate rebuild instead of
       // surfacing this as a hard error that requires operator intervention.
       if (invalid.length) {
-        // A first-pass send nobody approved yet is held for review; an approved
-        // send that is still held keeps the stale-bundle recovery so the finding
-        // returns to the review queue rather than being re-sent silently.
-        if (
-          holdGated &&
-          !currentFindings.some((finding) => finding.notificationStatus === 'QUEUED_FOR_DISPATCH') &&
-          !job.review_approved &&
-          job.channel === 'email'
-        ) {
-          routeToReview = true;
-          throw new Error(`Some advisory findings require review: ${[...new Set(invalid)].join('; ')}.`);
-        }
+        // A queued document that names a finding which no longer applies (or whose
+        // evidence changed) must not be delivered. Excluding the stale finding and
+        // sending the remainder would deliver a body that disagrees with its own
+        // CVE list, so the whole bundle is rebuilt from current inventory.
         permanent = true;
         staleAdvisory = true;
         throw new Error(
@@ -1900,10 +1740,8 @@ export async function deliverNext(
           permanent = true;
           throw new Error('Recipient subscription no longer permits all advisory findings');
         }
-        if (rec.deliveryGroup === 'EVERYONE' && !job.review_approved) {
-          routeToReview = true;
-          throw new Error('Recipient now requires security review');
-        }
+        // Findings are dispatched to every recipient group that is subscribed;
+        // there is no review gate on the delivery path.
       }
       // Confirm before sending. A failed attempt whose outcome is unknown (the
       // send threw after the transport had already accepted the message, or a
@@ -2049,9 +1887,7 @@ export async function deliverNext(
     const current = await db.query('SELECT status,lock_token FROM outbox WHERE id=$1 FOR UPDATE', [job.id]);
     if (current.rows[0]?.lock_token !== job.lock_token) return;
     const failed =
-        !!error &&
-        !routeToReview &&
-        (permanent || !retryPolicy.enabled || job.attempts >= retryPolicy.maxAttempts),
+        !!error && (permanent || !retryPolicy.enabled || job.attempts >= retryPolicy.maxAttempts),
       mlDelayMs = getMlRuntime()?.deliveryOptimizer.isTrained() ? computeRetryDelay(job.attempts) : undefined,
       retryDelay = emailRetryDelayPlan(job.attempts, retryPolicy, mlDelayMs);
     const retryDelayBaseAt = Date.now();
@@ -2065,15 +1901,15 @@ export async function deliverNext(
       'UPDATE outbox SET status=$2,next_attempt=$3,error=$4,provider_id=$5,locked_at=NULL,lock_token=NULL,updated_at=now() WHERE id=$1',
       [
         job.id,
-        routeToReview ? 'REVIEW' : error ? (failed ? 'FAILED' : 'QUEUED') : 'ACCEPTED',
+        error ? (failed ? 'FAILED' : 'QUEUED') : 'ACCEPTED',
         next,
-        // Keep the reason on a review-routed job: the operator needs it in the
-        // review queue, and the reviewer must not have to re-derive why.
-        !routeToReview && !error ? null : error || null,
+        // Keep the failure reason on the row so the Action Center can show why
+        // a delivery is being retried or has failed.
+        error || null,
         providerId || null,
       ],
     );
-    if (error && !routeToReview && !failed) {
+    if (error && !failed) {
       // A rate-limited or blackholed endpoint must not be hammered once per
       // queued job. Share this target's backoff with its remaining pending work;
       // bound the batch so the global state lock is not held across the queue.
@@ -2094,13 +1930,7 @@ export async function deliverNext(
         // Only stamp sentAt when the email is accepted; preserve the existing
         // value on RETRYING so a provider-accepted-but-temporarily-deferred
         // timestamp survives the retry cycle.
-        const status = routeToReview
-          ? 'REVIEW_REQUIRED'
-          : error
-            ? failed
-              ? 'FAILED'
-              : 'RETRYING'
-            : 'ACCEPTED';
+        const status = error ? (failed ? 'FAILED' : 'RETRYING') : 'ACCEPTED';
         const sentAt =
           status === 'ACCEPTED' ? new Date().toISOString() : status === 'RETRYING' ? log.sentAt : undefined;
         await put(db, 'emailLogs', job.id, {
@@ -2120,8 +1950,8 @@ export async function deliverNext(
           attemptCount: job.attempts,
           retryDelayMs: error && !failed ? scheduledRetryDelayMs : undefined,
           retryDelaySource: error && !failed ? scheduledRetryDelaySource : undefined,
-          errorMessage: routeToReview ? undefined : error || undefined,
-          nextRetryTime: routeToReview ? null : error && !failed ? next.toISOString() : null,
+          errorMessage: error || undefined,
+          nextRetryTime: error && !failed ? next.toISOString() : null,
           sentAt,
           // A test message or generated digest is not a finding email and never
           // enters the Action Center. Every real accepted finding delivery
@@ -2271,28 +2101,30 @@ export async function deliverNext(
           });
     }
     }
-    // Unverifiable-match notifications carry no advisory row, so the advisory
-    // bookkeeping above is skipped. Without parallel tracking, the findings
-    // remain REVIEW_REQUIRED after the transport accepts the combined email and
-    // are re-selected — and re-queued — on every pipeline run. The dedupe_key
-    // prevents an actual duplicate for unchanged content, but a benign finding
-    // revision change (vendor/product/asset label) would produce a new dedupe
-    // key and fire the notification a second time. Stamp the acceptance here so
-    // the pipeline can exclude already-notified findings and guarantee the email
-    // is sent at most once.
-    if (job.payload.unverifiableMatch && !error && !routeToReview) {
-      const notifiedIds = job.payload.unverifiableMatch.findings.map((f) => f.findingId);
-      const now = new Date().toISOString();
-      await db.query(`UPDATE records SET data=jsonb_set(data,'{reviewNotifiedAt}',to_jsonb($2::text)),updated_at=now()
-        WHERE kind='findings' AND id=ANY($1::text[]) AND COALESCE(data->>'reviewNotifiedAt','')=''`, [notifiedIds, now]);
+    // Every accepted finding email stamps `reviewNotifiedAt` on the findings it
+    // carried — including digest jobs that have an advisory row — so a finding is
+    // never included in a second consolidated email. The dedupe key alone is not
+    // enough: a benign finding revision change (vendor/product/asset label) would
+    // produce a new key and re-notify evidence the recipient already had.
+    // The timestamp is also the acceptance evidence for a finding whose group
+    // email is delayed, so the delay gate below cannot re-send it.
+    if (job.channel === 'email' && !error) {
+      const notifiedIds = job.payload.includedFindingIds ?? [];
+      if (notifiedIds.length) {
+        const now = new Date().toISOString();
+        await db.query(
+          `UPDATE records SET data=jsonb_set(data,'{reviewNotifiedAt}',to_jsonb($2::text)),updated_at=now()
+           WHERE kind='findings' AND id=ANY($1::text[]) AND COALESCE(data->>'reviewNotifiedAt','')=''`,
+          [notifiedIds, now],
+        );
+      }
     }
     // After a Security-team delivery is confirmed ACCEPTED, queue the same
-    // email for Everyone-group recipients in REVIEW status so an operator can
-    // preview, edit, and approve the broader broadcast. This is the deferred
-    // half of the `deferEveryoneUntilSecurityDelivered` setting; the function
-    // is a no-op when the setting is off or the recipient is not Security-team.
-    if (job.channel === 'email' && !error && !routeToReview && job.target_id !== 'test') {
-      await queueEveryoneReviewJobs(db, job, settings);
+    // email for Everyone-group recipients. This is the deferred half of the
+    // `deferEveryoneUntilSecurityDelivered` setting; the function is a no-op when
+    // the setting is off or the recipient is not Security-team.
+    if (job.channel === 'email' && !error && job.target_id !== 'test') {
+      await queueEveryoneDeliveryJobs(db, job, settings);
     }
     await writeEvent(db, {
       category: job.channel === 'email' ? 'EMAIL' : 'EVENT',
@@ -2307,7 +2139,7 @@ export async function deliverNext(
         ...(error ? errorInfo : {}),
       },
     });
-    if (job.channel === 'email' && transportAttempted && !routeToReview && !staleAdvisory && !holdGated && !unconfirmedError) {
+    if (job.channel === 'email' && transportAttempted && !staleAdvisory && !holdGated && !unconfirmedError) {
       const observedStatus = Number(/HTTP\s+(\d{3})\b/i.exec(error)?.[1] ?? statusCode);
       const classification = classifyDeliveryError({
         provider: emailProvider ?? 'unknown', statusCode: observedStatus,
