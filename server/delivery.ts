@@ -1848,6 +1848,11 @@ export async function deliverNext(
       const vendorAliases = buildAliasMap(aliasEntries, 'VENDOR');
       const productAliases = buildAliasMap(aliasEntries, 'PRODUCT');
       const invalid: string[] = [];
+      // Findings as the delivered document must describe them: the stored row
+      // merged with its freshly re-derived verdict, keeping the STORED id. The
+      // pipeline assigns a new random id to every match it derives, and claims,
+      // revision evidence and the document all address the queued finding row.
+      const deliveryFindings: Finding[] = [];
       // Findings whose evidence changed or that no longer apply. The document is
       // rebuilt without them rather than delivering a body that disagrees with
       // its own CVE list.
@@ -1936,7 +1941,10 @@ export async function deliverNext(
           revalidationError = 'Finding applicability could not be re-verified; delivery deferred';
           continue;
         }
-        if (match) currentFindings.push(match);
+        if (match) {
+          currentFindings.push(match);
+          if (finding) deliveryFindings.push({ ...finding, ...match, id: finding.id });
+        }
         // A finding the policy still holds for review is disclosed, not withheld.
         // Every match is dispatched; the rendered advisory annotates the finding
         // with its confidence limitation. Only a finding that no longer applies
@@ -2021,6 +2029,31 @@ export async function deliverNext(
             `Some advisory findings are no longer applicable; rebuild from current inventory. Reason: ${[...new Set(invalid)].join('; ')}.`,
           );
         }
+      }
+      // A bundle whose finding is now held by the confidence policy is
+      // disclosed, not withheld. There is no review queue, so the email still
+      // goes out — but it must state the limitation and its reason on the
+      // finding, which the body queued while the match was still confident
+      // cannot do. Rebuild it through the same canonical document builder the
+      // queueing path uses, so layout, colours, typography and the HTML
+      // attachment all match every other finding email.
+      //
+      // The original batch key is preserved so the delivery is still accounted
+      // as the same digest for CVE dispatch counting and de-duplication.
+      if (holdGated && revalidationView && deliveryFindings.length) {
+        const held = deliveryFindings.filter((finding) => !staleIds.has(finding.id));
+        if (held.length)
+          job.payload = {
+            ...consolidatedPayloadFor(
+              revalidationView,
+              held,
+              [...new Set(held.map((finding) => finding.cveId))],
+              await loadAdvisoryTemplate(pool),
+            ),
+            ...(job.payload.recipientEmail ? { recipientEmail: job.payload.recipientEmail } : {}),
+            ...(job.payload.digestKey ? { digestKey: job.payload.digestKey } : {}),
+            ...(job.payload.dailyDigest ? { dailyDigest: true } : {}),
+          };
       }
     }
     if (job.channel === 'email') {
@@ -2689,4 +2722,3 @@ export async function deliverNext(
 
   return true;
 }
-

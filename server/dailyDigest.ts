@@ -2,6 +2,7 @@ import type pg from 'pg';
 import { get, getMany, list, put, transaction, schemaLockKey, type Db } from './db';
 import { writeEvent } from './events';
 import { advisoryRevision, enqueue, findingRevision, revision, recipientAllows } from './delivery';
+import { activeClaims } from './deliveryClaims';
 import { advisoryEmail } from './advisoryEmail';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine';
 import { shouldSelectForDigest } from './ml/integration';
@@ -411,17 +412,16 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
         const findingRows = await db.query<{ data: Finding }>(
           `SELECT data FROM records WHERE kind='findings' AND created_at > now() - interval '24 hours'`,
         );
-        // A daily digest is a summary of the last 24 hours of *deliverable*
-        // findings. A `REVIEW_REQUIRED` finding is deliberately withheld by the
-        // confidence policy or by unverifiable applicability evidence, and the
-        // delivery worker refuses to carry it in an email bundle. Including it
-        // made the whole digest fail as stale every day (and, because the
-        // findings stay held, repeat on the next day too). Held findings remain
-        // available for operator review; they are not summarised in the email.
-        // A finding that is already queued, sent, or held for review is carried by
-        // its own consolidated findings email. Repeating it here delivered every
-        // alert twice a day, so the summary only covers findings no other email
-        // includes.
+        // A daily digest is a summary of the last 24 hours of findings that are
+        // still real. Eligibility here is about the *finding*, never about
+        // whether some email already mentioned it: `notificationStatus` is
+        // written at match time — before anything is sent — so excluding
+        // dispatch states here emptied the digest for every freshly matched
+        // finding and silently suppressed the whole summary.
+        //
+        // De-duplication against the consolidated finding email is per recipient
+        // and happens below, from the durable `delivery_claims` receipt, which is
+        // the only record that answers "has THIS recipient been told?".
         const candidates: Finding[] = findingRows.rows
           .map((r) => r.data)
           .filter(
@@ -429,12 +429,14 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
               f &&
               f.cveId &&
               !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(f.status) &&
+              // States in which the finding can never be summarised, whatever the
+              // recipient: it does not apply, a VEX ruling suppressed it, or its
+              // own delivery failed permanently.
               !['NOT_APPLICABLE', 'SUPPRESSED_VEX_NOT_AFFECTED', 'DELIVERY_FAILED'].includes(
                 f.notificationStatus,
               ) &&
-              !['QUEUED_FOR_DISPATCH', 'AUTO_DISPATCHED', 'DELIVERED', 'REVIEW_REQUIRED', 'DIGEST_BATCHED'].includes(
-                f.notificationStatus,
-              ) &&
+              // Already carried by an advisory that was raised and delivered as
+              // its own email; repeating it in the summary would duplicate it.
               !f.advisoryId,
           );
 
@@ -481,10 +483,11 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
           // inventory item was disabled after the finding was created, neither
           // of which invalidates the delivery that was already queued. Such a
           // finding keeps its stored (already-delivered) applicability.
-          if (match)
-            return match.notificationStatus === 'QUEUED_FOR_DISPATCH'
-              ? [{ ...f, ...match, id: f.id }]
-              : [];
+          // A held (limited-confidence) match is summarised like any other: there
+          // is no review queue, and the rendered document states the confidence
+          // limitation and its reason on the finding itself. Dropping it here
+          // silently hid real exposure from the daily summary.
+          if (match) return [{ ...f, ...match, id: f.id }];
           const storedDeliverable =
             f.notificationStatus === 'QUEUED_FOR_DISPATCH' ||
             f.notificationStatus === 'AUTO_DISPATCHED' ||
@@ -522,10 +525,36 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
           });
           return 0;
         }
+        // Per-recipient de-duplication against the consolidated finding email.
+        // `delivery_claims` records, per recipient, which findings that mailbox
+        // has been told about, so a recipient that already received an immediate
+        // consolidated email does not see the same findings repeated here — while
+        // a recipient added after that email still gets them. This replaces the
+        // global `notificationStatus` filter that could not tell "already
+        // emailed" from "matched but never sent".
+        const deliveredToRecipient = await activeClaims(
+          db,
+          recipients.map((recipient) => recipient.id),
+          'finding',
+          findings.map((finding) => finding.id),
+        );
+        // Two recipient records can share one mailbox. The consolidated path
+        // treats them as one delivery target, so their receipts are unioned here
+        // as well or the digest would re-send what the mailbox already has.
+        const mailboxReceived = (recipient: EmailRecipient): Set<string> => {
+          const received = new Set<string>();
+          const mailbox = recipient.email.trim().toLowerCase();
+          for (const alias of recipients)
+            if (alias.email.trim().toLowerCase() === mailbox)
+              for (const findingId of deliveredToRecipient.get(alias.id) ?? []) received.add(findingId);
+          return received;
+        };
         let jobs = 0;
         for (const recipient of recipients) {
           // Relevance ranks eligible findings; it must never override subscriptions or hide an alert.
-          const included = findings.filter((finding) => recipientAllows(recipient, finding))
+          const received = mailboxReceived(recipient);
+          const included = findings
+            .filter((finding) => recipientAllows(recipient, finding) && !received.has(finding.id))
             .map((finding) => ({
               finding,
               relevance: shouldSelectForDigest({
