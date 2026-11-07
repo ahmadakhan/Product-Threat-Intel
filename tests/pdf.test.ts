@@ -199,9 +199,9 @@ test('rendered advisory PDF is attached to provider messages', async () => {
       capturedBody = options?.body;
       return { status: 202, headers: { 'x-message-id': 'id' }, body: '' };
     },
-    false,
-    attachment,
-  );
+false,
+      [attachment],
+    );
   await closePdfRenderer();
 
   assert.ok(capturedBody);

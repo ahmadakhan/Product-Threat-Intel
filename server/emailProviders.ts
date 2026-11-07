@@ -82,7 +82,7 @@ export async function sendProviderEmail(
   job: Job,
   request: Requester,
   sandboxMode = false,
-  attachment?: EmailAttachment,
+  attachments: EmailAttachment[] = [],
 ): Promise<string> {
   const endpoint = emailEndpoint(config);
   if (!endpoint) throw new Error('Select an API email provider');
@@ -111,9 +111,11 @@ export async function sendProviderEmail(
           : {}),
       }
     : {};
-  const pdfBase64 = attachment ? attachment.content.toString('base64') : undefined;
-  const pdfFilename = attachment?.filename;
-  const pdfContentType = attachment?.contentType ?? 'application/pdf';
+  const encodedAttachments = attachments.map((item) => ({
+    filename: item.filename,
+    content: item.content.toString('base64'),
+    type: item.contentType,
+  }));
   let body: string;
   if (config.provider === 'API') {
     body = JSON.stringify({
@@ -123,9 +125,7 @@ export async function sendProviderEmail(
       text,
       ...(html ? { html } : {}),
       ...(config.replyTo ? { reply_to: { email: config.replyTo } } : {}),
-      ...(attachment
-        ? { attachments: [{ content: pdfBase64, type: pdfContentType, filename: pdfFilename }] }
-        : {}),
+      ...(encodedAttachments.length ? { attachments: encodedAttachments } : {}),
       headers: { ...deliveryHeader, ...unsubscribeHeader },
     });
   } else if (config.provider === 'SENDGRID') {
@@ -141,12 +141,8 @@ export async function sendProviderEmail(
       headers: { ...deliveryHeader, ...unsubscribeHeader },
       ...(config.replyTo ? { reply_to: { email: config.replyTo } } : {}),
       content: [{ type: 'text/plain', value: text }, ...(html ? [{ type: 'text/html', value: html }] : [])],
-      ...(attachment
-        ? {
-            attachments: [
-              { content: pdfBase64, type: pdfContentType, filename: pdfFilename, disposition: 'attachment' },
-            ],
-          }
+      ...(encodedAttachments.length
+        ? { attachments: encodedAttachments.map((item) => ({ ...item, disposition: 'attachment' })) }
         : {}),
     });
   } else if (config.provider === 'POSTMARK') {
@@ -159,8 +155,10 @@ export async function sendProviderEmail(
       TextBody: text,
       ...(config.replyTo ? { ReplyTo: config.replyTo } : {}),
       ...(html ? { HtmlBody: html } : {}),
-      ...(attachment
-        ? { Attachments: [{ Name: pdfFilename, Content: pdfBase64, ContentType: pdfContentType }] }
+      ...(encodedAttachments.length
+        ? { Attachments: encodedAttachments.map((item) => ({
+            Name: item.filename, Content: item.content, ContentType: item.type,
+          })) }
         : {}),
       MessageStream: config.postmarkMessageStream,
       Metadata: { delivery_id: job.id },
@@ -190,12 +188,10 @@ export async function sendProviderEmail(
           TextPart: text,
           HTMLPart: html,
           ...(config.replyTo ? { ReplyTo: config.replyTo } : {}),
-          ...(attachment
-            ? {
-                Attachments: [
-                  { FileName: pdfFilename, ContentType: pdfContentType, Base64Content: pdfBase64 },
-                ],
-              }
+          ...(encodedAttachments.length
+            ? { Attachments: encodedAttachments.map((item) => ({
+                FileName: item.filename, ContentType: item.type, Base64Content: item.content,
+              })) }
             : {}),
           Headers: [
             { Name: 'X-BA-Threat-Intel-Delivery-ID', Value: job.id },
@@ -220,8 +216,10 @@ export async function sendProviderEmail(
       text,
       ...(html ? { html } : {}),
       ...(config.replyTo ? { reply_to: config.replyTo } : {}),
-      ...(attachment
-        ? { attachments: [{ content: pdfBase64, type: pdfContentType, name: pdfFilename }] }
+      ...(encodedAttachments.length
+        ? { attachments: encodedAttachments.map((item) => ({
+            content: item.content, type: item.type, name: item.filename,
+          })) }
         : {}),
       headers: { ...deliveryHeader, ...unsubscribeHeader },
     });

@@ -79,7 +79,8 @@ export function consolidateNewsMatches(
     for (const articleId of match.articleIds) {
       const article = articles.get(articleId);
       if (!article) continue;
-      const item = byArticle.get(article.id) ?? {
+      const identity = newsArticleIdentity(article);
+      const item = byArticle.get(identity) ?? {
         article,
         assets: [],
         cveIds: [],
@@ -101,7 +102,7 @@ export function consolidateNewsMatches(
         (item.credibilityScore === undefined || match.credibilityScore > item.credibilityScore)
       )
         item.credibilityScore = match.credibilityScore;
-      byArticle.set(article.id, item);
+      byArticle.set(identity, item);
     }
   }
   return [...byArticle.values()]
@@ -121,6 +122,19 @@ export function consolidateNewsMatches(
 /** Stable identity for "this evidence was already sent to this recipient". */
 export const newsNotifiedKey = (recipientId: string, articleId: string) => `${recipientId}\u0000${articleId}`;
 
+/** URL identity is stable across tracking parameters and article-id changes. */
+export function newsArticleIdentity(article: Pick<IntelligenceArticle, 'id' | 'url'>): string {
+  const url = (article.url || '').trim();
+  if (url) {
+    try {
+      const parsed = new URL(url);
+      if (!['https:', 'http:'].includes(parsed.protocol)) return `id:${article.id}`;
+      return `url:${parsed.hostname.toLowerCase()}${parsed.pathname.replace(/\/+$/, '')}`;
+    } catch { /* malformed article URL falls back to id */ }
+  }
+  return `id:${article.id}`;
+}
+
 /**
  * Removes articles the recipient has already received.
  *
@@ -133,7 +147,11 @@ export function selectUnnotifiedArticles(
   recipientId: string,
   alreadyNotified: ReadonlySet<string>,
 ): ConsolidatedNewsItem[] {
-  return items.filter((item) => !alreadyNotified.has(newsNotifiedKey(recipientId, item.article.id)));
+  // A syndication feed may assign a different article id to the same URL.
+  return items.filter((item) =>
+    !alreadyNotified.has(newsNotifiedKey(recipientId, item.article.id)) &&
+    !alreadyNotified.has(newsNotifiedKey(recipientId, newsArticleIdentity(item.article)))
+  );
 }
 
 export interface ConsolidatedNewsDocument {

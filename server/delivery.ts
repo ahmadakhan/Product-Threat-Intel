@@ -18,6 +18,7 @@ import type {
   IntelligenceArticle,
   IntelligenceMatch,
 } from '../src/types/index.ts';
+import { recordNewsDeliveries } from './newsQueue.ts';
 /**
  * Payload carried by a consolidated news delivery job.
  *
@@ -32,7 +33,7 @@ export interface NewsEvidencePayload {
   /** Primary article, retained for backwards-compatible consumers. */
   article: Pick<IntelligenceArticle, 'id' | 'title' | 'url' | 'sourceFeeds' | 'publishedDate'>;
   /** Every article carried by this consolidated email. */
-  articles: Array<Pick<IntelligenceArticle, 'id' | 'title' | 'url' | 'sourceFeeds' | 'publishedDate'>>;
+  articles: Array<Pick<IntelligenceArticle, 'id' | 'title' | 'url' | 'sourceFeeds' | 'publishedDate'> & {identity?: string}>;
   /** Assets the articles were matched against. */
   assets: string[];
   /** @deprecated First matched asset; use `assets`. */
@@ -653,10 +654,23 @@ export function createMailSender(
       const settings = (db && (await get<AppSettings>(db, 'settings', 'main'))) || DEFAULT_SETTINGS;
       if (settings.emailEnabled === false) throw new Error('Email delivery is disabled by settings');
     }
-    // Apply operator edits exactly once and build the attachment from the very
+// Apply operator edits exactly once and build the attachment from the very
     // body being sent, so the PDF is byte-identical to the email.
     const content = applyJobEdits(job);
-    const attachment = await buildPdfAttachment(content, config, db);
+    const pdfAttachment = await buildPdfAttachment(content, config, db);
+    const htmlAttachment: EmailAttachment | undefined =
+      (isFindingDelivery(content.advisory_id) || content.advisory_id.startsWith('FINDINGS:')) &&
+      deliveryHtmlIsAttachable(content.payload.html)
+        ? {
+            filename: `${deliveryAttachmentStem(content)}.html`,
+            content: Buffer.from(content.payload.html, 'utf8'),
+            contentType: 'text/html; charset=utf-8',
+          }
+        : undefined;
+    // The HTML file contains precisely the HTML sent as the email body.
+    const attachments = [htmlAttachment, pdfAttachment].filter(
+      (item): item is EmailAttachment => Boolean(item),
+    );
     if (!isSmtpEmailProvider(saved.provider)) {
       const token = decrypt(saved.apiKey, encryptionKeys(config), `email-provider:${saved.provider}`);
       if (!token) throw new Error('Email provider token is missing');
@@ -665,14 +679,14 @@ export function createMailSender(
           ? decrypt(saved.mailjetApiSecret, encryptionKeys(config), `email-mailjet:${saved.provider}`)
           : saved.mailjetApiSecret;
       const provider = EMAIL_PROVIDER_LABELS[saved.provider];
-      try {
+try {
         const id = await sendProviderEmail(
           { ...saved, mailjetApiSecret: mailjetSecret },
           token,
           content,
           request,
           config.MAILJET_SANDBOX_MODE === 'true',
-          attachment,
+          attachments,
         );
         return { id, provider };
       } catch (error) {
@@ -722,10 +736,10 @@ export function createMailSender(
         // RFC 8058 one-click is only valid for an HTTP(S) unsubscribe URL. A
         // mailto fallback is handled by the mail client, not an HTTP POST.
         ...(saved.unsubscribeUrl && /^https?:\/\//i.test(saved.unsubscribeUrl)
-          ? { 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' }
+? { 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' }
           : {}),
       },
-      ...(attachment ? { attachments: [attachment] } : {}),
+      ...(attachments.length ? { attachments } : {}),
     });
     if (
       !result.accepted?.some(
@@ -2222,12 +2236,17 @@ export async function deliverNext(
         );
       }
     }
-    // After a Security-team delivery is confirmed ACCEPTED, queue the same
+// After a Security-team delivery is confirmed ACCEPTED, queue the same
     // email for Everyone-group recipients. This is the deferred half of the
     // `deferEveryoneUntilSecurityDelivered` setting; the function is a no-op when
     // the setting is off or the recipient is not Security-team.
     if (job.channel === 'email' && !error && job.target_id !== 'test') {
       await queueEveryoneDeliveryJobs(db, job, settings);
+    }
+    if (job.channel === 'email' && !error && job.payload.newsEvidence?.articles?.length) {
+      // The notification is durable only after the transport accepts it.
+      await recordNewsDeliveries(db, job.target_id, job.advisory_id,
+        job.payload.newsEvidence.articles, new Date().toISOString());
     }
     await writeEvent(db, {
       category: job.channel === 'email' ? 'EMAIL' : 'EVENT',

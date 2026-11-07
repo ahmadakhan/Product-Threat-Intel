@@ -82,7 +82,7 @@ import {
   type Job,
 } from './delivery';
 import { bufferFindingsForDigest } from './digest';
-import { loadNewsRecipients, queueConsolidatedNews } from './newsQueue';
+import { loadNewsRecipients, queueConsolidatedNews, newsArticleIdentity } from './newsQueue';
 import { renderAdvisory } from './advisoryRender';
 import { HttpError } from './validation';
 import { advisoryEmail } from './advisoryEmail';
@@ -1898,46 +1898,11 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           });
         }
       }
-      // Findings the confidence or applicability policy could not fully confirm are
-      // dispatched like any other finding: the email states the limitation and its
-      // reason on the finding itself. There is no operator review queue, and the
-      // filter runs against the reconciled set so a finding already accepted in an
-      // email is never announced again (reconcileFindings preserves reviewNotifiedAt).
-      //
-      // Held findings go through the same consolidated document builder as the
-      // ordinary dispatch (`pending` below), never a separate review bulletin.
-      const heldForReview = vexEnforced.filter(
-        (finding) =>
-          finding.notificationStatus === 'REVIEW_REQUIRED' &&
-          !finding.reviewNotifiedAt &&
-          !finding.advisoryId &&
-          !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status),
-      );
-      if (heldForReview.length) {
-        manualReviewFindingsQueued = await queueConsolidatedFindingNotifications(db, heldForReview, {
-          // One consolidated email per recipient who is subscribed to at least one
-          // of the held findings. The queue filters each recipient's view to the
-          // findings its subscription tier permits, so a CISA_KEV_ONLY subscriber
-          // never receives an unrelated low finding.
-          recipients: (await list<EmailRecipient>(db, 'recipients')).filter(
-            (recipient) => recipient.enabled && heldForReview.some((finding) => recipientAllows(recipient, finding)),
-          ),
-        });
-        await writeEvent(db, {
-          category: 'MATCHING',
-          code: 'matching.low_confidence_dispatched',
-          message: 'Findings with limited confidence notified with their limitation stated',
-          runId: execution!.id,
-          context: {
-            findings: heldForReview.length,
-            recipientsNotified: manualReviewFindingsQueued,
-          },
-        });
-      }
-      // Previously queued findings also become deliverable after enabling dispatch.
+      // Include limited-confidence findings in the SAME recipient email as
+      // confirmed findings. The renderer explains the confidence and its reason.
       const pending = vexEnforced.filter(
         (f) =>
-          (f.notificationStatus === 'QUEUED_FOR_DISPATCH' || f.notificationStatus === 'AUTO_DISPATCHED') &&
+          ['QUEUED_FOR_DISPATCH', 'AUTO_DISPATCHED', 'REVIEW_REQUIRED'].includes(f.notificationStatus) &&
           !f.advisoryId &&
           !f.reviewNotifiedAt &&
           !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(f.status),
@@ -1947,105 +1912,12 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       const mlOrdered = mlOrderFindingsByImportance(pending);
       pending.length = 0;
       pending.push(...mlOrdered);
-      const buildAdvisory = (batch: Finding[], isDigestBatch: boolean): Advisory => {
-        const cveIds = Array.from(new Set(batch.map((finding) => finding.cveId))).sort();
-        const rank = ['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
-        return {
-          id: formatAdvisoryId(settings.advisoryPrefix),
-          title: `Vulnerability ${isDigestBatch ? 'digest' : 'notice'}: ${cveIds.slice(0, 3).join(', ')}${cveIds.length > 3 ? ` (+${cveIds.length - 3} more)` : ''}`,
-          severity: batch.reduce(
-            (s, f) => (rank.indexOf(f.cve.cvss.severity) > rank.indexOf(s) ? f.cve.cvss.severity : s),
-            'UNKNOWN' as Advisory['severity'],
-          ),
-          cveIds,
-          findingIds: batch.map((f) => f.id),
-          createdDate: new Date().toISOString(),
-          deliveryStatus: 'PENDING',
-          recipientCount: 0,
-          executiveSummary: `${batch.length} inventory correlations require investigation. Confirm applicability and consult the vendor before remediation.`,
-          remediationInstructions:
-            'Review vendor advisories and deploy tested remediation through your change process.',
-          vendorLink:
-            Array.from(
-              new Set(
-                batch
-                  .map((f) => f.cve.remediation.vendorAdvisoryRef || f.cve.remediation.patchUrl)
-                  .filter(Boolean),
-              ),
-            ).sort()[0] || '',
-          affectedSystems: Array.from(new Set(batch.map((f) => f.matchedAssetName))).sort(),
-          isDigestBatch,
-        };
-      };
-      // The confidence policy gates *automatic* dispatch. With automatic dispatch
-      // disabled the finding is still recorded and remains eligible for delivery
-      // through an explicit operator action (review approval or a manually
-      // assembled advisory), so it must not be replaced by an advisory-bound
-      // delivery here — that would consume the finding and block the release.
-      if (!settings.autoDispatchEnabled && pending.length) {
-        await writeEvent(db, {
-          category: 'MATCHING',
-          code: 'matching.dispatch_held_by_policy',
-          message: 'Findings held for review by the workspace confidence policy',
-          runId: execution!.id,
-          context: { findings: pending.length },
-        });
-      }
-      if (settings.autoDispatchEnabled && pending.length) {
-        if (settings.digestBatchingEnabled) {
-          // flushes the window into one recipient-specific combined email, so a
-          // burst of detections (including detections from several pipeline
-          // runs) produces a single message per recipient instead of a storm.
-          digestBuffered = await bufferFindingsForDigest(
-            db,
-            pending.map((finding) => finding.id),
-            settings.digestWindowMinutes,
-          );
-        } else {
-          // A KEV-only or high-severity subscriber must never receive unrelated
-          // findings merely because one other item in a bundle passes its filter.
-          // Pre-group by the exact set of subscription tiers that admit the
-          // finding, so every recipient of a bundle is subscribed to all of it.
-          const groups = new Map<string, Finding[]>();
-          for (const finding of pending) {
-            const key = ['ALL_SEVERITIES', 'CRITICAL_HIGH_ONLY', 'CISA_KEV_ONLY']
-              .filter((tier) => recipientAllows({ subscriptionTier: tier } as EmailRecipient, finding))
-              .join(',');
-            const group = groups.get(key) || [];
-            group.push(finding);
-            groups.set(key, group);
-          }
-          for (const group of groups.values()) {
-            for (let offset = 0; offset < group.length; offset += 200) {
-              const batch = group.slice(offset, offset + 200);
-              const advisory = buildAdvisory(batch, false);
-              const count = await queueAdvisory(
-                db,
-                advisory,
-                batch,
-                renderAdvisory(snapshot.advisoryTemplate, advisory, batch),
-              );
-              notificationsQueued += count;
-              advisoriesQueued += count ? 1 : 0;
-              if (count)
-                // Batched advisory binding (audit finding #10): one upsert per
-                // batch, not one round trip per finding.
-                await putMany(
-                  db,
-                  'findings',
-                  batch.map((f) => ({ id: f.id, data: { ...f, advisoryId: advisory.id } })),
-                );
-            }
-          }
-        }
-      } else if (pending.length && !settings.autoDispatchEnabled) {
-        await writeEvent(db, {
-          category: 'EMAIL',
-          level: 'WARNING',
-          code: 'pipeline.auto_dispatch_disabled',
-          message: `Auto-dispatch is disabled. ${pending.length} findings are eligible for notification but will not be queued until autoDispatchEnabled is enabled in settings.`,
-          context: { pendingFindings: pending.length },
-        });
+      // Never gate findings on operator review or split the recipient's batch
+      // by confidence, severity tier, or an arbitrary page size.
+      // Subscription filtering happens inside the consolidated queue.
+      if (pending.length) {
+        notificationsQueued += await queueConsolidatedFindingNotifications(db, pending);
+        advisoriesQueued = notificationsQueued ? 1 : 0;
       }
       const zeroDayLog = zeroDayDigestNotificationsQueued
         ? `; ${zeroDayDigestNotificationsQueued} zero-day digest notifications queued`

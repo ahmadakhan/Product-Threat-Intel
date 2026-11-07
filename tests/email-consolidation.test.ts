@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { Advisory, EmailRecipient, Finding, IntelligenceArticle, IntelligenceMatch } from '../src/types/index.ts';
 import {
   consolidateNewsMatches,
+  newsArticleIdentity,
   newsNotifiedKey,
   renderConsolidatedNewsEmail,
   selectUnnotifiedArticles,
@@ -248,4 +249,18 @@ test('recipient subscription filters which findings a document may carry', async
     recipientAllows(kevOnly, { ...critical, cve: { ...critical.cve, cisaKev: { ...critical.cve.cisaKev, isKev: true } } }),
     true,
   );
+});
+
+test('syndicated URLs with different article ids and query strings are one story', () => {
+  const a1 = article('a1', 'https://example.com/story-1?utm_source=first', 'Story one');
+  const a3 = article('a3', 'https://example.com/story-1?utm_source=second', 'Story one syndicated');
+  const items = consolidateNewsMatches(
+    [match('m1', 'asset-1', ['a1', 'a3'])],
+    new Map([[a1.id, a1], [a3.id, a3]]),
+    (assetId) => `server-${assetId}`,
+  );
+  assert.equal(items.length, 1, 'same canonical URL must occur once in a consolidated email');
+  const ledger = new Set([newsNotifiedKey('r1', newsArticleIdentity(a1))]);
+  assert.equal(selectUnnotifiedArticles(items, 'r1', ledger).length, 0);
+  assert.equal(selectUnnotifiedArticles(items, 'r2', ledger).length, 1);
 });

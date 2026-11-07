@@ -10,6 +10,7 @@ import { writeEvent } from './events.ts';
 import { stableJson } from '../src/utils/deduplicator.ts';
 import {
   consolidateNewsMatches,
+  newsArticleIdentity,
   newsNotifiedKey,
   renderConsolidatedNewsEmail,
   selectUnnotifiedArticles,
@@ -38,21 +39,7 @@ import { deliveryHtmlIsAttachable } from './deliveryDocument.ts';
 const NEWS_LEDGER_KIND = 'newsNotifications';
 
 /** Canonical content identity for an article: URL first, then the id. */
-export function newsArticleIdentity(article: Pick<IntelligenceArticle, 'id' | 'url'>): string {
-  const url = (article.url || '').trim();
-  if (url) {
-    try {
-      const parsed = new URL(url);
-      parsed.hash = '';
-      // Query strings differ per tracking parameter on syndicated feeds; the
-      // path is the story identity.
-      return `url:${parsed.hostname.toLowerCase()}${parsed.pathname.replace(/\/+$/, '')}`;
-    } catch {
-      // Fall through to the id for a malformed feed URL.
-    }
-  }
-  return `id:${article.id}`;
-}
+export { newsArticleIdentity } from './newsEmail.ts';
 
 export function newsLedgerRecordId(recipientId: string, article: Pick<IntelligenceArticle, 'id' | 'url'>): string {
   return createHash('sha256')
@@ -98,8 +85,6 @@ export interface NewsQueueDeps {
   }) => Promise<string | null>;
 }
 
-const MAX_ARTICLES_PER_EMAIL = 100;
-
 /**
  * Reads the articles already delivered to a recipient.
  *
@@ -115,22 +100,37 @@ async function alreadyNotified(
   const notified = new Map<string, Set<string>>(recipientIds.map((id) => [id, new Set<string>()]));
   if (!recipientIds.length || !articles.size) return notified;
   const articleIds = [...articles.keys()];
-  const ledger = await db.query<{ recipient_id: string; article_id: string }>(
-    "SELECT data->>'recipientId' AS recipient_id, data->>'articleId' AS article_id FROM records WHERE kind=$1 AND data->>'recipientId'=ANY($2::text[]) AND data->>'articleId'=ANY($3::text[])",
-    [NEWS_LEDGER_KIND, [...recipientIds], articleIds],
+  const identities = [...new Set([...articles.values()].map(newsArticleIdentity))];
+  const ledger = await db.query<{ recipient_id: string; article_id: string; identity: string }>(
+    `SELECT data->>'recipientId' AS recipient_id, data->>'articleId' AS article_id,
+            data->>'identity' AS identity FROM records
+      WHERE kind=$1 AND data->>'recipientId'=ANY($2::text[])
+        AND (data->>'articleId'=ANY($3::text[]) OR data->>'identity'=ANY($4::text[]))`,
+    [NEWS_LEDGER_KIND, [...recipientIds], articleIds, identities],
   );
-  for (const row of ledger.rows) notified.get(row.recipient_id)?.add(row.article_id);
-  const queued = await db.query<{ target_id: string; article_id: string }>(
-    `SELECT o.target_id, entry->>'id' AS article_id
+  for (const row of ledger.rows) {
+    const set = notified.get(row.recipient_id);
+    if (row.article_id) set?.add(newsNotifiedKey(row.recipient_id, row.article_id));
+    if (row.identity) set?.add(newsNotifiedKey(row.recipient_id, row.identity));
+  }
+  const queued = await db.query<{ target_id: string; article_id: string; identity: string; url: string }>(
+    `SELECT o.target_id, entry->>'id' AS article_id,
+            entry->>'identity' AS identity, entry->>'url' AS url
        FROM outbox o
        CROSS JOIN LATERAL jsonb_array_elements(CASE
          WHEN jsonb_typeof(o.payload->'newsEvidence'->'articles')='array'
          THEN o.payload->'newsEvidence'->'articles' ELSE '[]'::jsonb END) entry
-      WHERE o.channel='email' AND o.status=ANY($1::text[])
-        AND o.target_id=ANY($2::text[]) AND entry->>'id'=ANY($3::text[])`,
-    [['QUEUED', 'SENDING', 'ACCEPTED'], [...recipientIds], articleIds],
+     WHERE o.channel='email' AND o.status=ANY($1::text[])
+       AND o.target_id=ANY($2::text[])
+       AND (entry->>'id'=ANY($3::text[]) OR entry->>'identity'=ANY($4::text[]))`,
+    [['QUEUED', 'SENDING', 'ACCEPTED'], [...recipientIds], articleIds, identities],
   );
-  for (const row of queued.rows) notified.get(row.target_id)?.add(row.article_id);
+  for (const row of queued.rows) {
+    const set = notified.get(row.target_id);
+    if (row.article_id) set?.add(newsNotifiedKey(row.target_id, row.article_id));
+    if (row.identity) set?.add(newsNotifiedKey(row.target_id, row.identity));
+    else if (row.article_id) set?.add(newsNotifiedKey(row.target_id, newsArticleIdentity({id:row.article_id,url:row.url || ''})));
+  }
   return notified;
 }
 
@@ -199,17 +199,16 @@ export async function queueConsolidatedNews(
   if (!items.length) return result;
   const articleRecord = new Map(items.map((item) => [item.article.id, item.article] as const));
   const notified = await alreadyNotified(db, selected.map((recipient) => recipient.id), articleRecord);
-  // One instant for every recipient of this run, so each ledger row records the
-  // delivery it actually belongs to.
-  const deliveredAt = new Date().toISOString();
+  // A recipient receives one consolidated news email per pipeline run.
   for (const recipient of selected) {
     const own = selectUnnotifiedArticles(items, recipient.id, notified.get(recipient.id) || new Set());
     if (!own.length) {
       result.articlesSuppressed += items.length;
       continue;
     }
-    const batch = own.slice(0, MAX_ARTICLES_PER_EMAIL);
-    const overflow = own.slice(MAX_ARTICLES_PER_EMAIL);
+    // One consolidated message per recipient, not one message per 100 articles.
+    const batch = own;
+    const overflow: typeof own = [];
     const document = renderConsolidatedNewsEmail(batch);
     const cveIds = [...new Set(batch.flatMap((item) => item.cveIds))].sort();
     const articleIds = batch.map((item) => item.article.id).sort();
@@ -239,13 +238,8 @@ export async function queueConsolidatedNews(
     result.emailsQueued++;
     result.articlesIncluded += batch.length;
     result.articlesSuppressed += overflow.length;
-    await recordNewsDeliveries(
-      db,
-      recipient.id,
-      advisoryId,
-      batch.map((item) => item.article),
-      deliveredAt,
-    );
+    // Do not mark news delivered on enqueue. The delivery worker records a
+    // durable receipt only after the mail provider accepts the message.
     await writeEvent(db, {
       category: 'MATCHING',
       level: 'INFO',

@@ -122,7 +122,7 @@ test('advisory PDF attachment is encoded per provider', async () => {
         return { status: 200, headers: {}, body: JSON.stringify({ success: true, message_ids: ['id'] }) };
       },
       false,
-      attachment,
+      [attachment],
     );
     assert.equal(result, 'id');
     assert.ok(capturedBody, `body should be captured for ${provider}`);
