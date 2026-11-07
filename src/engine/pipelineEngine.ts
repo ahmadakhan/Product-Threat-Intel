@@ -429,6 +429,10 @@ export function runVulnerabilityPipeline(
           effectiveVendorAliases,
           effectiveProductAliases,
           asset.version,
+          cve.cisaKev?.isKev === true &&
+            !cve.cpeMatches?.length &&
+            !cve.cpeMatchDetails?.length &&
+            !cve.purls?.length,
         ),
       );
       if (asset.purls?.length && cve.purls?.length)
@@ -496,11 +500,23 @@ export function runVulnerabilityPipeline(
         cve.cpeMatchDetails?.length ||
         cve.purls?.length
       );
-      const cveReviewOverride = cve.applicabilityRequiresReview && !advisoryLacksApplicabilityData;
-      const sourceRequiresReview = cve.applicabilityPolicy === 'REVIEW_ONLY';
+      // A complete product-wide registration (every component but vendor/product
+      // wildcarded) is a deliberate, broad "monitor everything" choice by the
+      // operator, the same choice that already releases the per-match version
+      // hold. The AND/negate flag protects against flattening a CVE's config
+      // tree into an OR when a concrete asset might not satisfy every branch;
+      // a product-wide registration matches every branch by construction, so
+      // the flag has nothing left to protect against for this asset.
+      const confirmedProductWideMatch = Boolean(result.productWideAllVersions) && !result.applicabilityRequiresReview;
+      const confirmedKevProductOnlyMatch =
+        confirmedProductWideMatch && result.method === 'VENDOR_PRODUCT_FALLBACK' && cve.cisaKev?.isKev === true;
+      const cveReviewOverride =
+        cve.applicabilityRequiresReview && !advisoryLacksApplicabilityData && !confirmedProductWideMatch;
+      const sourceRequiresReview = cve.applicabilityPolicy === 'REVIEW_ONLY' && !confirmedKevProductOnlyMatch;
       const unverifiableMatch = sourceRequiresReview || cveReviewOverride || result.applicabilityRequiresReview;
-      if (sourceRequiresReview || cveReviewOverride) result.confidence = 0;
       const threshold = settings.autoDispatchConfidenceThreshold ?? 90;
+      if (sourceRequiresReview || cveReviewOverride) result.confidence = 0;
+      else if (confirmedKevProductOnlyMatch) result.confidence = Math.max(result.confidence, threshold);
       (result as MatchResult & { contradicted?: true }).contradicted = packageRejected || undefined;
       const confirmed =
         !packageRejected &&

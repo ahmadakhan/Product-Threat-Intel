@@ -14,6 +14,7 @@ import { mitreRecord, mitreDelta } from './fixtures/mitre';
 import { applyCommand } from '../server/commands.ts';
 import type { Advisory, AliasEntry, Finding, NormalizedCVE, WatchListItem } from '../src/types/index.ts';
 import { deriveInventoryAliases } from '../src/utils/aliasLifecycle.ts';
+import { registrationAssetsFromCpes } from '../src/utils/watchlist.ts';
 import { encrypt } from '../server/secrets.ts';
 const database = process.env.TEST_DATABASE_URL;
 const cpe = (version: string) => `cpe:2.3:a:example:widget:${version}:*:*:*:*:*:*:*`;
@@ -665,6 +666,55 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       assert.equal(jobs.rows.length, 1);
       assert.equal(jobs.rows[0].status, 'QUEUED');
       assert.equal(jobs.rows[0].advisory_id, advisories[0].id);
+    });
+    await t.test('SonicOS KEV text evidence queues email for a registered all-version product', async () => {
+      await reset();
+      await save('settings', 'main', {
+        ...DEFAULT_SETTINGS,
+        autoDispatchEnabled: true,
+        autoDispatchConfidenceThreshold: 90,
+        digestBatchingEnabled: false,
+      });
+      await save('recipients', 'sonicwall-kev-recipient', {
+        id: 'sonicwall-kev-recipient',
+        name: 'SonicWall test recipient',
+        email: 'sonicwall-kev@example.invalid',
+        enabled: true,
+        deliveryGroup: 'SECURITY_TEAM',
+        subscriptionTier: 'ALL_SEVERITIES',
+      });
+      const [registered] = registrationAssetsFromCpes(
+        ['cpe:2.3:o:sonicwall:sonicos:*:*:*:*:*:*:*:*'],
+        { assetTag: 'SW-SONICOS', ownerGroup: 'SOC', notes: '', purls: [] },
+      );
+      await save('watchlist', 'sonicwall-sonicos', {
+        ...registered,
+        id: 'sonicwall-sonicos',
+        createdAt: new Date().toISOString(),
+      });
+      await save('cveData', 'CVE-2026-19868', {
+        ...vulnerability(),
+        cveId: 'CVE-2026-19868',
+        title: 'SonicOS SSLVPN authentication enforcement vulnerability',
+        description: 'An authentication enforcement vulnerability affects the SonicOS SSLVPN service.',
+        cpeMatches: [],
+        cpeMatchDetails: [],
+        versionRange: undefined,
+        purls: undefined,
+        applicabilityRequiresReview: true,
+        applicabilityPolicy: 'REVIEW_ONLY',
+        cisaKev: { isKev: true, dateAdded: '2026-11-06' },
+      });
+
+      await run();
+
+      const finding = (await list<Finding>(pool, 'findings'))[0];
+      assert.equal(finding.notificationStatus, 'QUEUED_FOR_DISPATCH');
+      const jobs = await pool.query<{ status: string }>(
+        "SELECT status FROM outbox WHERE channel='email' AND target_id='sonicwall-kev-recipient'",
+      );
+      assert.equal(jobs.rows.length, 1);
+      assert.equal(jobs.rows[0].status, 'QUEUED');
     });
     await t.test(
       'delivery rechecks current inventory before sending an already queued advisory',

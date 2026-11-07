@@ -307,6 +307,85 @@ test('L-1: a package-only advisory is still treated as having applicability data
   assert.equal(finding.confidence, 0);
 });
 
+/* ------------------------------------------------------------------ AND/negate vs product-wide wildcard */
+
+test('a product-wide wildcard registration dispatches despite a CVE-level AND/negate hold', () => {
+  // NVD configurations combining hardware-model criteria with software criteria
+  // via an AND node set applicabilityRequiresReview on the whole CVE, because
+  // flattening the tree into independent OR checks can't prove a concrete
+  // asset satisfies every branch. A complete product-wide registration (every
+  // component but vendor/product wildcarded) matches every branch by
+  // construction, so that protection has nothing left to verify here.
+  const cve = cveRecord({
+    cpeMatches: ['cpe:2.3:o:sonicwall:sonicos:7.0.1:*:*:*:*:*:*:*'],
+    cpeMatchDetails: [{ criteria: 'cpe:2.3:o:sonicwall:sonicos:7.0.1:*:*:*:*:*:*:*' }],
+    applicabilityRequiresReview: true,
+  });
+  const asset = assetRecord({
+    vendor: 'sonicwall',
+    product: 'sonicos',
+    version: '*',
+    purls: [],
+    cpes: ['cpe:2.3:o:sonicwall:sonicos:*:*:*:*:*:*:*:*'],
+  });
+  const [finding] = runVulnerabilityPipeline([], [cve], [asset], [], [], settings).newFindings;
+  assert.ok(finding);
+  assert.equal(finding.notificationStatus, 'QUEUED_FOR_DISPATCH');
+});
+
+test('a concrete device match still requires review under the same CVE-level AND/negate hold', () => {
+  const cve = cveRecord({
+    cveId: 'CVE-2026-9998',
+    cpeMatches: ['cpe:2.3:o:sonicwall:sonicos:7.0.1:*:*:*:*:*:*:*'],
+    cpeMatchDetails: [{ criteria: 'cpe:2.3:o:sonicwall:sonicos:7.0.1:*:*:*:*:*:*:*' }],
+    applicabilityRequiresReview: true,
+  });
+  const asset = assetRecord({
+    vendor: 'sonicwall',
+    product: 'sonicos',
+    version: '7.0.1',
+    purls: [],
+    cpes: ['cpe:2.3:o:sonicwall:sonicos:7.0.1:*:*:*:*:*:*:*'],
+  });
+  const [finding] = runVulnerabilityPipeline([], [cve], [asset], [], [], settings).newFindings;
+  assert.ok(finding);
+  assert.equal(finding.notificationStatus, 'REVIEW_REQUIRED');
+});
+
+test('a KEV naming the product dispatches for a wildcard registration when sources have no CPE data', () => {
+  const cve = cveRecord({
+    cveId: 'CVE-2026-19868',
+    title: 'SonicOS SSLVPN authentication enforcement vulnerability',
+    description: 'An authentication enforcement vulnerability affects the SonicOS SSLVPN service.',
+    cpeMatches: [],
+    cpeMatchDetails: [],
+    purls: undefined,
+    applicabilityRequiresReview: true,
+    applicabilityPolicy: 'REVIEW_ONLY',
+    cisaKev: { isKev: true, dateAdded: '2026-11-06' },
+  });
+  const asset = assetRecord({
+    vendor: 'sonicwall',
+    product: 'sonicos',
+    version: '*',
+    purls: [],
+    cpes: ['cpe:2.3:o:sonicwall:sonicos:*:*:*:*:*:*:*:*'],
+  });
+  const [kevFinding] = runVulnerabilityPipeline([], [cve], [asset], [], [], settings).newFindings;
+  assert.ok(kevFinding);
+  assert.equal(kevFinding.notificationStatus, 'QUEUED_FOR_DISPATCH');
+
+  const unconfirmedFindings = runVulnerabilityPipeline(
+    [],
+    [{ ...cve, cveId: 'CVE-2026-19869', cisaKev: { isKev: false } }],
+    [asset],
+    [],
+    [],
+    settings,
+  ).newFindings;
+  assert.equal(unconfirmedFindings.length, 0);
+});
+
 /* ------------------------------------------------------------------ H-5 */
 
 test('H-5: deterministic configuration faults are classified as permanent', () => {

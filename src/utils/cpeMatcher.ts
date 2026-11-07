@@ -795,6 +795,8 @@ export interface MatchResult {
   suppressedByVex?: boolean;
   suppressedReason?: string;
   applicabilityRequiresReview?: boolean;
+  /** Matched a complete product-wide registration (every component but vendor/product wildcarded). */
+  productWideAllVersions?: boolean;
 }
 
 /**
@@ -816,6 +818,7 @@ export function matchesWatchlistItem(
   customVendorAliases: Record<string, string[]> = {},
   customProductAliases: Record<string, string[]> = {},
   assetVersionInput?: string,
+  allowProductOnlyFallback = false,
 ): MatchResult {
   let bestMatch: MatchResult | undefined;
   const retain = (candidate: MatchResult) => {
@@ -908,6 +911,20 @@ export function matchesWatchlistItem(
       versionUnasserted: parsed.isValid && (!parsed.version || parsed.version === '*'),
     };
   });
+  const isProductWideRegistration = (asset: ParsedCPE, versionUnasserted: boolean, genericIdentity: boolean) =>
+    versionUnasserted &&
+    !genericIdentity &&
+    asset.part !== '*' &&
+    asset.vendor !== '*' &&
+    asset.product !== '*' &&
+    !hasUnescapedCpeWildcard(asset.vendor) &&
+    !hasUnescapedCpeWildcard(asset.product) &&
+    (['update', 'edition', 'language', 'swEdition', 'targetSw', 'targetHw', 'other'] as const).every(
+      (field) => asset[field] === '*' || asset[field] === '-',
+    );
+  const hasProductWideRegistration = preparedAssetCpes.some(({ genericIdentity, parsed, versionUnasserted }) =>
+    isProductWideRegistration(parsed, versionUnasserted, genericIdentity),
+  );
   for (const { assetCpe, genericIdentity, parsed: assetParsed, versionUnasserted } of preparedAssetCpes) {
     for (const vulnCpe of vulnCpeMatches) {
       const vulnParsed = parseCPE23(vulnCpe);
@@ -965,17 +982,7 @@ export function matchesWatchlistItem(
           'targetHw',
           'other',
         ] as const;
-        const productWideAllVersions =
-          versionUnasserted &&
-          !genericIdentity &&
-          asset.part !== '*' &&
-          asset.vendor !== '*' &&
-          asset.product !== '*' &&
-          !hasUnescapedCpeWildcard(asset.vendor) &&
-          !hasUnescapedCpeWildcard(asset.product) &&
-          (['update', 'edition', 'language', 'swEdition', 'targetSw', 'targetHw', 'other'] as const).every(
-            (field) => asset[field] === '*' || asset[field] === '-',
-          );
+        const productWideAllVersions = isProductWideRegistration(asset, versionUnasserted, genericIdentity);
         const contextNeedsReview = !productWideAllVersions && (
           contextFields.some(
             (field) =>
@@ -1004,6 +1011,7 @@ export function matchesWatchlistItem(
                 ? 'Matched strict CPE 2.3 component tokens; review required (wildcard version or context) (70% confidence)'
                 : 'Matched strict CPE 2.3 component tokens (90% confidence)',
           applicabilityRequiresReview: requiresReview,
+          productWideAllVersions,
         });
       }
     }
@@ -1155,11 +1163,16 @@ export function matchesWatchlistItem(
 
   // 5. Fallback Heuristic
   const fullText = `${vulnTitle} ${vulnDescription}`.toLowerCase();
+  const productOnlyKevFallback =
+    allowProductOnlyFallback &&
+    hasProductWideRegistration &&
+    normProduct &&
+    containsIdentityWords(fullText, normProduct);
   if (
     normVendor &&
     normProduct &&
-    containsIdentityWords(fullText, normVendor) &&
-    containsIdentityWords(fullText, normProduct)
+    ((containsIdentityWords(fullText, normVendor) && containsIdentityWords(fullText, normProduct)) ||
+      productOnlyKevFallback)
   ) {
     // Do not let the text fallback re-admit a release that the advisory range
     // explicitly excludes when every inventory version is comparable.
@@ -1171,6 +1184,7 @@ export function matchesWatchlistItem(
       confidence: 70,
       matchedCpe: assetCpes[0] || `cpe:2.3:a:${normVendor}:${normProduct}:*:*:*:*:*:*:*:*`,
       evidence: `Matched vendor "${normVendor}" and product "${normProduct}" in advisory text (70% confidence)`,
+      productWideAllVersions: productOnlyKevFallback || undefined,
     };
   }
 

@@ -128,6 +128,9 @@ export const DEFAULT_EGRESS_HOSTS = [
   'crowdstrike.com',
   'securelist.com',
   'www.securelist.com', // feed-kaspersky-securelist uses www.securelist.com
+  // SonicWall PSIRT Security Advisories
+  'psirtapi.global.sonicwall.com', // RSS API feed: https://psirtapi.global.sonicwall.com/api/v1/feed/rss.xml
+  'psirt.global.sonicwall.com', // Web portal redirect target
 ].join(',');
 
 const schema = z.object({

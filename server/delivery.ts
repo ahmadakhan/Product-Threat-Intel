@@ -1,4 +1,4 @@
-import { validateNativeDelivery, type NativeDelivery } from './correlation/notificationEvidence.ts';
+﻿import { validateNativeDelivery, type NativeDelivery } from './correlation/notificationEvidence.ts';
 import { describeError, writeEvent } from './events';
 import { classifyDeliveryError, computeRetryDelay, getMlRuntime } from './ml/integration.ts';
 import { advisoryEmail } from './advisoryEmail';
@@ -1089,6 +1089,54 @@ export async function queueNewsEvidenceNotifications(
     `Evidence: ${match.evidence}\n\n` +
     (match.zeroDay ? '** Potential zero-day: no assigned CVE **\n' : '') +
     'This is applicability evidence, not a confirmed advisory. Confirm source authenticity and consult the vendor before remediation.';
+
+const escapeHtml = (value: string) => value.replace(/[&<>"']/g, ch =>
+    ({ '&': '&', '<': '<', '>': '>', '"': '"', "'": String.fromCharCode(39) })[ch]!);
+  const escapeUrl = (value: string) => value.replace(/"/g, '%22');
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(subject)}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #1f2937; max-width: 600px; margin: 0 auto; padding: 24px;">
+  <div style="background: #f8fafc; border-radius: 8px; padding: 24px; border: 1px solid #e2e8f0;">
+    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 16px;">
+      <span style="background: #1e40af; color: white; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Threat Intelligence</span>
+      <span style="background: #dc2626; color: white; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">NEWS</span>
+    </div>
+    <h1 style="margin: 0 0 16px; font-size: 20px; font-weight: 600; color: #111827; line-height: 1.3;">${escapeHtml(primary.title)}</h1>
+    <div style="margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #e2e8f0;">
+      ${articles.map((article) => `
+        <div style="margin-bottom: 12px;">
+          <p style="margin: 0 0 4px; font-size: 14px; color: #374151;"><strong>Source:</strong> <a href="${escapeUrl(article.url)}" style="color: #2563eb; text-decoration: none;">${escapeHtml(article.url)}</a></p>
+          <p style="margin: 0 0 4px; font-size: 14px; color: #374151;"><strong>Published:</strong> ${escapeHtml(article.modifiedDate || article.publishedDate)}</p>
+          <p style="margin: 0; font-size: 14px; color: #374151;"><strong>Source feed:</strong> ${escapeHtml(article.sourceFeeds.length ? article.sourceFeeds.join(', ') : 'security news')}</p>
+        </div>
+      `).join('')}
+    </div>
+    <div style="margin-bottom: 16px; padding: 12px; background: #fff; border-radius: 6px; border: 1px solid #e2e8f0;">
+      <p style="margin: 0 0 4px; font-size: 14px; color: #374151;"><strong>Matched asset:</strong> ${escapeHtml(assetLine)}</p>
+      ${cveIds.length ? `<p style="margin: 0; font-size: 14px; color: #374151;"><strong>CVE reference(s):</strong> ${cveIds.map(cve => `<a href="https://nvd.nist.gov/vuln/detail/${escapeHtml(cve)}" style="color: #2563eb; text-decoration: none;">${escapeHtml(cve)}</a>`).join(', ')}</p>` : ''}
+    </div>
+    <div style="margin-bottom: 16px; padding: 12px; background: #fff; border-radius: 6px; border: 1px solid #e2e8f0;">
+      <p style="margin: 0 0 4px; font-size: 14px; color: #374151;"><strong>Evidence:</strong></p>
+      <p style="margin: 0; font-size: 14px; color: #374151; white-space: pre-wrap;">${escapeHtml(match.evidence)}</p>
+    </div>
+    ${match.zeroDay ? `
+    <div style="margin-bottom: 16px; padding: 12px; background: #fef3c7; border-radius: 6px; border: 1px solid #fcd34d;">
+      <p style="margin: 0; font-size: 14px; font-weight: 600; color: #92400e;">⚠ Potential zero-day: no assigned CVE</p>
+    </div>
+    ` : ''}
+    <div style="font-size: 13px; color: #6b7280; padding-top: 16px; border-top: 1px solid #e2e8f0;">
+      <p style="margin: 0;">This is applicability evidence, not a confirmed advisory. Confirm source authenticity and consult the vendor before remediation.</p>
+    </div>
+  </div>
+</body>
+</html>`;
   const articlePayloads = articles.map((article) => ({
     id: article.id,
     title: article.title,
@@ -1126,6 +1174,7 @@ export async function queueNewsEvidenceNotifications(
         {
           subject,
           text,
+          html,
           cveIds,
           newsEvidence,
           contentRevision,
@@ -2343,3 +2392,4 @@ export async function deliverNext(
 
   return true;
 }
+

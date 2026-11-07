@@ -147,7 +147,56 @@ function formattedDate(value?: string | null): string {
   return date === '—' ? 'Unavailable' : date;
 }
 
-export function renderAdvisory(template: string, advisory: Advisory, findings?: Finding[]): string {
+/**
+ * True when the finding's measured match confidence is below certainty.
+ *
+ * Findings are never withheld for confidence: every correlation is dispatched.
+ * The flag drives the in-finding notice that names the limitation and its
+ * reason, so reduced confidence is communicated instead of being dropped.
+ */
+export function confidenceIsLimited(finding: Finding): boolean {
+  const confidence = finding.confidence;
+  return typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 100;
+}
+
+function confidencePercent(finding: Finding): string {
+  const confidence = finding.confidence;
+  return typeof confidence === 'number' && Number.isFinite(confidence)
+    ? `${Math.round(confidence)}% match confidence`
+    : '';
+}
+
+/**
+ * Removes the machine-readable confidence suffix the pipeline appends to every
+ * evidence string ("... (70% confidence)") so the notice does not repeat the
+ * figure twice. Matching evidence is plain feed-derived text, never markup.
+ */
+function stripConfidenceEvidence(evidence?: string): string {
+  return (evidence || '')
+    .replace(/\s*\(\s*\d{1,3}% confidence\s*\)\s*$/i, '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .trim();
+}
+
+export interface AdvisoryRenderOptions {
+  /**
+   * Pinned render instant.
+   *
+   * The template embeds a "Report Generated" timestamp. The same rendered HTML
+   * drives both the email body and the PDF attachment, so the instant must be
+   * supplied by the caller: rendering the body and the attachment separately
+   * would stamp them a moment apart and make the attachment differ from the
+   * email. Callers that render once may omit it.
+   */
+  generatedAt?: Date;
+}
+
+export function renderAdvisory(
+  template: string,
+  advisory: Advisory,
+  findings?: Finding[],
+  options: AdvisoryRenderOptions = {},
+): string {
   const validation = validateAdvisoryFields(advisory);
   if (!validation.valid) {
     throw new Error(
@@ -239,7 +288,7 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
     severity: advisory.severity,
     advisory_id: advisory.id,
     advisory_title: advisory.title,
-    dispatch_date: new Date().toLocaleString('en-GB', {
+    dispatch_date: (options.generatedAt ?? new Date()).toLocaleString('en-GB', {
       day: 'numeric',
       month: 'long',
       year: 'numeric',
@@ -306,11 +355,21 @@ export function renderAdvisory(template: string, advisory: Advisory, findings?: 
           rawDescription.length > 600 ? `${rawDescription.slice(0, 597).trimEnd()}…` : rawDescription;
         const colour = SEVERITY_COLORS[severity] || SEVERITY_COLORS.UNKNOWN;
         const scoreLabel = typeof score === 'number' ? score.toFixed(1) : 'N/A';
+        // Every finding is dispatched, including those the matching policy could
+        // not confirm with full confidence. Rather than withholding them (which
+        // silently lost real exposure), the advisory states the limitation on the
+        // finding itself so the reader knows what still has to be verified.
+        const lowConfidenceNote = (finding?: Finding) => {
+          if (!finding || !confidenceIsLimited(finding)) return '';
+          const confidenceLabel = confidencePercent(finding);
+          const evidence = stripConfidenceEvidence(finding.matchingEvidence);
+          return `<div style="margin:5px 0 0;padding:7px 9px;border-left:3px solid #b7791f;background:#fffbeb;font-size:11px;line-height:17px;color:#7c2d12;"><strong>Low confidence${confidenceLabel ? ` (${escape(confidenceLabel)})` : ''}:</strong> ${escape(evidence || 'Applicability could not be fully verified; confirm the affected version with the vendor before remediation.')}</div>`;
+        };
         const productMetadata = (cveFindings.length ? cveFindings : [undefined])
           .map((finding) => {
             const productName = findingProductLabel(finding);
             const version = finding ? affectedVersionLabel(finding) || 'Unavailable; confirm with vendor' : 'Unavailable';
-            return `<div style="margin:5px 0 0;font-size:11px;line-height:17px;color:#475569;"><strong>Product:</strong> ${escape(productName)} &nbsp; <strong>Affected version(s):</strong> ${escape(version)}<br/><strong>Published:</strong> ${escape(formattedDate(finding?.cve.publishedDate))} &nbsp; <strong>Last modified:</strong> ${escape(formattedDate(finding?.cve.modifiedDate))}</div>`;
+            return `<div style="margin:5px 0 0;font-size:11px;line-height:17px;color:#475569;"><strong>Product:</strong> ${escape(productName)} &nbsp; <strong>Affected version(s):</strong> ${escape(version)}<br/><strong>Published:</strong> ${escape(formattedDate(finding?.cve.publishedDate))} &nbsp; <strong>Last modified:</strong> ${escape(formattedDate(finding?.cve.modifiedDate))}</div>${lowConfidenceNote(finding)}`;
           })
           .join('');
         // NVD is the authoritative, always-available source for a CVE id; it is
