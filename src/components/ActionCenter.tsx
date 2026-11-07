@@ -86,7 +86,6 @@ interface FilterOptions {
     | 'ALL'
     | 'DELIVERED'
     | 'ACCEPTED'
-    | 'REVIEW_REQUIRED'
     | 'QUEUED'
     | 'SENDING'
     | 'RETRYING'
@@ -125,7 +124,6 @@ export const ActionCenter: React.FC = () => {
     previewEmailPdf,
     acknowledgeEmailDelivery,
     updateAndSendEmail,
-    approveEmailDelivery,
     deleteEmailQueueItem,
     advisories,
     findings,
@@ -172,7 +170,7 @@ export const ActionCenter: React.FC = () => {
   const [resendBusy, setResendBusy] = useState(false);
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
   /** Pending email-send confirmation: { id, action, label }. Null when none pending. */
-  const [confirmSend, setConfirmSend] = useState<{ id: string; action: 'retry' | 'cancel' | 'send-now' | 'resend' | 'approve' | 'update-send'; label: string } | null>(null);
+  const [confirmSend, setConfirmSend] = useState<{ id: string; action: 'retry' | 'cancel' | 'send-now' | 'resend' | 'update-send'; label: string } | null>(null);
   
   // Pagination
   const [currentPage, setCurrentPage] = useState(1);
@@ -207,7 +205,7 @@ export const ActionCenter: React.FC = () => {
         const delivered = emailLogs.filter(isDeliveredLog).length;
         const pendingAction = emailLogs.filter(isActionPending).length;
         const failed = emailLogs.filter(log => log.status === 'FAILED').length;
-        const queued = emailLogs.filter(log => ['QUEUED', 'SENDING', 'RETRYING', 'REVIEW_REQUIRED'].includes(log.status)).length;
+        const queued = emailLogs.filter(log => ['QUEUED', 'SENDING', 'RETRYING'].includes(log.status)).length;
         const totalLogs = emailLogs.length;
         
         // Calculate delivery rate
@@ -320,11 +318,11 @@ export const ActionCenter: React.FC = () => {
     }
   }, [editing, validateAuditReason, buildEdits, editEmailReview, reload]);
 
-  /** Approve a held review job, or dispatch an updated copy of a delivered one. */
+  /** Dispatch an updated copy of a delivered or queued email. */
   const sendUpdated = useCallback(async () => {
     if (!editing) return;
     if (!validateAuditReason()) return;
-    setConfirmSend({ id: editing.id, action: editing.status === 'REVIEW_REQUIRED' ? 'approve' : 'update-send', label: editing.subject });
+    setConfirmSend({ id: editing.id, action: 'update-send', label: editing.subject });
   }, [editing, validateAuditReason]);
 
   /** Execute a previously confirmed email-send action. */
@@ -366,20 +364,10 @@ export const ActionCenter: React.FC = () => {
         }
         return;
       }
-      if ((action === 'approve' || action === 'update-send') && editing) {
+      if (action === 'update-send' && editing) {
         if (!validateAuditReason()) return;
         setEditBusy(true);
         try {
-          if (editing.status === 'REVIEW_REQUIRED') {
-            const saved = await editEmailReview(editing.id, buildEdits());
-            if (!saved) return;
-            const approved = await approveEmailDelivery(editing.id);
-            if (approved) {
-              setEditing(null);
-              await reload();
-            }
-            return;
-          }
           const result = await updateAndSendEmail(editing.id, {
             subject: subjectDraft.trim() || undefined,
             audienceNotice: edits.audienceNotice,
@@ -411,7 +399,6 @@ export const ActionCenter: React.FC = () => {
     resending,
     editing,
     buildEdits,
-    approveEmailDelivery,
     updateAndSendEmail,
     subjectDraft,
     edits,
@@ -489,7 +476,7 @@ export const ActionCenter: React.FC = () => {
   );
 
   const isEditable = (log: EmailDeliveryLog) =>
-    log.status === 'REVIEW_REQUIRED' || log.status === 'QUEUED';
+    log.status === 'QUEUED';
 
   /** Delivered finding emails remain actionable until an operator closes them. */
   const isFollowUpEligible = (log: EmailDeliveryLog) =>
@@ -650,14 +637,6 @@ export const ActionCenter: React.FC = () => {
         <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20">
           <AlertTriangle className="w-3 h-3" />
           <span>FAILED</span>
-        </span>
-      );
-    }
-    if (log.status === 'REVIEW_REQUIRED') {
-      return (
-        <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-violet-500/10 text-violet-400 border border-violet-500/20">
-          <Eye className="w-3 h-3" />
-          <span>REVIEW</span>
         </span>
       );
     }
@@ -831,7 +810,6 @@ export const ActionCenter: React.FC = () => {
               <option value="ALL">All Statuses</option>
               <option value="ACCEPTED">Accepted (delivered)</option>
               <option value="DELIVERED">Delivered (confirmed)</option>
-              <option value="REVIEW_REQUIRED">Awaiting review</option>
               <option value="QUEUED">Queued</option>
               <option value="SENDING">Sending</option>
               <option value="RETRYING">Retrying</option>
@@ -1224,7 +1202,7 @@ export const ActionCenter: React.FC = () => {
                   >
                     {editing.subject}
                   </h2>
-                  <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-400 light:text-zinc-600">
+<p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-400 light:text-zinc-600">
                     <span>To {editing.recipientEmail}</span>
                     <span aria-hidden="true" className="text-zinc-600">
                       ·
@@ -1232,11 +1210,9 @@ export const ActionCenter: React.FC = () => {
                     <span>Advisory {editing.advisoryId}</span>
                     <span
                       className={`ml-1 inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
-                        editing.status === 'REVIEW_REQUIRED'
-                          ? 'border-amber-500/30 bg-amber-500/10 text-amber-300 light:text-amber-700'
-                          : editing.status === 'QUEUED'
-                            ? 'border-sky-500/30 bg-sky-500/10 text-sky-300 light:text-sky-700'
-                            : 'border-zinc-700 bg-zinc-800/70 text-zinc-300 light:border-zinc-300 light:bg-zinc-100 light:text-zinc-700'
+                        editing.status === 'QUEUED'
+                          ? 'border-sky-500/30 bg-sky-500/10 text-sky-300 light:text-sky-700'
+                          : 'border-zinc-700 bg-zinc-800/70 text-zinc-300 light:border-zinc-300 light:bg-zinc-100 light:text-zinc-700'
                       }`}
                     >
                       {editing.status.replaceAll('_', ' ')}
@@ -1698,13 +1674,11 @@ export const ActionCenter: React.FC = () => {
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-3 border-t border-zinc-800/80 bg-zinc-900/70 px-6 py-4 light:border-zinc-200 light:bg-zinc-50">
+<div className="flex flex-wrap items-center gap-3 border-t border-zinc-800/80 bg-zinc-900/70 px-6 py-4 light:border-zinc-200 light:bg-zinc-50">
                 <p className="mr-auto text-[11px] text-zinc-500" aria-live="polite">
-                  {editing.status === 'REVIEW_REQUIRED'
-                    ? 'Review the message before approving delivery.'
-                    : editing.status === 'QUEUED'
-                      ? 'Edits are saved to the queued notification.'
-                      : 'The updated message will be sent as a new delivery.'}
+                  {editing.status === 'QUEUED'
+                    ? 'Edits are saved to the queued notification.'
+                    : 'The updated message will be sent as a new delivery.'}
                 </p>
                 <button
                   type="button"
@@ -1714,17 +1688,7 @@ export const ActionCenter: React.FC = () => {
                 >
                   Cancel
                 </button>
-                {editing.status === 'REVIEW_REQUIRED' ? (
-                  <button
-                    type="button"
-                    className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-amber-400/30 bg-amber-500 px-4 text-xs font-semibold text-zinc-950 shadow-sm transition hover:bg-amber-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400 disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={editBusy}
-                    onClick={sendUpdated}
-                  >
-                    <Send className="h-3.5 w-3.5" />
-                    {editBusy ? 'Sending…' : 'Approve & send'}
-                  </button>
-                ) : editing.status === 'QUEUED' ? (
+                {editing.status === 'QUEUED' ? (
                   <button
                     type="button"
                     className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
@@ -1914,8 +1878,6 @@ export const ActionCenter: React.FC = () => {
                   ? 'retry delivery of'
                   : confirmSend.action === 'resend'
                   ? 'resend'
-                  : confirmSend.action === 'approve'
-                  ? 'approve and send'
                   : 'send an updated copy of'}
                 {' '}
                 <span className="font-medium text-zinc-200 light:text-zinc-800">{confirmSend.label}</span>.{' '}

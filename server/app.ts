@@ -2025,10 +2025,9 @@ export function createApp(
     '/api/test-email',
     requireRole('ADMIN'),
     asyncRoute(async (req, res) => {
-      const { email, forceReview, html } = z
+      const { email, html } = z
         .object({
           email: z.email().max(254),
-          forceReview: z.boolean().optional(),
           html: z.string().min(1).max(200_000).optional(),
         })
         .parse(req.body);
@@ -2062,7 +2061,6 @@ export function createApp(
             cveIds: [],
           },
           randomUUID(),
-          forceReview ? 'REVIEW' : undefined,
         );
         await appendAudit(
           db,
@@ -2300,92 +2298,6 @@ export function createApp(
       res.status(202).json({ success: true, statusCode: 202, signature: 'Pending worker delivery' });
     }),
   );
-  app.post(
-    '/api/email/:id/approve',
-    requireRole('ADMIN', 'OPERATOR'),
-    asyncRoute(async (req, res) => {
-      const id = outboxId(req.params.id);
-      await transaction(pool, async (db) => {
-        // Findings are queued for delivery, not for review. "Approve" therefore
-        // confirms the operator's edits on a queued or previously-held email and
-        // releases it immediately; a job already in flight or delivered cannot
-        // be re-sent from here (use the follow-up resend route).
-        const row = await db.query(
-          "UPDATE outbox SET status='QUEUED',review_approved=true,attempts=0,next_attempt=now(),error=NULL,locked_at=NULL,lock_token=NULL,updated_at=now() WHERE id=$1 AND channel='email' AND status IN ('REVIEW','QUEUED') AND locked_at IS NULL RETURNING advisory_id, edits, payload",
-          [id],
-        );
-        if (!row.rowCount)
-          throw new HttpError(409, 'Only a queued email or a notification awaiting review can be approved');
-        const edits: ReviewEdits = row.rows[0].edits || {};
-        if (Object.keys(edits).length) {
-          const currentPayload = row.rows[0].payload;
-          // Idempotent: previously seeded notice/comment blocks are stripped
-          // before the current edits are applied, so re-approval or a later
-          // send cannot duplicate the reviewer's additions.
-          const updatedHtml = renderReviewEdits(currentPayload.html, edits);
-          if (updatedHtml !== currentPayload.html) {
-            // The reviewer comment is now part of the body. Keep the stored
-            // content revision in step with it, or the delivery worker would
-            // reject the very message the operator just approved as having
-            // "changed" between queueing and approval.
-            let contentRevision = currentPayload.contentRevision;
-            if (currentPayload.dailyDigest) {
-              contentRevision = createHash('sha256')
-                .update(stableJson({ ...currentPayload, html: updatedHtml, contentRevision: undefined }))
-                .digest('hex')
-                .slice(0, 20);
-            } else {
-              const advisory = await get<any>(db, 'advisories', String(row.rows[0].advisory_id));
-              const findingIds: string[] = currentPayload.includedFindingIds ?? advisory?.findingIds ?? [];
-              const findings = [...(await getMany<any>(db, 'findings', findingIds)).values()];
-              if (advisory) {
-                const recomputed = advisoryRevision(
-                  { ...advisory, cveIds: currentPayload.cveIds ?? advisory.cveIds },
-                  findings,
-                );
-                if (!currentPayload.contentRevision || recomputed === currentPayload.contentRevision)
-                  contentRevision = recomputed;
-                else
-                  // The advisory or its findings changed between queueing and
-                  // approval. Sending the modified body would deliver content the
-                  // revision does not describe, so the job goes back to review
-                  // instead of being dispatched on a mismatched hash.
-                  throw new HttpError(
-                    409,
-                    'Advisory content changed since this notification was queued; rebuild it before approving',
-                  );
-              }
-            }
-            await db.query('UPDATE outbox SET payload=$2::jsonb WHERE id=$1', [
-              id,
-              JSON.stringify({ ...currentPayload, html: updatedHtml, contentRevision }),
-            ]);
-          }
-        }
-        const log = await getForUpdate<any>(db, 'emailLogs', id);
-        if (log)
-          await put(db, 'emailLogs', id, {
-            ...log,
-            subject: effectiveSubject(log.subject, edits),
-            status: 'QUEUED',
-            attemptCount: 0,
-            nextRetryTime: new Date().toISOString(),
-            errorMessage: undefined,
-          });
-        await appendAudit(
-          db,
-          'Email notification approved',
-          `Delivery ${id}`,
-          req.operator!.username,
-          'EMAIL',
-          'INFO',
-          req.ip || '',
-        );
-        await refreshAdvisoryDeliveryStatus(db, String(row.rows[0].advisory_id));
-      });
-      res.json({ success: true });
-    }),
-  );
   app.get(
     '/api/email/:id/preview',
     requireRole('ADMIN', 'OPERATOR'),
@@ -2582,39 +2494,6 @@ export function createApp(
           'INFO',
           req.ip || '',
         );
-      });
-      res.json({ success: true });
-    }),
-  );
-  app.post(
-    '/api/email/:id/reject',
-    requireRole('ADMIN', 'OPERATOR'),
-    asyncRoute(async (req, res) => {
-      const id = outboxId(req.params.id);
-      await transaction(pool, async (db) => {
-        const row = await db.query(
-          "UPDATE outbox SET status='REJECTED',error='Rejected during security review',updated_at=now() WHERE id=$1 AND channel='email' AND status='REVIEW' RETURNING advisory_id",
-          [id],
-        );
-        if (!row.rowCount) throw new HttpError(409, 'Only notifications awaiting review can be rejected');
-        const log = await getForUpdate<any>(db, 'emailLogs', id);
-        if (log)
-          await put(db, 'emailLogs', id, {
-            ...log,
-            status: 'CANCELLED',
-            nextRetryTime: null,
-            errorMessage: 'Rejected during security review',
-          });
-        await appendAudit(
-          db,
-          'Email notification rejected',
-          `Delivery ${id}`,
-          req.operator!.username,
-          'EMAIL',
-          'WARNING',
-          req.ip || '',
-        );
-        await refreshAdvisoryDeliveryStatus(db, String(row.rows[0].advisory_id));
       });
       res.json({ success: true });
     }),

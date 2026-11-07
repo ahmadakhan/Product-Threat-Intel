@@ -338,7 +338,7 @@ test(
           'TEST',
           { subject: 'Test', text: 'Test', cveIds: [] },
           'approval-budget',
-          'REVIEW',
+          'QUEUED',
         );
         await pool.query('UPDATE outbox SET attempts=1 WHERE id=$1', [id]);
         await createUser(pool, 'audit-admin', 'Audit-test-password-2026!', 'ADMIN');
@@ -376,7 +376,7 @@ test(
             cveIds: [],
           },
           'review-edits-apply',
-          'REVIEW',
+          'QUEUED',
         );
         await createUser(pool, 'edit-admin', 'Edit-test-password-2026!', 'ADMIN');
         const app = createApp(pool, config, noNetwork),
@@ -409,12 +409,6 @@ test(
         assert.equal(previewRes.status, 200);
         assert.ok(previewRes.body.html.includes('Broad distribution notice'));
         assert.ok(previewRes.body.html.includes('Verified by admin'));
-        const approved = await agent
-          .post(`/api/email/${id}/approve`)
-          .set('Origin', config.APP_ORIGIN)
-          .set('x-csrf-token', logged.body.csrfToken)
-          .send({});
-        assert.equal(approved.status, 200);
         const delivered = await pool.query('SELECT payload, status FROM outbox WHERE id=$1', [id]);
         const deliveredHtml = delivered.rows[0].payload.html;
         assert.ok(deliveredHtml.includes('Broad distribution notice'));
@@ -462,7 +456,7 @@ test(
             cveIds: [],
           },
           'review-xss',
-          'REVIEW',
+          'QUEUED',
         );
         await createUser(pool, 'xss-admin', 'Xss-test-password-2026!', 'ADMIN');
         const app = createApp(pool, config, noNetwork),
@@ -487,12 +481,6 @@ test(
           .send();
         assert.ok(!previewRes.body.html.includes('<img src=x'), 'XSS in audience notice must be escaped');
         assert.ok(!previewRes.body.html.includes('<script>'), 'XSS in reviewer comment must be escaped');
-        const approved = await agent
-          .post(`/api/email/${id}/approve`)
-          .set('Origin', config.APP_ORIGIN)
-          .set('x-csrf-token', logged.body.csrfToken)
-          .send({});
-        assert.equal(approved.status, 200);
         const delivered = await pool.query('SELECT payload FROM outbox WHERE id=$1', [id]);
         const deliveredHtml = delivered.rows[0].payload.html;
         assert.ok(!deliveredHtml.includes('<img src=x'), 'XSS must be escaped in final delivered html');
