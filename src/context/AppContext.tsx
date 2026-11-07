@@ -642,8 +642,6 @@ function useApplication() {
         `/email/${encodeURIComponent(id)}/resend`,
         data,
       ),
-     approveEmailDelivery: (id: string) => call(`/email/${encodeURIComponent(id)}/approve`),
-    rejectEmailDelivery: (id: string) => call(`/email/${encodeURIComponent(id)}/reject`),
     editEmailReview: (id: string, edits: Partial<ReviewEdits>) =>
       call<{ success: boolean }>(`/email/${encodeURIComponent(id)}/edit`, edits),
     previewEmailReview: (id: string) =>

@@ -341,7 +341,7 @@ test(
     try {
       await migrate(pool);
 
-      await t.test('approval keeps the operator-pinned revision on a digest bundle', async () => {
+      await t.test('an edited digest bundle keeps the operator-pinned revision and is delivered', async () => {
         await reset();
         const high = await seedFinding('CVE-2026-71001');
         const lowCve = {
@@ -382,8 +382,7 @@ test(
         assert.ok(job.payload.contentRevision, 'the pinned revision is persisted with the payload');
 
         // A reviewer adds a comment, which changes the stored body.
-        // An OPERATOR may edit a held advisory body; the admin role has no
-        // review workflow surface of its own.
+        // An OPERATOR may edit a queued advisory body; there is no approval step.
         await createUser(pool, 'audit-admin', 'Audit-fixes-password-2026!', 'OPERATOR');
         const app = createApp(pool, config, noNetwork);
         const agent = supertest.agent(app);
@@ -400,19 +399,13 @@ test(
           .set('x-csrf-token', csrf)
           .send({ reviewerComment: 'Reviewed by the security team' });
         assert.equal(edited.status, 200, JSON.stringify(edited.body));
-        const approved = await agent
-          .post(`/api/email/${job.id}/approve`)
-          .set('Origin', config.APP_ORIGIN)
-          .set('x-csrf-token', csrf)
-          .send({});
-        assert.equal(approved.status, 200, JSON.stringify(approved.body));
 
         let sent = 0;
         await deliverNext(pool, config, noNetwork, async () => {
           sent++;
           return 'accepted-id';
         });
-        assert.equal(sent, 1, 'an approved digest job reaches the transport');
+        assert.equal(sent, 1, 'the edited digest job reaches the transport without approval');
         assert.equal(
           (await pool.query('SELECT status FROM outbox WHERE id=$1', [job.id])).rows[0].status,
           'ACCEPTED',
@@ -680,23 +673,19 @@ test(
         assert.equal(previewRes.status, 200);
         assert.ok(previewRes.body.html.includes('Verified for broad distribution'));
 
-        const approved = await agent
-          .post(`/api/email/${reviewRow.rows[0].id}/approve`)
-          .set('Origin', config.APP_ORIGIN)
-          .set('x-csrf-token', csrf)
-          .send({});
-        assert.equal(approved.status, 200);
-
-        // Approval confirms the edits and leaves the job queued and deliverable.
-        const approvedRow = await pool.query('SELECT status FROM outbox WHERE id=$1', [reviewRow.rows[0].id]);
-        assert.equal(approvedRow.rows[0].status, 'QUEUED');
+        // There is no approval step: the edited job stays queued and deliverable.
+        const queuedRow = await pool.query('SELECT status FROM outbox WHERE id=$1', [reviewRow.rows[0].id]);
+        assert.equal(queuedRow.rows[0].status, 'QUEUED');
+        // The job was pinned to the future to model "edited before the worker
+        // ran"; move it back into the due window now that editing is complete.
+        await pool.query('UPDATE outbox SET next_attempt=now() WHERE id=$1', [reviewRow.rows[0].id]);
 
         let broadcastSent = 0;
         await deliverNext(pool, config, noNetwork, async () => {
           broadcastSent++;
           return 'everyone-accepted';
         });
-        assert.equal(broadcastSent, 1, 'EVERYONE email is sent after approval');
+        assert.equal(broadcastSent, 1, 'EVERYONE email is sent automatically after the Security delivery');
         const finalRow = await pool.query('SELECT status FROM outbox WHERE id=$1', [reviewRow.rows[0].id]);
         assert.equal(finalRow.rows[0].status, 'ACCEPTED');
       });

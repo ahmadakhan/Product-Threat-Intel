@@ -16,3 +16,5 @@ backups/
 .runtime/
 
 /data/
+# Browser cookie files
+cookies.txt

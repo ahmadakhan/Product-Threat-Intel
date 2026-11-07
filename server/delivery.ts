@@ -971,29 +971,60 @@ export async function queueEveryoneDeliveryJobs(
     [acceptedJob.advisory_id],
   );
   const activeTargets = new Set(pending.rows.map((row) => row.target_id));
-  const everyoneRecipients = (await list<EmailRecipient>(db, 'recipients')).filter(
-    (r) => r.enabled && r.deliveryGroup === 'EVERYONE',
+  const allRecipients = await list<EmailRecipient>(db, 'recipients');
+  const recipientById = new Map(allRecipients.map((recipient) => [recipient.id, recipient]));
+  // A job can already target a different recipient record that shares this
+  // mailbox (Security and Everyone commonly point at the same address). The
+  // dedupe unit is the physical mailbox, not the record id, or that address
+  // receives two copies of the same document.
+  const activeMailboxes = new Set(
+    [...activeTargets]
+      .map((id) => recipientById.get(id)?.email.trim().toLowerCase())
+      .filter((email): email is string => Boolean(email)),
+  );
+  const everyoneRecipients = uniqueEnabledEmailRecipients(
+    allRecipients.filter((r) => r.deliveryGroup === 'EVERYONE'),
   );
   if (!everyoneRecipients.length) return 0;
+  const carriedFindingIds = Array.isArray(sharedPayload.includedFindingIds)
+    ? sharedPayload.includedFindingIds.filter((id): id is string => typeof id === 'string')
+    : [];
   let queued = 0;
   const priority = acceptedJob.priority ?? 0;
   for (const recipient of everyoneRecipients) {
-    if (activeTargets.has(recipient.id)) continue;
-    // The recipient must still be subscribed to every finding in the accepted
-    // bundle; the consolidated document is delivered as-is.
-    if (
-      await enqueue(
-        db,
-        'email',
-        recipient.id,
-        acceptedJob.advisory_id,
-        { ...sharedPayload, recipientEmail: recipient.email },
-        `${dispatchKey}:everyone:${contentRevision}:email:${recipient.id}`,
-        'QUEUED',
-        priority,
-      )
-    )
+    const mailbox = recipient.email.trim().toLowerCase();
+    if (activeTargets.has(recipient.id) || activeMailboxes.has(mailbox)) continue;
+    // Claim the findings this deferred document carries for this mailbox, in
+    // the same transaction as the enqueue. If the mailbox was already told
+    // about any of them (for example by the daily digest that raced this
+    // acceptance), do not send a second copy: release the partial grant and
+    // let a later consolidated pass deliver only the still-unclaimed findings.
+    const requests = carriedFindingIds.length
+      ? claimsForJob(recipient.id, 'finding', carriedFindingIds)
+      : [];
+    const claim = requests.length ? await claimItems(db, requests) : { granted: [], denied: [] };
+    if (requests.length && claim.granted.length !== requests.length) {
+      if (claim.granted.length) await releaseUnattachedClaims(db, claim.granted);
+      continue;
+    }
+    const dedupeKey = `${dispatchKey}:everyone:${contentRevision}:email:${recipient.id}`;
+    const id = await enqueue(
+      db,
+      'email',
+      recipient.id,
+      acceptedJob.advisory_id,
+      { ...sharedPayload, recipientEmail: recipient.email },
+      dedupeKey,
+      'QUEUED',
+      priority,
+    );
+    if (id) {
+      if (claim.granted.length) await attachClaimsToJob(db, id, claim.granted);
       queued++;
+      activeMailboxes.add(mailbox);
+    } else if (claim.granted.length) {
+      await reconcileDuplicateOutboxClaims(db, dedupeKey, claim.granted);
+    }
   }
   if (queued) {
     await writeEvent(db, {
