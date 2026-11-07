@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { createPool, migrate, put } from '../server/db.ts';
-import { queueConsolidatedFindingNotifications, queueDigestAdvisory, consolidatedFindingsDocument, queueZeroDayDigestNotification, findingHtmlAttachment, type ZeroDayDigestPayload } from '../server/delivery.ts';
+import { queueConsolidatedFindingNotifications, queueDigestAdvisory, consolidatedFindingsDocument, queueZeroDayDigestNotification, findingHtmlAttachment, queueEveryoneDeliveryJobs, type ZeroDayDigestPayload } from '../server/delivery.ts';
+import { runDailyDigest } from '../server/dailyDigest.ts';
 import { claimsForJob, claimItems, reconcileDuplicateOutboxClaims } from '../server/deliveryClaims.ts';
 import { newsArticleIdentity } from '../server/newsEmail.ts';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
@@ -131,6 +132,150 @@ test('Security-first defers only findings Security is subscribed to', { skip: !d
   });
 });
 
+
+test('the daily digest claims each finding it carries so a later queue cannot duplicate it', { skip: !database }, async () => {
+  await fixture(async (pool) => {
+    await put(pool, 'settings', 'main', {
+      ...DEFAULT_SETTINGS,
+      timezone: 'UTC',
+      dailyDigest: { enabled: true, time: '00:00', includeHealthReport: false },
+    });
+    // Deliberately no CVE cache / watchlist entry: the digest must still carry a
+    // finding that was already queued for dispatch (its rematch has no verdict,
+    // so the stored deliverable state is authoritative).
+    await put(pool, 'findings', finding.id, { ...finding, notificationStatus: 'QUEUED_FOR_DISPATCH' });
+    await put(pool, 'recipients', 'r1', {
+      id: 'r1', name: 'SOC', email: 'security@example.invalid', enabled: true,
+      dailyDigest: true, deliveryGroup: 'SECURITY_TEAM', subscriptionTier: 'ALL_SEVERITIES',
+      deliverySuccessRate: 1,
+    } as EmailRecipient);
+
+    assert.equal(await runDailyDigest(pool), 1);
+    const job = (await pool.query<{ id: string; status: string; payload: { includedFindingIds: string[] } }>(
+      "SELECT id,status,payload FROM outbox WHERE channel='email'",
+    )).rows[0];
+    assert.equal(job.status, 'QUEUED', 'there is no review status in the daily digest path');
+    assert.deepEqual(job.payload.includedFindingIds, [finding.id]);
+    const claim = (await pool.query<{ state: string; job_id: string }>(
+      `SELECT state,job_id FROM delivery_claims
+        WHERE recipient_id='r1' AND kind='finding' AND item_id=$1`,
+      [finding.id],
+    )).rows[0];
+    assert.equal(claim?.state, 'CLAIMED');
+    assert.equal(claim?.job_id, job.id, 'the digest claim is attached to the digest job');
+
+    // The consolidated queue shares the same durable claim, so it cannot send
+    // the same finding to the same mailbox a second time.
+    assert.equal(await queueConsolidatedFindingNotifications(pool, [finding]), 0);
+    assert.equal(
+      (await pool.query("SELECT count(*)::int AS n FROM outbox WHERE channel='email'")).rows[0].n,
+      1,
+    );
+  });
+});
+
+test('queueEveryoneDeliveryJobs never queues a second copy to the same mailbox', { skip: !database }, async () => {
+  await fixture(async (pool) => {
+    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, deferEveryoneUntilSecurityDelivered: true });
+    await put(pool, 'recipients', 'sec', {
+      id: 'sec', name: 'Security', email: 'shared@example.invalid', enabled: true,
+      deliveryGroup: 'SECURITY_TEAM', subscriptionTier: 'ALL_SEVERITIES', deliverySuccessRate: 1,
+    } as EmailRecipient);
+    await put(pool, 'recipients', 'everyone', {
+      id: 'everyone', name: 'Everyone', email: 'shared@example.invalid', enabled: true,
+      deliveryGroup: 'EVERYONE', subscriptionTier: 'ALL_SEVERITIES', deliverySuccessRate: 1,
+    } as EmailRecipient);
+    await put(pool, 'advisories', 'FINDINGS:shared-mailbox', {
+      id: 'FINDINGS:shared-mailbox', title: 'Shared mailbox', severity: 'HIGH',
+      cveIds: [finding.cveId], findingIds: [finding.id], createdDate: new Date().toISOString(),
+      deliveryStatus: 'PENDING', recipientCount: 1, executiveSummary: '', remediationInstructions: '',
+      vendorLink: '', affectedSystems: [],
+    });
+    const accepted = await pool.query<{ id: string }>(
+      `INSERT INTO outbox(id,dedupe_key,channel,target_id,advisory_id,payload,status,delivery_outcome,priority)
+       VALUES(gen_random_uuid(),'findings:shared:email:sec','email','sec','FINDINGS:shared-mailbox',
+              $1::jsonb,'ACCEPTED','ACCEPTED',0)
+       RETURNING id`,
+      [JSON.stringify({ subject: 'Shared', text: 'Shared', html: '<html></html>', includedFindingIds: [finding.id] })],
+    );
+    const acceptedJob = {
+      id: accepted.rows[0].id,
+      dedupe_key: 'findings:shared:email:sec',
+      channel: 'email',
+      target_id: 'sec',
+      advisory_id: 'FINDINGS:shared-mailbox',
+      payload: { subject: 'Shared', text: 'Shared', html: '<html></html>', includedFindingIds: [finding.id] },
+      status: 'ACCEPTED',
+      priority: 0,
+    } as unknown as Parameters<typeof queueEveryoneDeliveryJobs>[1];
+
+    assert.equal(await queueEveryoneDeliveryJobs(pool, acceptedJob, { ...DEFAULT_SETTINGS, deferEveryoneUntilSecurityDelivered: true }), 0);
+    assert.equal(
+      (await pool.query("SELECT count(*)::int AS n FROM outbox WHERE target_id='everyone'")).rows[0].n,
+      0,
+      'the shared mailbox already has the accepted Security job',
+    );
+  });
+});
+
+test('a deferred Everyone delivery claims its findings and blocks a second copy', { skip: !database }, async () => {
+  await fixture(async (pool) => {
+    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, deferEveryoneUntilSecurityDelivered: true });
+    await put(pool, 'recipients', 'sec', {
+      id: 'sec', name: 'Security', email: 'security@example.invalid', enabled: true,
+      deliveryGroup: 'SECURITY_TEAM', subscriptionTier: 'ALL_SEVERITIES', deliverySuccessRate: 1,
+    } as EmailRecipient);
+    await put(pool, 'recipients', 'everyone', {
+      id: 'everyone', name: 'Everyone', email: 'everyone@example.invalid', enabled: true,
+      deliveryGroup: 'EVERYONE', subscriptionTier: 'ALL_SEVERITIES', deliverySuccessRate: 1,
+    } as EmailRecipient);
+    await put(pool, 'advisories', 'FINDINGS:distinct-mailbox', {
+      id: 'FINDINGS:distinct-mailbox', title: 'Distinct mailbox', severity: 'HIGH',
+      cveIds: [finding.cveId], findingIds: [finding.id], createdDate: new Date().toISOString(),
+      deliveryStatus: 'PENDING', recipientCount: 1, executiveSummary: '', remediationInstructions: '',
+      vendorLink: '', affectedSystems: [],
+    });
+    const accepted = await pool.query<{ id: string }>(
+      `INSERT INTO outbox(id,dedupe_key,channel,target_id,advisory_id,payload,status,delivery_outcome,priority)
+       VALUES(gen_random_uuid(),'findings:distinct:email:sec','email','sec','FINDINGS:distinct-mailbox',
+              $1::jsonb,'ACCEPTED','ACCEPTED',0)
+       RETURNING id`,
+      [JSON.stringify({ subject: 'Distinct', text: 'Distinct', html: '<html></html>', includedFindingIds: [finding.id] })],
+    );
+    const acceptedJob = {
+      id: accepted.rows[0].id,
+      dedupe_key: 'findings:distinct:email:sec',
+      channel: 'email',
+      target_id: 'sec',
+      advisory_id: 'FINDINGS:distinct-mailbox',
+      payload: { subject: 'Distinct', text: 'Distinct', html: '<html></html>', includedFindingIds: [finding.id] },
+      status: 'ACCEPTED',
+      priority: 0,
+    } as unknown as Parameters<typeof queueEveryoneDeliveryJobs>[1];
+
+    assert.equal(await queueEveryoneDeliveryJobs(pool, acceptedJob, { ...DEFAULT_SETTINGS, deferEveryoneUntilSecurityDelivered: true }), 1);
+    const everyoneJob = (await pool.query<{ id: string; status: string }>(
+      "SELECT id,status FROM outbox WHERE target_id='everyone'",
+    )).rows[0];
+    assert.equal(everyoneJob.status, 'QUEUED', 'the deferred broadcast is auto-dispatched, never reviewed');
+    const claim = (await pool.query<{ state: string; job_id: string }>(
+      `SELECT state,job_id FROM delivery_claims
+        WHERE recipient_id='everyone' AND kind='finding' AND item_id=$1`,
+      [finding.id],
+    )).rows[0];
+    assert.equal(claim?.state, 'CLAIMED');
+    assert.equal(claim?.job_id, everyoneJob.id);
+
+    const everyoneRecipient = (await pool.query<{ data: EmailRecipient }>(
+      "SELECT data FROM records WHERE kind='recipients' AND id='everyone'",
+    )).rows[0].data;
+    assert.equal(
+      await queueConsolidatedFindingNotifications(pool, [finding], { recipients: [everyoneRecipient] }),
+      0,
+      'the Everyone claim blocks the consolidated queue from repeating the finding',
+    );
+  });
+});
 
 test('an oversized findings HTML attachment fails before any provider send', () => {
   assert.throws(() => findingHtmlAttachment({

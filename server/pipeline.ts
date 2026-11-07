@@ -1918,9 +1918,6 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         ? `; ${zeroDayDigestNotificationsQueued} zero-day digest notifications queued`
         : '';
       let deliveryLog = `${notificationsQueued} jobs queued${digestBuffered ? `; ${digestBuffered} findings buffered for the digest window` : ''}${newsNotificationsQueued ? `; ${newsNotificationsQueued} consolidated news emails queued` : ''}${manualReviewFindingsQueued ? `; ${manualReviewFindingsQueued} limited-confidence emails queued` : ''}${zeroDayLog}`;
-      if (pending.length && !settings.autoDispatchEnabled) {
-        deliveryLog += `; ${pending.length} findings pending but autoDispatchEnabled is false`;
-      }
       // Audit L-2: an ingestion outage and a correlation failure are different
       // incidents. Keep the FAILED status (it drives alerting and the audit
       // level) but state explicitly in the log that correlation completed over
@@ -1968,7 +1965,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             name: 'Delivery queue',
             status: 'SUCCESS',
             durationMs: Date.now() - queueStarted,
-            details: `${notificationsQueued} jobs queued${digestBuffered ? `; ${digestBuffered} findings buffered for the digest window` : ''}${pending.length && !settings.autoDispatchEnabled ? `; ${pending.length} findings pending but autoDispatchEnabled is false` : ''}${newsNotificationsQueued ? `; ${newsNotificationsQueued} consolidated news emails queued (${newsArticlesQueued} articles)` : ''}${manualReviewFindingsQueued ? `; ${manualReviewFindingsQueued} limited-confidence emails queued` : ''}${zeroDayLog}; transport acceptance is tracked separately`,
+            details: `${notificationsQueued} jobs queued${digestBuffered ? `; ${digestBuffered} findings buffered for the digest window` : ''}${newsNotificationsQueued ? `; ${newsNotificationsQueued} consolidated news emails queued (${newsArticlesQueued} articles)` : ''}${manualReviewFindingsQueued ? `; ${manualReviewFindingsQueued} limited-confidence emails queued` : ''}${zeroDayLog}; transport acceptance is tracked separately`,
           },
         ],
       };

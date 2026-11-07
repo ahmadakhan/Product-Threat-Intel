@@ -2,7 +2,14 @@ import type pg from 'pg';
 import { get, getMany, list, put, transaction, schemaLockKey, type Db } from './db';
 import { writeEvent } from './events';
 import { advisoryRevision, enqueue, findingRevision, revision, recipientAllows } from './delivery';
-import { activeClaims } from './deliveryClaims';
+import {
+  activeClaims,
+  attachClaimsToJob,
+  claimItems,
+  claimsForJob,
+  reconcileDuplicateOutboxClaims,
+} from './deliveryClaims';
+import { uniqueEnabledEmailRecipients } from './emailRecipients';
 import { advisoryEmail } from './advisoryEmail';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine';
 import { shouldSelectForDigest } from './ml/integration';
@@ -370,8 +377,12 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
         );
         const data = row.rows[0]?.data ?? {};
 
-        const recipients = (await list<EmailRecipient>(db, 'recipients')).filter(
-          (r) => r.enabled && r.dailyDigest,
+        const allRecipients = await list<EmailRecipient>(db, 'recipients');
+        // One physical mailbox receives at most one digest. Duplicate recipient
+        // configurations that share an address are collapsed to the widest
+        // subscription (the same rule the consolidated finding/news queues use).
+        const recipients = uniqueEnabledEmailRecipients(
+          allRecipients.filter((r) => r.dailyDigest),
         );
         // The day is claimed only when there is somebody to send to. Claiming it
         // first meant that a tick running before any recipient opted in (or with
@@ -534,7 +545,7 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
         // emailed" from "matched but never sent".
         const deliveredToRecipient = await activeClaims(
           db,
-          recipients.map((recipient) => recipient.id),
+          allRecipients.map((recipient) => recipient.id),
           'finding',
           findings.map((finding) => finding.id),
         );
@@ -544,7 +555,7 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
         const mailboxReceived = (recipient: EmailRecipient): Set<string> => {
           const received = new Set<string>();
           const mailbox = recipient.email.trim().toLowerCase();
-          for (const alias of recipients)
+          for (const alias of allRecipients)
             if (alias.email.trim().toLowerCase() === mailbox)
               for (const findingId of deliveredToRecipient.get(alias.id) ?? []) received.add(findingId);
           return received;
@@ -553,7 +564,7 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
         for (const recipient of recipients) {
           // Relevance ranks eligible findings; it must never override subscriptions or hide an alert.
           const received = mailboxReceived(recipient);
-          const included = findings
+          const candidate = findings
             .filter((finding) => recipientAllows(recipient, finding) && !received.has(finding.id))
             .map((finding) => ({
               finding,
@@ -568,6 +579,22 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
             }))
             .sort((a, b) => b.relevance - a.relevance)
             .map(({ finding }) => finding);
+          // Write side of the claim. The `activeClaims` read above is only an
+          // optimization: it cannot serialise two concurrent queue passes. The
+          // claim is taken in this same transaction as the enqueue, so a digest
+          // and a consolidated finding email racing for the same mailbox can
+          // never both carry the same finding.
+          let claimed: ReturnType<typeof claimsForJob> = [];
+          let included = candidate;
+          if (candidate.length) {
+            const claim = await claimItems(
+              db,
+              claimsForJob(recipient.id, 'finding', candidate.map((finding) => finding.id)),
+            );
+            claimed = claim.granted;
+            const granted = new Set(claimed.map((request) => request.itemId));
+            included = candidate.filter((finding) => granted.has(finding.id));
+          }
           if (!included.length && !health) continue;
           const view = buildDailyDigestAdvisory(included, settings, todayKey);
           const severityCounts = countSeverities(included);
@@ -642,19 +669,29 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
             contentRevision,
             dailyDigest: true,
           };
-          if (
-            await enqueue(
-              db,
-              'email',
-              recipient.id,
-              advisory.id,
-              payload,
-              `daily:${todayKey}:email:${recipient.id}`,
-              // Every recipient receives the digest: there is no review queue.
-              'QUEUED',
-            )
-          )
+          const dedupeKey = `daily:${todayKey}:email:${recipient.id}`;
+          const jobId = await enqueue(
+            db,
+            'email',
+            recipient.id,
+            advisory.id,
+            payload,
+            dedupeKey,
+            // Every recipient receives the digest: there is no review queue.
+            'QUEUED',
+          );
+          if (jobId) {
+            // The claim and the outbox job are committed together, so the
+            // delivery worker promotes exactly the claims this digest carried.
+            if (claimed.length) await attachClaimsToJob(db, jobId, claimed);
             jobs++;
+          } else if (claimed.length) {
+            // The outbox dedupe key already existed (or email delivery is
+            // disabled). Never leak the claims taken above: attach them to the
+            // existing job, promote an accepted receipt, or release them when
+            // no job can possibly send.
+            await reconcileDuplicateOutboxClaims(db, dedupeKey, claimed);
+          }
         }
 
         advisory.recipientCount = jobs;

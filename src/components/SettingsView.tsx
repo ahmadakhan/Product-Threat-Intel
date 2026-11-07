@@ -46,7 +46,6 @@ const withProcessingDefaults = (value: AppSettings): AppSettings => ({
 });
 
 const findingDispatchSettings = (value: AppSettings) => ({
-  autoDispatchEnabled: value.autoDispatchEnabled,
   autoDispatchConfidenceThreshold: value.autoDispatchConfidenceThreshold ?? 90,
   autoDispatchUnverifiableMatches: value.autoDispatchUnverifiableMatches ?? false,
   reviewUnverifiableMatches: value.reviewUnverifiableMatches ?? false,
@@ -284,7 +283,6 @@ export function SettingsView() {
   // Confirmation dialogs for mutating actions
   const [confirmProcessingToggle, setConfirmProcessingToggle] = useState<{ id: string; action: 'enable' | 'disable'; label: string } | null>(null);
   const [confirmProcessingSave, setConfirmProcessingSave] = useState<{ id: string; action: string; label: string } | null>(null);
-  const [confirmFindingToggle, setConfirmFindingToggle] = useState<{ id: string; action: 'enable' | 'disable'; label: string } | null>(null);
   const [confirmFindingSave, setConfirmFindingSave] = useState<{ id: string; action: string; label: string } | null>(null);
   const [confirmSecuritySave, setConfirmSecuritySave] = useState<{ id: string; action: string; label: string } | null>(null);
   const [confirmChangePassword, setConfirmChangePassword] = useState<{ id: string; action: string; label: string } | null>(null);
@@ -294,7 +292,7 @@ export function SettingsView() {
   const admin = session?.role === 'ADMIN';
   const [activeSection, setActiveSection] = useState(admin ? 'processing' : 'security');
   const processingConfirmPending = confirmProcessingToggle !== null || confirmProcessingSave !== null;
-  const findingConfirmPending = confirmFindingToggle !== null || confirmFindingSave !== null;
+  const findingConfirmPending = confirmFindingSave !== null;
   const processingDirty =
     form.scopeHours !== settings.scopeHours ||
     form.schedulerIntervalMinutes !== settings.schedulerIntervalMinutes ||
@@ -337,7 +335,7 @@ export function SettingsView() {
           {
             id: 'finding-dispatch',
             title: 'Finding dispatch',
-            description: 'Confidence & review',
+            description: 'Confidence threshold',
             icon: ShieldCheck,
           },
           { id: 'email', title: 'Email delivery', description: 'Providers & sender identity', icon: Mail },
@@ -399,17 +397,6 @@ export function SettingsView() {
         : 'Could not save processing settings. Your changes are still available to retry.',
     );
     setConfirmProcessingSave(null);
-  };
-
-  const executeFindingToggle = async () => {
-    if (!confirmFindingToggle) return;
-    const { id, action } = confirmFindingToggle;
-    const enable = action === 'enable';
-    setFindingForm((prev) => {
-      if (id === 'auto-dispatch') return { ...prev, autoDispatchEnabled: enable };
-      return prev;
-    });
-    setConfirmFindingToggle(null);
   };
 
   const executeFindingSave = async () => {
@@ -631,7 +618,7 @@ export function SettingsView() {
                         className={form.autoDispatchNewsToSecurityTeam ? 'is-enabled' : ''}
                         aria-hidden="true"
                       />
-                      {form.autoDispatchNewsToSecurityTeam ? 'Automatic' : 'Review only'}
+                      {form.autoDispatchNewsToSecurityTeam ? 'Automatic' : 'Disabled'}
                     </strong>
                   </div>
                   <div>
@@ -743,13 +730,13 @@ export function SettingsView() {
                   <ProcessingSection
                     number="02"
                     id="processing-recipients"
-                    title="Recipient review and handoff"
+                    title="Recipient delivery order"
                     description="Control when an advisory becomes available to the Everyone group."
                   >
                       <ProcessingToggle
                         id="processing-defer-everyone"
                         title="Send to the Security team before Everyone"
-                        description="After the transport accepts a Security-team email, queue the advisory for Everyone-group preview and approval."
+                        description="After the transport accepts a Security-team email, automatically queue the identical advisory for Everyone-group delivery."
                         checked={form.deferEveryoneUntilSecurityDelivered ?? false}
                         disabled={processingConfirmPending}
                         onChange={(checked) =>
@@ -766,28 +753,28 @@ export function SettingsView() {
                           <span>1</span>
                           <div>
                             <strong>Security team</strong>
-                            <p>Transport accepts the email</p>
+                            <p>Advisory queued for Security-team recipients</p>
                           </div>
                         </li>
                         <li>
                           <span>2</span>
                           <div>
-                            <strong>Email queue</strong>
-                            <p>Operator previews and approves</p>
+                            <strong>Delivery confirmed</strong>
+                            <p>Transport accepts the email</p>
                           </div>
                         </li>
                         <li>
                           <span>3</span>
                           <div>
                             <strong>Everyone</strong>
-                            <p>Approved broadcast is queued</p>
+                            <p>Identical advisory queued automatically</p>
                           </div>
                         </li>
                       </ol>
                     ) : (
                       <p className="processing-footnote">
                         <ShieldCheck size={14} aria-hidden="true" />
-                        Everyone-group emails require operator preview and approval in the email queue.
+                        Everyone-group emails are queued automatically without an approval step.
                       </p>
                     )}
                   </ProcessingSection>
@@ -1224,31 +1211,17 @@ export function SettingsView() {
                 <SectionHeading
                   icon={ShieldCheck}
                   id="finding-dispatch-title"
-                  title="Finding dispatch and review"
-                  description="Configure automatic finding notifications, match confidence, and review notices."
+                  title="Finding dispatch"
+                  description="Configure the confidence threshold for matched findings. Every finding is dispatched automatically."
                 />
                    <fieldset className="processing-settings-fields" disabled={pending > 0 || findingConfirmPending}>
-                     <legend className="sr-only">Finding dispatch and review configuration</legend>
+                     <legend className="sr-only">Finding dispatch configuration</legend>
                   <ProcessingSection
                     number="01"
                     id="processing-dispatch"
                     title="Dispatch policy"
-                    description="Set the confidence minimum and review options for matched findings."
+                    description="Set the confidence minimum for matched findings."
                   >
-                     <ProcessingToggle
-                       id="processing-auto-dispatch"
-                       title="Send confirmed findings automatically"
-                       description="Send queued findings automatically to eligible Security-team recipients. When off, eligible findings stay queued."
-                       checked={findingForm.autoDispatchEnabled}
-                       disabled={findingConfirmPending}
-                       onChange={(checked) =>
-                         setConfirmFindingToggle({
-                           id: 'auto-dispatch',
-                           action: checked ? 'enable' : 'disable',
-                           label: 'Automatic finding dispatch',
-                         })
-                       }
-                     />
                     <div className="processing-field-grid">
                       <ProcessingField
                         id="processing-confidence"
@@ -1282,8 +1255,8 @@ export function SettingsView() {
                       <div>
                         <strong>Recipient policies apply</strong>
                         <p>
-                          Subscription tiers and approval requirements determine who receives each
-                          notification.
+                          Subscription tiers determine who receives each notification. Every eligible
+                          finding is dispatched automatically.
                         </p>
                       </div>
                     </div>
@@ -2239,44 +2212,13 @@ export function SettingsView() {
         </SettingsDialog>
       )}
 
-      {/* Finding Dispatch Toggle Confirmation */}
-      {confirmFindingToggle && (
-        <SettingsDialog title="Confirm finding dispatch change" onClose={() => setConfirmFindingToggle(null)}>
-          <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
-            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
-              {confirmFindingToggle.action === 'enable' ? 'Enable' : 'Disable'} {confirmFindingToggle.label}?
-            </h3>
-            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
-              Are you sure you want to {confirmFindingToggle.action} {confirmFindingToggle.label.toLowerCase()}? The change will be saved with your finding dispatch settings.
-            </p>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setConfirmFindingToggle(null)}
-                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 text-xs font-medium transition"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={pending > 0}
-                onClick={executeFindingToggle}
-                className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold disabled:opacity-50 transition"
-              >
-                {pending > 0 ? 'Saving…' : 'Confirm'}
-              </button>
-            </div>
-          </div>
-        </SettingsDialog>
-      )}
-
       {/* Finding Dispatch Save Confirmation */}
       {confirmFindingSave && (
         <SettingsDialog title="Confirm save finding dispatch settings" onClose={() => setConfirmFindingSave(null)}>
           <div className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
             <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">Save finding dispatch settings?</h3>
             <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
-              This will persist automatic dispatch and confidence threshold changes to the server.
+              This will persist the confidence threshold changes to the server.
             </p>
             <div className="flex justify-end gap-2">
               <button
