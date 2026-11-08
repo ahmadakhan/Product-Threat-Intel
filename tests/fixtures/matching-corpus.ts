@@ -106,7 +106,7 @@ export const MATCHING_CORPUS: MatchingCase[] = [
   },
   {
     id: 'generic-cpe-resolved',
-    description: 'A wildcard inventory CPE is anchored to the inventory product and stays review-only',
+    description: 'A wildcard inventory CPE resolved to a concrete vendor/product is a confident match',
     tags: ['generic', 'positive'],
     input: {
       assetCpes: [cpe({ vendor: '*', product: '*', version: '1.5' })],
@@ -118,8 +118,8 @@ export const MATCHING_CORPUS: MatchingCase[] = [
     expected: {
       matched: true,
       methods: ['STRICT_CPE'],
-      confidence: 70,
-      requiresReview: true,
+      confidence: 90,
+      requiresReview: false,
     },
   },
   {

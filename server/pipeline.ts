@@ -107,6 +107,48 @@ export { renderAdvisory } from './advisoryRender';
 export async function rebuildLegacyDeliveryPayload(db: pg.Pool | pg.PoolClient, job: Job): Promise<boolean> {
   if (job.payload.nativeCorrelation) return false;
   const advisory = await get<Advisory>(db, 'advisories', job.advisory_id);
+  if (
+    !advisory &&
+    typeof job.advisory_id === 'string' &&
+    job.advisory_id.startsWith('FINDINGS:')
+  ) {
+    // A consolidated finding batch has no advisory row by design: the batch
+    // identity is its content. A legacy copy of it (queued without revision
+    // evidence) is rebuilt in place from its declared finding rows — the same
+    // rows the delivery worker treats as the batch's validated evidence at
+    // transport time. Only the revision maps are regenerated; the body already
+    // describes those exact finding rows.
+    const declaredCves = job.payload.cveIds ?? [];
+    const existingEvidence = job.payload.cveRevisions ?? {};
+    if (!declaredCves.length || declaredCves.every((cveId) => existingEvidence[cveId])) return false;
+    const findingIds = job.payload.includedFindingIds ?? [];
+    const findingMap = await getMany<Finding>(db, 'findings', findingIds);
+    if (!findingIds.length || findingMap.size !== new Set(findingIds).size) return false;
+    const current: Finding[] = [];
+    for (const finding of findingMap.values()) {
+      // Serial: `db` is a single client inside this transaction.
+      const asset = await get<WatchListItem>(db, 'watchlist', finding.matchedAssetId);
+      const cve = await get<NormalizedCVE>(db, 'cveData', finding.cveId);
+      const withdrawal = await get<{ modifiedDate: string }>(db, 'cveWithdrawals', finding.cveId);
+      if (!asset?.active || !cve || ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
+          (withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate))) return false;
+      current.push(finding);
+    }
+    const payload = {
+      ...job.payload,
+      // Recipient-specific per-recipient evidence preserved by the spread: the
+      // canonical builder is the same one every enqueue site uses (audit L-6).
+      ...deliveryRevisionEvidence(current),
+    };
+    const updated = await db.query(
+      "UPDATE outbox SET payload=$2::jsonb, review_approved=false, updated_at=now() WHERE id=$1 AND (status='QUEUED' OR (status='SENDING' AND lock_token=$3))",
+      [job.id, JSON.stringify(payload), job.lock_token],
+    );
+    if (!updated.rowCount) return false;
+    job.payload = payload;
+    job.review_approved = false;
+    return true;
+  }
   if (!advisory) return false;
   const declaredCves = job.payload.cveIds ?? advisory.cveIds;
   const evidence = job.payload.cveRevisions ?? {};
@@ -289,12 +331,15 @@ export async function rebuildFromCurrentInventory(
   reason: string,
   options: { payloadRebuilt?: boolean } = {},
 ): Promise<void> {
+  const rebuiltInPlace: string[] = [];
   if (!options.payloadRebuilt) {
     const legacy = await pool.query<Job>(
       "SELECT * FROM outbox WHERE advisory_id=$1 AND status='QUEUED' AND payload->'cveRevisions' IS NULL",
       [advisoryId],
     );
-    for (const job of legacy.rows) await rebuildLegacyDeliveryPayload(pool, job).catch(() => false);
+    for (const job of legacy.rows) {
+      if (await rebuildLegacyDeliveryPayload(pool, job).catch(() => false)) rebuiltInPlace.push(job.id);
+    }
   }
   // Regroup the still-deliverable jobs of this bundle before failing the rest,
   // so a single held finding cannot silently drop the deliverable findings.
@@ -307,8 +352,10 @@ export async function rebuildFromCurrentInventory(
       `UPDATE outbox
          SET status='FAILED', error=$1, next_attempt=now(),
              locked_at=NULL, lock_token=NULL, updated_at=now()
-       WHERE advisory_id=$2 AND status='QUEUED' RETURNING id,channel,attempts`,
-      [reason, advisoryId],
+       WHERE advisory_id=$2 AND status='QUEUED'
+         AND id::text <> ALL($3::text[])
+       RETURNING id,channel,attempts`,
+      [reason, advisoryId, rebuiltInPlace],
     );
     for (const row of invalidated.rows) {
       if (row.channel === 'email') {
@@ -726,7 +773,14 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       const schedulerNow = Date.now();
       const catchUpDue = settings.schedulerEnabled && (await list<FeedCursor>(pool, 'feedCursors')).some((cursor) => {
         if (!cursor.hasMore) return false;
-        if (!cursor.next_catchup_at) return false;
+        // `next_catchup_at` is a cooldown: "earliest time the next catch-up
+        // window may run". A cursor that is mid-catch-up but has no cooldown
+        // recorded (a legacy record, or a worker that stopped between the
+        // cursor write and the scheduler update) therefore has no reason to
+        // wait — treating a missing cooldown as "elapsed" is what lets an
+        // interrupted catch-up resume once scheduling is enabled instead of
+        // being stranded behind the interval gate forever.
+        if (!cursor.next_catchup_at) return true;
         const nextCatchupAt = Date.parse(cursor.next_catchup_at);
         return !Number.isFinite(nextCatchupAt) || nextCatchupAt <= schedulerNow;
       });

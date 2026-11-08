@@ -718,7 +718,7 @@ function useApplication() {
       (await call<PipelineExecution>('/pipeline', { scopeHours, incrementalFeeds })) || null,
     templateCustomization: customization,
     customAdvisoryTemplate: snapshot.customAdvisoryTemplate,
-    advisoryTemplate: draft ? compileCustomizedTemplate(draft) : snapshot.advisoryTemplate,
+    advisoryTemplate: snapshot.customAdvisoryTemplate || (draft ? compileCustomizedTemplate(draft) : snapshot.advisoryTemplate),
     updateTemplateCustomization: (update: Partial<TemplateCustomization>) =>
       setDraft((prev) => ({ ...snapshot.templateCustomization, ...prev, ...update })),
     saveTemplate: async (customAdvisoryTemplate?: string | null) => {

@@ -1365,15 +1365,68 @@ export async function queueConsolidatedFindingNotifications(
     const jobId = isPool(db) ? await transaction(db, enqueueWithClaim) : await enqueueWithClaim(db);
     if (jobId) queued++;
   }
-  if (queued)
+  // Webhook endpoints are a parallel notification surface, not an email
+  // duplicate: one POST per hook per pass carrying exactly what the hook's event
+  // subscription permits, rendered from the SAME consolidated document the
+  // email path uses (unused by `delivery_claims`, whose dedupe is per recipient;
+  // a hook has no mailbox). Idempotent per content revision: a repeated pass
+  // re-derives the same dedupe key, so an already-queued POST is not duplicated.
+  //
+  // A batch is queued for a hook even when the recipient loop queued nothing:
+  // recipient claims must never silence a hook's POST, and a hook whose
+  // subscription permits nothing gets no job at all instead of an empty one.
+  const hooks = (await list<WebhookEndpoint>(db, 'webhooks')).filter((hook) => hook.enabled);
+  let webhooksQueued = 0;
+  for (const hook of hooks) {
+    const permitted = unique.filter((finding) => webhookAllows(hook, finding));
+    if (!permitted.length) continue;
+    const hookIds = permitted.map((finding) => finding.id);
+    const hookBucket = consolidatedFindingBatchId(hookIds);
+    let hookBuilt = documentCache.get(hookBucket);
+    if (!hookBuilt) {
+      const { advisory, document } = consolidatedFindingsDocument(permitted, generatedAt, template);
+      const evidence = deliveryRevisionEvidence(permitted);
+      hookBuilt = {
+        payload: {
+          ...document,
+          cveIds: advisory.cveIds,
+          includedFindingIds: hookIds,
+          ...evidence,
+          contentRevision: createHash('sha256')
+            .update(stableJson({ findingIds: [...hookIds].sort(), ...evidence }))
+            .digest('hex')
+            .slice(0, 20),
+          generatedAt: generatedAt.toISOString(),
+          digestKey: advisory.id,
+        },
+        priority: advisoryPriority(permitted),
+      };
+      documentCache.set(hookBucket, hookBuilt);
+    }
+    if (
+      await enqueue(
+        db,
+        'webhook',
+        hook.id,
+        `FINDINGS:${hookBucket}`,
+        hookBuilt.payload,
+        `findings:${hookBuilt.payload.contentRevision}:webhook:${hook.id}`,
+        'QUEUED',
+        hookBuilt.priority,
+      )
+    )
+      webhooksQueued++;
+  }
+  if (queued || webhooksQueued) {
     await writeEvent(db, {
       category: 'EMAIL',
       level: 'INFO',
       code: 'delivery.findings_consolidated',
       message: 'Consolidated finding email queued for eligible recipients',
-      context: { findings: unique.length, recipientsNotified: queued },
+      context: { findings: unique.length, recipientsNotified: queued, webhooksQueued },
     });
-  return queued;
+  }
+  return queued + webhooksQueued;
 }
 
 /**
@@ -1818,17 +1871,22 @@ export async function deliverNext(
     // are validated against the whole advisory exactly as before.
     declaredCveIds = job.payload.cveIds ?? advisory?.cveIds ?? [];
     declaredFindingIds = job.payload.includedFindingIds ?? advisory?.findingIds ?? [];
-    if (advisory && declaredCveIds.some((id) => !job.payload.cveRevisions?.[id])) {
+    if (
+      (advisory || isConsolidatedFindings) &&
+      declaredCveIds.some((id) => !job.payload.cveRevisions?.[id])
+    ) {
       // Jobs queued before content-revision evidence existed cannot be validated
       // against the advisory they describe. Rebuild the payload from the
       // current CVE cache first; revalidation below then decides whether it is
-      // still deliverable. If the rebuild cannot produce evidence for every
-      // declared CVE (e.g. the CVE was removed from the cache), the bundle is
-      // stale and recovery rebuilds it from the current inventory instead.
+      // still deliverable. A consolidated batch is rebuilt in place from its
+      // declared finding rows (it has no advisory row). If the rebuild cannot
+      // produce evidence for every declared CVE (e.g. the CVE was removed from
+      // the cache, or a withdrawal invalidates it), the bundle is stale and
+      // recovery rebuilds it from the current inventory instead.
       const { rebuildLegacyDeliveryPayload } = await import('./pipeline');
       if (await rebuildLegacyDeliveryPayload(pool, job)) {
         legacyRebuilt = true;
-        declaredCveIds = job.payload.cveIds ?? advisory.cveIds;
+        declaredCveIds = job.payload.cveIds ?? advisory?.cveIds ?? declaredCveIds;
       }
       if (declaredCveIds.some((id) => !job.payload.cveRevisions?.[id])) {
         permanent = true;
@@ -1963,7 +2021,10 @@ export async function deliverNext(
                 ).newFindings[0]
               : undefined);
         } catch {
-          if (!isConsolidatedFindings) revalidationFailed = true;
+          // Re-derivation now also runs for consolidated batches: a safety-check
+          // failure on either shape cannot prove applicability, so the whole
+          // bundle is deferred below instead of sent on stored evidence alone.
+          revalidationFailed = true;
         }
         // A failed recheck cannot prove the finding is still applicable, so the
         // job is held (never sent) and committed as retryable instead of being
@@ -2202,7 +2263,11 @@ export async function deliverNext(
         permanent = true;
         throw new Error('Webhook subscription does not permit native intelligence');
       }
-      if (advisory && !currentFindings.every((finding) => webhookAllows(hook, finding))) {
+      // Consolidated batches have no advisory row, so `advisory` is undefined for
+      // every FINDINGS: webhook job queued by the pipeline; gating on it skipped
+      // this check entirely for the surface that now receives them. Gate on the
+      // same revalidation view an email job is checked against.
+      if (revalidationView && !currentFindings.every((finding) => webhookAllows(hook, finding))) {
         permanent = true;
         throw new Error('Webhook event subscription no longer permits all advisory findings');
       }

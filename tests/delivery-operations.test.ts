@@ -73,9 +73,9 @@ test(
       const send = (method: 'post' | 'delete', path: string) =>
         agent[method](path).set('Origin', origin).set('x-csrf-token', csrf).send({});
       const cases = [
-        ['post', '/api/email/not-a-uuid/approve'],
-        ['post', '/api/email/not-a-uuid/reject'],
+        ['post', '/api/email/not-a-uuid/edit'],
         ['post', '/api/email/not-a-uuid/retry'],
+        ['post', '/api/email/not-a-uuid/resend'],
         ['delete', '/api/email/not-a-uuid'],
       ] as const;
       for (const [method, path] of cases) {
@@ -86,7 +86,7 @@ test(
       }
       // A well-formed but unknown id keeps its existing "nothing to act on"
       // contract, so the guard did not swallow the normal path.
-      assert.equal((await send('post', `/api/email/${randomUUID()}/approve`)).status, 409);
+      assert.equal((await send('post', `/api/email/${randomUUID()}/retry`)).status, 409);
       assert.equal((await send('delete', `/api/email/${randomUUID()}`)).status, 409);
       // None of the rejected requests may look like an incident.
       const incidents = await pool.query(

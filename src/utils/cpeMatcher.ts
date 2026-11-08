@@ -394,6 +394,13 @@ export function verifyAliasNamespaceEdition(asset: ParsedCPE, vuln: ParsedCPE): 
  * identity: without help it intersects every advisory for the same part.
  * Resolve the wildcard side from the inventory's own vendor/product fields so
  * a generic inventory CPE matches the product it actually describes.
+ *
+ * When every wildcarded identity component is substituted, the resulting CPE
+ * asserts a concrete vendor and product, so the match is no longer a generic
+ * correlation: it is treated like a specific registered CPE (high confidence,
+ * no review hold). A substitution that leaves a wildcard in place (the
+ * inventory record itself has no vendor/product to fill in) stays generic and
+ * remains review-gated.
  */
 function resolveGenericCpeIdentity(
   assetCpeStr: string,
@@ -423,7 +430,13 @@ function resolveGenericCpeIdentity(
   const tokens = splitCpeTokens(parsed.raw.slice(8));
   tokens[1] = vendor;
   tokens[2] = product;
-  return { cpe: `cpe:2.3:${tokens.join(':')}`, inferred: true };
+  // A fully substituted identity is concrete: vendor and product both resolve
+  // to specific tokens, so the match no longer needs the generic-identity
+  // review gate. A partially resolved one (a wildcard the inventory could not
+  // fill in) stays generic.
+  const fullyResolved =
+    !isGenericCpeComponent(vendor) && !isGenericCpeComponent(product);
+  return { cpe: `cpe:2.3:${tokens.join(':')}`, inferred: !fullyResolved };
 }
 
 export interface CpeAliasOptions {
@@ -905,6 +918,8 @@ export function matchesWatchlistItem(
     return {
       assetCpe,
       genericIdentity,
+      /** The inventory CPE was a wildcard and its identity came from the record. */
+      identityFromInventory: assetCpe !== rawAssetCpe,
       parsed,
       // Product-level registrations cover all versions. Partial patterns still
       // require intersection checks; unknown concrete versions stay review-gated.
@@ -925,7 +940,13 @@ export function matchesWatchlistItem(
   const hasProductWideRegistration = preparedAssetCpes.some(({ genericIdentity, parsed, versionUnasserted }) =>
     isProductWideRegistration(parsed, versionUnasserted, genericIdentity),
   );
-  for (const { assetCpe, genericIdentity, parsed: assetParsed, versionUnasserted } of preparedAssetCpes) {
+  for (const {
+    assetCpe,
+    genericIdentity,
+    identityFromInventory,
+    parsed: assetParsed,
+    versionUnasserted,
+  } of preparedAssetCpes) {
     for (const vulnCpe of vulnCpeMatches) {
       const vulnParsed = parseCPE23(vulnCpe);
       const vulnConstrainsVersion =
@@ -1003,7 +1024,13 @@ export function matchesWatchlistItem(
           matchedCpe: vulnCpe,
           evidence: genericIdentity
             ? 'Matched CPE product identity inferred from the inventory record; confirm the generic CPE is intended (70% confidence)'
-            : versionRange
+            : identityFromInventory && !requiresReview
+              // A wildcard inventory CPE whose vendor and product were both
+              // substituted. Say so: the operator registered a wildcard and the
+              // match is asserted against the inventory record's own identity,
+              // not against tokens that were in the registered CPE.
+              ? `Matched the inventory record's vendor/product (${asset.vendor}/${asset.product}) substituted for the wildcard CPE; ${versionRange ? 'verified in version interval' : 'exact version token'} (${versionRange ? 100 : 90}% confidence)`
+              : versionRange
               ? requiresReview
                 ? 'Matched strict CPE 2.3 product identifiers; version or architecture applicability requires review'
                 : `Matched strict CPE 2.3 component tokens + verified in version interval [< ${versionRange.versionEndExcluding || versionRange.versionEndIncluding}] (100% confidence)`

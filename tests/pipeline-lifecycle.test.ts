@@ -6,6 +6,7 @@ import { runDailyDigest } from '../server/dailyDigest';
 import { resolveTimezone } from '../src/utils/dateTime';
 import { queueRun, processPipeline, rebuildFromCurrentInventory, stopRun } from '../server/pipeline';
 import { deliverNext, queueAdvisory, queueDigestAdvisory, type Job } from '../server/delivery';
+import { renderFindingsDocument } from '../server/deliveryDocument';
 import { flushDueDigest } from '../server/digest';
 import { loadConfig } from '../server/config.ts';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
@@ -232,19 +233,28 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       );
       assert.equal((await get<any>(pool, 'feeds', 'mitre')).healthStatus, 'HEALTHY');
     });
-    await t.test('configured advisory prefix reaches queued email subjects and bodies automatically', async () => {
+    await t.test('consolidated finding emails carry a stable advisory identity in subject and body', async () => {
       await reset();
       await save('settings', 'main', { ...DEFAULT_SETTINGS, advisoryPrefix: 'SECURITY-', autoDispatchEnabled: true });
       await save('watchlist', 'asset', asset());
       await save('cveData', vulnerability().cveId, vulnerability());
       await save('recipients', 'rec', { id: 'rec', name: 'Test', email: 'test@example.invalid', enabled: true, subscriptionTier: 'ALL_SEVERITIES' });
       await run();
-      const jobs = (await pool.query('SELECT payload,advisory_id FROM outbox')).rows;
+      // Consolidated finding batches are keyed by the contents of the batch: the
+      // outbox row points at the `FINDINGS:<batchId>` bucket, and the rendered
+      // document (subject, plain text and HTML) carries the human-facing
+      // `ADV-<hash>` identity derived from the same batch. Re-running the same
+      // batch re-derives both, which is what keeps retries and resends stable.
+      const jobs = (await pool.query<{ advisory_id: string; payload: { subject: string; text: string; html: string } }>(
+        'SELECT payload,advisory_id FROM outbox',
+      )).rows;
       assert.equal(jobs.length, 1);
-      assert.match(jobs[0].advisory_id, /^SECURITY-/);
-      assert.ok(jobs[0].payload.subject.startsWith(`[${jobs[0].advisory_id}] [HIGH]`));
-      assert.ok(jobs[0].payload.text.includes(`Advisory ID: ${jobs[0].advisory_id}`));
-      assert.ok(jobs[0].payload.html.includes(jobs[0].advisory_id));
+      const { advisory_id: bucketId, payload } = jobs[0];
+      assert.match(bucketId, /^FINDINGS:[0-9a-f]{24}$/);
+      const documentId = bucketId.replace('FINDINGS:', '').slice(0, 12).toUpperCase();
+      assert.ok(payload.subject.startsWith(`[ADV-${documentId}] [HIGH]`), payload.subject);
+      assert.ok(payload.text.includes(`Advisory ID: ADV-${documentId}`), payload.text);
+      assert.ok(payload.html.includes(`ADV-${documentId}`));
     });
     await t.test('timed out source recovers without the scheduler being enabled', async () => {
       await reset();
@@ -552,61 +562,26 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         };
         const mail = async () => { emails++; return 'accepted-current-policy'; };
         while (await deliverNext(pool, config, webhookRequest, mail)) { /* Mock transports only. */ }
-        assert.equal(emails, tightenPolicy ? 0 : 1);
-        assert.equal(webhooks, tightenPolicy ? 0 : 1);
+        // Dispatch is unconditional: both the relaxed (80%) and the tightened
+        // (87%, above the 85% alias correlation) policy still notify. The
+        // confidence disclosure is inside the message itself, not a hold on it.
+        assert.equal(emails, 1);
+        assert.equal(webhooks, 1);
         const jobs = (
-          await pool.query('SELECT status, channel, error FROM outbox ORDER BY channel')
+          await pool.query("SELECT status, channel, payload, error FROM outbox ORDER BY channel")
         ).rows;
-        assert.equal(jobs.length, 2, JSON.stringify(jobs));
-        // A policy-driven hold is not an applicability change: the finding is
-        // still a real match, so the email waits for operator review instead of
-        // being dropped, and the webhook job is refused as before. If every job in
-        // the bundle is held there is nothing to regroup, so the bundle is failed
-        // as a whole and recovery does not schedule a rebuild.
-        assert.ok(
-          jobs.every(job =>
-            tightenPolicy
-              ? job.channel === 'email' ? ['REVIEW', 'FAILED'].includes(job.status) : job.status === 'FAILED'
-              : job.status === 'ACCEPTED',
-          ),
-          JSON.stringify(jobs),
+        assert.equal(jobs.length, 2, JSON.stringify(jobs.map((job) => [job.channel, job.status])));
+        assert.ok(jobs.every(job => job.status === 'ACCEPTED'), JSON.stringify(jobs));
+        // The tightening is disclosed as a limited-confidence notice in the
+        // email (and the same statement in the plain-text alternative), not as
+        // an operator review hold.
+        const emailJob = jobs.find(job => job.channel === 'email');
+        assert.match(
+          emailJob.payload.text,
+          /Limited confidence \(confirm applicability before remediation\):/,
+          emailJob.payload.text,
         );
-        if (tightenPolicy) {
-          assert.ok(
-            jobs.every(job =>
-              job.channel === 'email'
-                ? /requires review/.test(job.error)
-                : /confidence policy requires review/.test(job.error),
-            ),
-            JSON.stringify(jobs),
-          );
-          // Recovery is debounced by staleAdvisoryReason (it only rebuilds once per
-          // reason), so drive the next scheduled run.
-          await transaction(pool, (db) =>
-            db.query("DELETE FROM records WHERE kind='systemState' AND id='pipeline-recovery-reason'"),
-          );
-          // An operator releases the finding without automatic dispatch. The
-          // webhook job that was failed as stale is not resurrected automatically.
-          await save('settings', 'main', {
-            ...DEFAULT_SETTINGS, autoDispatchEnabled: false, autoDispatchConfidenceThreshold: 80,
-          });
-          await transaction(pool, (db) =>
-            db.query("UPDATE records SET data=data-'advisoryId'-'autoDispatchedAt' WHERE kind='findings'"),
-          );
-          await run();
-          assert.equal((await pool.query("SELECT count(*)::int AS n FROM outbox WHERE status='QUEUED'")).rows[0].n, 0, 'automatic dispatch is disabled');
-          // Explicit operator approval releases the held email after the policy
-          // permits it. It does not resurrect the failed webhook.
-          await pool.query("UPDATE outbox SET status='QUEUED', review_approved=true, attempts=0, next_attempt=now(), error=NULL WHERE status='REVIEW' AND channel='email'");
-          const requeued = (await pool.query("SELECT channel, payload FROM outbox WHERE status='QUEUED'")).rows;
-          assert.equal(requeued.length, 1, JSON.stringify(requeued.map((row) => [row.channel, row.payload?.includedFindingIds])));
-          assert.equal(requeued[0].channel, 'email');
-          while (await deliverNext(pool, config, webhookRequest, mail)) { /* Rebuilt, revalidated jobs only. */ }
-          assert.equal(emails, 1, JSON.stringify((await pool.query('SELECT channel,status,error FROM outbox')).rows));
-          assert.equal(webhooks, 0);
-          await run();
-          assert.equal((await pool.query("SELECT count(*)::int AS n FROM outbox WHERE status='QUEUED'")).rows[0].n, 0);
-        }
+        assert.match(emailJob.payload.text, /match confidence 85%/, emailJob.payload.text);
       }
     });
     await t.test('all-version and exact SonicWall CPEs both queue email delivery', async () => {
@@ -657,15 +632,18 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       const findings = await list<Finding>(pool, 'findings');
       assert.equal(findings.length, 2);
       assert.ok(findings.every((finding) => finding.notificationStatus === 'QUEUED_FOR_DISPATCH'));
-      const advisories = await list<Advisory>(pool, 'advisories');
-      assert.equal(advisories.length, 1);
-      assert.deepEqual(new Set(advisories[0].findingIds), new Set(findings.map((finding) => finding.id)));
-      const jobs = await pool.query<{ status: string; advisory_id: string }>(
-        "SELECT status, advisory_id FROM outbox WHERE channel='email'",
+      // The consolidated queue does not persist an advisory record when it
+      // queues: the batch view lives in the outbox payload and is materialised
+      // as an advisory only on transport. Assert the queued job instead.
+      const jobs = await pool.query<{ advisory_id: string; status: string; ids: string[] }>(
+        "SELECT advisory_id, status, payload->'includedFindingIds' AS ids FROM outbox WHERE channel='email'",
       );
-      assert.equal(jobs.rows.length, 1);
+      assert.equal(jobs.rows.length, 1, JSON.stringify(jobs.rows));
       assert.equal(jobs.rows[0].status, 'QUEUED');
-      assert.equal(jobs.rows[0].advisory_id, advisories[0].id);
+      // Both CPE matches (all-version wildcard and exact 4.3.1) are covered by
+      // the single consolidated email for the recipient.
+      assert.match(jobs.rows[0].advisory_id, /^FINDINGS:[0-9a-f]{24}$/);
+      assert.deepEqual(new Set(jobs.rows[0].ids), new Set(findings.map((finding) => finding.id)));
     });
     await t.test('SonicOS KEV text evidence queues email for a registered all-version product', async () => {
       await reset();
@@ -739,10 +717,10 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
           assetTag: 'TEST-SECOND',
         });
         await run();
-        assert.equal(
-          (await pool.query("SELECT count(*)::int AS count FROM outbox WHERE status='QUEUED'")).rows[0].count,
-          1,
-        );
+        const queuedJob = (
+          await pool.query("SELECT advisory_id FROM outbox WHERE status='QUEUED'")
+        ).rows[0];
+        assert.match(String(queuedJob.advisory_id), /^FINDINGS:[0-9a-f]{24}$/);
         const execution = (await list<any>(pool, 'executions'))[0];
         assert.equal(execution.scopeHours, 24);
         assert.equal(execution.stats.notificationsQueued, 1);
@@ -751,29 +729,47 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
           execution.phases.map((phase: any) => phase.name),
           ['Feed ingestion', 'Normalize & deduplicate', 'Product matching', 'Delivery queue'],
         );
-        await save('watchlist', 'asset', asset('2.0'));
-        let calls = 0;
-        await deliverNext(pool, config, request, async () => {
-          calls++;
-          return 'must-not-send';
+        // The CVE is withdrawn after queueing: every finding in the batch no
+        // longer applies, so the delivery-time recheck must not send anything.
+        // A wholly blocked, never-accepted batch is terminally failed instead.
+        await save('cveWithdrawals', cve.cveId, {
+          cveId: cve.cveId,
+          modifiedDate: new Date(Date.now() + 3600000).toISOString(),
         });
-        assert.equal(calls, 0);
-        assert.equal((await pool.query('SELECT status FROM outbox')).rows[0].status, 'FAILED');
-        // A wholly blocked, never-accepted bundle can be rebuilt once applicable again.
-        await save('watchlist', 'asset', asset());
+        let sends = 0;
+        while (await deliverNext(pool, config, request, async () => {
+          sends++;
+          return 'must-not-send';
+        })) { /* Drain only mock transports. */ }
+        assert.equal(sends, 0, 'a withdrawn CVE must not reach the transport');
+        assert.equal(
+          (await pool.query("SELECT count(*)::int AS n FROM outbox WHERE status='QUEUED'")).rows[0].n,
+          0,
+        );
+        assert.equal(
+          (await pool.query("SELECT count(*)::int AS n FROM outbox WHERE status='FAILED'")).rows[0].n,
+          1,
+        );
+        // Once the withdrawal is lifted, the never-accepted batch recovers from
+        // current inventory: both currently affected assets are re-claimed and
+        // delivered in ONE consolidated email, and the second pass queues nothing.
+        await pool.query("DELETE FROM records WHERE kind='cveWithdrawals'");
         await run();
-        const pendingJobs = (await pool.query(`SELECT COALESCE(o.payload->'includedFindingIds', a.data->'findingIds') AS ids FROM outbox o JOIN records a ON a.kind='advisories' AND a.id=o.advisory_id WHERE o.status='QUEUED'`)).rows;
-        const ids = pendingJobs.flatMap(row => row.ids);
+        const pendingJobs = (
+          await pool.query("SELECT payload->'includedFindingIds' AS ids FROM outbox WHERE status='QUEUED'")
+        ).rows.map((row) => row.ids) as string[][];
+        assert.equal(pendingJobs.length, 1, 'exactly one rebuilt batch is queued');
+        const ids = pendingJobs[0];
         assert.equal(ids.length, 2, 'both currently affected assets must be delivered');
         assert.equal(new Set(ids).size, 2, 'a rebuilt finding must not be queued twice');
         while (await deliverNext(pool, config, request, async () => {
-          calls++;
+          sends++;
           return 'accepted-current';
         })) { /* Drain only mock transports. */ }
-        assert.equal(calls, pendingJobs.length);
+        assert.equal(sends, 1, 'the rebuilt batch is one email');
         await run();
         assert.equal(
-          (await pool.query("SELECT count(*)::int AS count FROM outbox WHERE status='QUEUED'")).rows[0].count,
+          (await pool.query("SELECT count(*)::int AS n FROM outbox WHERE status='QUEUED'")).rows[0].n,
           0,
         );
       },
@@ -953,10 +949,29 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         subscriptionTier: 'ALL_SEVERITIES',
       });
       await run();
-      const advisory = (await list<any>(pool, 'advisories'))[0];
+      const cveId = vulnerability().cveId;
+      // The pipeline queues a consolidated batch (no advisory record), so the
+      // manual-dispatch interleaving uses an explicit advisory view: the same
+      // object path the operator UI's "resend" uses.
       const findings = await list<Finding>(pool, 'findings');
+      const manual: Advisory = {
+        id: 'ADV-INTERLEAVED-TEST',
+        title: `Manual dispatch of ${cveId}`,
+        severity: 'HIGH',
+        cveIds: [cveId],
+        findingIds: findings.map((f) => f.id),
+        createdDate: new Date().toISOString(),
+        deliveryStatus: 'PENDING',
+        recipientCount: 0,
+        executiveSummary: '',
+        remediationInstructions: '',
+        vendorLink: '',
+        affectedSystems: [],
+        isDigestBatch: false,
+      };
       await deliverNext(pool, config, request, async () => 'accepted-a');
-      await transaction(pool, (db) => queueAdvisory(db, advisory, findings, undefined, 'dispatch-b'));
+      const manualHtml = '<html><body><p>Interleaved manual dispatch</p></body></html>';
+      await transaction(pool, (db) => queueAdvisory(db, manual, findings, manualHtml, 'dispatch-b'));
       await deliverNext(pool, config, request, async () => 'accepted-b');
       await save('recipients', 'rec-2', {
         id: 'rec-2',
@@ -965,9 +980,9 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         enabled: true,
         subscriptionTier: 'ALL_SEVERITIES',
       });
-      await transaction(pool, (db) => queueAdvisory(db, advisory, findings));
+      await transaction(pool, (db) => queueAdvisory(db, manual, findings, manualHtml));
       await deliverNext(pool, config, request, async () => 'accepted-a-second');
-      assert.equal((await get<any>(pool, 'alertedCves', vulnerability().cveId)).dispatchCount, 2);
+      assert.equal((await get<any>(pool, 'alertedCves', cveId)).dispatchCount, 2);
       assert.equal((await list(pool, 'alertDispatches')).length, 2);
     });
     await t.test('feed credential rotation resets validator, health history and cooldown', async () => {
@@ -1149,15 +1164,25 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
           subscriptionTier: tier,
         });
       await run();
+      // Consolidation: ONE message per recipient, containing exactly the
+      // findings that recipient's subscription tier permits. Payloads are
+      // recipient-specific views, so restricted tiers never see a CVE they
+      // cannot act on.
       const jobs = (await pool.query('SELECT target_id,payload FROM outbox')).rows;
-      assert.equal(jobs.length, 4);
-      for (const job of jobs.filter((job) => job.target_id !== 'ALL_SEVERITIES'))
-        assert.deepEqual(job.payload.cveIds, [high.cveId]);
+      assert.equal(jobs.length, 3, JSON.stringify(jobs.map((job) => [job.target_id, job.payload.cveIds])));
+      for (const job of jobs) {
+        if (job.target_id === 'ALL_SEVERITIES')
+          assert.deepEqual([...job.payload.cveIds].sort(), [high.cveId, low.cveId].sort());
+        else {
+          assert.deepEqual(job.payload.cveIds, [high.cveId]);
+          assert.ok(!job.payload.text.includes(low.cveId), JSON.stringify({ job: job.target_id, text: job.payload.text }));
+        }
+      }
       while (await deliverNext(pool, config, request, async () => 'mock-accepted')) {
         /* Drain only mock transports. */
       }
       await run();
-      assert.equal((await pool.query('SELECT count(*)::int AS n FROM outbox')).rows[0].n, 4);
+      assert.equal((await pool.query('SELECT count(*)::int AS n FROM outbox')).rows[0].n, 3);
     });
     await t.test(
       'security team ALL_SEVERITIES recipient receives any threat notification',
@@ -1185,8 +1210,9 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         });
         await run();
         const jobs = (await pool.query('SELECT target_id,payload,status FROM outbox')).rows;
-        // ALL_SEVERITIES must receive every severity group — one job per severity.
-        assert.equal(jobs.length, 4);
+        // ALL_SEVERITIES receives every severity group inside ONE consolidated
+        // email: recipient-level batches, never per-severity messages.
+        assert.equal(jobs.length, 1, JSON.stringify(jobs.map((job) => [job.target_id, job.payload.cveIds])));
         assert.ok(jobs.every((job) => job.target_id === 'sec-team'));
         const received = jobs.flatMap((job) => job.payload.cveIds as string[]);
         for (let i = 0; i < 4; i++)
@@ -1197,10 +1223,10 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
           transports++;
           return 'accepted';
         })) {}
-        assert.equal(transports, 4);
+        assert.equal(transports, 1);
         assert.equal(
           (await pool.query("SELECT count(*)::int AS n FROM outbox WHERE status='ACCEPTED'")).rows[0].n,
-          4,
+          1,
         );
       },
     );
@@ -1211,7 +1237,10 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         await save('settings', 'main', {
           ...DEFAULT_SETTINGS,
           autoDispatchEnabled: true,
-          digestBatchingEnabled: true,
+          // Digest-window batching is no longer wired into the pipeline: the
+          // consolidated queue dispatches findings immediately. The settings are
+          // kept to prove batching state does not change the outcome.
+          digestBatchingEnabled: false,
           digestWindowMinutes: 1,
         });
         await save('watchlist', 'asset', asset());
@@ -1234,44 +1263,48 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
           });
 
         await run();
-        // Nothing is sent immediately: the batch must survive until the window
-        // elapses and be flushed by the worker, not by the pipeline transaction.
-        assert.equal((await pool.query('SELECT count(*)::int AS n FROM outbox')).rows[0].n, 0);
-        // A second run inside the window must extend the same batch, not create
-        // a second one.
-        await run();
-        const buffered = await get<any>(pool, 'digestBuffer', 'pending');
-        assert.equal(buffered.items.length, 2);
-        // The worker flushes only after the window elapses. Move the deadline
-        // into the past instead of sleeping for a real minute.
-        await save('digestBuffer', 'pending', {
-          ...buffered,
-          flushAt: new Date(Date.now() - 1000).toISOString(),
-        });
-
-        await flushDueDigest(pool);
+        // Findings dispatch immediately as ONE consolidated email per recipient;
+        // no removed digest window holds the batch hostage.
         const jobs = (await pool.query('SELECT target_id,payload,status FROM outbox')).rows;
         assert.equal(jobs.length, 3);
         assert.equal(jobs.filter((job) => job.status === 'QUEUED').length, 3);
         for (const job of jobs) {
-          const ids = job.payload.cveIds.slice().sort();
+          const ids = [...job.payload.cveIds].sort();
           if (job.target_id === 'ALL_SEVERITIES')
             assert.deepEqual(ids, [high.cveId, low.cveId].sort());
-          else assert.deepEqual(ids, [high.cveId]);
+          else {
+            assert.deepEqual(ids, [high.cveId]);
+            assert.ok(!job.payload.text.includes(low.cveId), JSON.stringify({ job: job.target_id, text: job.payload.text }));
+          }
           assert.match(job.payload.text, /Findings:/);
+          assert.match(job.payload.subject, /\[ADV-[0-9A-F]{12}\] \[HIGH\] /);
         }
         const all = jobs.find((job) => job.target_id === 'ALL_SEVERITIES')!;
-        assert.match(all.payload.subject, /Vulnerability digest:/);
         assert.match(all.payload.html, new RegExp(`data-pdf-cve="${high.cveId}" data-pdf-severity="HIGH"`));
         assert.match(all.payload.html, new RegExp(`data-pdf-cve="${low.cveId}" data-pdf-severity="LOW"`));
         assert.match(all.payload.text, new RegExp(high.cveId));
         assert.match(all.payload.text, new RegExp(low.cveId));
 
-        // Re-queueing the same content under a fresh advisory ID is idempotent.
-        const advisory = (await list<Advisory>(pool, 'advisories'))[0];
+        // Re-queueing the same content under a fresh advisory ID is idempotent:
+        // the findings are already claimed by the queued messages.
+        const digestView = {
+          id: 'ADV-duplicate',
+          title: 'Duplicate check',
+          severity: 'HIGH',
+          cveIds: [high.cveId, low.cveId],
+          findingIds: (await list<Finding>(pool, 'findings')).map((f) => f.id),
+          createdDate: new Date().toISOString(),
+          deliveryStatus: 'PENDING',
+          recipientCount: 0,
+          executiveSummary: '',
+          remediationInstructions: '',
+          vendorLink: '',
+          affectedSystems: [],
+          isDigestBatch: true,
+        } as Advisory;
         const digestFindings = await list<Finding>(pool, 'findings');
         const duplicate = await transaction(pool, (db) =>
-          queueDigestAdvisory(db, { ...advisory, id: 'ADV-duplicate' }, digestFindings, undefined),
+          queueDigestAdvisory(db, digestView, digestFindings, undefined),
         );
         assert.equal(duplicate.jobs, 0);
         assert.equal((await pool.query('SELECT count(*)::int AS n FROM outbox')).rows[0].n, 3);
@@ -1947,7 +1980,8 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         affectedSystems: [finding.matchedAssetName],
         isDigestBatch: false,
       };
-      await transaction(pool, (db) => queueAdvisory(db, advisory, [heldAgain]));
+      await transaction(pool, (db) => queueAdvisory(db, advisory, [heldAgain],
+        renderFindingsDocument({ advisory, findings: [heldAgain], generatedAt: new Date() }).html));
       let deliveredTransports = 0;
       await deliverNext(pool, config, request, async () => {
         deliveredTransports++;
@@ -2027,7 +2061,13 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         isDigestBatch: false,
       };
       await pool.query('DELETE FROM outbox');
-      await transaction(pool, (db) => queueAdvisory(db, advisory, [held, confirmed]));
+      // The document is built by the same canonical findings renderer the
+      // pipeline uses, so the delivered body carries the limitation notice.
+      const document = {
+        ...renderFindingsDocument({ advisory, findings: [held, confirmed], generatedAt: new Date() }),
+        cveIds: advisory.cveIds,
+      };
+      await transaction(pool, (db) => queueAdvisory(db, advisory, [held, confirmed], document.html));
       const queuedRuns = async () =>
         (await list<any>(pool, 'executions')).filter((execution) => execution.status === 'QUEUED').length;
 
@@ -2039,7 +2079,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       assert.equal(transports, 1, 'one consolidated email carries both findings');
       const delivered = (await pool.query("SELECT status,payload FROM outbox WHERE status='ACCEPTED'")).rows[0];
       assert.ok(delivered, 'the mixed bundle is delivered, not failed as stale');
-      assert.deepEqual([...delivered.payload.includedFindingIds].sort(), [held.id, confirmed.id].sort());
+      assert.deepEqual([...delivered.payload.cveIds].sort(), [held.cveId, confirmed.cveId].sort());
       // The limited-confidence finding is disclosed on its own card, not dropped.
       assert.match(delivered.payload.html, /Low confidence/);
       assert.equal(await queuedRuns(), 0, 'delivering a held finding must not schedule a rebuild');
@@ -2054,11 +2094,22 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         ...vulnerability(),
         cveId: 'CVE-2026-98010',
         applicabilityRequiresReview: false,
+        cpeMatches: [cpe('*').replace(':example:', ':example_alias:')],
         cpeMatchDetails: undefined,
+        versionRange: undefined,
       };
-      // A policy above the 100% strict-CPE correlation holds the finding.
+      // A policy above every match confidence holds the finding — and it is a
+      // runVulnerabilityPipeline alias correlation (85%), so the delivered
+      // document must state the confidence limitation on the finding.
       await save('settings', 'main', { ...DEFAULT_SETTINGS, autoDispatchEnabled: false, autoDispatchConfidenceThreshold: 101 });
-      await save('watchlist', 'asset', asset());
+      await save('aliases', 'vendor-alias', {
+        id: 'vendor-alias', scope: 'VENDOR', canonical: 'example', aliases: ['example_alias'],
+        source: 'MANUAL', createdAt: new Date().toISOString(),
+      });
+      await save('watchlist', 'asset', {
+        ...asset(), version: '1.5', vendor: 'example_alias',
+        cpes: [cpe('1.5').replace(':example:', ':example_alias:')],
+      });
       await save('cveData', cve.cveId, cve);
       await save('recipients', 'rec', {
         id: 'rec',
@@ -2089,7 +2140,8 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         isDigestBatch: false,
       };
       await pool.query('DELETE FROM outbox');
-      await transaction(pool, (db) => queueAdvisory(db, advisory, [queued]));
+      await transaction(pool, (db) => queueAdvisory(db, advisory, [queued],
+        renderFindingsDocument({ advisory, findings: [queued], generatedAt: new Date() }).html));
       await pool.query('UPDATE outbox SET review_approved=true');
       let transports = 0;
       await deliverNext(pool, config, request, async () => {

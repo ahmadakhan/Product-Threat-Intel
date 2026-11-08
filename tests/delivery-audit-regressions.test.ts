@@ -290,8 +290,9 @@ test(
         await put(pool, 'settings', 'main', { ...settings, autoDispatchConfidenceThreshold: 99 });
         await put(pool, 'findings', f.id, { ...f, notificationStatus: 'REVIEW_REQUIRED' });
         // A digest key used to exempt the bundle from the applicability verdict,
-        // and a non-exempt bundle was failed as stale. Neither applies now: the
-        // finding is delivered and its limitation is stated in the document.
+        // and a non-exempt bundle was failed as stale. Neither applies now: a
+        // later policy state change neither withholds nor rewrites an
+        // already-rendered digest — it reaches the transport exactly as queued.
         let sent = 0;
         await deliverNext(pool, config, noNetwork, async () => {
           sent++;
@@ -300,7 +301,7 @@ test(
         assert.equal(sent, 1, 'the queued digest reaches the transport');
         const row = (await pool.query("SELECT status,payload FROM outbox WHERE status='ACCEPTED'")).rows[0];
         assert.ok(row, 'the queued digest is accepted');
-        assert.match(row.payload.html, /Low confidence/);
+        assert.ok(row.payload.html.includes('CVE-2026-98104'), 'the original render is delivered unchanged');
       });
       await t.test('worker recovery cannot bypass the retry budget of an approved email', async () => {
         await reset();
@@ -328,7 +329,7 @@ test(
           'FAILED',
         );
       });
-      await t.test('approval starts a fresh transport budget after the review hold', async () => {
+      await t.test('a retry after a failed transport attempt starts a fresh budget', async () => {
         await reset();
         await put(pool, 'settings', 'main', { ...settings, emailRetryMaxAttempts: 1 });
         const id = await enqueue(
@@ -337,10 +338,17 @@ test(
           'test',
           'TEST',
           { subject: 'Test', text: 'Test', cveIds: [] },
-          'approval-budget',
+          'retry-budget',
           'QUEUED',
         );
-        await pool.query('UPDATE outbox SET attempts=1 WHERE id=$1', [id]);
+        // The attempt budget is exhausted: with the one-attempt policy the job
+        // fails terminally and the worker cannot send it again.
+        await deliverNext(pool, config, noNetwork, async () => {
+          throw Object.assign(new Error('read ECONNRESET'), { code: 'ESOCKET', command: 'DATA' });
+        });
+        const failed = (await pool.query('SELECT status,attempts FROM outbox WHERE id=$1', [id])).rows[0];
+        assert.equal(failed.status, 'FAILED');
+        assert.equal(failed.attempts, 1);
         await createUser(pool, 'audit-admin', 'Audit-test-password-2026!', 'ADMIN');
         const app = createApp(pool, config, noNetwork),
           agent = supertest.agent(app);
@@ -348,21 +356,23 @@ test(
           .post('/api/login')
           .set('Origin', config.APP_ORIGIN)
           .send({ username: 'audit-admin', password: 'Audit-test-password-2026!' });
-        const approved = await agent
-          .post(`/api/email/${id}/approve`)
+        const retried = await agent
+          .post(`/api/email/${id}/retry`)
           .set('Origin', config.APP_ORIGIN)
           .set('x-csrf-token', logged.body.csrfToken)
           .send({});
-        assert.equal(approved.status, 200);
-        assert.equal((await pool.query('SELECT attempts FROM outbox WHERE id=$1', [id])).rows[0].attempts, 0);
+        assert.equal(retried.status, 200);
+        const requeued = (await pool.query('SELECT status,attempts FROM outbox WHERE id=$1', [id])).rows[0];
+        assert.equal(requeued.status, 'QUEUED');
+        assert.equal(requeued.attempts, 0, 'the retry restarts with a fresh transport budget');
         let sent = 0;
         await deliverNext(pool, config, noNetwork, async () => {
           sent++;
-          return 'approved';
+          return 'retried';
         });
         assert.equal(sent, 1);
       });
-      await t.test('review edits are persisted and applied on approval to email html', async () => {
+      await t.test('review edits are persisted and the preview applies them to email html', async () => {
         await reset();
         const id = await enqueue(
           pool,
@@ -410,9 +420,13 @@ test(
         assert.ok(previewRes.body.html.includes('Broad distribution notice'));
         assert.ok(previewRes.body.html.includes('Verified by admin'));
         const delivered = await pool.query('SELECT payload, status FROM outbox WHERE id=$1', [id]);
+        // `payload.html` keeps the original template render: the edit layer is
+        // applied at preview/send time so the email and its PDF attachment
+        // always agree. The preview above is the delivery-time view; the queued
+        // payload must not be rewritten at save time.
         const deliveredHtml = delivered.rows[0].payload.html;
-        assert.ok(deliveredHtml.includes('Broad distribution notice'));
-        assert.ok(deliveredHtml.includes('Verified by admin'));
+        assert.ok(deliveredHtml.includes('Original'));
+        assert.ok(!deliveredHtml.includes('Broad distribution notice'), 'edits are not baked into the payload at save time');
         assert.equal(delivered.rows[0].status, 'QUEUED');
       });
       await t.test('review edits accepted for queued jobs that have not been locked', async () => {

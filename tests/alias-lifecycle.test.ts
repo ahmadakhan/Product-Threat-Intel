@@ -218,8 +218,10 @@ test('a generic inventory CPE is constrained by the inventory product', () => {
     'unrelated body',
   );
   assert.equal(sameProduct.matched, true);
-  assert.equal(sameProduct.applicabilityRequiresReview, true);
-  assert.ok(sameProduct.confidence < 90);
+  // Both identity components resolved to acme/widget, so the match is
+  // concrete: high confidence, no review hold.
+  assert.equal(sameProduct.applicabilityRequiresReview, false);
+  assert.ok(sameProduct.confidence >= 90);
 
   const otherProduct = matchesWatchlistItem(
     [generic],

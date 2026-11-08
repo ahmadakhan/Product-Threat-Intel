@@ -878,7 +878,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       assert.equal((await supertest(createApp(pool, config, requester)).get('/ready')).status, 200);
     });
     await t.test(
-      'pipeline creates a pending advisory and outbox atomically; reruns do not duplicate',
+      'pipeline queues a consolidated findings email atomically; reruns do not duplicate',
       async () => {
         assert.equal(
           (
@@ -913,10 +913,17 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
         await processPipeline(pool, config, requester);
         const snapshot = (await admin.get('/api/state')).body;
         assert.equal(snapshot.findings.length, 1);
-        assert.equal(snapshot.advisories.length, 1);
-        assert.equal(snapshot.advisories[0].deliveryStatus, 'PENDING');
-        assert.equal(snapshot.emailLogs[0].status, 'QUEUED');
+        // Consolidated dispatch does not persist an advisory record at queue
+        // time: the batch identity lives in the outbox row (FINDINGS:<bucket>),
+        // and the per-recipient delivery claim is the dedupe record.
+        assert.equal(snapshot.advisories.length, 0);
         assert.equal(snapshot.alertedCves.length, 0);
+        assert.equal(snapshot.emailLogs[0].status, 'QUEUED');
+        const job = (await pool.query('SELECT advisory_id,status FROM outbox')).rows[0];
+        assert.match(String(job.advisory_id), /^FINDINGS:[0-9a-f]{24}$/);
+        assert.equal(job.status, 'QUEUED');
+        // A rerun re-derives the same batch, but the recipient's live claim
+        // denies it: the queued job is not duplicated.
         await queueRun(pool, 24, 'test');
         await processPipeline(pool, config, requester);
         assert.equal((await pool.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, 1);
@@ -929,12 +936,19 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
           throw Object.assign(new Error('temporary transport outage'), { code: 'ECONNRESET', command: 'CONN' });
         });
         assert.equal((await list<any>(pool, 'emailLogs'))[0].status, 'RETRYING');
+        // An ambiguous failure must NOT promote the recipient's claims: the
+        // provider may still deliver the first message, so the claims stay held.
+        assert.equal((await list<any>(pool, 'emailLogs')).length, 1);
         await pool.query("UPDATE outbox SET next_attempt=now() WHERE status='QUEUED'");
         await deliverNext(pool, config, requester, async () => '<provider-message-id>');
         const snapshot = (await admin.get('/api/state')).body;
         assert.equal(snapshot.emailLogs[0].status, 'ACCEPTED');
-        assert.equal(snapshot.advisories[0].deliveryStatus, 'ACCEPTED');
-        assert.equal(snapshot.alertedCves[0].dispatchCount, 1);
+        // Acceptance promotes this recipient's claims to DELIVERED: the durable
+        // receipt that stops later runs from re-notifying this mailbox.
+        const deliveredClaims = await pool.query(
+          `SELECT state FROM delivery_claims WHERE state='DELIVERED' AND kind='finding'`,
+        );
+        assert.equal(deliveredClaims.rowCount, 1, 'the accepted transport promotes the claim to DELIVERED');
       },
     );
     await t.test('webhook signs timestamp and exact body; nonretryable rejection is terminal', async () => {

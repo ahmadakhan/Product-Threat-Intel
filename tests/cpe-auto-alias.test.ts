@@ -169,8 +169,11 @@ test('a generic inventory CPE resolves to the inventory vendor/product', () => {
   );
   assert.equal(matched.matched, true);
   assert.equal(matched.method, 'STRICT_CPE');
-  assert.equal(matched.confidence, 70);
-  assert.equal(matched.applicabilityRequiresReview, true);
+  // Both wildcard identity components were substituted from the inventory
+  // vendor/product, so the match is a concrete product assertion: high
+  // confidence, not held for review.
+  assert.equal(matched.confidence, 90);
+  assert.equal(matched.applicabilityRequiresReview, false);
 
   // A generic CPE must not remain an unrestricted wildcard that matches an
   // unrelated advisory product. Before resolution both components were `*`.
@@ -179,6 +182,23 @@ test('a generic inventory CPE resolves to the inventory vendor/product', () => {
       .matched,
     false,
   );
+});
+
+test('a partially resolved generic CPE stays review-gated', () => {
+  // The inventory record names no vendor, so the vendor wildcard cannot be
+  // substituted and the identity remains generic: low confidence, review.
+  const generic = cpe('*', 'widget', '1.5');
+  const matched = matchesWatchlistItem(
+    [generic],
+    '',
+    'widget',
+    [cpe('acme', 'widget', '1.5')],
+    '',
+    '',
+  );
+  assert.equal(matched.matched, true);
+  assert.equal(matched.confidence, 70);
+  assert.equal(matched.applicabilityRequiresReview, true);
 });
 test('a CPE vendor/product mismatch falls through to the text fallback', () => {
   const result = matchesWatchlistItem(

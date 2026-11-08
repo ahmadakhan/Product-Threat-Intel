@@ -1,5 +1,5 @@
 import { PageHeading } from './PageHeading';
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
 import { copyText } from '../utils/clipboard';
 import {
@@ -40,6 +40,8 @@ export const AdvisoryTemplateView: React.FC = () => {
     updateTemplateCustomization,
     sendTestEmail,
     saveTemplate,
+    error,
+    clearError,
   } = useApp();
 
   const [testEmail, setTestEmail] = useState('');
@@ -87,11 +89,18 @@ export const AdvisoryTemplateView: React.FC = () => {
    const [isCustomTemplate, setIsCustomTemplate] = useState(false);
    const [editorRef, setEditorRef] = useState<HTMLTextAreaElement | null>(null);
 
-   const handleEnterEditor = () => {
-      setCustomTemplate(customAdvisoryTemplate ?? advisoryTemplate);
-      setIsCustomTemplate(customAdvisoryTemplate !== null);
-     setViewFormat('editor');
-   };
+const handleEnterEditor = () => {
+      // Re-clicking the "Template Editor" tab while already inside it must not
+      // reinitialize the draft: that silently threw away unsaved edits every
+      // time a user checked the Visual Canvas preview and clicked back in.
+      // Only seed the draft from the last-saved template the first time the
+      // editor is entered, or when no custom template has been started.
+      if (viewFormat !== 'editor' && !isCustomTemplate) {
+        setCustomTemplate(customAdvisoryTemplate ?? advisoryTemplate);
+        setIsCustomTemplate(customAdvisoryTemplate !== null);
+      }
+      setViewFormat('editor');
+    };
 
    const handleExitEditor = () => {
      if (isCustomTemplate) {
@@ -128,20 +137,21 @@ export const AdvisoryTemplateView: React.FC = () => {
       '{{recommended_actions}}',
     ];
 
-   const handleInsertToken = (token: string) => {
-     const el = editorRef;
-     if (el) {
-       const start = el.selectionStart;
-       const end = el.selectionEnd;
-       const value = customTemplate;
-       setCustomTemplate(value.slice(0, start) + token + value.slice(end));
-       const newPos = start + token.length;
-       setTimeout(() => {
-         el.focus();
-         el.setSelectionRange(newPos, newPos);
-       }, 0);
-     }
-   };
+const handleInsertToken = (token: string) => {
+      const el = editorRef;
+      if (el) {
+        const start = el.selectionStart;
+        const end = el.selectionEnd;
+        const value = customTemplate;
+        setCustomTemplate(value.slice(0, start) + token + value.slice(end));
+        setIsCustomTemplate(true);
+        const newPos = start + token.length;
+        setTimeout(() => {
+          el.focus();
+          el.setSelectionRange(newPos, newPos);
+        }, 0);
+      }
+    };
 
   // Active customization tool tab
   const [toolTab, setToolTab] = useState<'typography' | 'colors' | 'stamps' | 'tokens'>('colors');
@@ -261,15 +271,62 @@ export const AdvisoryTemplateView: React.FC = () => {
         .replace(/{{references_link}}/g, 'https://example.com/vendor-advisory');
     };
 
+  // Matches the server's strict templateSchema hex check (server/validation.ts).
+  // The color swatches pair a <input type="color"> (always a valid 6-digit
+  // hex) with a free-text input that has no validation of its own — pasting a
+  // value with an alpha channel, a 3-digit shorthand, or a missing "#" passes
+  // through to templateCustomization and fails the save on the server with no
+  // indication of why, discarding whatever HTML template edit was bundled in
+  // the same request. Catch it client-side instead so the real cause is shown.
+  const HEX_COLOR_RE = /^#[0-9a-f]{6}$/i;
+  const COLOR_FIELD_LABELS: Record<string, string> = {
+    canvasBg: 'Canvas Background',
+    cardBg: 'Card Background',
+    headerBg: 'Header Banner Bg',
+    accentColor: 'Accent Color',
+    headingColor: 'Heading Color',
+    fontColor: 'Font Color',
+    badgeStampColor: 'Badge/Stamp Color',
+  };
+  const getInvalidColorFields = () =>
+    Object.keys(COLOR_FIELD_LABELS).filter((key) => {
+      const value = templateCustomization[key as keyof typeof templateCustomization];
+      return typeof value !== 'string' || !HEX_COLOR_RE.test(value);
+    });
+
+  // Mirrors the server's strict templateSchema hex check (server/validation.ts).
+  // The color swatches pair a <input type="color"> (always a valid 6-digit
+  // hex) with a free-text input that has no validation of its own — pasting a
+  // value with an alpha channel, a 3-digit shorthand, or a missing "#" passes
+  // through to templateCustomization and fails the save on the server with no
+  // indication of why, discarding whatever HTML template edit was bundled in
+  // the same request. Derived from the draft so it clears the moment the value
+  // is fixed instead of only on the next save attempt.
+  const saveValidationError = useMemo(() => {
+    const invalid = getInvalidColorFields();
+    return invalid.length
+      ? `Fix the color value${invalid.length > 1 ? 's' : ''} for: ${invalid
+          .map((key) => COLOR_FIELD_LABELS[key])
+          .join(', ')}. Colors must be a 6-digit hex code like #09090b.`
+      : null;
+  }, [templateCustomization]);
+
   const handleSave = () => {
+    clearError();
     setConfirmSave(true);
   };
 
   const confirmSaveAction = async () => {
-    if (savingTemplate) return;
+    if (savingTemplate || saveValidationError) return;
     setSavingTemplate(true);
     try {
-      if (!(await saveTemplate(isCustomTemplate ? customTemplate : undefined))) return;
+      const ok = await saveTemplate(isCustomTemplate ? customTemplate : undefined);
+      if (!ok) {
+        // saveTemplate failed (server-side validation or a transient error);
+        // `error` from context now holds why. Keep the modal open so it's
+        // visible instead of the save silently appearing to do nothing.
+        return;
+      }
       // The save committed to the server and refresh() reloaded the snapshot.
       // Re-seed the local editor draft from the committed context so the
       // preview renders the server-canonical template (with saved settings /
@@ -1393,13 +1450,24 @@ export const AdvisoryTemplateView: React.FC = () => {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
           <div className="ui-panel bg-zinc-900 border border-zinc-800 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
             <h3 className="text-sm font-bold text-zinc-100 mb-2">Save & Apply to Notifications?</h3>
-            <p className="text-xs text-zinc-400 leading-relaxed mb-6">
+            <p className="text-xs text-zinc-400 leading-relaxed mb-4">
               Persist the customized advisory template to the server so it applies to future notifications.
             </p>
+            {(saveValidationError || error) && (
+              <div
+                role="alert"
+                className="mb-4 rounded-xl border border-rose-800/50 bg-rose-950/70 px-3 py-2.5 text-xs text-rose-100"
+              >
+                {saveValidationError || error}
+              </div>
+            )}
             <div className="flex justify-end space-x-2">
               <button
                 type="button"
-                onClick={() => setConfirmSave(false)}
+                onClick={() => {
+                  setConfirmSave(false);
+                  clearError();
+                }}
                 disabled={savingTemplate}
                 className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium"
               >
@@ -1408,7 +1476,7 @@ export const AdvisoryTemplateView: React.FC = () => {
               <button
                 type="button"
                 onClick={confirmSaveAction}
-                disabled={savingTemplate}
+                disabled={savingTemplate || !!saveValidationError}
                 className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white text-xs font-semibold"
               >
                 {savingTemplate ? 'Saving…' : 'Save & Apply'}

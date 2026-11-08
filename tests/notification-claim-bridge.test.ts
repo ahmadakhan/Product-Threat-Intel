@@ -283,3 +283,37 @@ test('an oversized findings HTML attachment fails before any provider send', () 
     payload: { html: '<html>' + 'x'.repeat(4_000_001) + '</html>' },
   } as unknown as import('../server/delivery.ts').Job), /exceeds the attachment limit/);
 });
+
+test('a consolidated batch queues one webhook per event-subscribed hook; webhook-only findings still dispatch', { skip: !database }, async () => {
+  await fixture(async (pool) => {
+    await put(pool, 'webhooks', 'hook-all', {
+      id: 'hook-all', name: 'All events', url: 'https://hooks.example.invalid/all',
+      provider: 'GENERIC_HMAC', secretToken: 'secret', enabled: true, events: ['ALL'], deliveryCount: 0,
+    });
+    await put(pool, 'webhooks', 'hook-critical', {
+      id: 'hook-critical', name: 'Critical only', url: 'https://hooks.example.invalid/critical',
+      provider: 'GENERIC_HMAC', secretToken: 'secret', enabled: true, events: ['CRITICAL'], deliveryCount: 0,
+    });
+    await put(pool, 'webhooks', 'hook-disabled', {
+      id: 'hook-disabled', name: 'Disabled', url: 'https://hooks.example.invalid/off',
+      provider: 'GENERIC_HMAC', secretToken: 'secret', enabled: false, events: ['ALL'], deliveryCount: 0,
+    });
+    // This HIGH finding is permitted by ALL only: the CRITICAL hook must not
+    // receive it, and the disabled hook must receive nothing.
+    assert.equal(await queueConsolidatedFindingNotifications(pool, [finding]), 2);
+    const hooks = (await pool.query<{ target_id: string; advisory_id: string; payload: { includedFindingIds: string[] } }>(
+      "SELECT target_id,advisory_id,payload FROM outbox WHERE channel='webhook' ORDER BY target_id",
+    )).rows;
+    assert.deepEqual(hooks.map((row) => row.target_id), ['hook-all']);
+    assert.match(hooks[0].advisory_id, /^FINDINGS:[0-9a-f]{24}$/);
+    assert.deepEqual(hooks[0].payload.includedFindingIds, ['f-one']);
+
+    // A repeat pass re-derives the same content revision, so neither surface is
+    // queued twice.
+    assert.equal(await queueConsolidatedFindingNotifications(pool, [finding]), 0);
+    assert.equal(
+      (await pool.query("SELECT count(*)::int AS n FROM outbox WHERE channel='webhook'")).rows[0].n,
+      1,
+    );
+  });
+});
