@@ -1319,7 +1319,12 @@ export async function queueConsolidatedFindingNotifications(
       const ownedBucket = consolidatedFindingBatchId(ownedIds);
       const ownedCache = documentCache.get(ownedBucket);
       const ownedDocument = ownedCache ?? (() => {
-        const { advisory, document } = consolidatedFindingsDocument(owned, generatedAt);
+        // Pass the same resolved `template` as every other build in this pass
+        // (audit): omitting it here silently fell back to the default layout
+        // whenever a concurrent run won part of this claim, dropping the
+        // operator's custom advisory template for exactly the jobs built on
+        // this path.
+        const { advisory, document } = consolidatedFindingsDocument(owned, generatedAt, template);
         const evidence = deliveryRevisionEvidence(owned);
         const builtPayload = {
           payload: {
