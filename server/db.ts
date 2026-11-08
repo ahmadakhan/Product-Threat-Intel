@@ -84,13 +84,21 @@ export const createPool = (url: string) => {
     }));
   });
   
+  // The 'remove' event is emitted when the pool disposes a client (for
+  // example on timeout or when forced to shrink).  Logging this gives deeper
+  // operational visibility than the generic `pg` error handler and preserves
+  // the same structured JSON format used elsewhere.
   pool.on('remove', () => {
-    console.log(JSON.stringify({
-      level: 'warn',
-      event: 'database-pool-connection-removed',
-      timestamp: new Date().toISOString(),
-      totalCount: pool.totalCount,
-    }));
+    console.log(
+      JSON.stringify({
+        level: 'warn',
+        event: 'database-pool-connection-removed',
+        timestamp: new Date().toISOString(),
+        totalCount: pool.totalCount,
+        idleCount: pool.idleCount,
+        activeCount: pool.totalCount - pool.idleCount,
+      })
+    );
   });
   
   pool.on('error', (error) => {
