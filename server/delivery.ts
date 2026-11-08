@@ -1749,17 +1749,15 @@ export async function deliverNext(
               delivery_outcome='NOT_ATTEMPTED',
               error='Superseded by a newer revision of the same finding batch'
         WHERE o.status='QUEUED'
-          AND (o.channel='email' OR $1::boolean)
           AND EXISTS (
             SELECT 1 FROM outbox newer
              WHERE newer.status IN ('QUEUED','SENDING')
-               AND newer.channel=o.channel
-               AND newer.target_id=o.target_id
-               AND newer.advisory_id=o.advisory_id
-               AND newer.id<>o.id
-               AND COALESCE(newer.payload->>'contentRevision','') <> COALESCE(o.payload->>'contentRevision','')
-               AND newer.updated_at > o.updated_at)`,
-      [settings.emailEnabled !== false],
+                AND newer.channel=o.channel
+                AND newer.target_id=o.target_id
+                AND newer.advisory_id=o.advisory_id
+                AND newer.id<>o.id
+                AND COALESCE(newer.payload->>'contentRevision','') <> COALESCE(o.payload->>'contentRevision','')
+                AND newer.updated_at > o.updated_at)`,
     );
     const claimed = await db.query(
       `WITH candidate AS (
