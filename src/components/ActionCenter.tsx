@@ -413,6 +413,14 @@ export const ActionCenter: React.FC = () => {
     reload,
   ]);
 
+  const openPdfWindow = useCallback(() => {
+    // What the iframe used to do with `allow-same-origin`, without giving the
+    // embedded document an origin of its own. `noopener` also severs the
+    // handle the new window would otherwise get on this one.
+    if (!pdfUrlRef.current) return;
+    window.open(pdfUrlRef.current, '_blank', 'noopener,noreferrer');
+  }, []);
+
   const refreshPdf = useCallback(async () => {
     if (!editing) return;
     setPdfLoading(true);
@@ -427,6 +435,9 @@ export const ActionCenter: React.FC = () => {
       const url = URL.createObjectURL(blob);
       pdfUrlRef.current = url;
       setPdfUrl(url);
+      // A separate top-level document, so the viewer renders it as a PDF page
+      // rather than refusing to embed it.
+      window.open(url, '_blank', 'noopener,noreferrer');
     } catch (caught) {
       setPdfError(caught instanceof Error ? caught.message : 'PDF preview failed');
     } finally {
@@ -1652,12 +1663,19 @@ export const ActionCenter: React.FC = () => {
                               </button>
                             </div>
                           ) : pdfUrl ? (
-                            <iframe
-                              title="PDF preview"
-                              className="h-full w-full"
-                              src={`${pdfUrl}#toolbar=0&view=FitH&scrollbar=0&statusbar=0&messages=0&navpanes=0`}
-                              sandbox="allow-same-origin allow-scripts allow-popups"
-                            />
+                            <div className="flex h-full flex-col items-center justify-center gap-3 p-4 text-center">
+                              <FileText className="h-8 w-8 text-zinc-500" />
+                              <p className="text-xs text-zinc-500">
+                                The rendered attachment opened in a new tab.
+                              </p>
+                              <button
+                                type="button"
+                                onClick={openPdfWindow}
+                                className="rounded border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 transition hover:bg-zinc-800"
+                              >
+                                Open attachment
+                              </button>
+                            </div>
                           ) : (
                             <div className="flex h-full items-center justify-center text-xs text-zinc-500">
                               <FileText className="h-8 w-8 mb-2" />

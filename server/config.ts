@@ -290,5 +290,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (url.username || url.password)
       throw new Error('HEARTBEAT_URL must not embed credentials; use a receiver with a token path');
   }
+  // In production /metrics is the only scrape surface, and it authenticates
+  // solely against METRICS_TOKEN. Unset, the route answers 404 and a scraper
+  // sees an empty target with no explanation — indistinguishable from a broken
+  // deploy. Warn once at startup rather than silently degrading observability.
+  if (config.NODE_ENV === 'production' && !config.METRICS_TOKEN)
+    console.warn(
+      JSON.stringify({
+        level: 'warning',
+        event: 'config.metrics_token_unset',
+        message:
+          'METRICS_TOKEN is unset, so /metrics returns 404 and no monitoring data is exposed. Set it to the same value the scraper authenticates with.',
+      }),
+    );
   return config;
 }

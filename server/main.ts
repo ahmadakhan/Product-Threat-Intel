@@ -146,6 +146,10 @@ async function listenWithRetry(port: number, host: string, maxAttempts = 5): Pro
       return server;
     } catch (error: unknown) {
       const code = (error as NodeJS.ErrnoException)?.code;
+      // Dispose the failed listener before retrying. A socket that failed to
+      // bind holds handles (and its 'error' listener) until closed; without
+      // this, each retry leaves one behind for the lifetime of the attempt.
+      await new Promise<void>((resolve) => server.close(() => resolve()));
       if (code !== 'EADDRINUSE') throw error;
       lastError = error;
       if (attempt === maxAttempts) break;
@@ -226,10 +230,18 @@ async function logMlTrainingResult(pool: Db, summary: TrainingSummary): Promise<
  * Backstop for a guarded operation that never settles despite its own deadline.
  * Retention and the digest renderer have explicit cancellation; this only covers
  * the case where cancellation itself cannot complete, so it is deliberately
- * longer than any legitimate run and is a last resort, not the deadline.
- * Configurable via STUCK_PROMISE_MS (default: 5 minutes).
+ * longer than any legitimate gap and is a last resort, not the deadline.
+ *
+ * The pipeline reports progress from its 15-second heartbeat as well as at each
+ * checkpoint, so a healthy run signals far more often than this. The default
+ * still has to clear the LONGEST silent stretch a healthy run can produce: a
+ * single in-flight source request. NVD pages are the slowest (120 s request
+ * timeout, 60 s socket timeout, 5 s provider pacing between pages), and a
+ * statement that hits the pool's timeout can add its own round trip. 15 minutes
+ * leaves that maximum several times over while still replacing a wedged
+ * instance in a bounded time. Configurable via STUCK_PROMISE_MS.
  */
-const STUCK_PROMISE_MS = Number(process.env.STUCK_PROMISE_MS ?? 5 * 60_000);
+const STUCK_PROMISE_MS = Number(process.env.STUCK_PROMISE_MS ?? 15 * 60_000);
 let digestStartedAt = 0;
 let pipelineStartedAt = 0;
 let outboxStartedAt = 0;
@@ -330,6 +342,10 @@ const tick = () => {
 };
 const WORKER_TICK_MS = Number(process.env.WORKER_TICK_MS ?? 5000);
 const timer = setInterval(tick, WORKER_TICK_MS);
+// These timers only exist to drive background work. They must not be the
+// reason the event loop stays alive: a harness (or a supervisor draining the
+// process) that has otherwise finished would be pinned open forever.
+timer.unref();
 tick();
 // Retention runs on its own cadence because the policy is operator-configurable
 // and can be much slower than the worker tick. The last successful run is
@@ -444,6 +460,7 @@ const retentionTick = () => {
     });
 };
 const retentionTimer = setInterval(retentionTick, 60000);
+retentionTimer.unref();
 retentionTick();
 // The daily digest is a calendar job (daily summary + health report at the
 // configured time/timezone). It is polled on the same cadence as retention and
@@ -549,8 +566,10 @@ const mlTrainingTick = () => {
     });
 };
 const dailyDigestTimer = setInterval(dailyDigestTick, 60000);
+dailyDigestTimer.unref();
 dailyDigestTick();
 const mlTrainingTimer = setInterval(mlTrainingTick, 60000);
+mlTrainingTimer.unref();
 mlTrainingTick();
 let mlTelemetryRunning: Promise<void> | null = null;
 let mlTelemetryPrevious = { time: Date.now(), completed: correlation.supervisor.ingestor.telemetry.completed };
@@ -582,7 +601,13 @@ const mlTelemetryTimer = setInterval(() => {
     .catch(report('ml.telemetry'))
     .finally(() => { mlTelemetryRunning = null; });
 }, 60000);
+mlTelemetryTimer.unref();
 const cleanup = setInterval(() => {
+  // Housekeeping, not work: every replica running it just serialises the same
+  // DELETE statements against the same rows. Only the worker replica owns it,
+  // like every other periodic job below, so the API replica stays free of
+  // background write load.
+  if (config.WORKER_ENABLED !== 'true') return;
   // Session and login-attempt expiry are security invariants, not retained
   // business data. Queue rows and operational events follow the retention
   // policy in runRetention so an operator's configured window stays authoritative.
@@ -597,6 +622,7 @@ const cleanup = setInterval(() => {
     })
     .catch(report('session-cleanup'));
 }, 60000);
+cleanup.unref();
 async function shutdown() {
   if (stopping) return;
   stopping = true;

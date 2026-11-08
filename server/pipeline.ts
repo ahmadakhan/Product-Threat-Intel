@@ -640,6 +640,30 @@ export async function stopRunWithClient(
       { locks: ['pipeline-queue'] },
     );
 }
+/** How often a running pipeline proves it is still alive. */
+export const PIPELINE_HEARTBEAT_MS = 15_000;
+
+/**
+ * Body of the pipeline heartbeat timer.
+ *
+ * Firing is itself proof the run is alive: the event loop is turning and this
+ * pass is still holding its slot. That evidence must reach the supervisor's
+ * stuck-promise backstop (`onProgress`), because `checkpoint()` only runs at
+ * request boundaries — one slow but healthy source request otherwise produces
+ * no progress signal at all and the run is cancelled as if it were wedged.
+ *
+ * Exported so the progress contract can be tested without a database.
+ */
+export function pipelineHeartbeat(
+  onProgress: (() => void) | undefined,
+  options: { onBeat: () => void },
+): () => void {
+  return () => {
+    onProgress?.();
+    options.onBeat();
+  };
+}
+
 export async function processPipeline(pool: pg.Pool, config: Config, request: Requester, signal?: AbortSignal, onProgress?: () => void): Promise<boolean> {
   signal?.throwIfAborted();
   const lock = await pool.connect();
@@ -823,16 +847,18 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     }));
     execution.startTime = new Date().toISOString();
     let heartbeatPending = false;
-    heartbeat = setInterval(() => {
-      if (heartbeatPending) return;
-      heartbeatPending = true;
-      void pool
-        .query('UPDATE scheduler_state SET heartbeat=now() WHERE id=1')
-        .catch(() => console.error(JSON.stringify({ level: 'error', event: 'pipeline-heartbeat' })))
-        .finally(() => {
-          heartbeatPending = false;
-        });
-    }, 15000);
+    heartbeat = setInterval(pipelineHeartbeat(onProgress, {
+      onBeat: () => {
+        if (heartbeatPending) return;
+        heartbeatPending = true;
+        void pool
+          .query('UPDATE scheduler_state SET heartbeat=now() WHERE id=1')
+          .catch(() => console.error(JSON.stringify({ level: 'error', event: 'pipeline-heartbeat' })))
+          .finally(() => {
+            heartbeatPending = false;
+          });
+      },
+    }), PIPELINE_HEARTBEAT_MS);
     heartbeat.unref();
     await lockedTransaction(async (db) => {
       await checkpoint(db);

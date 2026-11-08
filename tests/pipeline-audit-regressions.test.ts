@@ -86,11 +86,18 @@ test(
     };
     try {
       await migrate(pool);
+      // There is no operator review queue: a finding the confidence policy
+      // cannot confirm is still dispatched, and the rendered advisory states
+      // the limitation on the finding itself. The threshold therefore selects
+      // the finding's notificationStatus — the label and caveat the recipient
+      // sees — it does not withhold the alert. Asserting the label is what this
+      // case is really about; asserting an empty outbox encoded the removed
+      // review-queue contract.
       await t.test('preliminary match reuse respects the configured confidence threshold', async () => {
         await reset(99);
         await run();
         assert.equal((await list<Finding>(pool, 'findings'))[0].notificationStatus, 'REVIEW_REQUIRED');
-        assert.equal((await pool.query('SELECT 1 FROM outbox')).rowCount, 0);
+        assert.equal((await pool.query('SELECT 1 FROM outbox')).rowCount, 1, 'a held finding is disclosed, not withheld');
         await save('settings', 'main', {
           ...DEFAULT_SETTINGS,
           autoDispatchEnabled: true,
@@ -127,8 +134,11 @@ test(
           };
         });
         assert.equal(calls, 1);
+        // The mid-run edit to a 99% threshold must be honoured by the
+        // subsequent eligibility computation, so the finding is labelled
+        // review-required rather than dispatched as confirmed.
         assert.equal((await list<Finding>(pool, 'findings'))[0].notificationStatus, 'REVIEW_REQUIRED');
-        assert.equal((await pool.query('SELECT 1 FROM outbox')).rowCount, 0);
+        assert.equal((await pool.query('SELECT 1 FROM outbox')).rowCount, 1, 'disclosed, not withheld');
       });
       await t.test('a stop between checkpoint and progress write cannot be overwritten', async () => {
         await reset();

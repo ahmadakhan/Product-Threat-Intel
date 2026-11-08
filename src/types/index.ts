@@ -1058,17 +1058,22 @@ export interface AppSettings {
   advisoryPrefix: string;
   autoDispatchEnabled: boolean;
   /**
-   * Minimum confidence (0–100) required for a finding to auto-dispatch without
-   * manual review. Set to 0 to dispatch all findings regardless of confidence.
-   * The default (90) matches the previous hardcoded threshold.
+   * Confidence (0–100) at or above which a finding is considered confirmed.
+   *
+   * There is no operator review queue: a finding below this threshold is still
+   * dispatched, and the rendered advisory states the limitation and the reason
+   * on the finding itself. The threshold selects whether the finding is
+   * presented as confirmed (`QUEUED_FOR_DISPATCH`) or flagged as requiring the
+   * recipient's own verification (`REVIEW_REQUIRED`); it does not withhold the
+   * alert. The default (90) matches the previous hardcoded threshold.
    */
   autoDispatchConfidenceThreshold: number;
   /**
    * When true, unverifiable matches (whose version range cannot be confirmed)
-   * participate in the confidence threshold instead of being held for review
-   * unconditionally. Combined with autoDispatchConfidenceThreshold set to 0
-   * this dispatches every finding automatically; the default (false) preserves
-   * the conservative review-only hold for unverifiable matches.
+   * participate in the confidence threshold like any other match. When false
+   * (the default) they are always presented as review-required, regardless of
+   * score. Neither setting withholds the alert — every finding is dispatched
+   * and the advisory states the limitation on the finding itself.
    */
   autoDispatchUnverifiableMatches: boolean;
   /**

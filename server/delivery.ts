@@ -1733,6 +1733,34 @@ export async function deliverNext(
 ): Promise<boolean> {
   const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
   const job = await transaction(pool, async (db) => {
+    // A consolidated batch is rebuilt from its surviving findings, which gives
+    // it a NEW content revision and therefore a new dedupe key. The earlier
+    // revision of the same batch can still be sitting QUEUED: delivering it
+    // sends a stale body, and for a webhook — no mailbox, so no delivery claim
+    // to deduplicate against — a second POST covering the same findings.
+    //
+    // Retire those rows before choosing a candidate, in the same transaction as
+    // the claim: a row superseded here can never be picked by this statement or
+    // any concurrent one. Doing it after a send is too late — the stale row is
+    // claimed first and delivered.
+    await db.query(
+      `UPDATE outbox o
+          SET status='SUPERSEDED', locked_at=NULL, lock_token=NULL, updated_at=now(),
+              delivery_outcome='NOT_ATTEMPTED',
+              error='Superseded by a newer revision of the same finding batch'
+        WHERE o.status='QUEUED'
+          AND (o.channel='email' OR $1::boolean)
+          AND EXISTS (
+            SELECT 1 FROM outbox newer
+             WHERE newer.status IN ('QUEUED','SENDING')
+               AND newer.channel=o.channel
+               AND newer.target_id=o.target_id
+               AND newer.advisory_id=o.advisory_id
+               AND newer.id<>o.id
+               AND COALESCE(newer.payload->>'contentRevision','') <> COALESCE(o.payload->>'contentRevision','')
+               AND newer.updated_at > o.updated_at)`,
+      [settings.emailEnabled !== false],
+    );
     const claimed = await db.query(
       `WITH candidate AS (
          SELECT id,
@@ -2386,6 +2414,9 @@ export async function deliverNext(
       await releaseClaims(db, claimsForJob(job.target_id, 'finding', droppedFindingIds), {
         jobId: job.id,
       });
+    // Superseding the earlier revision of this batch happens at CLAIM time (see
+    // deliverNext), not here: by the time a job reaches this point it has
+    // already been claimed, so retiring siblings now would be too late.
     // AUD-007: persist the transport's verdict in the same transaction that
     // commits the outbox status.
     //   error empty          → the transport confirmed acceptance → ACCEPTED.

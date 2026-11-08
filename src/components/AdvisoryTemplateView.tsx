@@ -85,9 +85,23 @@ export const AdvisoryTemplateView: React.FC = () => {
    const [isFullscreen, setIsFullscreen] = useState(false);
    const [copiedHtml, setCopiedHtml] = useState(false);
 
-   const [customTemplate, setCustomTemplate] = useState<string>('');
-   const [isCustomTemplate, setIsCustomTemplate] = useState(false);
-   const [editorRef, setEditorRef] = useState<HTMLTextAreaElement | null>(null);
+  const [customTemplate, setCustomTemplate] = useState<string>('');
+  const [isCustomTemplate, setIsCustomTemplate] = useState(false);
+  const [editorRef, setEditorRef] = useState<HTMLTextAreaElement | null>(null);
+  // Tracks whether the user is actively typing in the editor, so the
+  // context-sync effect does not overwrite unsaved edits.
+  const isEditingRef = useRef(false);
+
+  // Sync local editor draft with server-persisted custom template when it
+  // changes (e.g. after a successful save, or when another replica updates it).
+  // Only sync when not actively editing to avoid overwriting unsaved edits.
+  useEffect(() => {
+    if (isEditingRef.current) return;
+    if (customAdvisoryTemplate !== null && customAdvisoryTemplate !== customTemplate) {
+      setCustomTemplate(customAdvisoryTemplate);
+      setIsCustomTemplate(true);
+    }
+  }, [customAdvisoryTemplate, customTemplate]);
 
 const handleEnterEditor = () => {
       // Re-clicking the "Template Editor" tab while already inside it must not
@@ -103,20 +117,32 @@ const handleEnterEditor = () => {
     };
 
    const handleExitEditor = () => {
-     if (isCustomTemplate) {
-       setCustomTemplate('');
-       setIsCustomTemplate(false);
-     }
-     setViewFormat('preview');
-   };
+      isEditingRef.current = false;
+      if (isCustomTemplate) {
+        setCustomTemplate('');
+        setIsCustomTemplate(false);
+      }
+      setViewFormat('preview');
+    };
 
-   const handleApplyCustomTemplate = () => {
-     const trimmed = customTemplate.trim();
-     if (trimmed) {
-       setIsCustomTemplate(true);
-       setViewFormat('preview');
-     }
-   };
+  const handleApplyCustomTemplate = async () => {
+    const trimmed = customTemplate.trim();
+    if (!trimmed) return;
+    isEditingRef.current = true;
+    try {
+      // Persist to the server immediately so changes are never lost when
+      // navigating away or refreshing. Settings-only changes (draft) are sent
+      // alongside; if no draft exists the server keeps existing settings.
+      await saveTemplate(trimmed);
+      setIsCustomTemplate(true);
+      setViewFormat('preview');
+    } catch {
+      // saveTemplate sets the error banner via safely(); keep the editor open
+      // so the user can fix and retry.
+    } finally {
+      isEditingRef.current = false;
+    }
+  };
 
     const tokenList = [
       '{{severity_header_badge}}',
@@ -138,6 +164,7 @@ const handleEnterEditor = () => {
     ];
 
 const handleInsertToken = (token: string) => {
+      isEditingRef.current = true;
       const el = editorRef;
       if (el) {
         const start = el.selectionStart;
@@ -348,6 +375,7 @@ const handleInsertToken = (token: string) => {
       setTimeout(() => setSaveToast(false), 2500);
     } finally {
       setSavingTemplate(false);
+      isEditingRef.current = false;
     }
   };
 
@@ -1085,8 +1113,12 @@ const handleInsertToken = (token: string) => {
                   ref={setEditorRef}
                   value={customTemplate}
                   onChange={(e) => {
+                    isEditingRef.current = true;
                     setCustomTemplate(e.target.value);
                     setIsCustomTemplate(true);
+                  }}
+                  onBlur={() => {
+                    isEditingRef.current = false;
                   }}
                   onKeyDown={(e) => {
                     if (e.ctrlKey && e.key === 's') {

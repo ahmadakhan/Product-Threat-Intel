@@ -12,7 +12,7 @@ import { publicAddress, resolvePublic, type Requester } from '../server/network'
 import { normalizeNvd } from '../server/ingestion';
 import { ingestFeed } from '../server/ingestion';
 import { processPipeline, queueRun } from '../server/pipeline';
-import { deliverNext } from '../server/delivery';
+import { deliverNext, queueConsolidatedFindingNotifications } from '../server/delivery';
 import { verifyAuditChain } from '../src/utils/cryptoChain';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
 import type { NormalizedCVE, Finding, Advisory, WebhookEndpoint } from '../src/types/index.ts';
@@ -990,6 +990,149 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       await deliverNext(pool, config, requester, async () => 'unused');
       assert.equal((await list<any>(pool, 'webhookLogs'))[0].status, 'FAILED');
       responseStatus = 200;
+    });
+    await t.test('a consolidated batch webhook is rechecked against its subscription before sending', async () => {
+      // A FINDINGS: batch has no advisory row, so the send-path subscription
+      // recheck used to gate on `advisory` and was skipped for exactly this
+      // job shape. Queue the batch while the hook is subscribed, then narrow
+      // the subscription before delivery: the POST must never be attempted.
+      await remove(pool, 'webhooks', 'hook-narrow');
+      await put(pool, 'webhooks', 'hook-narrow', {
+        id: 'hook-narrow',
+        name: 'narrow',
+        url: 'https://hooks.example.invalid/narrow',
+        provider: 'GENERIC_HMAC',
+        secretToken: 'webhook-fixture-secret-at-least-32-characters',
+        enabled: true,
+        events: ['ALL'],
+        deliveryCount: 0,
+      });
+      const finding = {
+        id: 'f-h1',
+        cveId: 'CVE-2026-90901',
+        status: 'MONITORED',
+        notificationStatus: 'QUEUED_FOR_DISPATCH',
+        matchedAssetId: 'asset-h1',
+        matchedAssetName: 'host-h1',
+        matchedAssetVendor: 'acme',
+        matchedAssetProduct: 'widget',
+        matchedCpe: 'cpe:2.3:a:acme:widget:1.0:*:*:*:*:*:*:*',
+        confidence: 95,
+        matchingEvidence: 'exact',
+        matchingMethod: 'STRICT_CPE',
+        exploitRisk: 'NONE',
+        advisoryId: null,
+        reviewNotifiedAt: null,
+        autoDispatchedAt: null,
+        timeline: [],
+        cve: {
+          cveId: 'CVE-2026-90901',
+          title: 'H1 fixture',
+          description: 'H1 fixture',
+          publishedDate: new Date().toISOString(),
+          modifiedDate: new Date().toISOString(),
+          cvss: { severity: 'HIGH', score: 8.0, version: '3.1', vector: '' },
+          cwe: [],
+          cpeMatches: ['cpe:2.3:a:acme:widget:1.0:*:*:*:*:*:*:*'],
+          remediation: { vendorAdvisoryRef: '', immediateActions: [], workarounds: [] },
+          epss: { score: 0.1, percentile: 0.5 },
+          sourceFeeds: ['NVD'],
+          cisaKev: { isKev: false },
+        },
+      } as any;
+      // The send path revalidates the batch against the stored finding row, so
+      // the fixture must exist where delivery looks for it.
+      await put(pool, 'findings', finding.id, finding);
+      // The send path re-derives the finding's applicability from the threat
+      // cache; without the CVE it cannot be proven and the finding is dropped
+      // as stale before any subscription check runs.
+      await put(pool, 'cveData', finding.cveId, finding.cve);
+      await queueConsolidatedFindingNotifications(pool, [finding]);
+      const narrowJob = (
+        await pool.query("SELECT id FROM outbox WHERE channel='webhook' AND target_id='hook-narrow' AND status='QUEUED'")
+      ).rows[0].id as string;
+      // Remove every other job (the earlier cases left deferred ones behind)
+      // so deliverNext must process this one. Deferred jobs make the case
+      // timing-dependent; removing them is exactly what this case needs, and
+      // the next case queues its own work from scratch.
+      await pool.query("DELETE FROM outbox WHERE status='QUEUED' AND id<>$1", [narrowJob]);
+      const queued = (
+        await pool.query(
+          "SELECT id,advisory_id FROM outbox WHERE channel='webhook' AND target_id='hook-narrow' AND status='QUEUED'",
+        )
+      ).rows;
+      assert.equal(queued.length, 1, 'the subscribed hook receives a queued batch');
+
+      // Narrow the subscription below the batch's severity, as an operator would.
+      await put(pool, 'webhooks', 'hook-narrow', {
+        ...(await get<any>(pool, 'webhooks', 'hook-narrow')),
+        events: ['CISA_KEV'],
+      });
+      capturedUrl = '';
+      const delivered = await deliverNext(pool, config, requester, async () => 'unused');
+      assert.equal(delivered, true, 'the queued job was the one processed');
+      assert.equal(capturedUrl, '', 'a hook that no longer permits the batch must not be contacted');
+      const row = (
+        await pool.query("SELECT status,error FROM outbox WHERE id=$1", [queued[0].id])
+      ).rows[0];
+      // A permanent failure is recorded FAILED (never retried); REJECTED is
+      // reserved for a transport that actually refused the message, and this
+      // job must never reach the transport.
+      assert.equal(row.status, 'FAILED');
+      assert.match(row.error, /subscription no longer permits/);
+      // Leave nothing of this case's own behind for the next one.
+      await pool.query("DELETE FROM outbox WHERE channel='webhook' AND target_id='hook-narrow'");
+      await remove(pool, 'webhooks', 'hook-narrow');
+    });
+    await t.test('a rebuilt batch supersedes the stale queued job for the same target', async () => {
+      // A rebuild changes the content revision, so the old row keeps a distinct
+      // dedupe key and would otherwise still be delivered: a stale body, and
+      // for a webhook (no mailbox, so no claim to deduplicate against) a second
+      // POST covering the same findings.
+      await remove(pool, 'webhooks', 'hook-rebuild');
+      await put(pool, 'webhooks', 'hook-rebuild', {
+        id: 'hook-rebuild',
+        name: 'rebuild',
+        url: 'https://hooks.example.invalid/rebuild',
+        provider: 'GENERIC_HMAC',
+        secretToken: 'webhook-fixture-secret-at-least-32-characters',
+        enabled: true,
+        events: ['ALL'],
+        deliveryCount: 0,
+      });
+      const staleId = (
+        await pool.query(
+          `INSERT INTO outbox(id,dedupe_key,channel,target_id,advisory_id,payload,status,delivery_outcome,next_attempt)
+           VALUES(gen_random_uuid(),'old-rev:webhook:hook-rebuild','webhook','hook-rebuild','FINDINGS:abc',
+                  '{"includedFindingIds":["f-old"],"contentRevision":"old-revision"}'::jsonb,'QUEUED','NOT_ATTEMPTED',now())
+           RETURNING id`,
+        )
+      ).rows[0].id as string;
+      const newestId = (
+        await pool.query(
+          `INSERT INTO outbox(id,dedupe_key,channel,target_id,advisory_id,payload,status,delivery_outcome,next_attempt)
+           VALUES(gen_random_uuid(),'new-rev:webhook:hook-rebuild','webhook','hook-rebuild','FINDINGS:abc',
+                  '{"includedFindingIds":["f-old"],"contentRevision":"new-revision"}'::jsonb,'QUEUED','NOT_ATTEMPTED',now())
+           RETURNING id`,
+        )
+      ).rows[0].id as string;
+      await pool.query("DELETE FROM outbox WHERE status='QUEUED' AND id NOT IN ($1,$2)", [staleId, newestId]);
+
+      await deliverNext(pool, config, requester, async () => 'unused');
+
+      const rows = (
+        await pool.query('SELECT id,status FROM outbox WHERE id = ANY($1::uuid[])', [[staleId, newestId]])
+      ).rows;
+      const byId = new Map(rows.map((row: { id: string; status: string }) => [row.id, row.status]));
+      assert.notEqual(byId.get(newestId), 'QUEUED', 'the newest revision is the one delivered');
+      assert.equal(
+        byId.get(staleId),
+        'SUPERSEDED',
+        'the older revision is retired, not left to be sent as a stale duplicate',
+      );
+
+      await pool.query("DELETE FROM outbox WHERE target_id='hook-rebuild'");
+      await remove(pool, 'webhooks', 'hook-rebuild');
     });
     await t.test('webhook rate limits persist provider cooldown without holding the worker', async () => {
       const hook = (await list<WebhookEndpoint>(pool, 'webhooks'))[0];

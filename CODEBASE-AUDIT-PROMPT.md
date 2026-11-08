@@ -6,22 +6,22 @@ You are a senior full-stack SRE, security engineer, production-readiness reviewe
 
 - **React 19 + Vite SPA** (`src/`), **Node.js >=26.0.0 + Express API/worker** (`server/`), **PostgreSQL 17**, Docker Compose + Caddy TLS proxy
 - **Bootstrap**: `server/main.ts`; router: `server/app.ts`; health: `/live`, `/ready`, `/metrics`
-- **Migrations**: `server/migrate.ts`, **`server/migrations/001..037`** + **`server/migrations/indexes/`** (concurrent index files). `REQUIRED_SCHEMA_VERSION = 37` (`server/db.ts:124`) enforced at production startup; must match the highest `NNN_*.sql` file.
+- **Migrations**: `server/migrate.ts`, **`server/migrations/001..040`** + **`server/migrations/indexes/`** (concurrent index files). `REQUIRED_SCHEMA_VERSION = 40` (`server/db.ts:124`) enforced at production startup; must match the highest `NNN_*.sql` file.
 - **Env validation**: `server/config.ts` (Zod schemas, `ENCRYPTION_KEY` base64 32-byte via regex `/^[A-Za-z0-9+/]{43}=$/`, production-gated checks). Production requires HTTPS `APP_ORIGIN` unless `ALLOW_INSECURE_HTTP` for private/Tailscale IPv4 origin; `FAULT_SIMULATION_ENABLED` blocked in production; `HEARTBEAT_URL` https-only in production, no embedded credentials; `TRUST_PROXY` rejects trust-all values.
 - **Database**: `server/db.ts` (pg pool, `statement_timeout`, audit hash chain `chainAuditLogs`, `transaction` with advisory locks, `state_metrics` table for bounded counts)
 - **ML subsystem**: `server/ml/` (algorithms, models — 18 models, runtime, train, integration, cron)
-- **Email delivery**: `server/delivery.ts`, `server/emailProviders.ts`, `server/dailyDigest.ts`
-- **Vulnerability search**: `server/vulnerabilitySearch.ts`, `server/googleCse.ts`, `shared/vulnerability.ts`
-- **Correlation engine**: `server/correlation/` (inventory, runtime, operations, stream, heartbeat, metrics)
+- **Email delivery**: `server/delivery.ts`, `server/emailProviders.ts`, `server/dailyDigest.ts`, `server/deliveryClaims.ts`
+- **Vulnerability search**: `server/vulnerabilitySearch.ts`, `server/googleCse.ts`, `shared/vulnerability.ts`, `server/cpeSearch.ts`, `server/threatSearch.ts`
+- **Correlation engine**: `server/correlation/` (inventory, runtime, operations, stream, heartbeat, metrics, supervisor)
 - **Pipeline engine**: `server/pipeline.ts`, `src/engine/pipelineEngine.ts`
 - **Frontend**: `src/components/` (48+ views), **`src/design/pages.ts` (exactly 24 pages)**, `src/context/`, `src/hooks/`, `src/utils/`, `src/engine/`, `src/types/index.ts`
 - **Shared**: `shared/correlation.ts`, `shared/state.ts`, `shared/vulnerability.ts`, `shared/watchlistIdentity.ts`
-- **Tests**: **69 test files** under `tests/` (node --test + vitest), `tests/fixtures/`
-- **Config/ops**: `.env`, `.env.example`, `.env.test`, `compose.yaml`, `Dockerfile`, `Dockerfile.test`, `docker-compose.test.yml`, `OPERATIONS.md`, `AGENTS.md`
+- **Tests**: multiple test files under `tests/` (node --test + vitest), `tests/fixtures/`
+- **Config/ops**: `.env`, `.env.example`, `.env.test`, `Dockerfile`, `Dockerfile.test`, `docker-compose.test.yml`, `OPERATIONS.md`, `AGENTS.md`
 
 ## Running the app for UI verification
 
-- **API server**: port 8080 (`npm run dev:server` → `node scripts/free-port.mjs 8080 && tsx watch --env-file=.env server/main.ts`)
+- **API server**: port 8080 (`npm run start` or `npm run dev:server`). Health: `http://localhost:8080/ready`
 - **SPA**: port 3000 (`npm run dev`), which **proxies `/api` to 8080** (`vite.config.ts`). `APP_ORIGIN=http://127.0.0.1:3000` in `.env` — the API rejects mutations whose `Origin` is not `APP_ORIGIN`, so **login through :8080 directly fails with 403**; always drive the app through :3000.
 - **Every page is client-side rendered** behind one login. Navigation is by clicking sidebar labels from `src/design/pages.ts`. To audit all pages, log in with a real account (create one with an elevated connection if none exists, then delete it afterwards) and click through every sidebar entry.
 - Verify with a headless browser: console errors, failed network requests, stuck loaders, crashed views, horizontal overflow at 390/820/1024/1280/1440/1920 px, and screenshots you actually look at. Geometric claims (overlap, clipping) must be measured with `getBoundingClientRect` — a screenshot crop is not proof of a layout bug.
@@ -32,7 +32,7 @@ dashboard, watchlist, findings, threat-intelligence-search, vulnerability-search
 
 ## Prior audit context (do not re-report already-fixed items unless they regress)
 
-The codebase has undergone multiple audit passes. Known fixed areas include: delivery false positives/negatives, stale-bundle recovery, CPE wildcard bypass, provider confirmation, real cancellation via AbortSignal, digest-window index, outbox isolation, concurrent-query-on-single-client fix, template XSS escaping, retention advisory-lock fix, stuck-promise guard releases, ML quality gate, pipeline hardening, fail-closed command authorization, unauthenticated `/api/state`, resend subscription governance, retention claim TTL, ML training cross-replica claim, digest lock-connection failure flags, daily-digest lock-event spam, Mailgun egress hosts, legacy ciphertext envelopes, stale seeded feed URLs, RSS XXE-guard false positives, unbounded execution-table scans, webhook blank-keeps, findings/ActionCenter/EmailQueue layout defects. Verify these fixes still hold and look for regressions, edge cases, and uncovered paths.
+The codebase has undergone multiple audit passes. Known fixed areas include: delivery false positives/negatives, stale-bundle recovery, CPE wildcard bypass, provider confirmation, real cancellation via AbortSignal, digest-window index, outbox isolation, concurrent-query-on-single-client fix, template XSS escaping, retention advisory-lock fix, stuck-promise guard releases, ML quality gate, pipeline hardening, fail-closed command authorization, unauthenticated `/api/state`, resend subscription governance, retention claim TTL, ML training cross-replica claim, digest lock-connection failure flags, daily-digest lock-event spam, Mailgun egress hosts, legacy ciphertext envelopes, stale seeded feed URLs, RSS XXE-guard false positives, unbounded execution-table scans, webhook blank-keeps, findings/ActionCenter/EmailQueue layout defects, template editor draft preservation, client-side hex color validation, consolidated findings custom advisory template passing. Verify these fixes still hold and look for regressions, edge cases, and uncovered paths.
 
 ## Audit Dimensions
 
@@ -67,7 +67,7 @@ The codebase has undergone multiple audit passes. Known fixed areas include: del
 ### 3. Database & Migrations (`server/db.ts`, `server/migrate.ts`, `server/migrations/`)
 
 - Migration job owns DDL; runtime role no DDL; idempotent migrations; reversible where feasible
-- `REQUIRED_SCHEMA_VERSION = 37` enforced at production startup, matching highest `NNN_*.sql` file
+- `REQUIRED_SCHEMA_VERSION = 40` enforced at production startup, matching highest `NNN_*.sql` file
 - Connection pooling: size, timeout, leak prevention, `release()` in finally with failure flag
 - Transactions for critical ops (outbox, findings, aliases); advisory locks scoped per schema
 - Index coverage for hot queries; `CREATE INDEX CONCURRENTLY` outside transaction (index files live in `migrations/indexes/`, version markers in `migrations/`)
@@ -112,6 +112,9 @@ The codebase has undergone multiple audit passes. Known fixed areas include: del
 - Error handling: `allSettled` for partial source failures; non-blocking writes
 - Delivery: prior-attempt consultation before re-send; `MAIL_CONFIRM_BEFORE_SEND`; provider confirmation lookup; `transportRejected` flag; everyone-group deferral
 - Pipeline: stale-bundle detection, `rebuildFromCurrentInventory`, advisory lock schema-scoped, interrupted `RUNNING` recovery, poison-pill cap
+- **Delivery claims** (`server/deliveryClaims.ts`): per-(recipient,kind,item) deduplication with TTL, ownership tracking, expired-claim recovery, `attachClaimsToJob`, `markClaimsDelivered`, `releaseClaims`, `releaseUnattachedClaims`, `releaseExpiredClaims`
+- **Consolidated findings** (`server/delivery.ts:1322`): `consolidatedFindingsDocument(owned, generatedAt, template)` — must pass the same resolved template as every other build in the pass, else drops custom advisory template
+- **Supervisor** (`server/correlation/supervisor.ts`): memory-aware shedding (85% soft, 95% hard ceiling) with hysteresis; circuit breaker (3 crashes/60s → 5min pause, persisted to DB, adopted by replicas); priority-aware admission (HIGH/MEDIUM/LOW pools, explicit scheduler)
 
 ### 6. Performance & Scale
 
@@ -162,6 +165,7 @@ The codebase has undergone multiple audit passes. Known fixed areas include: del
 - `initMlRuntime` failure does not block server start
 - Scheduled training interval; last-run dedup; cross-replica claim with TTL
 - `computeFeedRecoveryDelay` integration
+- Quality gate: feed recovery model requires ≥60% recovery rate or disables with fallback
 
 ### 10. Frontend Production & UI Page Audit (`src/`) — every page, in a real browser
 
@@ -189,7 +193,7 @@ The SPA has exactly **24 pages** registered in `src/design/pages.ts`. Audit **ev
 - `server-dist/` build output; `build-server.mjs` bundling
 - `scripts/build-server.mjs`, `scripts/supervisor.mjs`, `scripts/free-port.mjs`
 
-### 12. Vulnerability Search & OSINT (`server/vulnerabilitySearch.ts`, `server/googleCse.ts`, `shared/vulnerability.ts`)
+### 12. Vulnerability Search & OSINT (`server/vulnerabilitySearch.ts`, `server/googleCse.ts`, `shared/vulnerability.ts`, `server/cpeSearch.ts`, `server/threatSearch.ts`)
 
 - External API calls (OSV/NVD/CISA KEV/Google CSE) must have timeouts, retries, egress allowlist, rate limits
 - Input validation and SSRF protection on search queries

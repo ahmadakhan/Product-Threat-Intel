@@ -58,13 +58,21 @@ services:
       SMTP_FROM: ${SMTP_FROM:-}
       FEED_MAX_DURATION_SECONDS: ${FEED_MAX_DURATION_SECONDS:-1800}
       METRICS_TOKEN: ${METRICS_TOKEN:-}
-      WORKER_ENABLED: 'true'
+      # Only one replica runs background work (pipeline, outbox, digest,
+      # retention, ML training, session cleanup). Two workers would serialise the
+      # same claims against the same rows for no extra throughput.
+      WORKER_ENABLED: ${WORKER_ENABLED:-true}
       CORRELATION_DLQ_DIRECTORY: /var/lib/vulnstream/deadletters
+      # Dead letters live in PostgreSQL. The legacy directory below is only read
+      # once at startup to import files left by an earlier file-based deploy; it
+      # grows no further and can be removed once the import has run.
       CORRELATION_DLQ_STORAGE_MODE: database
       ML_DIRECTORY: /var/lib/vulnstream/ml
       ML_STORAGE_MODE: database
     volumes:
-      # Legacy sources are imported and pruned after their PostgreSQL copy commits.
+      # Legacy-only: dead letters are stored in PostgreSQL (see
+      # CORRELATION_DLQ_STORAGE_MODE). This volume exists solely so an upgrade
+      # can import and prune files left by a file-based deployment.
       - correlation-deadletters:/var/lib/vulnstream/deadletters
       - ml-models:/var/lib/vulnstream/ml
     deploy:
