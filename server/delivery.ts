@@ -1746,8 +1746,8 @@ export async function deliverNext(
     await db.query(
       `UPDATE outbox o
           SET status='SUPERSEDED', locked_at=NULL, lock_token=NULL, updated_at=now(),
-              delivery_outcome='NOT_ATTEMPTED',
-              error='Superseded by a newer revision of the same finding batch'
+              delivery_outcome = CASE WHEN o.delivery_outcome = 'NOT_ATTEMPTED' THEN 'NOT_ATTEMPTED' ELSE o.delivery_outcome END,
+              error = CASE WHEN o.delivery_outcome = 'NOT_ATTEMPTED' THEN 'Superseded by a newer revision of the same finding batch' ELSE o.error END
         WHERE o.status='QUEUED'
           AND EXISTS (
             SELECT 1 FROM outbox newer
@@ -1757,7 +1757,7 @@ export async function deliverNext(
                 AND newer.advisory_id=o.advisory_id
                 AND newer.id<>o.id
                 AND COALESCE(newer.payload->>'contentRevision','') <> COALESCE(o.payload->>'contentRevision','')
-                AND newer.updated_at > o.updated_at)`,
+                AND newer.created_at > o.created_at)`,
     );
     const claimed = await db.query(
       `WITH candidate AS (
