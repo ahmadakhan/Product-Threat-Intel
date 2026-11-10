@@ -37,6 +37,7 @@ export const FEED_TYPES = [
   'EPSS_API',
   'VULNCHECK_KEV',
   'VULNCHECK_NVD',
+  'NVD_API',
   'OTX_API',
   'OSV_API',
   'GITHUB_ADVISORIES',
@@ -515,7 +516,76 @@ export interface VulnerabilitySearchParams {
 
 export type VulnerabilitySearchIntent = 'CVE' | 'PACKAGE' | 'KEYWORD';
 
-/** One real-time web result returned by the live OSINT provider. */
+/**
+ * Result of a Package URL (PURL) lookup against VulnCheck NVD++.
+ * Mirrors the Python SDK's `endpoints_client.purl_get(purl)`.
+ */
+export interface VulncheckPurlResult {
+  /** The package URL that was queried. */
+  purl: string;
+  /** CVE IDs associated with this package URL. */
+  cves: string[];
+}
+
+/**
+ * Result of listing available VulnCheck indices.
+ * Mirrors the Python SDK's `endpoints_client.index_get()`.
+ */
+export interface VulncheckIndexInfo {
+  /** Index name (e.g. "vulncheck-nvd2", "vulncheck-kev", "initial-access"). */
+  name: string;
+  /** Optional human-readable description. */
+  description?: string;
+}
+
+/**
+ * Result of a VulnCheck index backup lookup.
+ * Mirrors the Python SDK's `endpoints_client.backup_index_get(index)`.
+ */
+export interface VulncheckBackupInfo {
+  /** Index name. */
+  index: string;
+  /** Signed download URL for the backup archive. */
+  url: string;
+}
+
+/**
+ * Retry configuration for VulnCheck API requests.
+ * Mirrors the Python SDK's `urllib3.util.retry.Retry` configuration.
+ */
+export interface VulncheckRetryConfig {
+  /** Maximum number of retry attempts. */
+  total: number;
+  /** Backoff factor between retries (seconds = backoff_factor * 2^(retry-1)). */
+  backoffFactor: number;
+  /** HTTP status codes that should trigger a retry. */
+  statusForcelist: number[];
+  /** HTTP methods that are eligible for retry. */
+  allowedMethods: string[];
+  /** Whether to respect Retry-After headers. */
+  respectRetryAfterHeader: boolean;
+}
+
+/**
+ * Proxy configuration for VulnCheck API requests.
+ * Mirrors the Python SDK's proxy configuration.
+ */
+export interface VulncheckProxyConfig {
+  /** Explicit proxy URL (e.g. "http://proxy:3128"). */
+  proxy?: string;
+  /** Comma-separated hosts to bypass the proxy (exact host, .suffix, CIDR, or "*"). */
+  noProxy?: string;
+}
+
+/**
+ * Configuration for VulnCheck API client behavior.
+ * Combines retry and proxy settings from the Python SDK.
+ */
+export interface VulncheckClientConfig {
+  retry?: VulncheckRetryConfig;
+  proxy?: VulncheckProxyConfig;
+}
+
 export interface LiveOsintResult {
   title: string;
   /** Plain-text snippet; provider markup and entities are stripped server-side. */

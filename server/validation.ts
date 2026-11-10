@@ -40,7 +40,7 @@ export const feedSchema = z
     ),
     authType: z.enum(['NONE', 'API_KEY', 'BEARER', 'BASIC']),
     authSecretKey: z.string().max(4096).optional(),
-    rateLimitPerMin: z.number().int().min(1).max(600),
+    rateLimitPerMin: z.number().int().min(1).max(1000),
     requestTimeoutSeconds: z.number().int().min(5).max(120).optional(),
     recoveryDelayMinutes: z.number().int().min(1).max(60).default(5),
     enabled: z.boolean(),
@@ -77,7 +77,7 @@ export const feedSchema = z
   .refine(
     (feed) =>
       feed.type !== 'VULNCHECK_NVD' ||
-      (feed.authType === 'BEARER' && feed.url === 'https://api.vulncheck.com/v3/index/nvd'),
+      (feed.authType === 'BEARER' && feed.url === 'https://api.vulncheck.com/v3/index/nist-nvd2'),
     {
       message: 'VulnCheck NVD++ requires Bearer authentication and the official NVD++ index endpoint',
       path: ['url'],

@@ -55,7 +55,7 @@ test('searchNvdCpes parses verified NVD CPE configurations and forwards the API 
   const keywordUrl = new URL(calls[0].url);
   const wildcardUrl = new URL(calls[1].url);
 
-  assert.equal(keywordUrl.origin + keywordUrl.pathname, 'https://api.vulncheck.com/v3/index/nvd');
+  assert.equal(keywordUrl.origin + keywordUrl.pathname, 'https://api.vulncheck.com/v3/index/nist-nvd2');
   assert.equal(keywordUrl.searchParams.get('keywordSearch'), 'microsoft windows 10');
   assert.equal(wildcardUrl.searchParams.get('cpeMatchString'), 'cpe:2.3:*:*:windows_10:*:*:*:*:*:*:*:*');
   assert.equal(wildcardUrl.searchParams.has('keywordSearch'), false);

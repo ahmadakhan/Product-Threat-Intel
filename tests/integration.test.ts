@@ -150,7 +150,7 @@ test('NVD uses bounded large-page requests and honors rate-limit retries', async
     id: 'nvd',
     name: 'NVD',
     type: 'VULNCHECK_NVD' as const,
-    url: 'https://api.vulncheck.com/v3/index/nvd',
+    url: 'https://api.vulncheck.com/v3/index/nist-nvd2',
     authType: 'BEARER' as const,
     authSecretKey: encrypt('vulncheck-test-token', [config.ENCRYPTION_KEY], 'feed:nvd'),
     rateLimitPerMin: 10,
@@ -168,7 +168,7 @@ test('NVD uses bounded large-page requests and honors rate-limit retries', async
     24,
     async (rawUrl, options) => {
       // The NVD++ adapter is a single conditional request for the whole window.
-      assert.equal(new URL(rawUrl).pathname, '/v3/index/nvd');
+      assert.equal(new URL(rawUrl).pathname, '/v3/index/nist-nvd2');
       assert.equal(new URL(rawUrl).searchParams.get('resultsPerPage'), null);
       headers.push(options?.headers || {});
       requestLimits.push({
@@ -738,7 +738,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
         assert.equal(result.body.results[0].cpeName, cpeName);
         assert.equal(capturedUrls.length, 2, 'keyword search followed by wildcard-vendor search');
         const keywordUrl = new URL(capturedUrls[0]);
-        assert.equal(keywordUrl.origin + keywordUrl.pathname, 'https://api.vulncheck.com/v3/index/nvd');
+        assert.equal(keywordUrl.origin + keywordUrl.pathname, 'https://api.vulncheck.com/v3/index/nist-nvd2');
         assert.equal(keywordUrl.searchParams.get('keywordSearch'), 'Microsoft windows 10');
         assert.equal(keywordUrl.searchParams.has('apiKey'), false);
         assert.equal(capturedHeaders.apiKey, 'cpe-test-api-key');

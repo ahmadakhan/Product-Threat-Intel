@@ -8,7 +8,7 @@ import type { ThreatFeed, VulncheckCpeSearchResult, VulncheckCpeSearchResponse }
 
 import { isProductWildcard, dictionaryEntryMatchesWildcard } from '../src/utils/registrationCpe.ts';
 
-const VULNCHECK_NVD_CPE_ENDPOINT = 'https://api.vulncheck.com/v3/index/nvd';
+const VULNCHECK_NVD_CPE_ENDPOINT = 'https://api.vulncheck.com/v3/index/nist-nvd2';
 
 export function buildCpeUrl(keyword: string, resultsPerPage: number): URL {
   const url = new URL(VULNCHECK_NVD_CPE_ENDPOINT);

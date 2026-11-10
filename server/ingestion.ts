@@ -71,7 +71,7 @@ export function getIngestionWindowStart(end: Date, scopeHours: number, checkpoin
   return new Date(Math.max(0, checkpointTime - CHECKPOINT_OVERLAP_MS));
 }
 const iso = (s: string) => new Date(s).toISOString();
-function normalizeOpenCve(detail: any, feedId: string): NormalizedCVE {
+function normalizeOpenCve(detail: any, feedId: string): NormalizedCVE | null {
   const metrics = detail.metrics || {};
   const metric = metrics.cvssV4_0?.data?.score != null
     ? { ...metrics.cvssV4_0.data, version: normalizeCvssVersion('4.0') }
@@ -102,34 +102,38 @@ function normalizeOpenCve(detail: any, feedId: string): NormalizedCVE {
   };
   for (const config of detail.nvd_cpe_configurations || []) walk(config);
   const score = Number(metric?.score || 0);
-  const description = String(detail.description || detail.title || detail.cve_id).slice(0, 30000);
-  return cveSchema.parse({
-    cveId: detail.cve_id,
-    title: String(detail.title || description).slice(0, 500),
-    description,
-    publishedDate: iso(detail.created_at),
-    modifiedDate: iso(detail.updated_at),
-    cvss: {
-      version: metric?.version || 'UNKNOWN',
-      score,
-      vector: sanitizeCvssVector(metric?.vector || ''),
-      // A metric present without a usable baseScore (missing, NaN, or the 0
-      // storage sentinel) is not a genuine CVSS 0.0 — see the matching
-      // comment in normalizeNvd. `cvssSeverity(0)` would mislabel it LOW.
-      severity: !metric || !Number.isFinite(score) || metric.score == null ? 'UNKNOWN' : cvssSeverity(score),
-    },
-    cwe: Array.isArray(detail.weaknesses) ? detail.weaknesses.filter((v: unknown) => typeof v === 'string').slice(0, 100) : [],
-    cpeMatches: details.map(({ criteria }) => criteria),
-    cpeMatchDetails: details,
-    applicabilityRequiresReview: applicabilityRequiresReview || details.length === 0,
-    sourceFeeds: [feedId],
-    epss: { score: 0, percentile: 0 },
-    cisaKev: metrics.kev?.provider === 'cisa' && metrics.kev?.data?.dateAdded
-      ? { isKev: true, dateAdded: metrics.kev.data.dateAdded, dueDate: metrics.kev.data.dueDate }
-      : { isKev: false },
-    exploitStatus: 'None',
-    remediation: { patchUrl: '', vendorAdvisoryRef: '', immediateActions: [], workarounds: [], rollbackPlan: '', stepByStep: [] },
-  });
+  const description = String(detail.title || detail.cve_id).slice(0, 30000);
+  try {
+    return cveSchema.parse({
+      cveId: detail.cve_id,
+      title: String(detail.title || description).slice(0, 500),
+      description,
+      publishedDate: iso(detail.created_at),
+      modifiedDate: iso(detail.updated_at),
+      cvss: {
+        version: metric?.version || 'UNKNOWN',
+        score,
+        vector: sanitizeCvssVector(metric?.vector || ''),
+        // A metric present without a usable baseScore (missing, NaN, or the 0
+        // storage sentinel) is not a genuine CVSS 0.0 — see the matching
+        // comment in normalizeNvd. `cvssSeverity(0)` would mislabel it LOW.
+        severity: !metric || !Number.isFinite(score) || metric.score == null ? 'UNKNOWN' : cvssSeverity(score),
+      },
+      cwe: Array.isArray(detail.weaknesses) ? detail.weaknesses.filter((v: unknown) => typeof v === 'string').slice(0, 100) : [],
+      cpeMatches: details.map(({ criteria }) => criteria),
+      cpeMatchDetails: details,
+      applicabilityRequiresReview: applicabilityRequiresReview || details.length === 0,
+      sourceFeeds: [feedId],
+      epss: { score: 0, percentile: 0 },
+      cisaKev: metrics.kev?.provider === 'cisa' && metrics.kev?.data?.dateAdded
+        ? { isKev: true, dateAdded: metrics.kev.data.dateAdded, dueDate: metrics.kev.data.dueDate }
+        : { isKev: false },
+      exploitStatus: 'None',
+      remediation: { patchUrl: '', vendorAdvisoryRef: '', immediateActions: [], workarounds: [], rollbackPlan: '', stepByStep: [] },
+    });
+  } catch {
+    return null;
+  }
 }
 export function normalizeNvd(item: any, feedId: string): NormalizedCVE | null {
   const cve = item.cve;
@@ -853,6 +857,104 @@ export async function ingestFeed(
       rejections,
       etag,
       syncState: { cursor: end.toISOString(), hasMore: cursor !== undefined, revisions, ...(etag ? { indexEtag: etag } : {}) },
+    };
+  }
+  if (feed.type === 'NVD_API') {
+    // NIST NVD 2.0 — free community vulnerability data service. No
+    // authentication required; unauthenticated rate limit is 5 requests per
+    // 30 seconds, so requests are paced at 6-second intervals.
+    const { start, end } = ingestionWindow(scopeHours, context);
+    const url = new URL(feed.url);
+    url.searchParams.set('pubStartDate', start.toISOString());
+    url.searchParams.set('pubEndDate', end.toISOString());
+    url.searchParams.set('resultsPerPage', '2000');
+    url.searchParams.set('startIndex', '0');
+
+    const cves: NormalizedCVE[] = [];
+    const withdrawals: NonNullable<IngestResult['withdrawals']> = [];
+    const rejections: NonNullable<IngestResult['rejections']> = [];
+    const seenIds = new Set<string>();
+    const revisions: Record<string, string> = {};
+    let totalFetched = 0;
+    let offset = 0;
+    let hasMore = true;
+
+    for (let pageNo = 0; pageNo < 100 && hasMore; pageNo++) {
+      const pageUrl = new URL(url);
+      pageUrl.searchParams.set('startIndex', String(offset));
+      const { data: page } = await json(pageUrl.href, false, {
+        timeoutMs: 60000,
+        socketTimeoutMs: 30000,
+        maxResponseBytes: 32 * 1024 * 1024,
+      }, true);
+      if (!page || !Array.isArray(page.vulnerabilities)) throw new Error('Invalid NVD API response');
+      for (const item of page.vulnerabilities) {
+        const id = normalizeCveId(item?.cve?.id);
+        if (!id || seenIds.has(id)) throw new Error('NVD returned an invalid or duplicate CVE');
+        seenIds.add(id);
+        const incomingModified = Date.parse(item.cve?.lastModified || '');
+        const revisionSeen = context.revisions?.[id];
+        if (
+          revisionSeen !== undefined &&
+          Number.isFinite(incomingModified) &&
+          Date.parse(revisionSeen) >= incomingModified
+        )
+          continue;
+        totalFetched++;
+        if (item.cve?.vulnStatus === 'Rejected') {
+          const modifiedDate = item.cve?.lastModified
+            ? iso(item.cve.lastModified)
+            : new Date().toISOString();
+          withdrawals.push({ cveId: id, modifiedDate });
+          continue;
+        }
+        const cachedModified = Date.parse(context.knownCveModifiedAt?.get(id) || '');
+        if (
+          Number.isFinite(cachedModified) &&
+          Number.isFinite(incomingModified) &&
+          cachedModified >= incomingModified
+        ) {
+          const cached = context.knownCveContent?.get(id);
+          if (!cached) continue;
+          const candidate = normalizeNvdItem(item, feed.id);
+          if (!candidate) continue;
+          const sourceRevision = cached.sourceApplicability?.[feed.id];
+          if (
+            sourceRevision
+              ? sourceRevision.contentHash === sourceCveContentHash(candidate)
+              : stableJson(candidate) === stableJson(cached)
+          )
+            continue;
+          cves.push(candidate);
+          revisions[id] = candidate.modifiedDate;
+          continue;
+        }
+        const normalized = normalizeNvdItem(item, feed.id);
+        if (normalized) {
+          cves.push(normalized);
+          revisions[id] = normalized.modifiedDate;
+        } else {
+          rejections.push({
+            feedId: feed.id,
+            cveId: id,
+            recordHash: stableJson(item).slice(0, 128),
+            category: 'SCHEMA_VALIDATION',
+            summary: 'NVD record failed normalization',
+            rejectedAt: new Date().toISOString(),
+          });
+        }
+      }
+      offset += page.vulnerabilities.length;
+      hasMore = offset < page.totalResults;
+      if (pageNo === 98 && hasMore) throw new Error('NVD API pagination exceeded 200,000 records');
+      if (hasMore) await sleep(Math.max(1000, 60000 / feed.rateLimitPerMin));
+    }
+    return {
+      cves,
+      count: totalFetched,
+      withdrawals,
+      rejections,
+      syncState: { cursor: end.toISOString(), hasMore: false, revisions },
     };
   }
   throw new Error(`Unsupported feed adapter: ${feed.type}`);

@@ -424,7 +424,7 @@ function nvdFeed(id: string): ThreatFeed {
     id,
     name: 'NVD',
     type: 'VULNCHECK_NVD',
-    url: 'https://api.vulncheck.com/v3/index/nvd',
+    url: 'https://api.vulncheck.com/v3/index/nist-nvd2',
     authType: 'NONE',
     rateLimitPerMin: 5,
     enabled: true,

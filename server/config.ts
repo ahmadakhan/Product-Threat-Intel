@@ -41,6 +41,7 @@ export const DEFAULT_EGRESS_HOSTS = [
   // EGRESS_ALLOWED_HOSTS" until its final host appears here.
   // Vulnerability data and enrichment
   'api.osv.dev',
+  'services.nvd.nist.gov', // NIST NVD 2.0 — free community vulnerability data service
   // Live OSINT web search (Google Custom Search JSON API)
   'www.googleapis.com',
   'raw.githubusercontent.com',

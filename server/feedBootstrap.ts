@@ -9,18 +9,21 @@ const RETIRED_DUPLICATE_FEEDS = [{ duplicateId: 'feed-darkreading-full', canonic
 export async function reconcileRecommendedFeeds(db: PoolClient, bootstrap = false): Promise<void> {
   const existing = await list<ThreatFeed>(db, 'feeds');
   const ids = new Set(existing.map((feed) => feed.id));
-  if (bootstrap)
-    for (const feed of RECOMMENDED_FEEDS) {
-      if (ids.has(feed.id) || findDuplicateFeedSource(feed, existing)) continue;
-      await put(db, 'feeds', feed.id, {
-        ...feed,
-        healthStatus: 'healthStatus' in feed ? feed.healthStatus : 'UNTESTED',
-        lastSync: null,
-        latencyMs: 0,
-        itemCountLastRun: 0,
-        ssrfValidated: false,
-      });
-    }
+  // Seed any recommended feeds that are missing from the database, on both
+  // fresh bootstrap and existing deployments. This ensures newly added
+  // recommended feeds (e.g. VulnCheck NVD++) appear in the Threat Feeds view
+  // even on databases created before they were added to the catalog.
+  for (const feed of RECOMMENDED_FEEDS) {
+    if (ids.has(feed.id) || findDuplicateFeedSource(feed, existing)) continue;
+    await put(db, 'feeds', feed.id, {
+      ...feed,
+      healthStatus: 'healthStatus' in feed ? feed.healthStatus : 'UNTESTED',
+      lastSync: null,
+      latencyMs: 0,
+      itemCountLastRun: 0,
+      ssrfValidated: false,
+    });
+  }
   for (const feed of existing) {
     const url = RECOMMENDED_FEED_URLS.get(feed.id);
     if (!url || !feed.url || feed.url === url) continue;
@@ -47,10 +50,11 @@ export async function reconcileRecommendedFeeds(db: PoolClient, bootstrap = fals
       errorLog: source.errorLog,
     });
   }
-  // Retire any legacy NVD/MITRE/OpenCVE feeds that may persist in existing
-  // databases. VulnCheck NVD++ is the sole authoritative CVE source; these types
-  // are no longer supported.
-  const RETIRED_FEED_TYPES = new Set(['NVD_API', 'MITRE_CVE', 'OPENCVE_API']);
+  // Retire any legacy MITRE/OpenCVE feeds that may persist in existing
+  // databases. VulnCheck NVD++ is the recommended authoritative CVE source;
+  // NIST NVD 2.0 remains available as a free community service (NVD_API type)
+  // and is not retired.
+  const RETIRED_FEED_TYPES = new Set(['MITRE_CVE', 'OPENCVE_API']);
   for (const feed of existing) {
     if (!RETIRED_FEED_TYPES.has(feed.type)) continue;
     await put(db, 'feeds', feed.id, {
@@ -61,18 +65,24 @@ export async function reconcileRecommendedFeeds(db: PoolClient, bootstrap = fals
     });
   }
   // Disable any VulnCheck feeds (NVD++ or KEV) that lack a configured Bearer
-  // token, preventing HTTP 401 errors from the VulnCheck API on every run.
-  for (const feed of existing) {
+  // token, or that have previously failed with HTTP 401 (invalid token),
+  // preventing repeated authentication failures on every run.
+  // Re-fetch all feeds after seeding so newly seeded feeds are also checked.
+  const allFeeds = await list<ThreatFeed>(db, 'feeds');
+  for (const feed of allFeeds) {
     if (feed.type !== 'VULNCHECK_KEV' && feed.type !== 'VULNCHECK_NVD') continue;
     if (!feed.enabled) continue;
-    if (!feed.authSecretKey || feed.authType !== 'BEARER') {
+    const hasAuthError = /401|unauthorized|invalid.*token/i.test(feed.errorLog ?? '');
+    if (!feed.authSecretKey || feed.authType !== 'BEARER' || hasAuthError) {
       await put(db, 'feeds', feed.id, {
         ...feed,
         enabled: false,
         healthStatus: 'DOWN' as const,
-        errorLog: feed.type === 'VULNCHECK_NVD'
-          ? 'Disabled: VulnCheck NVD++ requires a configured Bearer API token.'
-          : 'Disabled: VulnCheck KEV requires a configured Bearer API token.',
+        errorLog: hasAuthError
+          ? `Disabled: VulnCheck ${feed.type === 'VULNCHECK_NVD' ? 'NVD++' : 'KEV'} authentication failed (HTTP 401); configure a valid Bearer API token.`
+          : feed.type === 'VULNCHECK_NVD'
+            ? 'Disabled: VulnCheck NVD++ requires a configured Bearer API token.'
+            : 'Disabled: VulnCheck KEV requires a configured Bearer API token.',
       });
     }
   }

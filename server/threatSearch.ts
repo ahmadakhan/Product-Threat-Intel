@@ -17,7 +17,7 @@ import type { Db } from './db';
 import { list } from './db';
 import { HttpError } from './validation';
 
-const VULNCHECK_NVD_ENDPOINT = 'https://api.vulncheck.com/v3/index/nvd';
+const VULNCHECK_NVD_ENDPOINT = 'https://api.vulncheck.com/v3/index/nist-nvd2';
 
 interface AliasEntry {
   scope: 'VENDOR' | 'PRODUCT';

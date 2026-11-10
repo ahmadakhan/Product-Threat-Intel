@@ -14,7 +14,7 @@ const SEVERITY_COLORS: Record<string, string> = {
 const SEVERITY_BADGE = (severity: string, suffix = '') => {
   const color = SEVERITY_COLORS[severity] || SEVERITY_COLORS.UNKNOWN;
   const label = severity || 'UNKNOWN';
-  const escapedLabel = label.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
+  const escapedLabel = label.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch] ?? ch);
   return `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:${color};color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">${escapedLabel}${suffix}</span>`;
 };
 

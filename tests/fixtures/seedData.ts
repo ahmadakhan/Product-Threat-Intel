@@ -65,7 +65,7 @@ const SEEDED_FEEDS: ThreatFeed[] = [
     id: 'feed-nvd',
     name: 'NVD CVE 2.0 Batch Enrichment API',
     type: 'VULNCHECK_NVD',
-    url: 'https://api.vulncheck.com/v3/index/nvd',
+    url: 'https://api.vulncheck.com/v3/index/nist-nvd2',
     authType: 'NONE',
     rateLimitPerMin: 10,
     enabled: true,

@@ -872,8 +872,10 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       });
     });
     const allFeeds = await list<ThreatFeed>(pool, 'feeds');
-    // VULNCHECK_NVD is the sole authoritative CVE source and cannot be disabled.
-    const feeds = allFeeds.filter((feed) => feed.enabled || feed.type === 'VULNCHECK_NVD');
+    // VULNCHECK_NVD respects its enabled flag like all other feeds.
+    // Operators configure a Bearer token and enable it via the Feeds UI;
+    // without credentials the feed is auto-disabled by bootstrap.
+    const feeds = allFeeds.filter((feed) => feed.enabled);
     const feedTypesById = new Map(allFeeds.map((feed) => [feed.id, feed.type]));
     const [cachedCves, cachedWithdrawals, inventory, aliasEntries] = await Promise.all([
       list<NormalizedCVE>(pool, 'cveData'),

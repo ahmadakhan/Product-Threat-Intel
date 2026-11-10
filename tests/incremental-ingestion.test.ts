@@ -7,7 +7,7 @@ import { loadConfig } from '../server/config.ts';
 import { encrypt } from '../server/secrets.ts';
 import type { ThreatFeed } from '../src/types/index.ts';
 const config = loadConfig({ NODE_ENV: 'test', DATABASE_URL: 'postgres://unused', APP_ORIGIN: 'http://localhost', ENCRYPTION_KEY: randomBytes(32).toString('base64') });
-const feed = (type: ThreatFeed['type']): ThreatFeed => ({ id: 'source', name: 'Source', type, url: type === 'VULNCHECK_NVD' ? 'https://api.vulncheck.com/v3/index/nvd' : 'https://example.com/cves', authType: type === 'VULNCHECK_NVD' ? 'BEARER' : 'NONE', authSecretKey: type === 'VULNCHECK_NVD' ? encrypt('vulncheck-test-token', [config.ENCRYPTION_KEY], 'feed:source') : undefined, rateLimitPerMin: 600, enabled: true, healthStatus: 'UNTESTED', lastSync: null, itemCountLastRun: 0, latencyMs: 0, vendorSeed: false, ssrfValidated: false });
+const feed = (type: ThreatFeed['type']): ThreatFeed => ({ id: 'source', name: 'Source', type, url: type === 'VULNCHECK_NVD' ? 'https://api.vulncheck.com/v3/index/nist-nvd2' : 'https://example.com/cves', authType: type === 'VULNCHECK_NVD' ? 'BEARER' : 'NONE', authSecretKey: type === 'VULNCHECK_NVD' ? encrypt('vulncheck-test-token', [config.ENCRYPTION_KEY], 'feed:source') : undefined, rateLimitPerMin: 600, enabled: true, healthStatus: 'UNTESTED', lastSync: null, itemCountLastRun: 0, latencyMs: 0, vendorSeed: false, ssrfValidated: false });
 const response = (data: unknown) => ({ status: 200, body: JSON.stringify(data), headers: { etag: 'index-v1' } });
 const sleep = async () => {};
 
@@ -55,7 +55,7 @@ test('VULNCHECK_NVD skips unchanged record revisions and uses conditional reques
   const date = new Date(Date.now() - 1000).toISOString();
   let records = 0;
   const record = (id: string) => ({ cve: { id, vulnStatus: 'Published', published: date, lastModified: date, descriptions: [{ lang: 'en', value: 'Test' }], configurations: [], metrics: [], references: [], weaknesses: [] } });
-  const vulncheckUrl = 'https://api.vulncheck.com/v3/index/nvd';
+  const vulncheckUrl = 'https://api.vulncheck.com/v3/index/nist-nvd2';
   // The VulnCheck adapter is single-request: the whole window comes back on
   // the conditional-probe request (its record payload embeds the CVE), so the
   // unchanged-revision path is proven by the second run re-fetching nothing.
@@ -79,7 +79,7 @@ test('VULNCHECK_NVD re-fetches revised records and paces paginated cursors', asy
   const ids = Array.from({ length: 8 }, (_, n) => `CVE-2026-${98001 + n}`);
   let waits = 0;
   const source = feed('VULNCHECK_NVD');
-  const vulncheckUrl = 'https://api.vulncheck.com/v3/index/nvd';
+  const vulncheckUrl = 'https://api.vulncheck.com/v3/index/nist-nvd2';
   const record = (id: string) => ({ cve: { id, vulnStatus: 'Published', published: date, lastModified: date, descriptions: [{ lang: 'en', value: 'Test' }], configurations: [], metrics: [], references: [], weaknesses: [] } });
   // Two cursor pages: the first returns half the CVEs plus a next cursor, the
   // second returns the rest. Each page hop must honor the rate-limit pacing.

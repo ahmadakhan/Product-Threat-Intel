@@ -22,7 +22,7 @@ const feed = (type: ThreatFeed['type']): ThreatFeed => ({
   id: 'test-feed',
   name: 'Test source',
   type,
-  url: type === 'VULNCHECK_NVD' ? 'https://api.vulncheck.com/v3/index/nvd' : 'https://example.com/data?date=2020-01-01',
+  url: type === 'VULNCHECK_NVD' ? 'https://api.vulncheck.com/v3/index/nist-nvd2' : 'https://example.com/data?date=2020-01-01',
   authType: type === 'VULNCHECK_NVD' ? 'BEARER' : 'NONE',
   authSecretKey: type === 'VULNCHECK_NVD'
     ? encrypt('vulncheck-test-token', [config.ENCRYPTION_KEY], 'feed:test-feed')

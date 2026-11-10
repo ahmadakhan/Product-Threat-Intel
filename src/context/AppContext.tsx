@@ -132,7 +132,7 @@ function useApplication() {
       }
       throw new Error(
         data.error === 'Validation failed'
-          ? `${data.error}: ${(data.details || []).map((d: any) => d.path.join('.') + ': ' + d.message).join('; ')}`
+          ? `${data.error}: ${Array.isArray(data.details) ? (data.details as any[]).map((d: any) => d.path.join('.') + ': ' + d.message).join('; ') : data.details || ''}`
           : data.error || 'Request failed',
       );
     }
@@ -345,7 +345,11 @@ function useApplication() {
     }
   };
   const save = async (action: string, data: unknown, id?: string) => {
-    const saved = !!(await command(action, data, id));
+    const result = await command(action, data, id);
+    if (result && typeof result === 'object' && 'error' in result) {
+      throw new Error(result.error);
+    }
+    const saved = !!result;
     if (saved) await refreshAfterMutation();
     return saved;
   };

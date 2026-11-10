@@ -157,7 +157,7 @@ export const ThreatFeedsView: React.FC = () => {
       authSecretKey: feed.authSecretKey || '',
       requestTimeoutSeconds: feed.requestTimeoutSeconds ?? 60,
       recoveryDelayMinutes: feed.recoveryDelayMinutes ?? 5,
-      rateLimitPerMin: feed.rateLimitPerMin,
+      rateLimitPerMin: feed.rateLimitPerMin ?? 60,
       enabled: feed.enabled,
     });
     setEditingFeed(feed);
@@ -230,6 +230,10 @@ export const ThreatFeedsView: React.FC = () => {
           setShowAddModal(true);
         }
       }
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : 'Failed to update feed. Please check the form values and try again.');
+      setConfirmSave(null);
+      setShowAddModal(true);
     } finally {
       setSavePending(false);
     }
@@ -588,7 +592,7 @@ export const ThreatFeedsView: React.FC = () => {
                           : {}),
                         ...(type === 'VULNCHECK_NVD'
                           ? {
-                              url: 'https://api.vulncheck.com/v3/index/nvd',
+                              url: 'https://api.vulncheck.com/v3/index/nist-nvd2',
                               rateLimitPerMin: 60,
                             }
                           : {}),
@@ -620,12 +624,12 @@ export const ThreatFeedsView: React.FC = () => {
                   >
                     Rate Limit (req/min)
                   </label>
-                  <input
-                    id="feed-rate"
-                    type="number"
-                    min={1}
-                    max={600}
-                    value={formData.rateLimitPerMin}
+<input
+  id="feed-rate"
+  type="number"
+  min={1}
+  max={1000}
+  value={formData.rateLimitPerMin}
                     onChange={(e) => setFormData({ ...formData, rateLimitPerMin: Number(e.target.value) })}
                     className="w-full bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-xl px-3 py-2 text-xs text-zinc-100 dark:text-zinc-100 light:text-zinc-900 font-mono focus:border-zinc-600 focus:outline-none"
                   />

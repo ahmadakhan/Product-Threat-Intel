@@ -202,7 +202,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       await save('watchlist', 'asset', asset());
       const date = new Date(Date.now() - 1000).toISOString();
       const common = { enabled: true, rateLimitPerMin: 600 };
-      await save('feeds', 'feed-a', { ...common, id: 'feed-a', name: 'Primary NVD++', type: 'VULNCHECK_NVD', url: 'https://api.vulncheck.com/v3/index/nvd', authType: 'BEARER', authSecretKey: encrypt('token-a', encryptionKeys(config), 'feed:feed-a') });
+      await save('feeds', 'feed-a', { ...common, id: 'feed-a', name: 'Primary NVD++', type: 'VULNCHECK_NVD', url: 'https://api.vulncheck.com/v3/index/nist-nvd2', authType: 'BEARER', authSecretKey: encrypt('token-a', encryptionKeys(config), 'feed:feed-a') });
       await save('feeds', 'feed-b', { ...common, id: 'feed-b', name: 'Mirror NVD++', type: 'VULNCHECK_NVD', url: 'https://mirror.example.com/v3/index/nvd', authType: 'BEARER', authSecretKey: encrypt('token-b', encryptionKeys(config), 'feed:feed-b') });
       const record = (id: string) => ({ cve: {
         id, published: date, lastModified: date, vulnStatus: 'Analyzed',
