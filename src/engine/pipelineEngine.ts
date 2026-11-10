@@ -463,12 +463,12 @@ export function runVulnerabilityPipeline(
   const matchingStarted = performance.now();
   for (const raw of latest.values()) {
     const canonical = normalizeCveId(raw.cveId);
-    const inTimelineScope = isWithinTimelineScope(raw.publishedDate, raw.modifiedDate, settings.scopeHours, started);
-    // Filter before candidate selection so every match method (strict CPE/PURL,
-    // alias, and vendor/product fallback) sees only CVEs whose latest published
-    // or modified date is inside the run's timeline scope. Existing findings
-    // are still re-evaluated outside that window so scope expiry alone cannot
-    // turn an active finding into NOT_APPLICABLE during reconciliation.
+    const inTimelineScope = Boolean(canonical && cpeChangedCveIds.has(canonical)) ||
+      isWithinTimelineScope(raw.publishedDate, raw.modifiedDate, settings.scopeHours, started);
+    // All match methods share the timeline gate. Changed CPE applicability must
+    // also reach assets without previous findings, even outside that window.
+    // Existing findings stay eligible so scope expiry alone cannot turn an
+    // active finding into NOT_APPLICABLE during reconciliation.
     if (!canonical || (!inTimelineScope && !knownCves.has(canonical))) continue;
     processed++;
     const cve = { ...raw, cveId: canonical };
