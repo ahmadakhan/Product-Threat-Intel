@@ -22,6 +22,7 @@ if (existsSync(_envPath) && !process.env.DATABASE_URL) {
 import { backfillCorrelationInventory } from './correlation/inventory.ts';
 import { CorrelationRuntime } from './correlation/runtime.ts';
 import { describeError, writeEvent } from './events';
+import type { Finding } from '../src/types/index.ts';
 import { loadConfig } from './config';
 import { createPool, migrate, transaction, get, put, list, REQUIRED_SCHEMA_VERSION } from './db';
 import { createApp } from './app';
@@ -675,11 +676,17 @@ const enrichmentBacklogTick = async () => {
   if (stopping || config.WORKER_ENABLED !== 'true' || enrichmentBacklogRunning) return;
   enrichmentBacklogRunning = (async () => {
     try {
+      // Push the cheap predicates (kind, dispatch status) into the database so
+      // the scan narrows to queued findings only; the missing-CPE check stays
+      // in JS because the JSONB shape varies between finding generations.
       const rows = await pool.query<{ data: string }>(
-        `SELECT data FROM records WHERE kind='findings'`,
+        `SELECT data FROM records
+          WHERE kind='findings'
+            AND data->>'notificationStatus' = 'QUEUED_FOR_DISPATCH'
+          ORDER BY created_at ASC`,
       );
-      const findings = rows.rows.map((row) => row.data as unknown as import('../src/types/index.ts').Finding);
-      const candidates = enrichmentBacklogCandidates(findings);
+      const queued = rows.rows.map((row) => JSON.parse(row.data) as Finding);
+      const candidates = enrichmentBacklogCandidates(queued);
       if (candidates.length > 0) {
         await writeEvent(pool, {
           category: 'PIPELINE',
@@ -719,14 +726,16 @@ const deadLetterRetryTick = async () => {
       let retried = 0;
       for (const row of rows.rows) {
         try {
-          const deadLetter = JSON.parse(row.data);
+          const deadLetter = JSON.parse(row.data) as { findingId?: string; id?: string };
           // Re-queue the finding through the normal pipeline path by marking
           // the finding as not-yet-dispatched so the next pipeline run picks it up.
           const findingId = deadLetter.findingId || deadLetter.id;
-          const finding = await get<any>(pool, 'findings', findingId);
+          const finding = findingId
+            ? await get<Finding>(pool, 'findings', findingId)
+            : undefined;
           if (finding) {
-            await put(pool, 'findings', findingId, {
-              ...finding.data,
+            await put(pool, 'findings', findingId!, {
+              ...finding,
               notificationStatus: 'QUEUED_FOR_DISPATCH',
               autoDispatchedAt: null,
               reviewNotifiedAt: null,
@@ -735,7 +744,7 @@ const deadLetterRetryTick = async () => {
           }
           // Mark the dead letter as resolved (retried)
           await put(pool, 'delivery_dead_letters', row.id, {
-            ...JSON.parse(row.data),
+            ...deadLetter,
             resolvedAt: new Date().toISOString(),
             resolvedBy: 'auto-retry',
           });
@@ -825,6 +834,12 @@ async function shutdown() {
   clearInterval(mlTrainingTimer);
   clearInterval(mlTelemetryTimer);
   clearInterval(cleanup);
+  // Later worker jobs are unref'd so they do not hold the event loop open,
+  // but they must still be cancelled: a timer that fires after `stopping =
+  // true` would skip (guards handle it) yet keep running during teardown and
+  // could race the pool drain below.
+  clearInterval(enrichmentBacklogTimer);
+  clearInterval(deadLetterRetryTimer);
   const deadline = setTimeout(() => process.exit(1), 30000);
   deadline.unref();
   await new Promise<void>((resolve) => server.close(() => resolve()));

@@ -204,7 +204,10 @@ export function indexStatements(sql: string): string[] {
 }
 
 const indexName = (statement: string): string | null =>
-  /CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+IF\s+NOT\s+EXISTS\s+"?([a-z0-9_]+)"?/i.exec(
+  // Names are interpolated into `DROP INDEX ... "${name}"`, so the capture is
+  // deliberately restricted to safe identifier characters — the regex doubles
+  // as the injection guard for anything parsed out of a migration file.
+  /^[\s\S]*?CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+IF\s+NOT\s+EXISTS\s+"?([A-Za-z_][A-Za-z0-9_$]*)"?/.exec(
     statement,
   )?.[1] ?? null;
 
@@ -311,6 +314,7 @@ async function buildIndex(client: pg.PoolClient, statement: string, file: string
       )
       .catch(() => ({ rows: [] as { invalid: boolean }[] }));
     if (invalid.rows[0]?.invalid) {
+    if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(name)) throw new Error(`Unsafe migration index name: ${name}`);
       await client.query(`DROP INDEX CONCURRENTLY IF EXISTS "${name}"`);
       console.log(JSON.stringify({
         level: 'warn',
