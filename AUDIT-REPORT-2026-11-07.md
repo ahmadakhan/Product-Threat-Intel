@@ -377,7 +377,8 @@ Key behavioral changes since baseline:
 - `delivery.ts:1384-1445` — `queueConsolidatedFindingNotifications` now queues webhooks
 - `delivery.ts:1757-1772` — Supersede stale QUEUED rows before claim in `deliverNext`
 - `delivery.ts:1917-1919` — Revalidation failure now applies to consolidated batches too
-- `server/pipeline.ts:874-878` — VULNCHECK_NVD now respects `enabled` flag (uncommitted)
+- `delivery.ts:2418` — Defensive `typeof` guard on `job.advisory_id.startsWith()` to prevent runtime TypeError if advisory_id is ever null at runtime
+- `server/pipeline.ts:874-878` — VULNCHECK_NVD now respects `enabled` flag
 
 ---
 
@@ -495,4 +496,8 @@ The implemented changes represent a significant improvement in the email deliver
 **Next Review:** Recommended after 30 days of production operation  
 **Auditor:** Codebase Audit System  
 **Reference:** CODEBASE-AUDIT-PROMPT.md  
-**Verification:** `npm run lint` passes clean; test suite executing without regressions
+
+**Verification:**
+- `npm run lint` — `tsc --noEmit`: PASSES CLEAN (0 errors)
+- `npm test` — 957 tests, 51 suites: 871 passed, 0 failed, 86 skipped
+- Production-grade defensive fix: `delivery.ts:2418` — `typeof` guard on `job.advisory_id.startsWith()`

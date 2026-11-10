@@ -2415,7 +2415,7 @@ export async function deliverNext(
     // the row must carry the payload that was actually sent. Without this the
     // outbox kept the pre-rebuild body and a later retry or audit would show
     // findings the recipient never received.
-    const rebuiltPayload = job.advisory_id.startsWith('FINDINGS:') ? job.payload : undefined;
+    const rebuiltPayload = typeof job.advisory_id === 'string' && job.advisory_id.startsWith('FINDINGS:') ? job.payload : undefined;
     carriedFindingIds = job.payload.includedFindingIds ?? [];
     droppedFindingIds = declaredFindingIds.filter((id) => !carriedFindingIds.includes(id));
     if (job.channel === 'email' && droppedFindingIds.length)
