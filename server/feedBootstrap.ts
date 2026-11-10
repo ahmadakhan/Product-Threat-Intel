@@ -72,7 +72,9 @@ export async function reconcileRecommendedFeeds(db: PoolClient, bootstrap = fals
   for (const feed of allFeeds) {
     if (feed.type !== 'VULNCHECK_KEV' && feed.type !== 'VULNCHECK_NVD') continue;
     if (!feed.enabled) continue;
-    const hasAuthError = /401|unauthorized|invalid.*token/i.test(feed.errorLog ?? '');
+    // Match the status line the connectivity test writes ("HTTP 401"), not any
+    // bare "401" substring such as a timing value.
+    const hasAuthError = /\bHTTP 401\b|unauthorized|invalid.*token/i.test(feed.errorLog ?? '');
     if (!feed.authSecretKey || feed.authType !== 'BEARER' || hasAuthError) {
       await put(db, 'feeds', feed.id, {
         ...feed,

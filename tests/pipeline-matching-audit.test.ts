@@ -232,12 +232,12 @@ test('C-2: non-zero-day matches survive an exceeded cap untouched', () => {
 test('H-1: credibility is monotone in corroborating sources', () => {
   const one = computeCredibilityScore(
     { id: 'x', cveId: null, assetId: 'a', assetName: '', articleIds: [], status: 'REVIEW_REQUIRED', evidence: '', zeroDay: true },
-    ['RSS_NEWS'],
+    ['RSS_ATOM'],
     false,
   );
   const three = computeCredibilityScore(
     { id: 'x', cveId: null, assetId: 'a', assetName: '', articleIds: [], status: 'REVIEW_REQUIRED', evidence: '', zeroDay: true },
-    ['RSS_NEWS', 'THREAT_FEED', 'VULNCHECK_NVD'],
+    ['RSS_ATOM', 'VULNCHECK_NVD'],
     false,
   );
   assert.ok(three > one, `expected ${three} > ${one}`);
@@ -245,8 +245,8 @@ test('H-1: credibility is monotone in corroborating sources', () => {
 
 test('credibility scoring applies runtime-trained weights', () => {
   const match = { id: 'x', cveId: null, assetId: 'a', assetName: '', articleIds: [], status: 'REVIEW_REQUIRED' as const, evidence: '', zeroDay: true };
-  const defaultScore = computeCredibilityScore(match, ['RSS_NEWS'], false);
-  const feedHeavy = computeCredibilityScore(match, ['RSS_NEWS'], false, { feedWeight: 0.9, keywordWeight: 0.1 });
+  const defaultScore = computeCredibilityScore(match, ['RSS_ATOM'], false);
+  const feedHeavy = computeCredibilityScore(match, ['RSS_ATOM'], false, { feedWeight: 0.9, keywordWeight: 0.1 });
   assert.equal(feedHeavy, 21);
   assert.notEqual(feedHeavy, defaultScore);
 });
@@ -273,7 +273,7 @@ test('H-1: a zero-day flagged article still produces a zero-day match', () => {
     publishedDate: NOW.toISOString(),
     modifiedDate: NOW.toISOString(),
     cveIds: [],
-    sourceFeeds: ['RSS_NEWS'],
+    sourceFeeds: ['RSS_ATOM'],
     zeroDay: true,
   };
   const asset = assetRecord({ cpes: [], purls: [] });

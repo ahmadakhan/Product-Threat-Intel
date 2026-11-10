@@ -1856,6 +1856,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         execution!.scopeHours,
         new Date(),
         credibilityWeights,
+        feedTypesById,
       ).map((match) => ({
         ...match,
         calibratedCredibilityScore: calibrateCredibilityScore(match.credibilityScore ?? 0).score,

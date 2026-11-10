@@ -672,6 +672,11 @@ mlTrainingTimer.unref();
 mlTrainingTick();
 
 let enrichmentBacklogRunning: Promise<unknown> | null = null;
+// records.data is jsonb, which node-pg already decodes to an object. Accept a
+// text value too, so this does not depend on the driver's type mapping.
+const parseRecordData = <T,>(data: unknown): T =>
+  (typeof data === 'string' ? JSON.parse(data) : data) as T;
+
 const enrichmentBacklogTick = async () => {
   if (stopping || config.WORKER_ENABLED !== 'true' || enrichmentBacklogRunning) return;
   enrichmentBacklogRunning = (async () => {
@@ -679,13 +684,13 @@ const enrichmentBacklogTick = async () => {
       // Push the cheap predicates (kind, dispatch status) into the database so
       // the scan narrows to queued findings only; the missing-CPE check stays
       // in JS because the JSONB shape varies between finding generations.
-      const rows = await pool.query<{ data: string }>(
+      const rows = await pool.query<{ data: unknown }>(
         `SELECT data FROM records
           WHERE kind='findings'
             AND data->>'notificationStatus' = 'QUEUED_FOR_DISPATCH'
           ORDER BY created_at ASC`,
       );
-      const queued = rows.rows.map((row) => JSON.parse(row.data) as Finding);
+      const queued = rows.rows.map((row) => parseRecordData<Finding>(row.data));
       const candidates = enrichmentBacklogCandidates(queued);
       if (candidates.length > 0) {
         await writeEvent(pool, {
@@ -717,7 +722,7 @@ const deadLetterRetryTick = async () => {
   if (stopping || config.WORKER_ENABLED !== 'true' || !isLeader || deadLetterRetryRunning) return;
   deadLetterRetryRunning = (async () => {
     try {
-      const rows = await pool.query<{ id: string; data: string }>(
+      const rows = await pool.query<{ id: string; data: unknown }>(
         `SELECT id, data FROM records WHERE kind='delivery_dead_letters'
          AND COALESCE(data->>'resolvedAt','')=''
          ORDER BY created_at ASC LIMIT 50`,
@@ -726,7 +731,7 @@ const deadLetterRetryTick = async () => {
       let retried = 0;
       for (const row of rows.rows) {
         try {
-          const deadLetter = JSON.parse(row.data) as { findingId?: string; id?: string };
+          const deadLetter = parseRecordData<{ findingId?: string; id?: string }>(row.data);
           // Re-queue the finding through the normal pipeline path by marking
           // the finding as not-yet-dispatched so the next pipeline run picks it up.
           const findingId = deadLetter.findingId || deadLetter.id;

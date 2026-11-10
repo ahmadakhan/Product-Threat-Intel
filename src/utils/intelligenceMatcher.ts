@@ -19,8 +19,7 @@ const text = (value: string) =>
 export const FEED_WEIGHTS: Record<string, number> = {
   CISA_KEV: 40,
   VULNCHECK_KEV: 30,
-  RSS_NEWS: 15,
-  THREAT_FEED: 20,
+  RSS_ATOM: 15,
 };
 
 /** Compute a credibility score (0–100) for an intelligence match.
@@ -343,6 +342,7 @@ export function matchIntelligence(
   scopeHours = 0,
   now: Date = new Date(),
   credibilityWeights: { feedWeight: number; keywordWeight: number } = { feedWeight: 0.6, keywordWeight: 0.4 },
+  feedTypesById: ReadonlyMap<string, string> = new Map(),
 ): IntelligenceMatch[] {
   const matches = new Map<string, IntelligenceMatch>();
   const current = new Map(findings.map((finding) => [`${finding.cveId}:${finding.matchedAssetId}`, finding]));
@@ -360,6 +360,8 @@ export function matchIntelligence(
     // CVE it corroborates. Using the latest activity keeps an updated story
     // eligible even when it was first published before the window opened.
     if (!isWithinTimelineScope(article.publishedDate, article.modifiedDate, scopeHours, now)) continue;
+    // Feed weights are keyed by type, so resolve the article's feed IDs first.
+    const sourceFeedTypes = article.sourceFeeds.map((feed) => feedTypesById.get(feed) ?? feed);
     const document = text(`${article.title} ${article.summary}`);
     // The vendor/product variants are properties of the asset, not of the
     // article, so resolve them once per asset instead of rebuilding the arrays
@@ -404,12 +406,12 @@ export function matchIntelligence(
           finding.status !== 'FALSE_POSITIVE';
         const old = matches.get(id);
         const isZeroDay = article.zeroDay === true;
-        const articleFeedWeight = Math.max(...article.sourceFeeds.map((feed) => FEED_WEIGHTS[feed] ?? 10), 10);
+        const articleFeedWeight = Math.max(...sourceFeedTypes.map((feed) => FEED_WEIGHTS[feed] ?? 10), 10);
         const sourceFeedWeight = Math.max(old?.sourceFeedWeight ?? 10, articleFeedWeight);
         const keywordScore = confirmed ? 100 : isZeroDay ? 70 : 50;
         const credibilityScore = computeCredibilityScore(
           { id, cveId, assetId: asset.id, assetName: '', articleIds: [], status: confirmed ? 'CORROBORATED' : 'REVIEW_REQUIRED', evidence: '', zeroDay: isZeroDay },
-          article.sourceFeeds,
+          sourceFeedTypes,
           Boolean(finding && confirmed),
           credibilityWeights,
         );

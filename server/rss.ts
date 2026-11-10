@@ -132,8 +132,10 @@ export function parseSyndication(
     if (mentioned.length > MAX_ENTRY_CVE_IDS) bulkCveArticles++;
     // Zero-day heuristic: articles without a CVE ID that mention exploitation,
     // zero-day, or in-the-wild activity are flagged for priority review.
+    // Test the original mention count: a round-up post whose CVE list was dropped
+    // above still names CVEs, so it must not be flagged as a CVE-less zero-day.
     const zeroDay =
-      cveIds.length === 0 &&
+      mentioned.length === 0 &&
       /\b(zero[- ]?day|0[- ]?day|actively exploited|in the wild|unpatched|no (?:patch|fix|cve))\b/i.test(
         `${title} ${full}`,
       );
