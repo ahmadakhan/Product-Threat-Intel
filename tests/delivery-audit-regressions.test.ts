@@ -287,7 +287,7 @@ test(
         const [f] = await seed([makeCve('CVE-2026-98104')]);
         await put(pool, 'recipients', 'all', recipient('all'));
         await runDailyDigest(pool);
-        await put(pool, 'settings', 'main', { ...settings, autoDispatchConfidenceThreshold: 99 });
+        await put(pool, 'settings', 'main', { ...settings, confirmedFindingThreshold: 99 });
         await put(pool, 'findings', f.id, { ...f, notificationStatus: 'REVIEW_REQUIRED' });
         // A digest key used to exempt the bundle from the applicability verdict,
         // and a non-exempt bundle was failed as stale. Neither applies now: a

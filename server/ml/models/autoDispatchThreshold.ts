@@ -3,7 +3,7 @@
  * auto-dispatching findings (default 90% in pipelineEngine.ts:401) by trading
  * off false-positive rate against recall.
  *
- * File target: pipelineEngine.ts:401 (`autoDispatchConfidenceThreshold`)
+ * File target: pipelineEngine.ts:401 (`confirmedFindingThreshold`)
  *
  * The model tracks historical (confidence_score, dispatched, outcome) tuples
  * and finds the threshold that maximizes:

@@ -149,10 +149,10 @@ test('NVD uses bounded large-page requests and honors rate-limit retries', async
   const feed = {
     id: 'nvd',
     name: 'NVD',
-    type: 'NVD_API' as const,
-    url: 'https://services.nvd.nist.gov/rest/json/cves/2.0',
-    authType: 'NONE' as const,
-    authSecretKey: '',
+    type: 'VULNCHECK_NVD' as const,
+    url: 'https://api.vulncheck.com/v3/index/nvd',
+    authType: 'BEARER' as const,
+    authSecretKey: encrypt('vulncheck-test-token', [config.ENCRYPTION_KEY], 'feed:nvd'),
     rateLimitPerMin: 10,
     enabled: true,
     healthStatus: 'UNTESTED' as const,
@@ -161,33 +161,31 @@ test('NVD uses bounded large-page requests and honors rate-limit retries', async
     vendorSeed: true,
     itemCountLastRun: 0,
     ssrfValidated: false,
-    etag: 'stale-page-etag',
   };
+  const page = JSON.stringify({ vulnerabilities: [], _meta: { next_cursor: null } });
   await ingestFeed(
     feed,
     24,
     async (rawUrl, options) => {
-      assert.equal(new URL(rawUrl).searchParams.get('resultsPerPage'), '2000');
+      // The NVD++ adapter is a single conditional request for the whole window.
+      assert.equal(new URL(rawUrl).pathname, '/v3/index/nvd');
+      assert.equal(new URL(rawUrl).searchParams.get('resultsPerPage'), null);
       headers.push(options?.headers || {});
       requestLimits.push({
         timeoutMs: options?.timeoutMs,
         socketTimeoutMs: options?.socketTimeoutMs,
         maxResponseBytes: options?.maxResponseBytes,
       });
-      return {
-        status: 200,
-        body: JSON.stringify({ vulnerabilities: [], totalResults: 0, startIndex: 0 }),
-        headers: {},
-      };
+      return { status: 200, body: page, headers: {} };
     },
     config,
   );
   assert.equal(headers.length, 1);
+  // The sync-state index ETag governs conditionality; none is set on first run.
   assert.equal(headers[0]['If-None-Match'], undefined);
   assert.deepEqual(requestLimits, [
-    { timeoutMs: 120000, socketTimeoutMs: 60000, maxResponseBytes: 32 * 1024 * 1024 },
+    { timeoutMs: 60000, socketTimeoutMs: 30000, maxResponseBytes: 32 * 1024 * 1024 },
   ]);
-
   const retryDelays: number[] = [];
   let retryCalls = 0;
   await ingestFeed(
@@ -197,11 +195,7 @@ test('NVD uses bounded large-page requests and honors rate-limit retries', async
       retryCalls++;
       return retryCalls === 1
         ? { status: 429, body: '', headers: { 'retry-after': '2' } }
-        : {
-            status: 200,
-            body: JSON.stringify({ vulnerabilities: [], totalResults: 0, startIndex: 0 }),
-            headers: {},
-          };
+        : { status: 200, body: page, headers: {} };
     },
     config,
     async <T = void>(ms = 0, value?: T): Promise<T> => {
@@ -211,7 +205,6 @@ test('NVD uses bounded large-page requests and honors rate-limit retries', async
   );
   assert.equal(retryCalls, 2);
   assert.deepEqual(retryDelays, [6100]);
-
   const timeoutDelays: number[] = [];
   let timeoutCalls = 0;
   await ingestFeed(
@@ -220,11 +213,7 @@ test('NVD uses bounded large-page requests and honors rate-limit retries', async
     async () => {
       timeoutCalls++;
       if (timeoutCalls === 1) throw new Error('Outbound request timed out');
-      return {
-        status: 200,
-        body: JSON.stringify({ vulnerabilities: [], totalResults: 0, startIndex: 0 }),
-        headers: {},
-      };
+      return { status: 200, body: page, headers: {} };
     },
     config,
     async <T = void>(ms = 0, value?: T): Promise<T> => {
@@ -576,7 +565,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
     await t.test('vendor-seeded feeds cannot be deleted but can be toggled', async () => {
       const seeded = await command('feed.save', {
         name: 'Seeded NVD',
-        type: 'NVD_API',
+        type: 'VULNCHECK_NVD',
         url: 'https://8.8.8.8/nvd',
         authType: 'NONE',
         rateLimitPerMin: 10,
@@ -589,7 +578,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       assert.equal(
         (await command('feed.save', {
           name: 'Duplicate Seeded NVD',
-          type: 'NVD_API',
+          type: 'VULNCHECK_NVD',
           url: 'https://8.8.8.8/nvd#duplicate',
           authType: 'NONE',
           rateLimitPerMin: 10,
@@ -602,7 +591,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
         (await command('feed.import', [{
           id: 'duplicate-seeded-nvd',
           name: 'Imported Duplicate NVD',
-          type: 'NVD_API',
+          type: 'VULNCHECK_NVD',
           url: 'https://8.8.8.8/nvd',
           authType: 'NONE',
           rateLimitPerMin: 10,
@@ -638,7 +627,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
     await t.test('non-vendor-seeded NVD feeds cannot be deleted but can be toggled', async () => {
       const nvd = await command('feed.save', {
         name: 'Custom NVD',
-        type: 'NVD_API',
+        type: 'VULNCHECK_NVD',
         url: 'https://8.8.8.8/custom-nvd',
         authType: 'NONE',
         rateLimitPerMin: 10,
@@ -739,7 +728,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       const feedId = 'cpe-search-test-key';
       const cpeName = 'cpe:2.3:o:microsoft:windows_10:22h2:*:*:*:*:*:*:*';
       await put(pool, 'feeds', feedId, {
-        id: feedId, type: 'NVD_API', authType: 'API_KEY', enabled: true,
+        id: feedId, type: 'VULNCHECK_NVD', authType: 'API_KEY', enabled: true,
         authSecretKey: encrypt('cpe-test-api-key', [key], `feed:${feedId}`),
       });
       try {
@@ -749,7 +738,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
         assert.equal(result.body.results[0].cpeName, cpeName);
         assert.equal(capturedUrls.length, 2, 'keyword search followed by wildcard-vendor search');
         const keywordUrl = new URL(capturedUrls[0]);
-        assert.equal(keywordUrl.origin + keywordUrl.pathname, 'https://services.nvd.nist.gov/rest/json/cpes/2.0');
+        assert.equal(keywordUrl.origin + keywordUrl.pathname, 'https://api.vulncheck.com/v3/index/nvd');
         assert.equal(keywordUrl.searchParams.get('keywordSearch'), 'Microsoft windows 10');
         assert.equal(keywordUrl.searchParams.has('apiKey'), false);
         assert.equal(capturedHeaders.apiKey, 'cpe-test-api-key');

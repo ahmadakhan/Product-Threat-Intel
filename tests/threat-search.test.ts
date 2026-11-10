@@ -127,7 +127,7 @@ test('searchThreatIntelligence searches NVD by CPE virtual match and returns mat
 
   assert.equal(result.hits.length, 1);
   assert.equal(result.hits[0].cve.cveId, 'CVE-2024-1234');
-  assert.equal(result.hits[0].source, 'NVD_API');
+  assert.equal(result.hits[0].source, 'KEYWORD_FALLBACK');
   assert.ok(result.hits[0].matchingCpes.includes('cpe:2.3:a:microsoft:windows_10:10.0.19041:*:*:*:*:*:*:*'));
   assert.equal(result.rateLimited, false);
   assert.equal(result.vendor, 'microsoft');

@@ -38,6 +38,7 @@ const ALL_COMMAND_ACTIONS = [
   'alias.delete',
   'alias.promote',
   'alias.revoke',
+  'circuit-breaker.status',
 ];
 
 test('every dispatcher action is classified exactly once (admin or operator)', () => {

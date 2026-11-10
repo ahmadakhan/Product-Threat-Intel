@@ -66,7 +66,7 @@ import {
 import { bindClusterToCve, clusterSuppressedAssets } from './correlation/clusters.ts';
 import { refreshCandidatePairs } from './versionIndex';
 import { recoveryDue, recoveryAt, isPermanentFeedFailure, shouldStartAutomaticRun } from './feedRecovery';
-import { ingestionWindow, type FeedCursor, OPENCVE_MAX_WINDOW_HOURS } from './ingestionState';
+import { ingestionWindow, type FeedCursor } from './ingestionState';
 import type { Requester } from './network';
 import { withAbortSignal } from './network';
 import { feedEgressHosts, type Config } from './config';
@@ -872,7 +872,8 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       });
     });
     const allFeeds = await list<ThreatFeed>(pool, 'feeds');
-    const feeds = allFeeds.filter((feed) => feed.enabled);
+    // VULNCHECK_NVD is the sole authoritative CVE source and cannot be disabled.
+    const feeds = allFeeds.filter((feed) => feed.enabled || feed.type === 'VULNCHECK_NVD');
     const feedTypesById = new Map(allFeeds.map((feed) => [feed.id, feed.type]));
     const [cachedCves, cachedWithdrawals, inventory, aliasEntries] = await Promise.all([
       list<NormalizedCVE>(pool, 'cveData'),
@@ -922,10 +923,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           // pacing that bootstrap needs over 40 minutes for detail retrieval.
           // Give that source enough time to finish atomically while preserving
           // the configured limit for all other feeds.
-          const maxDurationSeconds =
-            feed.type === 'MITRE_CVE'
-              ? Math.max(config.FEED_MAX_DURATION_SECONDS, 3600)
-              : config.FEED_MAX_DURATION_SECONDS;
+          const maxDurationSeconds = config.FEED_MAX_DURATION_SECONDS;
           const deadline = start + maxDurationSeconds * 1000;
           const configuredFeedHosts = config.EGRESS_ALLOWED_HOSTS.split(',').map((host) => host.trim()).filter(Boolean);
           const additionalAllowedHosts = feedEgressHosts(feed.type, feed.url, configuredFeedHosts)
@@ -965,8 +963,8 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             };
             const savedCursor = await get<FeedCursor>(pool, 'feedCursors', feed.id);
             const cursor = savedCursor?.fingerprint === sourceFingerprint(feed) ? savedCursor : undefined;
-            if (['NVD_API', 'OPENCVE_API', 'MITRE_CVE', 'VULNCHECK_KEV'].includes(feed.type)) {
-              const maxWindow = feed.type === 'OPENCVE_API' ? OPENCVE_MAX_WINDOW_HOURS : 24;
+            if (feed.type === 'VULNCHECK_KEV') {
+              const maxWindow = 24;
               const window = ingestionWindow(execution!.scopeHours, cursor, undefined, maxWindow);
               execution!.logs.push(
                 `Feed ${feed.id}: ${window.incremental ? 'incremental' : 'initial bounded'} sync ${window.start.toISOString()} to ${window.end.toISOString()}`,
@@ -996,17 +994,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
               config,
               checkedSleep,
               targets,
-              feed.type === 'NVD_API'
-                ? async ({ offset, total, records }) => {
-                    await transaction(pool, async (db) => {
-                      await checkpoint(db);
-                      execution!.phases[0].durationMs = Date.now() - Date.parse(execution!.startTime);
-                      execution!.phases[0].details = `NVD: ${offset.toLocaleString()} of ${total.toLocaleString()} records in incremental sync; ${records.toLocaleString()} retrieved`;
-                      execution!.stats.rawIngested = rawCount + records;
-                      await saveActiveExecution(db, execution!);
-                    }, undefined, { signal });
-                  }
-                : undefined,
+              undefined,
               context,
             );
             if (feed.type === 'CISA_KEV' && result.notModified) {
@@ -1041,6 +1029,24 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
               consecutiveFailures: 0,
               circuitOpenUntil: null,
             });
+            // Feed completeness verification: if the source returned items but
+            // none appear in the pipeline corpus, the feed may be silently
+            // dropping records. Flag it for operator review.
+            if (
+              result.count > 0 &&
+              !result.notModified &&
+              results.some((r) => r.sourceId === feed.id && r.cves.length === 0)
+            ) {
+              pushExecutionLog(execution!, `Feed ${feed.id}: returned ${result.count} items but zero CVEs entered the pipeline — possible ingestion filter issue`);
+              await writeEvent(pool, {
+                category: 'FEED',
+                level: 'WARNING',
+                code: 'feed.completeness_gap',
+                message: `${feed.name}: returned ${result.count} items but zero CVEs entered the pipeline`,
+                runId: execution!.id,
+                context: { feedId: feed.id, returnedCount: result.count, pipelineCount: 0 },
+              });
+            }
           } catch (e) {
             signal?.throwIfAborted();
             if (e instanceof PipelineStopped || connectionLost) throw e;
@@ -1485,6 +1491,38 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         const previousView = oldCveViews.get(cve.cveId);
         return previousView === undefined || previousView !== cveContentView(cve);
       });
+      // Audit: detect CVEs whose CPE applicability data changed since the last
+      // run (e.g. NVD published CPE data for CVE-2026-107154). These CVEs must be
+      // re-matched against ALL assets regardless of scopeHours, because the new
+      // CPE data may now match assets that previously had no applicable data.
+      const cpeChangedCveIdsSet = new Set<string>();
+      for (const cve of changedCves) {
+        const previous = oldCveMap.get(cve.cveId);
+        if (!previous) continue;
+        const prevCpe = JSON.stringify(previous.cpeMatches ?? []).localeCompare(
+          JSON.stringify(cve.cpeMatches ?? []),
+        );
+        const prevDetails = JSON.stringify(previous.cpeMatchDetails ?? []).localeCompare(
+          JSON.stringify(cve.cpeMatchDetails ?? []),
+        );
+        if (prevCpe !== 0 || prevDetails !== 0) {
+          cpeChangedCveIdsSet.add(cve.cveId);
+          await writeEvent(db, {
+            category: 'PIPELINE',
+            level: 'INFO',
+            code: 'pipeline.cpe_changed',
+            message: `CPE applicability data changed for ${cve.cveId}; will re-match against all assets`,
+            runId: execution!.id,
+            context: { cveId: cve.cveId, title: cve.title },
+          }).catch(() => undefined);
+        }
+      }
+      // Persist the CPE-changed set so the next run can re-evaluate even if
+      // this run's scopeHours window excludes them.
+      await put(db, 'systemState', 'cpe-changed-cves', {
+        cveIds: [...cpeChangedCveIdsSet],
+        updatedAt: new Date().toISOString(),
+      });
       // Bind published CVEs to their pre-CVE clusters so early-intelligence
       // evidence and operator rulings travel with the canonical identifier.
       // Only CVEs that are new to the corpus (not merely re-versioned) can
@@ -1587,6 +1625,23 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         `Applicability matching is time-bounded to the run window (scopeHours=${execution!.scopeHours})`,
       );
       const finalCves = [...byId.values()];
+      // Include CPE-changed CVEs regardless of scopeHours: their new applicability
+      // data may now match assets that previously had no CPE data. The matching
+      // engine still applies scopeHours to the run, but these CVEs are always
+      // eligible for re-correlation.
+      const cpeChangedState = await get<{ cveIds: string[] }>(
+        db,
+        'systemState',
+        'cpe-changed-cves',
+      ).catch(() => undefined);
+      // Combine previously persisted CPE changes with any detected in this run.
+      const cpeChangedCveIds = new Set([...(cpeChangedState?.cveIds ?? []), ...cpeChangedCveIdsSet]);
+      const cpeChangedCves = finalCves.filter((cve) => cpeChangedCveIds.has(cve.cveId));
+      if (cpeChangedCves.length > 0) {
+        execution!.logs.push(
+          `CPE data changed for ${cpeChangedCves.length} CVE(s); re-matching against all assets`,
+        );
+      }
       // Inventory may have changed while this run was ingesting. Re-derive its
       // automatic aliases for the final snapshot so both the PostgreSQL
       // candidate index and the JavaScript matcher use the same expanded keys.
@@ -1606,6 +1661,27 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         undefined,
         { locks: ['match-index'] },
       );
+      // Load circuit breaker cooldown state from the previous run. Cooldowns
+      // that have expired are auto-reset; active cooldowns hold dispatches from
+      // tripped feeds for the configured duration.
+      const cbState = await get<any>(pool, 'systemState', 'circuit-breaker-state');
+      const now = Date.now();
+      const cooldownMinutes = settings.circuitBreakerCooldownMinutes ?? 60;
+      const feedCooldownMinutes = settings.circuitBreakerFeedCooldownMinutes ?? 60;
+      const circuitBreakerCooldowns: {
+        overallUntil: number | null;
+        feedUntil: Map<string, number>;
+      } = { overallUntil: null, feedUntil: new Map() };
+      if (cbState) {
+        const cooldowns = cbState.cooldowns ?? {};
+        if (cooldowns.overallUntil && Date.parse(cooldowns.overallUntil) > now) {
+          circuitBreakerCooldowns.overallUntil = Date.parse(cooldowns.overallUntil);
+        }
+        for (const [feedId, until] of Object.entries(cooldowns.feeds ?? {})) {
+          const untilMs = Date.parse(String(until));
+          if (untilMs > now) circuitBreakerCooldowns.feedUntil.set(feedId, untilMs);
+        }
+      }
       const correlated = runVulnerabilityPipeline(
         feeds,
         finalCves,
@@ -1619,6 +1695,9 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         finalProductAliases,
         finalPairs.size ? finalPairs : undefined,
         aliasEntries,
+        undefined,
+        circuitBreakerCooldowns,
+        cpeChangedCveIds,
       );
       const previousInventory = await get<Record<string, string>>(db, 'systemState', 'matched-inventory-v1');
       const inventoryFingerprints: Record<string, string> = Object.create(null);
@@ -1708,6 +1787,32 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         'findings',
         persistedFindings.map((f) => ({ id: f.id, data: f })),
       );
+      // Persist engine-produced audit logs (authoritative autodispatch,
+      // circuit breaker trips) with proper hash-chain chaining. Escalate
+      // WARNING-level events to the operational event log so the security
+      // team is alerted when autodispatch is being held.
+      for (const auditLog of correlated.newAuditLogs) {
+        await appendAudit(
+          db,
+          auditLog.event,
+          auditLog.details,
+          auditLog.actor,
+          auditLog.category,
+          auditLog.level,
+          auditLog.ipAddress,
+          auditLog.context,
+        );
+        if (auditLog.level === 'WARNING' && (auditLog.category === 'PIPELINE' || auditLog.category === 'FEED' || auditLog.category === 'EMAIL')) {
+          await writeEvent(db, {
+            category: auditLog.category,
+            level: auditLog.level,
+            code: auditLog.event,
+            message: auditLog.details.slice(0, 1000),
+            runId: execution!.id,
+            context: auditLog.context ?? undefined,
+          });
+        }
+      }
       // Rebuild the automatic alias layer from current inventory and from the
       // correlations that survived this run. Rows that are no longer supported
       // by either source are removed, while operator-managed rows are never
@@ -2060,6 +2165,25 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         unverifiableNotificationsQueued: manualReviewFindingsQueued,
         zeroDayDigestNotificationsQueued,
       };
+      // Persist circuit breaker state so the status endpoint can surface it to
+      // operators. Captures this run's dispatch counts and whether any cap
+      // was tripped, so the UI can alert when autodispatch is being held.
+      const cooldowns: { overallUntil: string | null; feeds: Record<string, string> } = {
+        overallUntil: correlated.circuitBreakerCooldowns?.overallUntil
+          ? new Date(correlated.circuitBreakerCooldowns.overallUntil).toISOString()
+          : null,
+        feeds: Object.fromEntries(
+          [...(correlated.circuitBreakerCooldowns?.feedUntil ?? new Map())].map(
+            ([k, v]) => [k, new Date(v).toISOString()],
+          ),
+        ),
+      };
+      await put(db, 'systemState', 'circuit-breaker-state', {
+        totalDispatchCount: execution.stats.totalDispatchCount ?? 0,
+        authoritativeSourceDispatchCount: execution.stats.authoritativeSourceDispatchCount ?? 0,
+        dispatchedAt: new Date().toISOString(),
+        cooldowns,
+      });
       await saveActiveExecution(db, execution);
       // Clear next_catchup_run if all feeds have completed their catch-up.
       const pendingCatchup = acceptedResults.some((r) => r.syncState?.catch_up && r.syncState.hasMore);

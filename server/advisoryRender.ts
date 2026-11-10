@@ -284,8 +284,79 @@ export function renderAdvisory(
   ${targetGuidance}
 </div>`;
   }).join('');
-  const values: Record<string, string> = {
+  const severity_color = SEVERITY_COLORS[advisory.severity] || SEVERITY_COLORS.UNKNOWN;
+  const severity_text = advisory.severity || 'UNKNOWN';
+
+  // Build per-CVE vulnerability detail objects for the {{#each vulnerabilities}} block.
+  const vulnerabilityDetails = [...advisory.cveIds]
+    .sort((a: string, b: string) => severityRank(b, advisory, findings) - severityRank(a, advisory, findings) || a.localeCompare(b))
+    .map((cve: string) => {
+      const cveFindings = findings?.filter((f) => f.cveId === cve) || [];
+      const ranks: Advisory['severity'][] = ['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
+      const severity = cveFindings.reduce(
+        (current, f) =>
+          ranks.indexOf(f.cve.cvss.severity) > ranks.indexOf(current) ? f.cve.cvss.severity : current,
+        (cveFindings.length ? 'UNKNOWN' : advisory.severity) as Advisory['severity'],
+      );
+      const primary = cveFindings.find((f) => f.cve.cvss.severity === severity) || cveFindings[0];
+      const score = primary?.cve.cvss.score;
+      const cveColour = SEVERITY_COLORS[severity] || SEVERITY_COLORS.UNKNOWN;
+      const scoreLabel = typeof score === 'number' ? score.toFixed(1) : 'N/A';
+      const rawDescription =
+        cveFindings.find((f) => f.cve.description)?.cve.description || 'No vendor description published.';
+      const description =
+        rawDescription.length > 600 ? `${rawDescription.slice(0, 597).trimEnd()}…` : rawDescription;
+      const published = primary?.cve.publishedDate
+        ? formattedDate(primary.cve.publishedDate)
+        : formattedDate(advisory.createdDate);
+      const modified = primary?.cve.modifiedDate
+        ? formattedDate(primary.cve.modifiedDate)
+        : formattedDate(advisory.createdDate);
+      const vendors = cveFindings
+        .filter((f) => f.cve.remediation?.vendorAdvisoryRef)
+        .map((f) => ({
+          url: safeHttpHref(f.cve.remediation!.vendorAdvisoryRef!),
+          name: escape(f.cve.cveId),
+        }));
+      const lowConfidenceNote = (finding?: Finding) => {
+        if (!finding || !confidenceIsLimited(finding)) return '';
+        const confidenceLabel = confidencePercent(finding);
+        const evidence = stripConfidenceEvidence(finding.matchingEvidence);
+        return `<div style="margin:5px 0 0;padding:7px 9px;border-left:3px solid #b7791f;background:#fffbeb;font-size:11px;line-height:17px;color:#7c2d12;"><strong>Low confidence${confidenceLabel ? ` (${escape(confidenceLabel)})` : ''}:</strong> ${escape(evidence || 'Applicability could not be fully verified; confirm the affected version with the vendor before remediation.')}</div>`;
+      };
+      const productMetadata = (cveFindings.length ? cveFindings : [undefined])
+        .map((finding) => {
+          const productName = findingProductLabel(finding);
+          const version = finding ? affectedVersionLabel(finding) || 'Unavailable; confirm with vendor' : 'Unavailable';
+          return `<div style="margin:5px 0 0;font-size:11px;line-height:17px;color:#475569;"><strong>Product:</strong> ${escape(productName)} &nbsp; <strong>Affected version(s):</strong> ${escape(version)}<br/><strong>Published:</strong> ${escape(formattedDate(finding?.cve.publishedDate))} &nbsp; <strong>Last modified:</strong> ${escape(formattedDate(finding?.cve.modifiedDate))}</div>${lowConfidenceNote(finding)}`;
+        })
+        .join('');
+      return {
+        cve_id: escape(cve),
+        cve_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(cve)}`,
+        severity: escape(severity),
+        severity_color: cveColour,
+        cvss_score: scoreLabel,
+        published_date: escape(published),
+        last_modified_date: escape(modified),
+        description: escape(description),
+        vendors,
+        product_metadata: productMetadata,
+      };
+    });
+
+  // Build reference objects for the {{#each references}} block.
+  const referenceDetails = findings
+    ?.filter((f) => f.cve.remediation?.vendorAdvisoryRef)
+    .map((f) => ({
+      url: safeHttpHref(f.cve.remediation!.vendorAdvisoryRef!),
+      title: escape(`Vendor advisory for ${f.cve.cveId}`),
+    })) || [];
+
+  const values: Record<string, string | unknown> = {
     severity: advisory.severity,
+    severity_text,
+    severity_color,
     advisory_id: advisory.id,
     advisory_title: advisory.title,
     dispatch_date: (options.generatedAt ?? new Date()).toLocaleString('en-GB', {
@@ -295,6 +366,7 @@ export function renderAdvisory(
       hour: '2-digit',
       minute: '2-digit',
     }),
+    advisory_published_date: formattedDate(advisory.createdDate),
     executive_summary: escape(stripGeneratedExecutiveSummaryMarkup(composedSummary)),
     cve_ids: advisory.cveIds.join(', '),
     affected_systems: advisory.affectedSystems.join('\n'),
@@ -322,97 +394,18 @@ export function renderAdvisory(
           `<a href="https://nvd.nist.gov/vuln/detail/${encodeURIComponent(cve)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin:0 8px 4px 0;color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">${escape(cve)}</a>`,
       )
       .join(', '),
-    cve_details: [...advisory.cveIds]
-      // CRITICAL -> HIGH -> MEDIUM -> LOW -> UNKNOWN; ties broken by CVE id so a
-      // re-send of the same findings renders in a stable order.
-      .sort((a: string, b: string) => severityRank(b, advisory, findings) - severityRank(a, advisory, findings) || a.localeCompare(b))
-      .map((cve: string) => {
-        // Multiple findings can share a CVE (one per matched asset); use the
-        // highest-ranked severity among them so the badge never understates
-        // risk for this specific CVE.
-        const cveFindings = findings?.filter((f) => f.cveId === cve) || [];
-        const ranks: Advisory['severity'][] = ['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
-        const severity = cveFindings.reduce(
-          (current, f) =>
-            ranks.indexOf(f.cve.cvss.severity) > ranks.indexOf(current) ? f.cve.cvss.severity : current,
-          (cveFindings.length ? 'UNKNOWN' : advisory.severity) as Advisory['severity'],
-        );
-        const primary = cveFindings.find((f) => f.cve.cvss.severity === severity) || cveFindings[0];
-        const score = primary?.cve.cvss.score;
-        const kev = cveFindings.some((f) => f.cve.cisaKev?.isKev);
-        // Only a real, parseable http(s) vendor reference is published. The old
-        // fallback chain ended at `advisory.vendorLink`, which is a synthesized
-        // value rather than a vendor advisory URL, so "View Source" could point
-        // at nothing useful.
-        const vendorHref = safeHttpHref(
-          cveFindings.find((f) => f.cve.remediation?.vendorAdvisoryRef)?.cve.remediation?.vendorAdvisoryRef || '',
-        );
-        // The description is rendered as prose (clamped) rather than a bullet:
-        // it is the substance of the entry, not an attribute of it.
-        const rawDescription =
-          cveFindings.find((f) => f.cve.description)?.cve.description || 'No vendor description published.';
-        const description =
-          rawDescription.length > 600 ? `${rawDescription.slice(0, 597).trimEnd()}…` : rawDescription;
-        const colour = SEVERITY_COLORS[severity] || SEVERITY_COLORS.UNKNOWN;
-        const scoreLabel = typeof score === 'number' ? score.toFixed(1) : 'N/A';
-        // Every finding is dispatched, including those the matching policy could
-        // not confirm with full confidence. Rather than withholding them (which
-        // silently lost real exposure), the advisory states the limitation on the
-        // finding itself so the reader knows what still has to be verified.
-        const lowConfidenceNote = (finding?: Finding) => {
-          if (!finding || !confidenceIsLimited(finding)) return '';
-          const confidenceLabel = confidencePercent(finding);
-          const evidence = stripConfidenceEvidence(finding.matchingEvidence);
-          return `<div style="margin:5px 0 0;padding:7px 9px;border-left:3px solid #b7791f;background:#fffbeb;font-size:11px;line-height:17px;color:#7c2d12;"><strong>Low confidence${confidenceLabel ? ` (${escape(confidenceLabel)})` : ''}:</strong> ${escape(evidence || 'Applicability could not be fully verified; confirm the affected version with the vendor before remediation.')}</div>`;
-        };
-        const productMetadata = (cveFindings.length ? cveFindings : [undefined])
-          .map((finding) => {
-            const productName = findingProductLabel(finding);
-            const version = finding ? affectedVersionLabel(finding) || 'Unavailable; confirm with vendor' : 'Unavailable';
-            return `<div style="margin:5px 0 0;font-size:11px;line-height:17px;color:#475569;"><strong>Product:</strong> ${escape(productName)} &nbsp; <strong>Affected version(s):</strong> ${escape(version)}<br/><strong>Published:</strong> ${escape(formattedDate(finding?.cve.publishedDate))} &nbsp; <strong>Last modified:</strong> ${escape(formattedDate(finding?.cve.modifiedDate))}</div>${lowConfidenceNote(finding)}`;
-          })
-          .join('');
-        // NVD is the authoritative, always-available source for a CVE id; it is
-        // the link the reader needs from the CVE ID itself.
-        const nvdHref = `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(cve)}`;
-        const sources = [`<a data-pdf-source="NVD" href="${nvdHref}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">NVD</a>`];
-        if (vendorHref)
-          sources.push(
-            `<a data-pdf-source="Vendor advisory" href="${escape(vendorHref)}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">Vendor advisory</a>`,
-          );
-        sources.push(
-          `<a data-pdf-source="CISA KEV" href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">CISA KEV</a>`,
-        );
-        return `<table class="vulnstream-pdf-card" data-pdf-cve="${escape(cve)}" data-pdf-severity="${escape(severity)}" data-pdf-score="${scoreLabel}" data-pdf-kev="${kev}" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 16px;border-collapse:separate;border-spacing:0;background:#ffffff;">
-  <tbody><tr>
-    <td style="padding:14px;border:1px solid #e2e8f0;border-radius:4px;background:#ffffff;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
-    <tr class="vulnstream-pdf-header">
-      <td style="padding:0;vertical-align:top;">
-        <div style="font-size:14px;font-weight:bold;color:#0f172a;line-height:20px;">
-          <a href="${nvdHref}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">${escape(cve)}</a>
+    cve_details: vulnerabilityDetails.map((v) => `
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8fafc;border:1px solid #e2e8f0;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:12px;">
+      <tr><td style="padding:12px;">
+        <div style="font-size:14px;font-weight:700;color:#0f172a;">
+          <a href="${v.cve_url}" target="_blank" style="color:#0f172a;text-decoration:none;">${v.cve_id}</a>
         </div>
-      </td>
-      <td width="1%" align="right" style="padding:0 0 0 12px;white-space:nowrap;vertical-align:top;">
-        <span style="display:inline-block;background:${colour};color:#ffffff;padding:3px 9px;border-radius:4px;font-size:11px;font-weight:bold;letter-spacing:0.3px;">${escape(severity)} \u00b7 CVSS ${scoreLabel}</span>
-        ${kev ? '<span style="display:inline-block;margin-left:6px;background:#7f1d1d;color:#ffffff;padding:3px 9px;border-radius:4px;font-size:11px;font-weight:bold;letter-spacing:0.3px;">KEV</span>' : ''}
-      </td>
-    </tr>
-    <tr>
-      <td colspan="2" style="padding:8px 0 0;font-size:12px;line-height:19px;color:#334155;text-align:left;">${escape(description)}</td>
-    </tr>
-    <tr>
-      <td colspan="2" style="padding:6px 0 0;text-align:left;">${productMetadata}</td>
-    </tr>
-    <tr class="vulnstream-pdf-sources">
-      <td colspan="2" style="padding:8px 0 0;font-size:11px;line-height:16px;color:#64748b;text-align:left;">Sources: ${sources.join(' <span style="color:#cbd5e1;">&middot;</span> ')}</td>
-    </tr>
-  </table></td>
-  </tr></tbody>
-</table>`;
-      })
-      .join('\n'),
-    // Prose blocks instead of bullets: a numbered step list reads as an ordered
-    // procedure and survives plain-text clients without a bullet glyph.
+        <div style="padding-top:2px;"><span style="font-size:12px;font-weight:700;color:${v.severity_color};">${v.severity} \u00b7 CVSS ${v.cvss_score}</span></div>
+        <div style="font-size:11px;color:#64748b;padding-top:2px;">Published: ${v.published_date} | Last Modified: ${v.last_modified_date}</div>
+        <div style="font-size:13px;line-height:20px;color:#334155;padding-top:6px;">${v.description}</div>
+        ${v.product_metadata}
+      </td></tr></table>
+    `).join('\n'),
     mitigation_steps: `<div style="font-size:12px;line-height:20px;color:#334155;">
   <div style="margin:0 0 6px;"><strong>1.</strong>&nbsp; Confirm affected products and versions with current vendor guidance.</div>
   <div style="margin:0 0 6px;"><strong>2.</strong>&nbsp; Use vendor-documented workarounds or compensating controls only when appropriate.</div>
@@ -429,9 +422,31 @@ export function renderAdvisory(
      reviewer_comment: edits.reviewerComment
        ? `<strong>Reviewer note${edits.reviewerName ? ` by ${escape(edits.reviewerName)}` : ''}</strong> ${escape(edits.reviewerComment).replace(/\n/g, '<br/>')}`
        : '',
-     severity_badge: SEVERITY_BADGE(advisory.severity),
-     severity_header_badge: SEVERITY_BADGE(advisory.severity, ' SEVERITY'),
-   };
+    severity_badge: SEVERITY_BADGE(advisory.severity),
+    severity_header_badge: SEVERITY_BADGE(advisory.severity, ' SEVERITY'),
+    severity_summary: (() => {
+      const counts: Record<string, number> = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, UNKNOWN: 0 };
+      for (const cveId of advisory.cveIds) {
+        const sev = cveSeverity(cveId, advisory, findings);
+        counts[sev] = (counts[sev] || 0) + 1;
+      }
+      const order: string[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
+      const labels: Record<string, string> = { CRITICAL: 'Critical', HIGH: 'High', MEDIUM: 'Medium', LOW: 'Low', UNKNOWN: 'Unknown' };
+      const parts: string[] = [];
+      for (const sev of order) {
+        const n = counts[sev];
+        if (n > 0) {
+          const color = SEVERITY_COLORS[sev] || SEVERITY_COLORS.UNKNOWN;
+          parts.push(
+            `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:0.3px;background:${color};color:#ffffff;"><span style="display:inline-block;width:8px;height:8px;background:#ffffff;border-radius:50%;opacity:0.9;"></span>${n} ${escape(labels[sev])}</span>`
+          );
+        }
+      }
+      return parts.join(' <span style="color:#94a3b8;padding:0 5px;">·</span> ');
+    })(),
+    vulnerabilities: vulnerabilityDetails,
+    references: referenceDetails,
+  };
   const rawHtmlTokens = new Set([
     'cve_id_links',
     'cve_details',
@@ -442,12 +457,41 @@ export function renderAdvisory(
     'recommended_actions',
     'severity_badge',
     'severity_header_badge',
+    'severity_summary',
   ]);
+  // Process {{#if key}}...{{/if}} conditional blocks.
   let processed = template.replace(/\{\{#if\s+([a-z_]+)\}\}([\s\S]*?)\{\{\/if\}\}/g, (_, key, content) => {
-    return values[key] && values[key].trim() ? content : '';
+    const val = values[key];
+    const truthy = val !== undefined && val !== null && val !== '' &&
+      !(Array.isArray(val) && val.length === 0);
+    return truthy ? content : '';
   });
-  return processed.replace(/{{([a-z_]+)}}/g, (_, key) => {
-    if (rawHtmlTokens.has(key)) return values[key] || '';
-    return escape(values[key] || '');
+  // Process {{#each array}}...{{/each}} loops.
+  processed = processed.replace(/\{\{#each\s+([a-z_]+)\}\}([\s\S]*?)\{\{\/each\}\}/g, (_, key, content) => {
+    const arr = values[key];
+    if (!Array.isArray(arr) || arr.length === 0) return '';
+    return arr.map((item) => {
+      let inner = content;
+      // Replace {{field}} inside the loop body with item[field].
+      for (const [k, v] of Object.entries(item as Record<string, unknown>)) {
+        inner = inner.replace(new RegExp(`\\{\\{\\s*${k}\\s*\\}\\}`, 'g'), String(v ?? ''));
+      }
+      // Replace {{#if field}}...{{/if}} inside the loop body.
+      inner = inner.replace(/\{\{#if\s+([a-z_]+)\}\}([\s\S]*?)\{\{\/if\}\}/g, (_2: string, k2: string, c2: string) => {
+        const v2 = (item as Record<string, unknown>)[k2];
+        const truthy2 = v2 !== undefined && v2 !== null && v2 !== '' &&
+          !(Array.isArray(v2) && v2.length === 0);
+        return truthy2 ? c2 : '';
+      });
+      return inner;
+    }).join('');
+  });
+  // Replace {{{key}}} (raw HTML) and {{key}} (escaped or raw for HTML fields) for top-level values.
+  return processed.replace(/{{{([a-z_]+)}}}/g, (_, key) => {
+    if (rawHtmlTokens.has(key)) return String(values[key] || '');
+    return escape(String(values[key] || ''));
+  }).replace(/{{([a-z_]+)}}/g, (_, key) => {
+    if (rawHtmlTokens.has(key)) return String(values[key] || '');
+    return escape(String(values[key] || ''));
   });
 }

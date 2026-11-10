@@ -10,6 +10,7 @@ const one: ConsolidatedNewsItem = {
   },
   assets: ['server-1'], cveIds: [], evidence: ['Inventory correlation'],
   zeroDay: false, matchIds: ['m1'],
+  consolidationReason: 'new_article', suppressesCveIds: [],
 };
 
 test('consolidated news remains a styled HTML document', () => {

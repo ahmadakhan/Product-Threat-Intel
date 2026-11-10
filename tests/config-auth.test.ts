@@ -129,7 +129,7 @@ test('the default egress allowlist covers every redirect target of the recommend
   }
   assert.ok(hosts.has('www.cisecurity.com'), 'the configured URL host must stay allowlisted');
   assert.ok(hosts.has('api.osv.dev'), 'the vulnerability search primary database must stay allowlisted');
-  assert.ok(hosts.has('services.nvd.nist.gov'), 'the vulnerability search CVE enrichment must stay allowlisted');
+  assert.ok(hosts.has('api.vulncheck.com'), 'the vulnerability search CVE enrichment must stay allowlisted');
 });
 
 test('every recommended feed URL host is allowlisted', () => {

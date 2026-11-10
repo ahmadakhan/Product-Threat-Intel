@@ -15,8 +15,6 @@ export interface IngestionState {
 export interface FeedCursor extends IngestionState { fingerprint: string }
 const HOUR = 3600000;
 export const SYNC_OVERLAP_MS = 10 * 60000;
-/** Maximum incremental window for sources with per-run record caps (e.g. OpenCVE's 500-CVE limit). */
-export const OPENCVE_MAX_WINDOW_HOURS = 3;
 /** Bootstrap at most one day; resume older checkpoints in bounded daily slices. */
 export function ingestionWindow(scopeHours: number, state: IngestionState = {}, now = Date.now(), maxWindowHours = 24) {
   const cursor = state.cursor ? Date.parse(state.cursor) : NaN;

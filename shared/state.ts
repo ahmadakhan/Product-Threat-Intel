@@ -67,9 +67,23 @@ export const DEFAULT_SETTINGS: AppSettings = {
   schedulerIntervalMinutes: 60,
   schedulerEnabled: true,
   advisoryPrefix: 'ADV-',
-  autoDispatchEnabled: false,
-  autoDispatchConfidenceThreshold: 90,
-  autoDispatchUnverifiableMatches: false,
+  // Autodispatch is on by default. There is no review queue: every finding is
+  // dispatched and the advisory states the limitation on the finding itself,
+  // so the defaults govern how a finding is LABELLED, not whether the security
+  // team hears about it. Unverifiable matches (version not asserted by the
+  // inventory) participate in the threshold like any other match; an operator
+  // who wants them always flagged review-required turns this off in Settings.
+  // Keep this consistent with the settingsSchema default in server/validation.ts
+  // and the coercion in SettingsView — a divergence means fresh installs,
+  // schema defaults and the UI disagree about the same setting.
+  autoDispatchEnabled: true,
+  confirmedFindingThreshold: 90,
+  autoDispatchUnverifiableMatches: true,
+  maxFindingsPerRun: 10000,
+  maxDispatchesPerRunPerFeed: 10000,
+  maxTotalFindingsPerRun: 50000,
+  circuitBreakerCooldownMinutes: 60,
+  circuitBreakerFeedCooldownMinutes: 60,
   autoDispatchNewsToSecurityTeam: false,
   reviewUnverifiableMatches: false,
   deferEveryoneUntilSecurityDelivered: false,

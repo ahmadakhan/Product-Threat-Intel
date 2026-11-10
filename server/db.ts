@@ -129,7 +129,7 @@ export const schemaLockKey = 'hashtext(COALESCE(current_schema(), current_databa
  * it matches the highest `NNN_*.sql` file, so a forgotten bump fails the suite
  * rather than shipping a build that boots against an un-migrated database.
  */
-export const REQUIRED_SCHEMA_VERSION = 41;
+export const REQUIRED_SCHEMA_VERSION = 42;
 
 /**
  * Migration files sorted by numeric prefix. Only plain `NNN_name.sql` entries
@@ -268,9 +268,16 @@ export async function applyIndexMigrations(pool: pg.Pool): Promise<void> {
         }
       }
     } finally {
-      await client
-        .query('SELECT pg_advisory_unlock(800005, hashtext(COALESCE(current_schema(), current_database())))')
-        .catch(() => {});
+      try {
+        await client.query(
+          'SELECT pg_advisory_unlock(800005, hashtext(COALESCE(current_schema(), current_database())))',
+        );
+      } catch {
+        // If the release fails the session advisory lock stays pinned on this
+        // connection. Destroying it prevents a recycled connection from handing
+        // a held lock to the next migration and blocking every concurrent deploy.
+        failed = true;
+      }
     }
   } catch (error) {
     failed = true;

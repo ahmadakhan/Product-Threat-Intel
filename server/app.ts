@@ -66,7 +66,6 @@ import { createHash } from 'node:crypto';
 import { stableJson } from '../src/utils/deduplicator.ts';
 import { advisoryEmail } from './advisoryEmail';
 import { currentAdvisoryBody } from './advisoryRebuild.ts';
-import { renderAdvisoryPdf } from './pdf';
 import {
   effectiveSubject,
   normalizeEmailSubject,
@@ -112,7 +111,7 @@ import type {
   NormalizedCVE,
   AliasEntry,
   WatchListItem,
-  NvdCpeSearchResponse,
+  VulncheckCpeSearchResponse,
   ThreatSearchResponse,
   ThreatAnalytics,
   CpeMatchSimulation,
@@ -506,6 +505,58 @@ export function createApp(
       });
     }),
   );
+  // /healthz: comprehensive health for Kubernetes probes and load balancers.
+  // Includes leader status, circuit breaker state, dead letter count, and
+  // pipeline status so operators can see the full autonomy picture at a glance.
+  app.get('/healthz', asyncRoute(async (_req, res) => {
+    const started = Date.now();
+    await pool.query('SELECT 1');
+    const databaseLatencyMs = Date.now() - started;
+    const supervisor = options.correlation?.supervisor;
+    const cbState = await get<any>(pool, 'systemState', 'circuit-breaker-state').catch(() => undefined);
+    const leaderState = await get<any>(pool, 'systemState', 'leader-election').catch(() => undefined);
+    const deadLetterCount = await pool.query(
+      `SELECT count(*) FROM records
+        WHERE kind='delivery_dead_letters' AND COALESCE(data->>'resolvedAt','')=''`,
+    ).then((r) => Number(r.rows[0]?.count ?? 0));
+    const now = Date.now();
+    const leaderStale = !leaderState ||
+      !(leaderState.heartbeatAt && Date.parse(leaderState.heartbeatAt) > now - 30000);
+    const circuitOpen = cbState &&
+      cbState.cooldowns?.overallUntil &&
+      Date.parse(cbState.cooldowns.overallUntil) > now;
+    const healthChecks: Record<string, { status: 'ok' | 'degraded' | 'error'; message?: string }> = {
+      database: { status: 'ok', message: `SELECT 1 in ${databaseLatencyMs}ms` },
+      supervisor: {
+        status: supervisor?.health === 'HEALTHY' ? 'ok' : 'degraded',
+        message: supervisor?.health ?? 'unknown',
+      },
+      leader: {
+        status: leaderStale ? 'error' : 'ok',
+        message: leaderStale ? 'no leader or stale heartbeat' : `leader: ${leaderState?.leaderId ?? 'unknown'}`,
+      },
+      circuitBreaker: {
+        status: circuitOpen ? 'degraded' : 'ok',
+        message: circuitOpen ? 'overall dispatch cap tripped' : 'all dispatch paths open',
+      },
+      deadLetters: {
+        status: deadLetterCount > 50 ? 'degraded' : 'ok',
+        message: `${deadLetterCount} unresolved dead letter(s)`,
+      },
+    };
+    const allOk = Object.values(healthChecks).every((c) => c.status === 'ok');
+    const anyError = Object.values(healthChecks).some((c) => c.status === 'error');
+    res.status(anyError ? 503 : allOk ? 200 : 200).json({
+      status: anyError ? 'unhealthy' : allOk ? 'healthy' : 'degraded',
+      checks: healthChecks,
+      databaseLatencyMs,
+      leaderId: leaderState?.leaderId ?? null,
+      isLeader: !leaderStale && Boolean(leaderState),
+      circuitBreakerTripped: circuitOpen ?? false,
+      unresolvedDeadLetters: deadLetterCount,
+      uptimeMs: process.uptime() * 1000,
+    });
+  }));
   app.post('/api/login', loginHandler(pool, config));
   // Reset endpoints are public: enforce shared IP and account quotas before
   // account lookup, mail delivery, code verification, or password hashing.
@@ -1891,7 +1942,6 @@ export function createApp(
       let response: ResponseData;
       try {
         const testUrl = new URL(feed.url);
-        if (feed.type === 'NVD_API') testUrl.searchParams.set('resultsPerPage', '1');
         if (feed.type === 'OTX_API') {
           if (feed.url !== OTX_SUBSCRIBED_PULSES_URL || feed.authType !== 'API_KEY')
             throw new HttpError(400, 'AlienVault OTX requires its subscribed-pulses API endpoint and an API key');
@@ -1899,27 +1949,16 @@ export function createApp(
         }
         const osvProbe = feed.type === 'OSV_API';
         const requestOptions =
-          feed.type === 'NVD_API'
-            ? { headers, timeoutMs: 25000, socketTimeoutMs: 20000, maxResponseBytes: 256 * 1024 }
-            : feed.type === 'MITRE_CVE'
-              ? { headers, timeoutMs: 120000, socketTimeoutMs: 60000, maxResponseBytes: 64 * 1024 * 1024 }
-              : feed.type === 'OPENCVE_API'
-                ? {
-                    headers,
-                    timeoutMs: (feed.requestTimeoutSeconds || 60) * 1000,
-                    socketTimeoutMs: Math.min((feed.requestTimeoutSeconds || 60) * 1000, 30000),
-                    maxResponseBytes: 4 * 1024 * 1024,
-                  }
-                : feed.type === 'RSS_ATOM'
-                  ? { headers, timeoutMs: 25000, maxResponseBytes: RSS_MAX_BYTES }
-                  : feed.type === 'OTX_API'
-                    ? {
-                        headers,
-                        timeoutMs: (feed.requestTimeoutSeconds || 60) * 1000,
-                        socketTimeoutMs: Math.min((feed.requestTimeoutSeconds || 60) * 1000, 30000),
-                        maxResponseBytes: 8 * 1024 * 1024,
-                      }
-                    : osvProbe
+          feed.type === 'RSS_ATOM'
+            ? { headers, timeoutMs: 25000, maxResponseBytes: RSS_MAX_BYTES }
+            : feed.type === 'OTX_API'
+              ? {
+                  headers,
+                  timeoutMs: (feed.requestTimeoutSeconds || 60) * 1000,
+                  socketTimeoutMs: Math.min((feed.requestTimeoutSeconds || 60) * 1000, 30000),
+                  maxResponseBytes: 8 * 1024 * 1024,
+                }
+              : osvProbe
                       ? {
                           method: 'POST' as const,
                           headers: { ...headers, 'content-type': 'application/json' },
@@ -2330,44 +2369,8 @@ export function createApp(
       });
     }),
   );
-   app.post(
-     '/api/email/:id/preview-edits',
-     requireRole('ADMIN', 'OPERATOR'),
-     asyncRoute(async (req, res) => {
-       const id = outboxId(req.params.id);
-       const proposedEdits: ReviewEdits = z
-         .object({
-           subject: z.string().max(200).optional(),
-           audienceNotice: z.string().max(2000).optional(),
-           reviewerComment: z.string().max(2000).optional(),
-           reviewerName: z.string().max(100).optional(),
-           customBodyOverride: z.string().max(50000).optional(),
-           customFields: z.record(z.string(), z.string().max(2000)).optional(),
-         })
-         .parse(req.body);
-        const row = await pool.query(
-          `SELECT o.payload->>'html' AS "html", o.payload->>'text' AS "text",
-                  o.payload->>'subject' AS "subject", o.edits
-            FROM outbox o
-           WHERE o.id=$1 AND o.channel='email' AND ${editableJobStatusSql('o.status')}`,
-          [id],
-        );
-        if (!row.rowCount) throw new HttpError(404, 'Email job not found or not in a previewable state');
-        const record = row.rows[0];
-        const mergedEdits: ReviewEdits = { ...(record.edits || {}), ...proposedEdits };
-        const content = editedJobContent(record, mergedEdits);
-        // Normalize HTML preview so text (audience notice, reviewer comment) remains visible.
-        if (!content.html || !content.html.includes('<body')) {
-          const bodyWrap = content.html && content.html.length > 0
-            ? `<html><head><meta charset="utf-8"><title>Email Preview</title></head><body>${content.html}</body></html>`
-            : '<html><head><meta charset="utf-8"><title>Email Preview</title></head><body></body></html>';
-          content.html = bodyWrap;
-        }
-       res.json({ html: content.html, text: content.text, subject: content.subject, edits: mergedEdits });
-     }),
-   );
   app.post(
-    '/api/email/:id/preview-pdf',
+    '/api/email/:id/preview-edits',
     requireRole('ADMIN', 'OPERATOR'),
     asyncRoute(async (req, res) => {
       const id = outboxId(req.params.id);
@@ -2379,6 +2382,7 @@ export function createApp(
           reviewerName: z.string().max(100).optional(),
           customBodyOverride: z.string().max(50000).optional(),
           customFields: z.record(z.string(), z.string().max(2000)).optional(),
+          attachHtml: z.boolean().optional(),
         })
         .parse(req.body);
       const row = await pool.query(
@@ -2389,26 +2393,17 @@ export function createApp(
         [id],
       );
       if (!row.rowCount) throw new HttpError(404, 'Email job not found or not in a previewable state');
-      // The PDF is rendered from exactly the HTML that would be emailed, which
-      // is what makes an edit in the Action Center update the attachment too.
-      const content = editedJobContent(row.rows[0], {
-        ...(row.rows[0].edits || {}),
-        ...proposedEdits,
-      });
-      if (!content.html.trim())
-        throw new HttpError(400, 'The edited email has no renderable body to convert to PDF');
-      try {
-        const pdf = await renderAdvisoryPdf(content.html);
-        res.setHeader('content-type', 'application/pdf');
-        res.setHeader('content-disposition', 'inline; filename="email-preview.pdf"');
-        res.setHeader('cache-control', 'no-store');
-        res.send(Buffer.from(pdf));
-      } catch (error) {
-        throw new HttpError(
-          502,
-          `PDF rendering failed: ${error instanceof Error ? error.message : 'unknown renderer error'}`,
-        );
+      const record = row.rows[0];
+      const mergedEdits: ReviewEdits = { ...(record.edits || {}), ...proposedEdits };
+      const content = editedJobContent(record, mergedEdits);
+      // Normalize HTML preview so text (audience notice, reviewer comment) remains visible.
+      if (!content.html || !content.html.includes('<body')) {
+        const bodyWrap = content.html && content.html.length > 0
+          ? `<html><head><meta charset="utf-8"><title>Email Preview</title></head><body>${content.html}</body></html>`
+          : '<html><head><meta charset="utf-8"><title>Email Preview</title></head><body></body></html>';
+        content.html = bodyWrap;
       }
+      res.json({ html: content.html, text: content.text, subject: content.subject, edits: mergedEdits });
     }),
   );
   app.post(
@@ -2621,6 +2616,7 @@ export function createApp(
           customFields: z.record(z.string(), z.string().max(2000)).optional(),
           recipientMode: z.enum(['SINGLE_EMAIL', 'SECURITY_TEAM', 'EVERYONE']),
           customEmail: z.string().email().optional(),
+          attachHtml: z.boolean().optional(),
           reason: z.string().trim().max(1000).default(''),
         })
         .parse(req.body);
@@ -2671,6 +2667,7 @@ export function createApp(
           ...(data.customFields !== undefined && { customFields: data.customFields }),
           recipientMode: data.recipientMode,
           ...(data.customEmail !== undefined && { customEmail: data.customEmail }),
+          ...(data.attachHtml !== undefined && { attachHtml: data.attachHtml }),
         };
         const snapshot = await state(db);
         // Re-render for the new audience instead of reusing the source body: a

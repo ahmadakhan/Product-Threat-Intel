@@ -3,11 +3,11 @@ import { parseCPE23 } from '../../src/utils/cpeMatcher.ts';
 import type { FindingFeatures } from './models/reviewRanker.ts';
 
 const APPLICABILITY_FEED_WEIGHTS: Partial<Record<FeedType, number>> = {
-  NVD_API: 40,
-  MITRE_CVE: 35,
-  OPENCVE_API: 25,
   OSV_API: 40,
   GITHUB_ADVISORIES: 35,
+  // VulnCheck NVD++ mirrors the authoritative NVD/MITRE registries, including
+  // their CPE applicability configurations, so it earns the top weight.
+  VULNCHECK_NVD: 40,
 };
 
 const finite = (value: unknown) =>

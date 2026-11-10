@@ -26,7 +26,7 @@ const ACRONYMS: Record<string, string> = {
   dns: 'DNS',
   smtp: 'SMTP',
   ssrf: 'SSRF',
-  nvd: 'NVD',
+  vulncheck: 'VulnCheck NVD++',
   kev: 'KEV',
   epss: 'EPSS',
   utc: 'UTC',

@@ -4,14 +4,14 @@ import { decrypt, encryptionKeys } from './secrets';
 import { parseCPE23, normalizeCpeForComparison } from '../src/utils/cpeMatcher.ts';
 import type { Config } from './config';
 import type { Requester } from './network';
-import type { ThreatFeed, NvdCpeSearchResult, NvdCpeSearchResponse } from '../src/types/index.ts';
+import type { ThreatFeed, VulncheckCpeSearchResult, VulncheckCpeSearchResponse } from '../src/types/index.ts';
 
 import { isProductWildcard, dictionaryEntryMatchesWildcard } from '../src/utils/registrationCpe.ts';
 
-const NVD_CPE_ENDPOINT = 'https://services.nvd.nist.gov/rest/json/cpes/2.0';
+const VULNCHECK_NVD_CPE_ENDPOINT = 'https://api.vulncheck.com/v3/index/nvd';
 
 export function buildCpeUrl(keyword: string, resultsPerPage: number): URL {
-  const url = new URL(NVD_CPE_ENDPOINT);
+  const url = new URL(VULNCHECK_NVD_CPE_ENDPOINT);
   url.searchParams.set('keywordSearch', keyword);
   url.searchParams.set('resultsPerPage', String(resultsPerPage));
   return url;
@@ -25,7 +25,7 @@ export function buildCpeUrl(keyword: string, resultsPerPage: number): URL {
  * dictionary entries regardless of the NVD-registered vendor label.
  */
 export function buildCpeMatchStringUrl(matchString: string, resultsPerPage: number): URL {
-  const url = new URL(NVD_CPE_ENDPOINT);
+  const url = new URL(VULNCHECK_NVD_CPE_ENDPOINT);
   url.searchParams.set('cpeMatchString', matchString);
   url.searchParams.set('resultsPerPage', String(resultsPerPage));
   return url;
@@ -59,7 +59,7 @@ function parseNvdCpeProducts(
   exactCpe?: string,
   seenCpes?: Set<string>,
   viaWildcardVendor?: boolean,
-): { results: NvdCpeSearchResult[]; totalResults: number } {
+): { results: VulncheckCpeSearchResult[]; totalResults: number } {
   let data: any;
   try {
     data = JSON.parse(body);
@@ -71,7 +71,7 @@ function parseNvdCpeProducts(
     throw new Error('NVD returned an invalid CPE search response');
 
   const configurations: any[] = data.products;
-  const results: NvdCpeSearchResult[] = [];
+  const results: VulncheckCpeSearchResult[] = [];
   for (const entry of configurations) {
     const cpe = entry?.cpe || entry;
     const name = typeof cpe?.cpeName === 'string' ? cpe.cpeName : '';
@@ -109,6 +109,14 @@ function parseNvdCpeProducts(
  * authentication. Returns an empty string when no NVD key is configured, in
  * which case the NVD CPE search is served from the public, unauthenticated
  * rate budget (5 requests / 30s).
+ *
+ * NVD feeds have been removed in favor of VulnCheck NVD++; this function
+ * always returns an empty string.
+ */
+/**
+ * CPE dictionary search rides on the VulnCheck NVD++ credential (the source that
+ * replaced the standalone NVD feed): an enabled VULNCHECK_NVD feed with a stored
+ * Bearer token supplies the key for keyword searches and cpeNameId verifications.
  */
 export async function loadNvdApiKey(db: Db, config: Config): Promise<string> {
   let feeds: ThreatFeed[];
@@ -118,40 +126,39 @@ export async function loadNvdApiKey(db: Db, config: Config): Promise<string> {
     console.warn(JSON.stringify({ level: 'warn', event: 'nvd_api_key_feed_query_failed' }));
     return '';
   }
-  const nvd = feeds.find((f) => f.type === 'NVD_API' && f.authType === 'API_KEY' && f.enabled);
-  if (!nvd) {
-    const nvdFeeds = feeds.filter((f) => f.type === 'NVD_API');
+  const vulncheck = feeds.find((f) => f.type === 'VULNCHECK_NVD' && f.authType === 'BEARER' && f.enabled);
+  if (!vulncheck) {
+    const vulncheckFeeds = feeds.filter((f) => f.type === 'VULNCHECK_NVD');
     console.warn(
       JSON.stringify({
         level: 'warn',
         event: 'nvd_api_key_not_configured',
-        nvdFeedCount: nvdFeeds.length,
-        authTypes: nvdFeeds.map((f) => f.authType),
-        enabledFlags: nvdFeeds.map((f) => f.enabled),
+        nvdFeedCount: vulncheckFeeds.length,
+        authTypes: vulncheckFeeds.map((f) => f.authType),
+        enabledFlags: vulncheckFeeds.map((f) => f.enabled),
       }),
     );
     return '';
   }
-  if (!nvd.authSecretKey) {
+  if (!vulncheck.authSecretKey) {
     console.warn(
       JSON.stringify({
         level: 'warn',
-        event: 'nvd_api_key_secret_missing',
-        feedId: nvd.id,
-        authType: nvd.authType,
+        event: 'nvd_api_key_missing_secret',
+        feedId: vulncheck.id,
       }),
     );
     return '';
   }
   try {
-    return decrypt(nvd.authSecretKey, encryptionKeys(config), `feed:${nvd.id}`);
-  } catch (err) {
+    return decrypt(vulncheck.authSecretKey, encryptionKeys(config), `feed:${vulncheck.id}`);
+  } catch (error) {
     console.warn(
       JSON.stringify({
         level: 'warn',
         event: 'nvd_api_key_decrypt_failed',
-        feedId: nvd.id,
-        error: err instanceof Error ? err.message : String(err),
+        feedId: vulncheck.id,
+        message: error instanceof Error ? error.message : 'unknown error',
       }),
     );
     return '';
@@ -175,7 +182,7 @@ export async function searchNvdCpes(
   limit: number,
   exactCpe?: string,
   cpeNameId?: string,
-): Promise<NvdCpeSearchResponse> {
+): Promise<VulncheckCpeSearchResponse> {
   // NVD keywordSearch matches titles/reference text, not CPE component names.
   const keyword = `${vendor} ${product}`.replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
   const pageSize = Math.min(Math.max(1, limit), 200);

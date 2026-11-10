@@ -605,7 +605,18 @@ async function confirmPriorDelivery(
   if (!messageId) return 'unknown';
   const token = decrypt(saved.apiKey, encryptionKeys(config), `email-provider:${saved.provider}`);
   if (!token) return 'unknown';
-  return lookupProviderDelivery(saved, token, messageId, request);
+  // A lookup that itself fails (provider 5xx, timeout, auth rejected) does NOT
+  // change what is known about the message: the prior attempt's outcome is as
+  // unresolved as before. Letting the error propagate would classify it as this
+  // attempt's transport failure and could drive the job to FAILED — punishing
+  // the message for our confirmation infrastructure's own outage, and on a
+  // max-attempts boundary permanently suppressing a job that may already have
+  // been delivered. Report 'unknown' and let the caller defer the retry.
+  try {
+    return await lookupProviderDelivery(saved, token, messageId, request);
+  } catch {
+    return 'unknown';
+  }
 }
 
 export function createMailSender(
@@ -637,7 +648,7 @@ export function createMailSender(
 // Apply operator edits once. The attachment contains the exact HTML body.
     const content = applyJobEdits(job);
     // Failure to attach is a delivery failure, never a silent HTML-only send.
-    const htmlAttachment = findingHtmlAttachment(content);
+    const htmlAttachment = job.edits?.attachHtml ? findingHtmlAttachment(content) : undefined;
     const attachments: EmailAttachment[] = htmlAttachment ? [htmlAttachment] : [];
     if (!isSmtpEmailProvider(saved.provider)) {
       const token = decrypt(saved.apiKey, encryptionKeys(config), `email-provider:${saved.provider}`);
@@ -2269,7 +2280,6 @@ export async function deliverNext(
       // transport attempt. Oversized/missing HTML is a LOCAL error, not proof
       // that the provider may have accepted the message.
       const preparedEmail = applyJobEdits(job);
-      findingHtmlAttachment(preparedEmail);
       // Before any possible external send, persist UNKNOWN. A crash after
       // provider acceptance is then safe to reconcile without a blind retry.
       await transaction(pool, async (db) => {
@@ -2700,6 +2710,23 @@ export async function deliverNext(
         await releaseClaims(db, claimsForJob(job.target_id, 'finding', carriedFindingIds), {
           jobId: job.id,
         });
+      // Dead letter: record every provably undelivered finding so it is never
+      // silently lost. Operators can reconcile dead letters through the
+      // delivery-dead-letter API and re-queue them after fixing the transport.
+      for (const findingId of carriedFindingIds) {
+        await put(db, 'delivery_dead_letters', `${job.target_id}:${findingId}`, {
+          id: `${job.target_id}:${findingId}`,
+          recipientId: job.target_id,
+          findingId,
+          advisoryId: job.advisory_id,
+          errorCode: typeof errorInfo?.errorCode === 'string' ? errorInfo.errorCode : (typeof errorInfo?.errorType === 'string' ? errorInfo.errorType : 'Unknown'),
+          errorMessage: typeof errorInfo?.error === 'string' ? errorInfo.error : String(error),
+          deliveryOutcome,
+          createdAt: new Date().toISOString(),
+          resolvedAt: null,
+          resolvedBy: null,
+        });
+      }
     }
     if (job.channel === 'email' && error && failed && !confirmedNonDelivery)
       await writeEvent(db, {

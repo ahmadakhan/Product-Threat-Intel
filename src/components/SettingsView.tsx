@@ -46,7 +46,7 @@ const withProcessingDefaults = (value: AppSettings): AppSettings => ({
 });
 
 const findingDispatchSettings = (value: AppSettings) => ({
-  autoDispatchConfidenceThreshold: value.autoDispatchConfidenceThreshold ?? 90,
+  confirmedFindingThreshold: value.confirmedFindingThreshold ?? 90,
   autoDispatchUnverifiableMatches: value.autoDispatchUnverifiableMatches ?? false,
   reviewUnverifiableMatches: value.reviewUnverifiableMatches ?? false,
 });
@@ -253,7 +253,7 @@ export function SettingsView() {
   const [securityMessage, setSecurityMessage] = useState('');
   const [findingForm, setFindingForm] = useState(() => findingDispatchSettings(settings));
   const [confidenceDrafts, setConfidenceDrafts] = useState(() => ({
-    queued: String(settings.autoDispatchConfidenceThreshold ?? 90),
+    queued: String(settings.confirmedFindingThreshold ?? 90),
   }));
   const [findingMessage, setFindingMessage] = useState('');
   const [findingSaveError, setFindingSaveError] = useState(false);
@@ -317,7 +317,7 @@ export function SettingsView() {
   const queuedConfidenceError = confidenceInputError(confidenceDrafts.queued);
   const findingInvalid = Boolean(queuedConfidenceError);
   const findingDirty = JSON.stringify(findingForm) !== JSON.stringify(findingDispatchSettings(settings)) ||
-    confidenceDrafts.queued !== String(settings.autoDispatchConfidenceThreshold ?? 90);
+    confidenceDrafts.queued !== String(settings.confirmedFindingThreshold ?? 90);
   const securityDirty =
     securityForm.sessionTimeoutMins !== settings.securityPolicy.sessionTimeoutMins ||
     securityForm.minPasswordLen !== settings.securityPolicy.minPasswordLen ||
@@ -404,13 +404,13 @@ export function SettingsView() {
     setFindingSaveError(false);
     const nextFindingForm = {
       ...findingForm,
-      autoDispatchConfidenceThreshold: Number(confidenceDrafts.queued),
+      confirmedFindingThreshold: Number(confidenceDrafts.queued),
     };
     const saved = await updateSettings(nextFindingForm);
     if (saved) {
       setFindingForm(nextFindingForm);
       setConfidenceDrafts({
-        queued: String(nextFindingForm.autoDispatchConfidenceThreshold),
+        queued: String(nextFindingForm.confirmedFindingThreshold),
       });
     }
     setFindingSaveError(!saved);
@@ -1225,9 +1225,9 @@ export function SettingsView() {
                     <div className="processing-field-grid">
                       <ProcessingField
                         id="processing-confidence"
-                        label="Queued email minimum confidence"
+                        label="Confirmed finding threshold"
+                        hint="Findings at or above this confidence are presented as confirmed. Lower-confidence findings are still dispatched, flagged for your own verification in the advisory. Nothing is withheld."
                         unit="/ 100"
-                        hint="Eligible matches at or above this minimum receive QUEUED_FOR_DISPATCH. The saved minimum applies even with trained ML."
                         error={queuedConfidenceError}
                       >
                         <input
@@ -1327,7 +1327,7 @@ export function SettingsView() {
                         onClick={() => {
                           setFindingForm(findingDispatchSettings(settings));
                           setConfidenceDrafts({
-                            queued: String(settings.autoDispatchConfidenceThreshold ?? 90),
+                            queued: String(settings.confirmedFindingThreshold ?? 90),
                           });
                           setFindingMessage('');
                           setFindingSaveError(false);

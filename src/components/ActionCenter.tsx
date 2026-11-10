@@ -47,6 +47,7 @@ import {
   Image,
   Table,
   Trash2,
+  Maximize,
 } from 'lucide-react';
 import { Pagination } from './Pagination';
 import { sanitizeEmailHtml } from '../utils/sanitizeEmailHtml';
@@ -121,7 +122,6 @@ export const ActionCenter: React.FC = () => {
     editEmailReview,
     previewEmailReview,
     previewEmailEdits,
-    previewEmailPdf,
     acknowledgeEmailDelivery,
     updateAndSendEmail,
     deleteEmailQueueItem,
@@ -153,19 +153,18 @@ export const ActionCenter: React.FC = () => {
   // the backend already escapes untrusted values, this is defence in depth.
   const sanitizedPreviewHtml = useMemo(() => sanitizeEmailHtml(previewHtml), [previewHtml]);
   const [previewLoading, setPreviewLoading] = useState(false);
-  const [previewTab, setPreviewTab] = useState<'email' | 'pdf' | 'html'>('email');
-  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
-  const [pdfLoading, setPdfLoading] = useState(false);
-  const [pdfError, setPdfError] = useState<string | null>(null);
+  const [previewTab, setPreviewTab] = useState<'email' | 'html'>('email');
   const [editBusy, setEditBusy] = useState(false);
   const [htmlContent, setHtmlContent] = useState<string>('');
   const [htmlMode, setHtmlMode] = useState<'visual' | 'source'>('visual');
+  const [attachHtml, setAttachHtml] = useState(false);
+  const [isFullScreen, setIsFullScreen] = useState(false);
   const editDialogRef = useDialogFocus(() => {
     if (!editBusy) setEditing(null);
   }, !!editing);
   const [livePreviewDebounce, setLivePreviewDebounce] = useState<ReturnType<typeof setTimeout> | null>(null);
-  const pdfUrlRef = useRef<string | null>(null);
   const editorRef = useRef<HTMLDivElement>(null);
+  const editorHasFocusRef = useRef(false);
   const [resending, setResending] = useState<{ id: string; advisoryId: string; mode: RecipientMode; email: string; reason: string } | null>(null);
   const [resendBusy, setResendBusy] = useState(false);
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
@@ -274,23 +273,15 @@ export const ActionCenter: React.FC = () => {
     setConfirmSend({ id: 'bulk', action: action === 'cancel' ? 'cancel' : 'send-now', label: `${selectedLogs.size} selected emails` });
   };
 
-  /** Releases the blob URL backing the PDF preview. */
-  const revokePdf = useCallback(() => {
-    if (pdfUrlRef.current) {
-      URL.revokeObjectURL(pdfUrlRef.current);
-      pdfUrlRef.current = null;
-    }
-    setPdfUrl(null);
-  }, []);
-
   const buildEdits = useCallback(
     (): ReviewEdits => ({
       ...edits,
       subject: subjectDraft.trim() || undefined,
       recipientMode,
       customEmail: recipientMode === 'SINGLE_EMAIL' ? customEmail.trim() || undefined : undefined,
+      attachHtml,
     }),
-    [edits, subjectDraft, recipientMode, customEmail],
+    [edits, subjectDraft, recipientMode, customEmail, attachHtml],
   );
 
   const validateAuditReason = useCallback(() => {
@@ -377,6 +368,7 @@ export const ActionCenter: React.FC = () => {
             recipientMode,
             customEmail:
               recipientMode === 'SINGLE_EMAIL' ? customEmail.trim() || undefined : undefined,
+            attachHtml,
             reason: reason.trim() || undefined,
           });
           if (result) {
@@ -413,44 +405,9 @@ export const ActionCenter: React.FC = () => {
     reload,
   ]);
 
-  const openPdfWindow = useCallback(() => {
-    // What the iframe used to do with `allow-same-origin`, without giving the
-    // embedded document an origin of its own. `noopener` also severs the
-    // handle the new window would otherwise get on this one.
-    if (!pdfUrlRef.current) return;
-    window.open(pdfUrlRef.current, '_blank', 'noopener,noreferrer');
-  }, []);
-
-  const refreshPdf = useCallback(async () => {
-    if (!editing) return;
-    setPdfLoading(true);
-    setPdfError(null);
-    try {
-      const blob = await previewEmailPdf(editing.id, buildEdits());
-      if (!blob) {
-        setPdfError('PDF preview could not be generated. See the error banner for details.');
-        return;
-      }
-      if (pdfUrlRef.current) URL.revokeObjectURL(pdfUrlRef.current);
-      const url = URL.createObjectURL(blob);
-      pdfUrlRef.current = url;
-      setPdfUrl(url);
-      // A separate top-level document, so the viewer renders it as a PDF page
-      // rather than refusing to embed it.
-      window.open(url, '_blank', 'noopener,noreferrer');
-    } catch (caught) {
-      setPdfError(caught instanceof Error ? caught.message : 'PDF preview failed');
-    } finally {
-      setPdfLoading(false);
-    }
-  }, [editing, buildEdits, previewEmailPdf]);
-
   const triggerLivePreview = useCallback(
     (newEdits: ReviewEdits, newSubject?: string) => {
       if (!editing) return;
-      // Any edit invalidates the rendered PDF; the operator re-renders on demand.
-      revokePdf();
-      setPdfError(null);
       if (livePreviewDebounce) clearTimeout(livePreviewDebounce);
       const timer = setTimeout(() => {
         setPreviewLoading(true);
@@ -467,21 +424,19 @@ export const ActionCenter: React.FC = () => {
     // livePreviewDebounce is intentionally not a dependency: the callback only
     // cancels the previous timer and setState makes the new one visible to the
     // cleanup effect without re-creating this closure.
-    [editing, subjectDraft, previewEmailEdits, revokePdf],
+    [editing, subjectDraft, previewEmailEdits],
   );
 
-  // Pending live-preview request, debounce timer and PDF blob must not outlive
-  // the editor: clear/release all three on unmount and when the editor closes.
+  // Pending live-preview request must not outlive the editor: clear it on unmount
+  // and when the editor closes.
   useEffect(() => {
     if (editing) return;
     if (livePreviewDebounce) clearTimeout(livePreviewDebounce);
     setPreviewHtml('');
-    revokePdf();
-  }, [editing, livePreviewDebounce, revokePdf]);
+  }, [editing, livePreviewDebounce]);
   useEffect(
     () => () => {
       if (livePreviewDebounce) clearTimeout(livePreviewDebounce);
-      if (pdfUrlRef.current) URL.revokeObjectURL(pdfUrlRef.current);
     },
     [livePreviewDebounce],
   );
@@ -537,8 +492,8 @@ export const ActionCenter: React.FC = () => {
       setPreviewTab('email');
       setHtmlMode('visual');
       setHtmlContent('');
-      setPdfError(null);
-      revokePdf();
+      setAttachHtml(false);
+      setIsFullScreen(false);
       setPreviewLoading(true);
       void previewEmailReview(log.id).then((preview) => {
         if (preview) {
@@ -553,12 +508,25 @@ export const ActionCenter: React.FC = () => {
         setPreviewLoading(false);
       });
     },
-    [previewEmailReview, revokePdf],
+    [previewEmailReview],
   );
 
   useEffect(() => {
     if (!editing || previewLoading || htmlMode !== 'visual' || !editorRef.current) return;
-    editorRef.current.innerHTML = editableEmailBody(htmlContent);
+    // Only sync when the committed HTML differs from what's in the editor, and
+    // never while the user has focus (avoids flicker / cursor loss).
+    if (editorHasFocusRef.current) return;
+    const current = editorRef.current.innerHTML;
+    const target = editableEmailBody(htmlContent);
+    if (current !== target) {
+      const sel = document.getSelection();
+      const range = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
+      editorRef.current.innerHTML = target;
+      if (range && editorRef.current.contains(range.startContainer)) {
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+      }
+    }
   }, [editing?.id, previewLoading, htmlMode]);
 
   // HTML Editor Functions
@@ -573,22 +541,32 @@ export const ActionCenter: React.FC = () => {
   const execCommand = useCallback((command: string, value?: string) => {
     if (editorRef.current) {
       editorRef.current.focus();
+      editorHasFocusRef.current = true;
       document.execCommand(command, false, value);
       setTimeout(() => {
+        editorHasFocusRef.current = false;
         if (editorRef.current) commitVisualBody(editorRef.current.innerHTML);
       }, 0);
     }
   }, [commitVisualBody]);
 
   const handleHtmlInput = useCallback(() => {
-    if (editorRef.current) commitVisualBody(editorRef.current.innerHTML);
+    if (editorRef.current) {
+      editorHasFocusRef.current = true;
+      commitVisualBody(editorRef.current.innerHTML);
+      setTimeout(() => {
+        editorHasFocusRef.current = false;
+      }, 0);
+    }
   }, [commitVisualBody]);
 
   const insertHtml = useCallback((html: string) => {
     if (editorRef.current) {
       editorRef.current.focus();
+      editorHasFocusRef.current = true;
       document.execCommand('insertHTML', false, html);
       setTimeout(() => {
+        editorHasFocusRef.current = false;
         if (editorRef.current) commitVisualBody(editorRef.current.innerHTML);
       }, 0);
     }
@@ -597,8 +575,10 @@ export const ActionCenter: React.FC = () => {
   const formatBlock = useCallback((tag: string) => {
     if (editorRef.current) {
       editorRef.current.focus();
+      editorHasFocusRef.current = true;
       document.execCommand('formatBlock', false, tag);
       setTimeout(() => {
+        editorHasFocusRef.current = false;
         if (editorRef.current) commitVisualBody(editorRef.current.innerHTML);
       }, 0);
     }
@@ -1200,7 +1180,7 @@ export const ActionCenter: React.FC = () => {
               role="dialog"
               aria-modal="true"
               aria-labelledby="edit-email-title"
-              className="flex max-h-[92vh] w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-950 shadow-2xl shadow-black/30 light:border-zinc-200 light:bg-white"
+              className={`flex ${isFullScreen ? 'h-full w-full max-h-none max-w-none' : 'max-h-[92vh] w-full max-w-7xl'} flex-col overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-950 shadow-2xl shadow-black/30 light:border-zinc-200 light:bg-white ${isFullScreen ? 'rounded-none' : 'rounded-2xl'}`}
             >
               <div className="flex items-start justify-between gap-4 border-b border-zinc-800/80 px-6 py-5 light:border-zinc-200">
                 <div className="min-w-0">
@@ -1230,17 +1210,28 @@ export const ActionCenter: React.FC = () => {
                     </span>
                   </p>
                 </div>
-                <button
-                  type="button"
-                  aria-label="Close editor"
-                  className="rounded-lg p-2 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 disabled:cursor-not-allowed disabled:opacity-50 light:hover:bg-zinc-100 light:hover:text-zinc-800"
-                  disabled={editBusy}
-                  onClick={() => {
-                    if (!editBusy) setEditing(null);
-                  }}
-                >
-                  <X className="h-4 w-4" />
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    aria-label={isFullScreen ? 'Exit full size' : 'Full size'}
+                    className="rounded-lg p-2 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 disabled:cursor-not-allowed disabled:opacity-50 light:hover:bg-zinc-100 light:hover:text-zinc-800"
+                    disabled={editBusy}
+                    onClick={() => setIsFullScreen((prev) => !prev)}
+                  >
+                    <Maximize className={`h-4 w-4 ${isFullScreen ? 'rotate-180' : ''}`} />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Close editor"
+                    className="rounded-lg p-2 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 disabled:cursor-not-allowed disabled:opacity-50 light:hover:bg-zinc-100 light:hover:text-zinc-800"
+                    disabled={editBusy}
+                    onClick={() => {
+                      if (!editBusy) setEditing(null);
+                    }}
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
 
               <div className="min-h-0 flex-1 overflow-y-auto xl:overflow-hidden">
@@ -1396,7 +1387,8 @@ export const ActionCenter: React.FC = () => {
                               contentEditable
                               suppressContentEditableWarning
                               onInput={handleHtmlInput}
-                              onBlur={updatePreviewFromHtml}
+                              onBlur={() => { editorHasFocusRef.current = false; updatePreviewFromHtml(); }}
+                              onFocus={() => { editorHasFocusRef.current = true; }}
                               className="min-h-[320px] max-h-[480px] overflow-y-auto p-4 bg-white rounded-lg border border-zinc-800/80 light:border-zinc-200 text-zinc-900 light:text-zinc-900 text-sm leading-relaxed focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent"
                               style={{
                                 fontFamily: 'inherit',
@@ -1556,18 +1548,15 @@ export const ActionCenter: React.FC = () => {
                           if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
                           event.preventDefault();
                           const nextTab =
-                            event.key === 'Home'
-                              ? 'email'
-                              : event.key === 'End'
-                                ? 'pdf'
-                                : event.key === 'ArrowRight'
-                                  ? previewTab === 'email' ? 'pdf' : 'email'
-                                  : previewTab === 'email' ? 'pdf' : 'email';
+                            event.key === 'Home' ? 'email'
+                            : event.key === 'End' ? 'html'
+                            : event.key === 'ArrowRight'
+                              ? previewTab === 'email' ? 'html' : 'email'
+                              : previewTab === 'email' ? 'html' : 'email';
                           setPreviewTab(nextTab);
                           event.currentTarget
                             .querySelector<HTMLButtonElement>(`[data-preview-tab="${nextTab}"]`)
                             ?.focus();
-                          if (nextTab === 'pdf') void refreshPdf();
                         }}
                       >
                         <button
@@ -1584,39 +1573,43 @@ export const ActionCenter: React.FC = () => {
                               : 'text-zinc-400 hover:text-zinc-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-500 light:text-zinc-600 light:hover:text-zinc-900'
                           }`}
                         >
-                          <Mail className="mr-1 inline h-3 w-3" /> Email
+                          <Mail className="mr-1 inline h-3 w-3" /> Rendered
                         </button>
                         <button
                           type="button"
                           role="tab"
-                          data-preview-tab="pdf"
-                          aria-selected={previewTab === 'pdf'}
-                          tabIndex={previewTab === 'pdf' ? 0 : -1}
-                          aria-controls="pdf-preview-panel"
-                          onClick={() => {
-                            setPreviewTab('pdf');
-                            void refreshPdf();
-                          }}
+                          data-preview-tab="html"
+                          aria-selected={previewTab === 'html'}
+                          tabIndex={previewTab === 'html' ? 0 : -1}
+                          aria-controls="html-preview-panel"
+                          onClick={() => setPreviewTab('html')}
                           className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
-                            previewTab === 'pdf'
+                            previewTab === 'html'
                               ? 'bg-sky-600 text-white shadow-sm'
                               : 'text-zinc-400 hover:text-zinc-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-500 light:text-zinc-600 light:hover:text-zinc-900'
                           }`}
                         >
-                          <FileText className="mr-1 inline h-3 w-3" /> PDF
+                          <FileText className="mr-1 inline h-3 w-3" /> HTML source
                         </button>
                       </div>
-                      {previewTab === 'pdf' && (
-                        <button
-                          type="button"
-                          className="ui-secondary inline-flex items-center gap-1 px-2 py-1 text-[11px]"
-                          disabled={pdfLoading}
-                          onClick={() => void refreshPdf()}
-                        >
-                          <RefreshCw className={`h-3 w-3 ${pdfLoading ? 'animate-spin' : ''}`} />
-                          Refresh PDF
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        className="ui-secondary inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium"
+                        disabled={previewLoading}
+                        onClick={() => setIsFullScreen((prev) => !prev)}
+                      >
+                        <Maximize className="h-3 w-3" />
+                        <span>{isFullScreen ? 'Exit full size' : 'Full size'}</span>
+                      </button>
+                      <label className="inline-flex items-center gap-1.5 cursor-pointer select-none px-3 py-1.5 rounded-lg border border-zinc-800/80 bg-zinc-900/50 text-xs text-zinc-300 light:border-zinc-200 light:bg-zinc-50 light:text-zinc-700 hover:bg-zinc-800/30 light:hover:bg-zinc-100 transition">
+                        <input
+                          type="checkbox"
+                          checked={attachHtml}
+                          onChange={(e) => setAttachHtml(e.target.checked)}
+                          className="w-4 h-4 rounded border-zinc-600 text-sky-500 focus:ring-sky-500"
+                        />
+                        <span>Attach HTML file</span>
+                      </label>
                     </div>
 
                     <div
@@ -1641,63 +1634,42 @@ export const ActionCenter: React.FC = () => {
                     </div>
                     <div
                       role="tabpanel"
-                      id="pdf-preview-panel"
-                      aria-label="PDF preview"
-                      hidden={previewTab !== 'pdf'}
+                      id="html-preview-panel"
+                      aria-label="HTML source preview"
+                      hidden={previewTab !== 'html'}
                     >
-                      {previewTab === 'pdf' && (
-                        <div className="h-[480px] w-full overflow-hidden rounded-xl border border-zinc-800/80 light:border-zinc-200">
-                          {pdfLoading ? (
-                            <div className="flex h-full items-center justify-center text-xs text-zinc-500">
-                              <RefreshCw className="h-4 w-4 animate-spin" /> Rendering PDF…
-                            </div>
-                          ) : pdfError ? (
-                            <div className="flex h-full items-center justify-center p-6 text-center text-xs text-rose-400">
-                              <FileText className="h-8 w-8 mb-2" />
-                              <div>{pdfError}</div>
-                              <button
-                                onClick={() => void refreshPdf()}
-                                className="mt-4 px-3 py-1.5 rounded-lg bg-rose-500/10 text-rose-400 border border-rose-500/20 hover:bg-rose-500/20 text-xs font-medium transition"
-                              >
-                                <RefreshCw className="h-3 w-3 inline mr-1" /> Retry
-                              </button>
-                            </div>
-                          ) : pdfUrl ? (
-                            <div className="flex h-full flex-col items-center justify-center gap-3 p-4 text-center">
-                              <FileText className="h-8 w-8 text-zinc-500" />
-                              <p className="text-xs text-zinc-500">
-                                The rendered attachment opened in a new tab.
-                              </p>
-                              <button
-                                type="button"
-                                onClick={openPdfWindow}
-                                className="rounded border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 transition hover:bg-zinc-800"
-                              >
-                                Open attachment
-                              </button>
-                            </div>
-                          ) : (
-                            <div className="flex h-full items-center justify-center text-xs text-zinc-500">
-                              <FileText className="h-8 w-8 mb-2" />
-                              <div>Open the PDF tab to render the attachment.</div>
-                            </div>
-                          )}
+                      {previewTab === 'html' && (
+                        <div className="h-[480px] w-full overflow-auto rounded-xl border border-zinc-800/80 bg-zinc-950 p-4 font-mono text-xs text-zinc-100 light:border-zinc-200 light:bg-zinc-50 light:text-zinc-900">
+                          {previewHtml || <span className="text-zinc-500">No HTML source available.</span>}
                         </div>
                       )}
                     </div>
                     <p className="mt-2 text-[11px] text-zinc-500">
-                      The PDF attachment is generated from this same edited body, so both stay in sync.
+                      The rendered preview is exactly what recipients receive. Enable "Attach HTML file" to
+                      send the same body as a downloadable .html attachment alongside the message.
                     </p>
                   </div>
                 </div>
               </div>
 
 <div className="flex flex-wrap items-center gap-3 border-t border-zinc-800/80 bg-zinc-900/70 px-6 py-4 light:border-zinc-200 light:bg-zinc-50">
-                <p className="mr-auto text-[11px] text-zinc-500" aria-live="polite">
-                  {editing.status === 'QUEUED'
-                    ? 'Edits are saved to the queued notification.'
-                    : 'The updated message will be sent as a new delivery.'}
-                </p>
+                <div className="flex items-center gap-3">
+                  <label className="inline-flex items-center gap-1.5 cursor-pointer select-none px-3 py-1.5 rounded-lg border border-zinc-800/80 bg-zinc-900/50 text-xs text-zinc-300 light:border-zinc-200 light:bg-zinc-50 light:text-zinc-700 hover:bg-zinc-800/30 light:hover:bg-zinc-100 transition">
+                    <input
+                      type="checkbox"
+                      checked={attachHtml}
+                      onChange={(e) => setAttachHtml(e.target.checked)}
+                      className="w-4 h-4 rounded border-zinc-600 text-sky-500 focus:ring-sky-500"
+                    />
+                    <span>Attach HTML file to email</span>
+                  </label>
+                  <span className="w-px h-4 bg-zinc-700 light:bg-zinc-300" />
+                  <p className="mr-auto text-[11px] text-zinc-500" aria-live="polite">
+                    {editing.status === 'QUEUED'
+                      ? 'Edits are saved to the queued notification.'
+                      : 'The updated message will be sent as a new delivery.'}
+                  </p>
+                </div>
                 <button
                   type="button"
                   className="ui-secondary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500"

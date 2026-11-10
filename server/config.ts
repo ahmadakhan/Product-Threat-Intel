@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { randomUUID } from 'node:crypto';
 import ipaddr from 'ipaddr.js';
 import { FEED_TYPES } from '../src/types/index.ts';
 const databaseUrl = z
@@ -39,7 +40,6 @@ export const DEFAULT_EGRESS_HOSTS = [
   // publisher moves to another host fails with "not in
   // EGRESS_ALLOWED_HOSTS" until its final host appears here.
   // Vulnerability data and enrichment
-  'services.nvd.nist.gov',
   'api.osv.dev',
   // Live OSINT web search (Google Custom Search JSON API)
   'www.googleapis.com',
@@ -48,7 +48,6 @@ export const DEFAULT_EGRESS_HOSTS = [
   'cisa.gov', // cisa.gov redirects to the www spelling
   'api.first.org',
   'api.github.com',
-  'app.opencve.io',
   'api.vulncheck.com',
   'otx.alienvault.com',
   // Mail providers
@@ -175,6 +174,12 @@ const schema = z.object({
   // an earlier attempt was delivered; this flag can no longer disable that guard.
   MAIL_CONFIRM_BEFORE_SEND: z.enum(['true', 'false']).default('true'),
   FEED_MAX_DURATION_SECONDS: z.coerce.number().int().min(1).max(7200).default(1800),
+  // Background work (pipeline, outbox, digest, retention, ML training,
+  // session cleanup) runs unless explicitly disabled. This must stay `true`:
+  // .env and .env.example do not set it, so a `false` default silently turns
+  // every deployment that does not opt in into an API-only process that
+  // ingests nothing and delivers nothing. Replicas that must not run
+  // background work set WORKER_ENABLED=false explicitly.
   WORKER_ENABLED: z.enum(['true', 'false']).default('true'),
   // Seed the recommended-threat-feed catalog on first bootstrap. Off by default:
   // enabling imports default feeds (CISA, CERT/CC, MITRE CVE, etc.) that fetch
@@ -208,6 +213,9 @@ const schema = z.object({
   // output to lifecycle and error events; 'verbose' adds per-tick detail for
   // pipeline, ingestion, delivery, and retention steps to aid troubleshooting.
   LOG_LEVEL: z.enum(['standard', 'verbose']).default('standard'),
+  // Unique instance ID for distributed leader election. Set explicitly for
+  // stable leadership across restarts; defaults to a random UUID per process.
+  INSTANCE_ID: z.string().trim().min(1).max(128).optional(),
 });
 export type Config = z.infer<typeof schema>;
 /**
@@ -252,6 +260,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = schema.parse(env);
   const config = {
     ...parsed,
+    INSTANCE_ID: parsed.INSTANCE_ID || randomUUID(),
     EGRESS_ALLOWED_HOSTS: mergeAllowedHosts(
       parsed.EGRESS_ALLOWED_HOSTS,
       parsed.EGRESS_ALLOWED_HOSTS_EXTRA,

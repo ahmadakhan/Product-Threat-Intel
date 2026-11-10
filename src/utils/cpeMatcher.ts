@@ -615,6 +615,153 @@ export const normalizeAliasToken = (value: string) =>
     .replace(/[\s._-]+/g, '');
 
 /**
+ * Canonical vendor/product registry for enterprise-grade identity resolution.
+ *
+ * Maps common spelling variants, multi-word tokenizations, and case variants
+ * to a single canonical identity so that "SonicWall", "sonicwall", "SONICWALL",
+ * "Sonic Wall", and "Sonic-Wall" all correlate to the same finding without
+ * requiring an operator-managed alias row.
+ *
+ * The registry is additive only: entries never remove or merge distinct
+ * products (e.g. "sonicwall" and "sonicwall-remote-access" stay separate).
+ */
+const CANONICAL_VENDOR_MAP: Record<string, string> = {
+  'sonicwall': 'sonicwall',
+  'sonic wall': 'sonicwall',
+  'sonic-wall': 'sonicwall',
+  'microsoft': 'microsoft',
+  'msft': 'microsoft',
+  'microsoft corporation': 'microsoft',
+  'cisco': 'cisco',
+  'cisco systems': 'cisco',
+  'ciscoproducts': 'cisco',
+  'adobe': 'adobe',
+  'adobe systems': 'adobe',
+  'oracle': 'oracle',
+  'oracle corporation': 'oracle',
+  'vmware': 'vmware',
+  'vmware inc': 'vmware',
+  'vmware, inc': 'vmware',
+  'red hat': 'redhat',
+  'redhat': 'redhat',
+  'redhat inc': 'redhat',
+  'ubuntu': 'ubuntu',
+  'canonical': 'ubuntu',
+  'canonical ltd': 'ubuntu',
+  'apache': 'apache',
+  'apache software foundation': 'apache',
+  'the apache software foundation': 'apache',
+  'nginx': 'nginx',
+  'nginx inc': 'nginx',
+  'nginx, inc': 'nginx',
+  'mysql': 'mysql',
+  'oracle mysql': 'mysql',
+  'postgresql': 'postgresql',
+  'postgres': 'postgresql',
+  'the postgresql global development group': 'postgresql',
+};
+
+const CANONICAL_PRODUCT_MAP: Record<string, string> = {
+  'sonicos': 'sonicos',
+  'sonicwall sonicos': 'sonicos',
+  'sonic-wall sonicos': 'sonicos',
+  'windows': 'windows',
+  'microsoft windows': 'windows',
+  'ms windows': 'windows',
+  'ios': 'cisco_ios',
+  'cisco ios': 'cisco_ios',
+  'cisco ios xe': 'cisco_ios_xe',
+  'cisco ios xr': 'cisco_ios_xr',
+  'windows server': 'windows_server',
+  'microsoft windows server': 'windows_server',
+  'vmware esxi': 'vmware_esxi',
+  'vmware esx': 'vmware_esxi',
+  'red hat enterprise linux': 'rhel',
+  'rhel': 'rhel',
+  'red hat linux': 'rhel',
+  'apache httpd': 'apache_httpd',
+  'apache http server': 'apache_httpd',
+  'nginx open source': 'nginx',
+  'mysql server': 'mysql',
+  'postgresql server': 'postgresql',
+  'ubuntu server': 'ubuntu',
+};
+
+/**
+ * Returns the canonical vendor identity for a raw vendor string, or the
+ * normalized input when no canonical mapping exists. Case-insensitive and
+ * whitespace/separator tolerant so "Sonic Wall" matches "SonicWall".
+ */
+export function canonicalVendor(vendor: string): string {
+  const key = normalizeAliasToken(vendor);
+  return CANONICAL_VENDOR_MAP[key] ?? normalizeAliasToken(vendor);
+}
+
+/**
+ * Returns the canonical product identity for a raw product string, or the
+ * normalized input when no canonical mapping exists. Case-insensitive and
+ * whitespace/separator tolerant.
+ */
+export function canonicalProduct(product: string): string {
+  const key = normalizeAliasToken(product);
+  return CANONICAL_PRODUCT_MAP[key] ?? normalizeAliasToken(product);
+}
+
+/**
+ * Tokenizes a multi-word vendor/product name into identity-bearing tokens
+ * while preserving distinguishing characters (e.g. "c++" stays "c++").
+ * Stops at whitespace/separators so "Sonic Wall" yields ["sonic", "wall"]
+ * which can match "SonicWall" via canonical lookup.
+ */
+export function identityTokens(value: string): string[] {
+  const normalized = normalizeAliasToken(value);
+  if (!normalized) return [];
+  // Split into word tokens for multi-word matching, but keep the full
+  // normalized string as the primary token so exact matches still win.
+  const words = normalized.split(/(?=[A-Z])|[\s._-]+/).filter(Boolean);
+  return [normalized, ...words];
+}
+
+/**
+ * Checks whether two vendor/product names share any canonical identity,
+ * handling spelling variants, case differences, and multi-word tokenization.
+ * Used only as a fallback signal — never overrides explicit CPE/PURL mismatch.
+ */
+export function vendorProductIdentityOverlap(
+  assetVendor: string,
+  assetProduct: string,
+  vulnVendor: string,
+  vulnProduct: string,
+): { vendorOverlap: boolean; productOverlap: boolean; confidence: number } {
+  const av = canonicalVendor(assetVendor);
+  const ap = canonicalProduct(assetProduct);
+  const vv = canonicalVendor(vulnVendor);
+  const vp = canonicalProduct(vulnProduct);
+
+  const vendorExact = av === vv;
+  const vendorTokens = [...new Set([...identityTokens(assetVendor), ...identityTokens(vulnVendor)])];
+  const vendorTokenOverlap = vendorTokens.length > 1 &&
+    identityTokens(assetVendor).some((t) => identityTokens(vulnVendor).includes(t));
+
+  const productExact = ap === vp;
+  const productTokens = [...new Set([...identityTokens(assetProduct), ...identityTokens(vulnProduct)])];
+  const productTokenOverlap = productTokens.length > 1 &&
+    identityTokens(assetProduct).some((t) => identityTokens(vulnProduct).includes(t));
+
+  const vendorOverlap = vendorExact || vendorTokenOverlap;
+  const productOverlap = productExact || productTokenOverlap;
+
+  // Confidence tiers: exact canonical match > token overlap > no overlap
+  let confidence = 0;
+  if (vendorExact && productExact) confidence = 90;
+  else if (vendorExact && productTokenOverlap) confidence = 82;
+  else if (vendorTokenOverlap && productExact) confidence = 82;
+  else if (vendorTokenOverlap && productTokenOverlap) confidence = 75;
+
+  return { vendorOverlap, productOverlap, confidence };
+}
+
+/**
  * Returns every spelling in the alias group that contains `value`.
  *
  * Candidate prefilters (the in-process inventory index and the PostgreSQL
@@ -1205,12 +1352,26 @@ export function matchesWatchlistItem(
     // explicitly excludes when every inventory version is comparable.
     if (rangeHasBounds && allVersionsProvablyOutside)
       return { matched: false, method: 'NONE', confidence: 0, evidence: 'Version outside advisory range' };
+
+    // Enterprise vendor/product identity: canonical registry and multi-word
+    // token overlap improve evidence quality. Confidence stays at the base
+    // fallback level here — the pipeline's authoritativeSourceDispatch rule
+    // (pipelineEngine.ts) is what raises confidence to the auto-dispatch
+    // threshold, and only for authoritative sources.
+    const identity = vendorProductIdentityOverlap(
+      normVendor, normProduct,
+      vulnCpeMatches[0] ? parseCPE23(vulnCpeMatches[0]).vendor : normVendor,
+      vulnCpeMatches[0] ? parseCPE23(vulnCpeMatches[0]).product : normProduct,
+    );
+
     return {
       matched: true,
       method: 'VENDOR_PRODUCT_FALLBACK',
       confidence: 70,
       matchedCpe: assetCpes[0] || `cpe:2.3:a:${normVendor}:${normProduct}:*:*:*:*:*:*:*:*`,
-      evidence: `Matched vendor "${normVendor}" and product "${normProduct}" in advisory text (70% confidence)`,
+      evidence: identity.confidence > 0
+        ? `Matched vendor "${normVendor}" and product "${normProduct}" in advisory text via canonical identity resolution (${identity.confidence}% identity confidence, fallback confidence 70%)`
+        : `Matched vendor "${normVendor}" and product "${normProduct}" in advisory text (70% confidence)`,
       productWideAllVersions: productOnlyKevFallback || undefined,
     };
   }

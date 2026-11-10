@@ -493,7 +493,7 @@ export const ThreatFeedsView: React.FC = () => {
                         >
                           <Edit2 className="w-3.5 h-3.5" />
                         </button>
-                        {!feed.vendorSeed && feed.type !== 'NVD_API' && (
+                        {!feed.vendorSeed && (
                           <button
                             onClick={() => setDeletingFeed(feed)}
                             className="p-1 text-zinc-400 hover:text-red-400 dark:text-zinc-400 dark:hover:text-red-400 light:text-zinc-600 light:hover:text-red-500 transition"
@@ -583,15 +583,14 @@ export const ThreatFeedsView: React.FC = () => {
                       setFormData({
                         ...formData,
                         type,
-                        ...(type === 'MITRE_CVE'
-                          ? {
-                              url: 'https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/deltaLog.json',
-                              authType: 'NONE' as FeedAuthType,
-                              rateLimitPerMin: 120,
-                            }
-                          : {}),
-                        ...(type === 'OPENCVE_API' || type === 'VULNCHECK_KEV'
+                        ...(type === 'VULNCHECK_KEV' || type === 'VULNCHECK_NVD'
                           ? { authType: 'BEARER' as FeedAuthType }
+                          : {}),
+                        ...(type === 'VULNCHECK_NVD'
+                          ? {
+                              url: 'https://api.vulncheck.com/v3/index/nvd',
+                              rateLimitPerMin: 60,
+                            }
                           : {}),
                         ...(type === 'OTX_API'
                           ? {
@@ -605,11 +604,9 @@ export const ThreatFeedsView: React.FC = () => {
                     className="w-full bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-xl px-3 py-2 text-xs text-zinc-200 dark:text-zinc-200 light:text-zinc-800 font-mono focus:border-zinc-600 focus:outline-none"
                   >
                     <option value="JSON_SEARCH_API">Normalized CVE JSON array</option>
-                    <option value="NVD_API">NVD CVE API 2.0</option>
-                    <option value="MITRE_CVE">MITRE CVE (official CVE JSON 5 list)</option>
                     <option value="CISA_KEV">CISA KEV JSON catalog</option>
                     <option value="EPSS_API">FIRST EPSS API</option>
-                    <option value="OPENCVE_API">OpenCVE API v2 (Bearer token)</option>
+                    <option value="VULNCHECK_NVD">VulnCheck NVD++ (authoritative CVE source, Bearer token)</option>
                     <option value="VULNCHECK_KEV">VulnCheck KEV (Bearer token)</option>
                     <option value="OTX_API">AlienVault OTX subscribed Pulses (API key)</option>
                     <option value="RSS_ATOM">RSS / Atom news and advisory evidence</option>

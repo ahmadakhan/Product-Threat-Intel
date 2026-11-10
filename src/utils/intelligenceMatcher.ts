@@ -17,11 +17,8 @@ const text = (value: string) =>
  * training features, or the reverse, and the mismatch was invisible.
  */
 export const FEED_WEIGHTS: Record<string, number> = {
-  NVD_API: 40,
   CISA_KEV: 40,
-  MITRE_CVE: 35,
   VULNCHECK_KEV: 30,
-  OPENCVE_API: 25,
   RSS_NEWS: 15,
   THREAT_FEED: 20,
 };
@@ -421,6 +418,8 @@ export function matchIntelligence(
           cveId,
           assetId: asset.id,
           assetName: `${asset.assetTag} (${asset.vendor} ${asset.product})`,
+          assetVendor: asset.vendor,
+          assetProduct: asset.product,
           articleIds: [...new Set([...(old?.articleIds || []), article.id])].sort(),
           status: confirmed ? 'CORROBORATED' : 'REVIEW_REQUIRED',
           findingId: finding?.id,

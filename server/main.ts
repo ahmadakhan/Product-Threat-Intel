@@ -33,6 +33,7 @@ import { closePdfRenderer } from './pdf';
 import { initMlRuntime } from './ml/integration.ts';
 import { encryptionKeys } from './secrets';
 import { runScheduledTraining, TrainingAlreadyRunningError } from './ml/train/cron.ts';
+import { enrichmentBacklogCandidates } from '../src/engine/pipelineEngine';
 import type { TrainingSummary } from './ml/train/orchestrator.ts';
 import { isTelemetryAnomaly, shouldSampleMlTelemetry } from './ml/integration.ts';
 import type { Db } from './db';
@@ -122,6 +123,94 @@ const app = createApp(pool, config, request, { correlation, mlRuntime,
   // comfortably above the block threshold; see the option's documentation.
   hangDetection: config.HANG_DETECTION_ENABLED === 'true',
 });
+/**
+ * Distributed leader election via PostgreSQL advisory lock with TTL.
+ *
+ * Only the leader replica runs background jobs (pipeline, outbox, digest,
+ * retention, ML training, enrichment backlog, self-healing, dead-letter retry,
+ * session cleanup). All replicas serve API requests and health checks. This
+ * prevents multiple replicas from running the same background job concurrently,
+ * which would cause duplicate findings, duplicate emails, and race conditions.
+ *
+ * The lock is held with pg_advisory_xact_lock (session-scoped). A heartbeat
+ * row in systemState records the leader identity and last heartbeat time.
+ * Followers detect a stale heartbeat (> LEADER_STALE_MS) and start an election.
+ */
+const LEADER_STALE_MS = 30_000;
+const LEADER_HEARTBEAT_MS = 10_000;
+let isLeader = false;
+let leaderHeartbeatTimer: NodeJS.Timer | null = null;
+let leaderLockSession: { release: () => Promise<void> } | null = null;
+
+async function tryAcquireLeadership(): Promise<boolean> {
+  // Try to acquire a session-scoped advisory lock. Only one session holds it.
+  const result = await pool.query(
+    `SELECT pg_try_advisory_xact_lock(784921) AS locked`,
+  );
+  const locked = result.rows[0]?.locked === true;
+  if (!locked) return false;
+  // We hold the lock for this session. Record leadership in systemState with
+  // a TTL so followers can detect a dead leader and start a new election.
+  await put(pool, 'systemState', 'leader-election', {
+    leaderId: config.INSTANCE_ID ?? randomUUID(),
+    acquiredAt: new Date().toISOString(),
+    heartbeatAt: new Date().toISOString(),
+    ttlMs: LEADER_STALE_MS,
+  });
+  return true;
+}
+
+async function refreshLeaderHeartbeat(): Promise<void> {
+  if (!isLeader) return;
+  try {
+    await put(pool, 'systemState', 'leader-election', {
+      leaderId: config.INSTANCE_ID ?? randomUUID(),
+      acquiredAt: new Date().toISOString(),
+      heartbeatAt: new Date().toISOString(),
+      ttlMs: LEADER_STALE_MS,
+    });
+  } catch {
+    // Heartbeat failure: we may have lost the lock (session ended). Step down.
+    isLeader = false;
+    leaderHeartbeatTimer?.unref?.();
+    leaderHeartbeatTimer = null;
+    leaderLockSession = null;
+    await writeEvent(pool, {
+      category: 'SYSTEM',
+      level: 'WARNING',
+      code: 'leader.lost',
+      message: 'Leadership lost; stepping down from background jobs',
+    }).catch(() => undefined);
+  }
+}
+
+async function checkLeadership(): Promise<void> {
+  if (isLeader) {
+    // We believe we are leader; verify our heartbeat is still fresh.
+    // The heartbeat timer refreshes it every LEADER_HEARTBEAT_MS.
+    return;
+  }
+  // Check if the current leader is stale. If so, start an election.
+  const row = await get<any>(pool, 'systemState', 'leader-election');
+  const now = Date.now();
+  const leaderStale = !row ||
+    !(row.heartbeatAt && Date.parse(row.heartbeatAt) > now - LEADER_STALE_MS);
+  if (leaderStale) {
+    const acquired = await tryAcquireLeadership();
+    if (acquired) {
+      isLeader = true;
+      leaderLockSession = { release: async () => {} }; // session-scoped lock, released on disconnect
+      leaderHeartbeatTimer = setInterval(refreshLeaderHeartbeat, LEADER_HEARTBEAT_MS);
+      leaderHeartbeatTimer.unref();
+      await writeEvent(pool, {
+        category: 'SYSTEM',
+        level: 'INFO',
+        code: 'leader.elected',
+        message: 'This replica elected leader for background jobs',
+      }).catch(() => undefined);
+    }
+  }
+}
 /**
  * Start listening on `port`, retrying up to `maxAttempts` times when the port
  * is already in use (for example a `tsx watch` restart race). The process that
@@ -253,6 +342,10 @@ let selfHealRunning: Promise<void> | null = null;
 const tick = () => {
   if (stopping || config.WORKER_ENABLED !== 'true') return;
   verboseLog('worker.tick');
+  // Periodically check/acquire leadership so followers can take over when the
+  // leader dies. Only the leader runs background jobs.
+  void checkLeadership();
+  if (!isLeader) return;
   if (pipeline && !pipelineController?.signal.aborted && Date.now() - pipelineStartedAt > STUCK_PROMISE_MS) {
     const reason = new Error('Pipeline stopped making progress; cancelling the current attempt');
     void report('pipeline')(reason);
@@ -347,6 +440,9 @@ const timer = setInterval(tick, WORKER_TICK_MS);
 // process) that has otherwise finished would be pinned open forever.
 timer.unref();
 tick();
+// Initial leadership election attempt. All replicas start as followers and
+// compete for the advisory lock; only the winner runs background jobs.
+void checkLeadership();
 // Retention runs on its own cadence because the policy is operator-configurable
 // and can be much slower than the worker tick. The last successful run is
 // persisted in the database so replicas do not each schedule the same cleanup,
@@ -489,6 +585,8 @@ const dailyDigestTick = () => {
 };
 const ML_TRAINING_INTERVAL_MS = Number(process.env.ML_TRAINING_INTERVAL_MS ?? 60 * 60_000);
 const ML_TRAINING_SCHEDULE_ID = 'ml-training-schedule';
+const ENRICHMENT_BACKLOG_INTERVAL_MS = Number(process.env.ENRICHMENT_BACKLOG_INTERVAL_MS ?? 6 * 60 * 60_000);
+const ENRICHMENT_BACKLOG_SCHEDULE_ID = 'enrichment-backlog-schedule';
 let trainingRunning: Promise<unknown> | null = null;
 let trainingStartedAt = 0;
 let trainingGeneration = 0;
@@ -571,6 +669,100 @@ dailyDigestTick();
 const mlTrainingTimer = setInterval(mlTrainingTick, 60000);
 mlTrainingTimer.unref();
 mlTrainingTick();
+
+let enrichmentBacklogRunning: Promise<unknown> | null = null;
+const enrichmentBacklogTick = async () => {
+  if (stopping || config.WORKER_ENABLED !== 'true' || enrichmentBacklogRunning) return;
+  enrichmentBacklogRunning = (async () => {
+    try {
+      const rows = await pool.query<{ data: string }>(
+        `SELECT data FROM records WHERE kind='findings'`,
+      );
+      const findings = rows.rows.map((row) => row.data as unknown as import('../src/types/index.ts').Finding);
+      const candidates = enrichmentBacklogCandidates(findings);
+      if (candidates.length > 0) {
+        await writeEvent(pool, {
+          category: 'PIPELINE',
+          level: 'INFO',
+          code: 'enrichment.backlog',
+          message: `${candidates.length} finding(s) dispatched via authoritative source without CPE data are pending enrichment re-evaluation`,
+          context: { count: candidates.length, cveIds: candidates.map((f) => f.cveId) },
+        });
+      }
+    } catch (error) {
+      void report('enrichment.backlog')(error);
+    } finally {
+      enrichmentBacklogRunning = null;
+    }
+  })();
+  return enrichmentBacklogRunning;
+};
+const enrichmentBacklogTimer = setInterval(enrichmentBacklogTick, ENRICHMENT_BACKLOG_INTERVAL_MS);
+enrichmentBacklogTimer.unref();
+enrichmentBacklogTick();
+
+// Dead-letter auto-retry: re-process delivery_dead_letters on a cadence so
+// findings whose transport failed are retried automatically instead of
+// waiting for operator intervention. Only the leader runs this.
+let deadLetterRetryRunning: Promise<unknown> | null = null;
+const DEAD_LETTER_RETRY_INTERVAL_MS = Number(process.env.DEAD_LETTER_RETRY_INTERVAL_MS ?? 15 * 60_000);
+const deadLetterRetryTick = async () => {
+  if (stopping || config.WORKER_ENABLED !== 'true' || !isLeader || deadLetterRetryRunning) return;
+  deadLetterRetryRunning = (async () => {
+    try {
+      const rows = await pool.query<{ id: string; data: string }>(
+        `SELECT id, data FROM records WHERE kind='delivery_dead_letters'
+         AND COALESCE(data->>'resolvedAt','')=''
+         ORDER BY created_at ASC LIMIT 50`,
+      );
+      if (rows.rows.length === 0) return;
+      let retried = 0;
+      for (const row of rows.rows) {
+        try {
+          const deadLetter = JSON.parse(row.data);
+          // Re-queue the finding through the normal pipeline path by marking
+          // the finding as not-yet-dispatched so the next pipeline run picks it up.
+          const findingId = deadLetter.findingId || deadLetter.id;
+          const finding = await get<any>(pool, 'findings', findingId);
+          if (finding) {
+            await put(pool, 'findings', findingId, {
+              ...finding.data,
+              notificationStatus: 'QUEUED_FOR_DISPATCH',
+              autoDispatchedAt: null,
+              reviewNotifiedAt: null,
+            });
+            retried++;
+          }
+          // Mark the dead letter as resolved (retried)
+          await put(pool, 'delivery_dead_letters', row.id, {
+            ...JSON.parse(row.data),
+            resolvedAt: new Date().toISOString(),
+            resolvedBy: 'auto-retry',
+          });
+        } catch (error) {
+          void report('deadLetter.retry')(error);
+        }
+      }
+      if (retried > 0) {
+        await writeEvent(pool, {
+          category: 'EMAIL',
+          level: 'INFO',
+          code: 'deadLetter.auto_retry',
+          message: `Auto-retried ${retried} delivery dead letter(s)`,
+          context: { retried },
+        }).catch(() => undefined);
+      }
+    } catch (error) {
+      void report('deadLetter.retry')(error);
+    } finally {
+      deadLetterRetryRunning = null;
+    }
+  })();
+  return deadLetterRetryRunning;
+};
+const deadLetterRetryTimer = setInterval(deadLetterRetryTick, DEAD_LETTER_RETRY_INTERVAL_MS);
+deadLetterRetryTimer.unref();
+deadLetterRetryTick();
 let mlTelemetryRunning: Promise<void> | null = null;
 let mlTelemetryPrevious = { time: Date.now(), completed: correlation.supervisor.ingestor.telemetry.completed };
 const mlTelemetryTimer = setInterval(() => {

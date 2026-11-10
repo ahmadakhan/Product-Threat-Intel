@@ -112,6 +112,13 @@ export async function claimItems(
            WHERE o.id = delivery_claims.job_id
              AND o.status = 'FAILED'
         )
+        AND NOT EXISTS (
+          SELECT 1 FROM outbox o
+           WHERE o.id = delivery_claims.job_id
+             AND o.status = 'SUPERSEDED'
+             AND o.delivery_outcome IS DISTINCT FROM 'ACCEPTED'
+             AND o.delivery_outcome IS DISTINCT FROM 'REJECTED'
+        )
      RETURNING recipient_id,kind,item_id`,
     [
       unique.map((request) => request.recipientId),
@@ -283,6 +290,12 @@ export async function activeClaims(
           OR EXISTS (
             SELECT 1 FROM outbox o
              WHERE o.id = c.job_id AND o.status = 'FAILED'
+          )
+          OR EXISTS (
+            SELECT 1 FROM outbox o
+             WHERE o.id = c.job_id AND o.status = 'SUPERSEDED'
+               AND o.delivery_outcome IS DISTINCT FROM 'ACCEPTED'
+               AND o.delivery_outcome IS DISTINCT FROM 'REJECTED'
           ))`,
     [kind, [...recipientIds], [...itemIds]],
   );

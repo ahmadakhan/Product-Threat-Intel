@@ -245,18 +245,79 @@ const handleInsertToken = (token: string) => {
     return isCustomTemplate && customTemplate ? customTemplate : advisoryTemplate;
   };
 
-   // Preview-only examples; never substitute an unverified real remediation command.
-    const getRenderedHtml = () => {
-     const source = isCustomTemplate && customTemplate ? customTemplate : advisoryTemplate;
-     return source
-       .replace(/{{severity}}/g, 'HIGH')
+  // Preview-only examples; never substitute an unverified real remediation command.
+  const getRenderedHtml = () => {
+    const {
+      accentColor = '#1d4ed8',
+      fontColor = '#334155',
+      cardBg = '#ffffff',
+      headerBg = '#0f172a',
+    } = templateCustomization;
+
+    // Header banner text color adapts to background luminance (mirrors server compileCustomizedTemplate)
+    const headerHex = String(headerBg).slice(1);
+    const expanded = headerHex.length === 3 ? [...headerHex].map((ch) => ch + ch).join('') : headerHex;
+    const luminance = [0, 2, 4]
+      .map((offset) => parseInt(expanded.slice(offset, offset + 2), 16) / 255)
+      .map((channel) => (channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4))
+      .reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
+    const headerText = luminance > 0.179 ? '#0f172a' : '#ffffff';
+    const headerMuted = luminance > 0.179 ? '#334155' : '#cbd5e1';
+
+    const headerBanner = `
+      <div style="background:${headerBg};padding:20px 32px;box-shadow:0 1px 3px rgba(0,0,0,0.2);font-family:'Plus Jakarta Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+        <div style="font-size:10px;font-weight:bold;letter-spacing:1.5px;color:${headerMuted};margin-bottom:8px;">
+          THREAT INTELLIGENCE &amp; BA CYBER SECURITY OPERATIONS
+        </div>
+        <div style="font-size:24px;line-height:30px;font-weight:bold;color:${headerText};margin-bottom:6px;">
+          Security Advisory
+        </div>
+        <div style="font-size:16px;line-height:22px;font-weight:600;color:${headerText};margin-bottom:8px;">
+          {{advisory_title}}
+        </div>
+        <div style="font-size:12px;line-height:18px;color:${headerMuted};">
+          Advisory ID: {{advisory_id}}<br>Report Generated: {{dispatch_date}}
+        </div>
+      </div>
+    `;
+
+    const source = isCustomTemplate && customTemplate ? customTemplate : advisoryTemplate;
+
+    // Determine whether the source template already renders a header section.
+    // The server-compiled template bakes headerBg into <td bgcolor=...>. Custom
+    // templates are operator-owned HTML; they always get our header banner
+    // prepended so a missing custom header doesn't leave the email headerless.
+    const hasExistingHeader = /<td\s+bgcolor=/i.test(source);
+
+    // Replace hardcoded header colors in-place so client-side headerBg changes
+    // take effect on the live preview (only matches if server-compiled header exists).
+    let html = source.replace(
+      /<td bgcolor="#[0-9a-f]{6}" style="padding:20px 32px;box-shadow:0 1px 3px rgba\(0,0,0,0\.2\);">/,
+      `<td bgcolor="${headerBg}" style="padding:20px 32px;box-shadow:0 1px 3px rgba(0,0,0,0.2);">`
+    );
+    html = html.replace(
+      /<div style="font-size:10px;font-weight:bold;letter-spacing:1\.5px;color:#[0-9a-f]{6};margin-bottom:8px;">/,
+      `<div style="font-size:10px;font-weight:bold;letter-spacing:1.5px;color:${headerMuted};margin-bottom:8px;">`
+    );
+    html = html.replace(
+      /<div class="title" style="font-size:24px;line-height:30px;font-weight:bold;color:#[0-9a-f]{6};margin-bottom:6px;">/,
+      `<div class="title" style="font-size:24px;line-height:30px;font-weight:bold;color:${headerText};margin-bottom:6px;">`
+    );
+    html = html.replace(
+      /<div style="font-size:16px;line-height:22px;font-weight:600;color:#[0-9a-f]{6};margin-bottom:8px;">/,
+      `<div style="font-size:16px;line-height:22px;font-weight:600;color:${headerText};margin-bottom:8px;">`
+    );
+
+    // Only prepend a header banner when the source has no header section at all.
+    return (!hasExistingHeader ? headerBanner + html : html)
+      .replace(/{{severity}}/g, 'HIGH')
       .replace(
         /{{severity_header_badge}}/g,
-        '<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:#f59e0b;color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">HIGH SEVERITY</span>',
+        `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:${accentColor};color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">HIGH SEVERITY</span>`,
       )
       .replace(
         /{{severity_badge}}/g,
-        '<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:#f59e0b;color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">HIGH</span>',
+        `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:${accentColor};color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">HIGH</span>`,
       )
       .replace(/{{advisory_id}}/g, previewId)
       .replace(/{{advisory_title}}/g, 'Example advisory — template preview only')
@@ -267,23 +328,23 @@ const handleInsertToken = (token: string) => {
       )
       .replace(
         /{{cve_id_links}}/g,
-        '<a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="display:inline-block;margin:0 8px 4px 0;color:#1d4ed8;text-decoration:underline;">CVE-2026-0001</a><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0002" style="display:inline-block;margin:0 8px 4px 0;color:#1d4ed8;text-decoration:underline;">CVE-2026-0002</a>',
+        `<a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="display:inline-block;margin:0 8px 4px 0;color:${accentColor};text-decoration:underline;">CVE-2026-0001</a><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0002" style="display:inline-block;margin:0 8px 4px 0;color:${accentColor};text-decoration:underline;">CVE-2026-0002</a>`,
       )
       .replace(
         /{{affected_systems_html}}/g,
-        '<div style="margin:0 0 8px;font-size:12px;line-height:19px;color:#334155;">Example inventory asset 1</div>\n<div style="margin:0 0 8px;font-size:12px;line-height:19px;color:#334155;">Example inventory asset 2</div>',
+        `<div style="margin:0 0 8px;font-size:12px;line-height:19px;color:${fontColor};">Example inventory asset 1</div>\n<div style="margin:0 0 8px;font-size:12px;line-height:19px;color:${fontColor};">Example inventory asset 2</div>`,
       )
       .replace(
         /{{vendor_products_html}}/g,
-        '<div style="margin:0 0 8px;padding:0 0 8px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:19px;color:#334155;"><strong>VendorCorp - ProductSuite</strong><br>Affected versions: &gt;= 4.2 and &lt; 4.8</div>\n<div style="margin:0 0 8px;padding:0 0 8px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:19px;color:#334155;"><strong>AnotherVendor - ProductLine</strong><br>Affected versions: 10.1 through 10.4</div>',
+        `<div style="margin:0 0 8px;padding:0 0 8px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:19px;color:${fontColor};"><strong>VendorCorp - ProductSuite</strong><br>Affected versions: &gt;= 4.2 and &lt; 4.8</div>\n<div style="margin:0 0 8px;padding:0 0 8px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:19px;color:${fontColor};"><strong>AnotherVendor - ProductLine</strong><br>Affected versions: 10.1 through 10.4</div>`,
       )
       .replace(
         /{{cve_details}}/g,
-        '<div style="margin:0 0 16px;padding:16px;border:1px solid #e2e8f0;border-left:4px solid #f59e0b;border-radius:4px;background:#ffffff;"><div style="font-size:14px;font-weight:bold;line-height:20px;"><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="color:#1d4ed8;text-decoration:underline;">CVE-2026-0001</a></div><p style="margin:8px 0 0;font-size:12px;line-height:19px;color:#334155;">A remotely exploitable vulnerability affects the listed product versions.</p><div style="margin:8px 0 0;font-size:11px;line-height:17px;"><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="color:#1d4ed8;text-decoration:underline;">NVD</a> &nbsp;·&nbsp; <a href="https://example.com" style="color:#1d4ed8;text-decoration:underline;">Vendor advisory</a></div></div>',
+        `<div style="margin:0 0 16px;padding:16px;border:1px solid #e2e8f0;border-radius:4px;background:${cardBg};"><div style="font-size:14px;font-weight:bold;line-height:20px;"><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="color:${accentColor};text-decoration:underline;">CVE-2026-0001</a></div><p style="margin:8px 0 0;font-size:12px;line-height:19px;color:${fontColor};">A remotely exploitable vulnerability affects the listed product versions.</p><div style="margin:8px 0 0;font-size:11px;line-height:17px;"><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="color:${accentColor};text-decoration:underline;">NVD</a> &nbsp;·&nbsp; <a href="https://example.com" style="color:${accentColor};text-decoration:underline;">Vendor advisory</a></div></div>`
       )
       .replace(
         /{{remediation_steps}}/g,
-        '<p style="margin:0 0 10px;font-size:12px;line-height:19px;color:#334155;">Review vendor guidance and validate remediation through your change process.</p><div style="margin:0 0 12px;padding:12px 14px;border:1px solid #e2e8f0;border-radius:4px;background:#ffffff;"><strong><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="color:#1d4ed8;text-decoration:underline;">CVE-2026-0001</a></strong><ul style="margin:6px 0 0;padding-left:20px;font-size:12px;line-height:19px;color:#334155;"><li>Confirm affected versions with the vendor.</li><li>Apply a tested vendor-supported fix.</li><li>Rescan affected systems and record the outcome.</li></ul><p style="margin:8px 0 0;font-size:12px;"><a href="https://example.com/patch-guidance" style="color:#1d4ed8;text-decoration:underline;">Vendor patch</a></p></div><div style="margin:0 0 12px;padding:12px 14px;border:1px solid #e2e8f0;border-radius:4px;background:#ffffff;"><strong><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0002" style="color:#1d4ed8;text-decoration:underline;">CVE-2026-0002</a></strong><ul style="margin:6px 0 0;padding-left:20px;font-size:12px;line-height:19px;color:#334155;"><li>Disable the vulnerable feature until the vendor update is deployed.</li><li>Verify service health after remediation.</li></ul></div>',
+        `<p style="margin:0 0 10px;font-size:12px;line-height:19px;color:${fontColor};">Review vendor guidance and validate remediation through your change process.</p><div style="margin:0 0 12px;padding:12px 14px;border:1px solid #e2e8f0;border-radius:4px;background:${cardBg};"><strong><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="color:${accentColor};text-decoration:underline;">CVE-2026-0001</a></strong><ul style="margin:6px 0 0;padding-left:20px;font-size:12px;line-height:19px;color:${fontColor};"><li>Confirm affected versions with the vendor.</li><li>Apply a tested vendor-supported fix.</li><li>Rescan affected systems and record the outcome.</li></ul><p style="margin:8px 0 0;font-size:12px;"><a href="https://example.com/patch-guidance" style="color:${accentColor};text-decoration:underline;">Vendor patch</a></p></div><div style="margin:0 0 12px;padding:12px 14px;border:1px solid #e2e8f0;border-radius:4px;background:${cardBg};"><strong><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0002" style="color:${accentColor};text-decoration:underline;">CVE-2026-0002</a></strong><ul style="margin:6px 0 0;padding-left:20px;font-size:12px;line-height:19px;color:${fontColor};"><li>Disable the vulnerable feature until the vendor update is deployed.</li><li>Verify service health after remediation.</li></ul></div>`,
       )
       .replace(
         /{{mitigation_steps}}/g,
@@ -293,10 +354,10 @@ const handleInsertToken = (token: string) => {
         /{{recommended_actions}}/g,
         '<ul>\n<li>Inventory all affected systems identified in this advisory.</li>\n<li>Apply vendor patches immediately following your change management process.</li>\n<li>Validate backup, restore, and operational functionality after remediation.</li>\n</ul>',
       )
-        .replace(/{{vendor_link}}/g, 'https://example.com')
-        .replace(/{{remediation_link}}/g, 'https://example.com/patch-guidance')
-        .replace(/{{references_link}}/g, 'https://example.com/vendor-advisory');
-    };
+      .replace(/{{vendor_link}}/g, 'https://example.com')
+      .replace(/{{remediation_link}}/g, 'https://example.com/patch-guidance')
+      .replace(/{{references_link}}/g, 'https://example.com/vendor-advisory');
+  };
 
   // Matches the server's strict templateSchema hex check (server/validation.ts).
   // The color swatches pair a <input type="color"> (always a valid 6-digit

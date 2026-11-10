@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { NvdCpeSearchResult } from '../src/types/index.ts';
+import type { VulncheckCpeSearchResult } from '../src/types/index.ts';
 import { parseCPE23 } from '../src/utils/cpeMatcher.ts';
 import {
   productWildcardCpe,
@@ -15,7 +15,7 @@ const first = 'cpe:2.3:o:microsoft:windows_server_2022:20348:*:*:*:*:*:x64:*';
 const second = first.replace(':20348:', ':20349:');
 const other = 'cpe:2.3:a:apache:http_server:2.4.62:*:*:*:*:*:*:*';
 const wildcard = 'cpe:2.3:o:microsoft:windows_server_2022:*:*:*:*:*:*:*:*';
-const entry = (name: string, id = 'dictionary-id'): NvdCpeSearchResult => {
+const entry = (name: string, id = 'dictionary-id'): VulncheckCpeSearchResult => {
   const parsed = parseCPE23(name);
   return {
     cpeName: name,

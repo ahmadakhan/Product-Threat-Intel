@@ -142,41 +142,41 @@ test('delivery documents escape feed-controlled content everywhere', () => {
   assert.ok(!document.html.includes('<b>server</b>'));
 });
 
-const article = (id: string, url: string, title: string, publishedDate = '2026-01-01T00:00:00Z'): IntelligenceArticle => ({
+const article = (id: string, url: string, title: string, cveIds: string[] = ['CVE-2026-12345'], publishedDate = '2026-01-01T00:00:00Z'): IntelligenceArticle => ({
   id,
   url,
   title,
   summary: '',
   publishedDate,
   modifiedDate: publishedDate,
-  cveIds: ['CVE-2026-12345'],
+  cveIds,
   sourceFeeds: ['THREAT_FEED'],
 });
 
-const match = (id: string, assetId: string, articleIds: string[], evidence = 'Acme widget referenced'): IntelligenceMatch => ({
+const match = (id: string, assetId: string, articleIds: string[], evidence = 'Acme widget referenced', credibilityScore = 80, cveId: string | null = 'CVE-2026-12345'): IntelligenceMatch => ({
   id,
-  cveId: 'CVE-2026-12345',
+  cveId,
   assetId,
   assetName: `server-${assetId}`,
   articleIds,
   status: 'REVIEW_REQUIRED',
   evidence,
-  credibilityScore: 80,
+  credibilityScore,
 });
 
 test('news is consolidated to one item per article, regardless of match count', () => {
-  const a1 = article('a1', 'https://example.com/story-1', 'Story one');
-  const a2 = article('a2', 'https://example.com/story-2', 'Story two');
+  const a1 = article('a1', 'https://example.com/story-1', 'Story one', ['CVE-2026-12345']);
+  const a2 = article('a2', 'https://example.com/story-2', 'Story two', ['CVE-2026-67890']);
   const articles = new Map([
     [a1.id, a1],
     [a2.id, a2],
   ]);
   const items = consolidateNewsMatches(
     [
-      match('m1', 'asset-1', ['a1']),
+      match('m1', 'asset-1', ['a1'], undefined, 80, null),
       // The same article re-correlated to a second asset is still one item.
-      match('m2', 'asset-2', ['a1'], 'Acme widget two referenced'),
-      match('m3', 'asset-1', ['a2']),
+      match('m2', 'asset-2', ['a1'], 'Acme widget two referenced', 80, null),
+      match('m3', 'asset-1', ['a2'], undefined, 80, null),
     ],
     articles,
     (assetId) => `server-${assetId}`,
@@ -189,10 +189,10 @@ test('news is consolidated to one item per article, regardless of match count', 
 });
 
 test('an article already sent to a recipient is never selected again', () => {
-  const a1 = article('a1', 'https://example.com/story-1', 'Story one');
-  const a2 = article('a2', 'https://example.com/story-2', 'Story two');
+  const a1 = article('a1', 'https://example.com/story-1', 'Story one', ['CVE-2026-12345']);
+  const a2 = article('a2', 'https://example.com/story-2', 'Story two', ['CVE-2026-67890']);
   const items = consolidateNewsMatches(
-    [match('m1', 'asset-1', ['a1', 'a2'])],
+    [match('m1', 'asset-1', ['a1', 'a2'], undefined, 80, null)],
     new Map([
       [a1.id, a1],
       [a2.id, a2],
@@ -268,13 +268,43 @@ test('syndicated URLs with different article ids and query strings are one story
   assert.equal(selectUnnotifiedArticles(items, 'r2', ledger).length, 1);
 });
 
+test('same CVE from different sources is deduplicated to one article', () => {
+  const a1 = article('a1', 'https://feed-a.com/story', 'Acme Widget CVE-2026-12345', ['CVE-2026-12345']);
+  const a2 = article('a2', 'https://feed-b.com/report', 'Acme Widget flaw CVE-2026-12345', ['CVE-2026-12345']);
+  const items = consolidateNewsMatches(
+    [
+      match('m1', 'asset-1', ['a1'], 'Feed A evidence', 70, 'CVE-2026-12345'),
+      match('m2', 'asset-1', ['a2'], 'Feed B evidence', 90, 'CVE-2026-12345'),
+    ],
+    new Map([[a1.id, a1], [a2.id, a2]]),
+    () => 'server-1',
+  );
+  assert.equal(items.length, 1, 'same CVE from two feeds must appear once');
+  const kept = items[0];
+  assert.equal(kept.article.id, 'a2', 'higher credibility feed wins');
+  assert.equal(kept.consolidationReason, 'cve_dedup_kept');
+  assert.deepEqual(kept.suppressesCveIds, ['CVE-2026-12345']);
+});
+
+test('articles with no CVE IDs are never suppressed by CVE dedup', () => {
+  const a1 = article('a1', 'https://example.com/story-1', 'General security news', []);
+  const a2 = article('a2', 'https://example.com/story-2', 'More general news', []);
+  const items = consolidateNewsMatches(
+    [match('m1', 'asset-1', ['a1'], 'Feed A evidence', 80, null),
+     match('m2', 'asset-1', ['a2'], 'Feed B evidence', 80, null)],
+    new Map([[a1.id, a1], [a2.id, a2]]),
+    () => 'server-1',
+  );
+  assert.equal(items.length, 2, 'CVE-less articles are kept separately');
+});
+
 test('meaningful query parameters distinguish articles; tracking parameters do not', () => {
   // AUD-003: `?id=100` and `?id=200` are different stories.
-  const first = article('a1', 'https://example.com/article?id=100', 'Story 100');
-  const second = article('a2', 'https://example.com/article?id=200', 'Story 200');
+  const first = article('a1', 'https://example.com/article?id=100', 'Story 100', ['CVE-2026-12345']);
+  const second = article('a2', 'https://example.com/article?id=200', 'Story 200', ['CVE-2026-67890']);
   assert.notEqual(newsArticleIdentity(first), newsArticleIdentity(second));
   const items = consolidateNewsMatches(
-    [match('m1', 'asset-1', ['a1', 'a2'])],
+    [match('m1', 'asset-1', ['a1', 'a2'], undefined, 80, null)],
     new Map([[first.id, first], [second.id, second]]),
     () => 'server-1',
   );
@@ -293,11 +323,11 @@ test('meaningful query parameters distinguish articles; tracking parameters do n
 test('an oversized consolidated news email keeps styled HTML and summarises the overflow', () => {
   // AUD-004: the body must never be replaced by the plain-text document.
   const items = consolidateNewsMatches(
-    [match('m1', 'asset-1', ['a1', 'a2', 'a3'])],
+    [match('m1', 'asset-1', ['a1', 'a2', 'a3'], undefined, 80, null)],
     new Map([
-      ['a1', article('a1', 'https://example.com/1', 'First story')],
-      ['a2', article('a2', 'https://example.com/2', 'Second story')],
-      ['a3', article('a3', 'https://example.com/3', 'Third story')],
+      ['a1', article('a1', 'https://example.com/1', 'First story', ['CVE-2026-12345'])],
+      ['a2', article('a2', 'https://example.com/2', 'Second story', ['CVE-2026-67890'])],
+      ['a3', article('a3', 'https://example.com/3', 'Third story', ['CVE-2026-11111'])],
     ]),
     () => 'server-1',
   );

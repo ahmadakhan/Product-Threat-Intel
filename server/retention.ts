@@ -412,7 +412,7 @@ export async function runRetention(
     let outboxDeleted = 0;
     for (;;) {
       const outbox = await db.query(
-        "DELETE FROM outbox WHERE id IN (SELECT id FROM outbox WHERE status IN ('ACCEPTED','FAILED','REJECTED') AND updated_at < $1 LIMIT 10000)",
+        "DELETE FROM outbox WHERE id IN (SELECT id FROM outbox WHERE status IN ('ACCEPTED','FAILED','REJECTED','SUPERSEDED') AND updated_at < $1 LIMIT 10000)",
         [new Date(plan.cutoff)],
       );
       outboxDeleted += outbox.rowCount ?? 0;

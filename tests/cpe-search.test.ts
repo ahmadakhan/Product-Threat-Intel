@@ -55,7 +55,7 @@ test('searchNvdCpes parses verified NVD CPE configurations and forwards the API 
   const keywordUrl = new URL(calls[0].url);
   const wildcardUrl = new URL(calls[1].url);
 
-  assert.equal(keywordUrl.origin + keywordUrl.pathname, 'https://services.nvd.nist.gov/rest/json/cpes/2.0');
+  assert.equal(keywordUrl.origin + keywordUrl.pathname, 'https://api.vulncheck.com/v3/index/nvd');
   assert.equal(keywordUrl.searchParams.get('keywordSearch'), 'microsoft windows 10');
   assert.equal(wildcardUrl.searchParams.get('cpeMatchString'), 'cpe:2.3:*:*:windows_10:*:*:*:*:*:*:*:*');
   assert.equal(wildcardUrl.searchParams.has('keywordSearch'), false);
@@ -138,8 +138,8 @@ test('loadNvdApiKey decrypts the configured NVD feed key', async () => {
         {
           data: {
             id: 'feed-nvd',
-            type: 'NVD_API',
-            authType: 'API_KEY',
+            type: 'VULNCHECK_NVD',
+            authType: 'BEARER',
             enabled: true,
             authSecretKey: secret,
           },
@@ -155,7 +155,7 @@ test('loadNvdApiKey returns empty when no NVD key is configured', async () => {
   const db = {
     query: async () => ({
       rows: [
-        { data: { id: 'feed-mitre', type: 'MITRE_CVE', authType: 'NONE', enabled: true, authSecretKey: '' } },
+        { data: { id: 'feed-vulncheck', type: 'VULNCHECK_NVD', authType: 'NONE', enabled: true, authSecretKey: '' } },
       ],
     }),
   } as unknown as Parameters<typeof loadNvdApiKey>[0];

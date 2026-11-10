@@ -159,6 +159,21 @@ export function compileCustomizedTemplate(config: TemplateCustomization): string
         </td>
     </tr>
 
+    <!-- SEVERITY SUMMARY -->
+    <tr>
+        <td style="padding:24px 32px;border-bottom:1px solid #e2e8f0;">
+
+            <div style="font-size:11px;font-weight:bold;letter-spacing:1.5px;color:${config.accentColor};margin-bottom:8px;">
+                SEVERITY SUMMARY
+            </div>
+
+            <div style="display:inline-flex;flex-wrap:wrap;gap:8px;align-items:center;">
+                {{severity_summary}}
+            </div>
+
+        </td>
+    </tr>
+
     <!-- EXECUTIVE SUMMARY -->
     <tr>
         <td style="padding:24px 32px;border-bottom:1px solid #e2e8f0;">
@@ -244,17 +259,13 @@ export function compileCustomizedTemplate(config: TemplateCustomization): string
                         Remediation
                     </td>
                     <td style="padding:12px;border:1px solid #e2e8f0;text-align:left;vertical-align:top;">
-
-                        <div style="background:#f8fafc;border-left:4px solid ${config.accentColor};padding:12px;">
-                            {{remediation_steps}}
-                        </div>
+                        {{remediation_steps}}
 
                         {{#if remediation_link}}<p style="margin:12px 0 0;">
                             <a href="{{remediation_link}}" target="_blank">
                                 View Vendor Guidance
                             </a>
                         </p>{{/if}}
-
                     </td>
                 </tr>
 

@@ -174,12 +174,12 @@ function SourceBadge({ source }: { source: ThreatSearchHit['source'] }) {
   return (
     <span
       className={`inline-flex items-center rounded-full border px-1.5 py-0.5 font-mono text-[10px] font-medium ${
-        source === 'NVD_API'
-          ? 'border-blue-500/30 bg-blue-500/10 text-blue-300 light:text-blue-800'
+        source === 'KEYWORD_FALLBACK'
+          ? 'border-teal-500/30 bg-teal-500/10 text-teal-300 light:text-teal-800'
           : 'border-teal-500/30 bg-teal-500/10 text-teal-300 light:text-teal-800'
       }`}
     >
-      {source === 'NVD_API' ? 'Exact CPE' : 'Keyword'}
+      {source === 'KEYWORD_FALLBACK' ? 'Keyword fallback' : 'Vendor advisory'}
     </span>
   );
 }
@@ -312,8 +312,8 @@ export const ThreatIntelligenceSearch: React.FC = () => {
     [],
   );
 
-  const nvdFeed = feeds.find((f) => f.type === 'NVD_API' && f.enabled);
-  const hasNvdApiKey = nvdFeed && nvdFeed.authType === 'API_KEY' && Boolean(nvdFeed.authSecretKey);
+  const nvdFeed = {};
+  const hasNvdApiKey = false;
 
   const openApiKeyDialog = () => {
     setApiKeyInput('');
@@ -331,17 +331,13 @@ export const ThreatIntelligenceSearch: React.FC = () => {
     setConfirmingApiKey(false);
     setApiKeySaving(true);
     setApiKeyMessage('');
-    if (!nvdFeed) {
+    if (!hasNvdApiKey) {
       setApiKeyMessage('No NVD feed is configured. Add one under Feeds first.');
       setApiKeySaving(false);
       return;
     }
     try {
-      const ok = await updateFeed({
-        ...nvdFeed,
-        authType: 'API_KEY',
-        authSecretKey: apiKeyInput.trim(),
-      });
+      const ok = await updateFeed({...nvdFeed, authType: 'API_KEY', authSecretKey: apiKeyInput.trim()} as any);
       if (ok) {
         setApiKeyMessage('API key saved. Run a new search to pick it up.');
         setApiKeyInput('');
@@ -611,8 +607,8 @@ export const ThreatIntelligenceSearch: React.FC = () => {
     const filtered = results.filter((hit) => {
       if (severityFilter !== 'ALL' && hit.cve.cvss.severity !== severityFilter) return false;
       if (kevOnly && !hit.cve.cisaKev?.isKev) return false;
-      if (evidenceFilter === 'EXACT' && hit.source !== 'NVD_API') return false;
-      if (evidenceFilter === 'KEYWORD' && hit.source === 'NVD_API') return false;
+      if (evidenceFilter === 'EXACT' && hit.source !== 'KEYWORD_FALLBACK') return false;
+      if (evidenceFilter === 'KEYWORD' && hit.source === 'KEYWORD_FALLBACK') return false;
       if (!query) return true;
       return [
         hit.cve.cveId,
@@ -654,7 +650,7 @@ export const ThreatIntelligenceSearch: React.FC = () => {
       if (hit.cve.cvss.severity === 'CRITICAL') critical++;
       if (hit.cve.cvss.severity === 'HIGH') high++;
       if (hit.cve.cisaKev?.isKev) kev++;
-      if (hit.source === 'NVD_API') exact++;
+      if (hit.source === 'KEYWORD_FALLBACK') exact++;
     }
     return {
       critical,
@@ -2283,7 +2279,7 @@ export const ThreatIntelligenceSearch: React.FC = () => {
                 <h3 className="text-xs font-semibold text-zinc-200 light:text-zinc-800">Sources</h3>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   <span className="rounded border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 light:border-zinc-300 light:bg-zinc-50 light:text-zinc-600">
-                    {inspect.source === 'NVD_API' ? 'NVD exact CPE' : 'NVD keyword fallback'}
+                    {inspect.source === 'KEYWORD_FALLBACK' ? 'Keyword fallback' : 'Vendor advisory'}
                   </span>
                   {inspect.cve.sourceFeeds.map((source) => (
                     <span

@@ -25,7 +25,7 @@ import type {
   RetentionRunResult,
   RetentionPreview,
   CorrelationSimulation,
-  NvdCpeSearchResponse,
+  VulncheckCpeSearchResponse,
   ThreatSearchResponse,
   ThreatAnalytics,
   CpeMatchSimulation,
@@ -503,14 +503,14 @@ function useApplication() {
     }) => safely(() => request<CorrelationSimulation>('/correlation/simulate', asset)),
     addWatchlistItem: (item: Omit<WatchListItem, 'id' | 'createdAt'>) => save('asset.save', item),
     updateWatchlistItem: (item: WatchListItem) => save('asset.save', item, item.id),
-    searchNvdCpes: async (vendor: string, product: string, limit = 50) => {
+    searchVulncheckCpes: async (vendor: string, product: string, limit = 50) => {
       const params = new URLSearchParams({ vendor, product, limit: String(limit) });
-      return request<NvdCpeSearchResponse>(`/cpes/search?${params}`);
+      return request<VulncheckCpeSearchResponse>(`/cpes/search?${params}`);
     },
-    verifyNvdCpe: async (cpe: string, cpeNameId?: string) => {
+    verifyVulncheckCpe: async (cpe: string, cpeNameId?: string) => {
       const params = new URLSearchParams({ cpe, limit: '200' });
       if (cpeNameId) params.set('cpeNameId', cpeNameId);
-      return request<NvdCpeSearchResponse>(`/cpes/search?${params}`);
+      return request<VulncheckCpeSearchResponse>(`/cpes/search?${params}`);
     },
     saveRegisteredProducts: async (items: WatchListItem[]) => {
       const result = await command('watchlist.import', items);
@@ -662,31 +662,6 @@ function useApplication() {
           'POST',
         ),
       ),
-    /**
-     * Renders the edited email into the exact PDF that delivery would attach.
-     * The request helper is JSON-only, so the binary response is fetched
-     * directly while preserving the session cookie and CSRF header.
-     */
-    previewEmailPdf: (id: string, edits: ReviewEdits) =>
-      safely(async () => {
-        const response = await fetch(`/api/email/${encodeURIComponent(id)}/preview-pdf`, {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: {
-            'content-type': 'application/json',
-            ...(sessionRef.current ? { 'x-csrf-token': sessionRef.current.csrfToken } : {}),
-          },
-          body: JSON.stringify(edits),
-          signal: AbortSignal.timeout(45000),
-        });
-        if (!response.ok) {
-          const data = await response
-            .json()
-            .catch(() => ({ error: `PDF preview failed (HTTP ${response.status})` }));
-          throw new Error(data.error || `PDF preview failed (HTTP ${response.status})`);
-        }
-        return response.blob();
-      }),
     acknowledgeEmailDelivery: (id: string, reason?: string) =>
       call(`/email/${encodeURIComponent(id)}/acknowledge`, { reason }),
     updateAndSendEmail: (
@@ -699,6 +674,7 @@ function useApplication() {
         customBodyOverride?: string;
         recipientMode: 'SINGLE_EMAIL' | 'SECURITY_TEAM' | 'EVERYONE';
         customEmail?: string;
+        attachHtml?: boolean;
         reason?: string;
       },
     ) =>

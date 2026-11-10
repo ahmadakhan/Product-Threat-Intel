@@ -8,6 +8,7 @@ import { matchesWatchlistItem } from '../src/utils/cpeMatcher.ts';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
 import { cveSchema } from '../server/validation.ts';
+import { encrypt } from '../server/secrets.ts';
 import type { NormalizedCVE, ThreatFeed, WatchListItem } from '../src/types/index.ts';
 
 const config = loadConfig({
@@ -21,8 +22,11 @@ const feed = (type: ThreatFeed['type']): ThreatFeed => ({
   id: 'test-feed',
   name: 'Test source',
   type,
-  url: 'https://example.com/data?date=2020-01-01',
-  authType: 'NONE',
+  url: type === 'VULNCHECK_NVD' ? 'https://api.vulncheck.com/v3/index/nvd' : 'https://example.com/data?date=2020-01-01',
+  authType: type === 'VULNCHECK_NVD' ? 'BEARER' : 'NONE',
+  authSecretKey: type === 'VULNCHECK_NVD'
+    ? encrypt('vulncheck-test-token', [config.ENCRYPTION_KEY], 'feed:test-feed')
+    : undefined,
   rateLimitPerMin: 10,
   enabled: true,
   healthStatus: 'UNTESTED',
@@ -81,7 +85,7 @@ test('product-wide CPE wildcards cover constrained platforms; later confirmed ev
       [{ ...asset, cpes: [cpe('*')] }],
       [],
       [],
-      { ...DEFAULT_SETTINGS, scopeHours: 0 },
+      { ...DEFAULT_SETTINGS, scopeHours: 0, autoDispatchEnabled: true },
     ).newFindings[0];
     assert.equal(finding?.notificationStatus, expected);
   }
@@ -98,6 +102,7 @@ test('product-wide CPE wildcards cover constrained platforms; later confirmed ev
   const finding = runVulnerabilityPipeline([], [record], [asset], [], [], {
     ...DEFAULT_SETTINGS,
     scopeHours: 0,
+    autoDispatchEnabled: true,
   }).newFindings[0];
   assert.equal(finding.notificationStatus, 'QUEUED_FOR_DISPATCH');
 });
@@ -160,7 +165,7 @@ test('text-only provider review policy does not override verified structured app
     [asset],
     [],
     [],
-    { ...DEFAULT_SETTINGS, scopeHours: 0, autoDispatchEnabled: true, autoDispatchConfidenceThreshold: 90 },
+    { ...DEFAULT_SETTINGS, scopeHours: 0, autoDispatchEnabled: true, confirmedFindingThreshold: 90 },
   );
   assert.equal(result.newFindings[0]?.notificationStatus, 'QUEUED_FOR_DISPATCH');
   assert.equal(result.newFindings[0]?.confidence, 90);
@@ -201,7 +206,7 @@ test('a provider revision replaces its own old criteria without removing another
     [{ ...asset, cpes: [cpe('1.5')] }],
     [],
     [],
-    { ...DEFAULT_SETTINGS, scopeHours: 0, autoDispatchEnabled: true, autoDispatchConfidenceThreshold: 0, autoDispatchUnverifiableMatches: true },
+    { ...DEFAULT_SETTINGS, scopeHours: 0, autoDispatchEnabled: true, confirmedFindingThreshold: 0, autoDispatchUnverifiableMatches: true },
   ).newFindings[0];
   assert.equal(conflictingFinding?.notificationStatus, 'REVIEW_REQUIRED');
 });
@@ -229,7 +234,7 @@ test('a newer revision from the same provider replaces superseded applicability'
 test('NVD retains provisional analysis as review-only and reports withdrawals', async () => {
   assert.equal(normalizeNvd(nvd('Awaiting Analysis'), 'nvd')?.applicabilityRequiresReview, true);
   const result = await ingestFeed(
-    feed('NVD_API'),
+    feed('VULNCHECK_NVD'),
     24,
     async () => ({
       status: 200,
@@ -248,7 +253,7 @@ test('NVD resumes from an overlapping checkpoint and avoids normalizing cached r
   const checkpoint = new Date(Date.now() - 60 * 60 * 1000);
   let requestedUrl = '';
   const result = await ingestFeed(
-    feed('NVD_API'),
+    feed('VULNCHECK_NVD'),
     24,
     async (value) => {
       requestedUrl = value;
@@ -337,7 +342,7 @@ test('long NVD Retry-After defers instead of retrying before the allowed time', 
   let calls = 0;
   await assert.rejects(
     ingestFeed(
-      feed('NVD_API'),
+      feed('VULNCHECK_NVD'),
       24,
       async () => {
         calls++;
@@ -385,7 +390,7 @@ test('package applicability never borrows a range from an unrelated CPE', () => 
 });
 
 test('null JSON and unsolicited conditional responses cannot claim feed success', async () => {
-  for (const type of ['JSON_SEARCH_API', 'CISA_KEV', 'NVD_API'] as const) {
+  for (const type of ['JSON_SEARCH_API', 'CISA_KEV'] as const) {
     await assert.rejects(
       ingestFeed(feed(type), 24, async () => ({ status: 200, headers: {}, body: 'null' }), config),
     );
@@ -398,23 +403,27 @@ test('null JSON and unsolicited conditional responses cannot claim feed success'
 
 test('NVD rejects duplicate, overfull and shifting pages atomically', async () => {
   for (const pages of [
-    [{ startIndex: 0, totalResults: 2, vulnerabilities: [nvd(), nvd()] }],
-    [{ startIndex: 0, totalResults: 0, vulnerabilities: [nvd()] }],
+    // Two pages whose cursor repeats: the relay loop would never terminate.
     [
-      { startIndex: 0, totalResults: 2, vulnerabilities: [nvd()] },
-      { startIndex: 1, totalResults: 1, vulnerabilities: [] },
+      { vulnerabilities: [nvd()], _meta: { next_cursor: 'c1' } },
+      { vulnerabilities: [], _meta: { next_cursor: 'c1' } },
+    ],
+    // The same CVE ID on two distinct cursors: the provider re-used a record.
+    [
+      { vulnerabilities: [nvd()], _meta: { next_cursor: 'c1' } },
+      { vulnerabilities: [nvd()], _meta: { next_cursor: 'c2' } },
     ],
   ]) {
     let index = 0;
     await assert.rejects(
       ingestFeed(
-        feed('NVD_API'),
+        feed('VULNCHECK_NVD'),
         24,
         async () => ({ status: 200, headers: {}, body: JSON.stringify(pages[index++]) }),
         config,
         async () => {},
       ),
-       /duplicate|pagination|short/,
+      /duplicate|cursor/,
     );
   }
 });
@@ -488,7 +497,7 @@ test('NVD ingests a corrected CVE whose lastModified did not advance', async () 
   };
 
   // Unchanged content at an unchanged timestamp is still skipped.
-  const unchanged = await ingestFeed(feed('NVD_API'), 24, request, config, async () => {}, [], undefined, {
+  const unchanged = await ingestFeed(feed('VULNCHECK_NVD'), 24, request, config, async () => {}, [], undefined, {
     ...context,
     knownCveContent: new Map([['CVE-2026-12345', cve()]]),
   });
@@ -497,7 +506,7 @@ test('NVD ingests a corrected CVE whose lastModified did not advance', async () 
     cve: { ...corrected.cve, metrics: {}, references: [] },
   };
   const baseline = await ingestFeed(
-    feed('NVD_API'),
+    feed('VULNCHECK_NVD'),
     24,
     async () => ({
       status: 200,
@@ -512,7 +521,7 @@ test('NVD ingests a corrected CVE whose lastModified did not advance', async () 
   );
   const cached = baseline.cves[0];
   assert.ok(cached, 'the baseline record must normalise');
-  const changed = await ingestFeed(feed('NVD_API'), 24, request, config, async () => {}, [], undefined, {
+  const changed = await ingestFeed(feed('VULNCHECK_NVD'), 24, request, config, async () => {}, [], undefined, {
     ...context,
     knownCveContent: new Map([['CVE-2026-12345', cached]]),
   });

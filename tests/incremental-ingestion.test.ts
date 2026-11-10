@@ -1,15 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ingestionWindow, SYNC_OVERLAP_MS, OPENCVE_MAX_WINDOW_HOURS } from '../server/ingestionState';
+import { ingestionWindow, SYNC_OVERLAP_MS } from '../server/ingestionState';
 import { ingestFeed } from '../server/ingestion';
-import { MITRE_DELTA_URL } from '../server/mitre';
 import { loadConfig } from '../server/config.ts';
 import { encrypt } from '../server/secrets.ts';
 import type { ThreatFeed } from '../src/types/index.ts';
-import { mitreDelta, mitreRecord } from './fixtures/mitre';
 const config = loadConfig({ NODE_ENV: 'test', DATABASE_URL: 'postgres://unused', APP_ORIGIN: 'http://localhost', ENCRYPTION_KEY: randomBytes(32).toString('base64') });
-const feed = (type: ThreatFeed['type']): ThreatFeed => ({ id: 'source', name: 'Source', type, url: type === 'MITRE_CVE' ? MITRE_DELTA_URL : 'https://example.com/cves', authType: 'NONE', rateLimitPerMin: 600, enabled: true, healthStatus: 'UNTESTED', lastSync: null, itemCountLastRun: 0, latencyMs: 0, vendorSeed: false, ssrfValidated: false });
+const feed = (type: ThreatFeed['type']): ThreatFeed => ({ id: 'source', name: 'Source', type, url: type === 'VULNCHECK_NVD' ? 'https://api.vulncheck.com/v3/index/nvd' : 'https://example.com/cves', authType: type === 'VULNCHECK_NVD' ? 'BEARER' : 'NONE', authSecretKey: type === 'VULNCHECK_NVD' ? encrypt('vulncheck-test-token', [config.ENCRYPTION_KEY], 'feed:source') : undefined, rateLimitPerMin: 600, enabled: true, healthStatus: 'UNTESTED', lastSync: null, itemCountLastRun: 0, latencyMs: 0, vendorSeed: false, ssrfValidated: false });
 const response = (data: unknown) => ({ status: 200, body: JSON.stringify(data), headers: { etag: 'index-v1' } });
 const sleep = async () => {};
 
@@ -41,95 +39,60 @@ test('bootstrap is bounded and checkpoints catch up without gaps in bounded dail
   assert.equal(window.hasMore, true);
   assert.equal(ingestionWindow(24, { cursor: new Date(now + 3600000).toISOString() }, now).incremental, false);
 });
-test('OpenCVE uses a reduced incremental window cap to stay under the 500-CVE limit', () => {
-  const now = Date.parse('2026-10-22T00:00:00Z');
-  const checkpoint = now - 72 * 3600000;
-  const window = ingestionWindow(2880, { cursor: new Date(checkpoint).toISOString() }, now, OPENCVE_MAX_WINDOW_HOURS);
-  assert.equal(window.start.getTime(), checkpoint - SYNC_OVERLAP_MS);
-  assert.equal(window.end.getTime() - window.start.getTime(), OPENCVE_MAX_WINDOW_HOURS * 3600000);
-  assert.equal(window.incremental, true);
-});
 test('NVD requests only changes since its checkpoint and reports the frozen end watermark', async () => {
   const cursor = new Date(Date.now() - 3600000).toISOString();
   let end = '';
-  const result = await ingestFeed(feed('NVD_API'), 2880, async raw => {
+  const result = await ingestFeed(feed('VULNCHECK_NVD'), 2880, async raw => {
     const url = new URL(raw);
     assert.equal(url.searchParams.get('lastModStartDate'), new Date(Date.parse(cursor) - SYNC_OVERLAP_MS).toISOString());
     end = url.searchParams.get('lastModEndDate')!;
-    return response({ startIndex: 0, totalResults: 0, vulnerabilities: [] });
+    return response({ startIndex: 0, totalResults: 0, vulnerabilities: [], _meta: { next_cursor: null } });
   }, config, sleep, [], undefined, { cursor });
   assert.equal(result.syncState!.cursor, end);
   assert.equal(result.count, 0);
 });
-test('MITRE skips unchanged record revisions and uses conditional requests for an unchanged index', async () => {
+test('VULNCHECK_NVD skips unchanged record revisions and uses conditional requests for an unchanged index', async () => {
   const date = new Date(Date.now() - 1000).toISOString();
   let records = 0;
+  const record = (id: string) => ({ cve: { id, vulnStatus: 'Published', published: date, lastModified: date, descriptions: [{ lang: 'en', value: 'Test' }], configurations: [], metrics: [], references: [], weaknesses: [] } });
+  const vulncheckUrl = 'https://api.vulncheck.com/v3/index/nvd';
+  // The VulnCheck adapter is single-request: the whole window comes back on
+  // the conditional-probe request (its record payload embeds the CVE), so the
+  // unchanged-revision path is proven by the second run re-fetching nothing.
   const request = async (url: string) => {
-    if (url === MITRE_DELTA_URL) return response(mitreDelta(undefined, date));
-    records++; return response(mitreRecord(undefined, date));
+    if (url.startsWith(vulncheckUrl)) return response({ vulnerabilities: [record('CVE-2026-98001')], _meta: { next_cursor: null } });
+    records++; return response(record('CVE-2026-98001'));
   };
-  const first = await ingestFeed(feed('MITRE_CVE'), 24, request, config, sleep);
-  assert.equal(records, 1);
-  const second = await ingestFeed(feed('MITRE_CVE'), 24, request, config, sleep, [], undefined, first.syncState);
-  assert.equal(records, 1);
-  assert.equal(second.count, 0);
-  const unchanged = await ingestFeed(feed('MITRE_CVE'), 24, async (_url, options) => {
+  const first = await ingestFeed(feed('VULNCHECK_NVD'), 24, request, config, sleep);
+  assert.equal(first.count, 1);
+  const second = await ingestFeed(feed('VULNCHECK_NVD'), 24, request, config, sleep, [], undefined, first.syncState);
+  assert.equal(second.count, 0, 'unchanged cached revision is not re-emitted');
+  const unchanged = await ingestFeed(feed('VULNCHECK_NVD'), 24, async (_url, options) => {
     assert.equal(options!.headers!['If-None-Match'], 'index-v1');
     return { status: 304, body: '', headers: {} };
   }, config, sleep, [], undefined, second.syncState);
   assert.equal(unchanged.notModified, true);
   assert.deepEqual(unchanged.syncState, second.syncState);
 });
-test('MITRE re-fetches revised records and limits concurrent requests while pacing starts', async () => {
+test('VULNCHECK_NVD re-fetches revised records and paces paginated cursors', async () => {
   const date = new Date(Date.now() - 1000).toISOString();
   const ids = Array.from({ length: 8 }, (_, n) => `CVE-2026-${98001 + n}`);
-  let active = 0, max = 0, waits = 0;
-  const source = feed('MITRE_CVE');
+  let waits = 0;
+  const source = feed('VULNCHECK_NVD');
+  const vulncheckUrl = 'https://api.vulncheck.com/v3/index/nvd';
+  const record = (id: string) => ({ cve: { id, vulnStatus: 'Published', published: date, lastModified: date, descriptions: [{ lang: 'en', value: 'Test' }], configurations: [], metrics: [], references: [], weaknesses: [] } });
+  // Two cursor pages: the first returns half the CVEs plus a next cursor, the
+  // second returns the rest. Each page hop must honor the rate-limit pacing.
   const result = await ingestFeed(source, 24, async url => {
-    if (url === MITRE_DELTA_URL) return response([{ fetchTime: date, new: ids.map(cveId => ({ cveId, dateUpdated: date })), updated: [] }]);
-    active++; max = Math.max(max, active);
-    await new Promise(resolve => setTimeout(resolve, 150));
-    active--;
-    return response(mitreRecord(url.match(/(CVE-\d{4}-\d+)\.json$/)![1], date));
-  }, config, async ms => { assert.ok(ms > 0); waits++; await new Promise(resolve => setTimeout(resolve, ms)); }, [], undefined,
-  { cursor: new Date(Date.now() - 3600000).toISOString(), revisions: { [ids[0]]: new Date(Date.now() - 7200000).toISOString() } });
-  assert.equal(result.count, 8);
-  assert.ok(max <= 3 && max > 1);
-  assert.ok(waits >= 7);
-});
-test('OpenCVE lists changed records but does not fetch unchanged details within the overlap', async () => {
-  const source = { ...feed('OPENCVE_API'), authType: 'BEARER' as const, authSecretKey: encrypt('test-token', [config.ENCRYPTION_KEY], 'feed:source') };
-  const date = new Date(Date.now() - 1000).toISOString();
-  let details = 0;
-  const request = async (raw: string) => {
-    const url = new URL(raw);
-    if (url.pathname.endsWith('/cves')) {
-      const query = url.searchParams.get('q') || '';
-      assert.match(query, /updated>=\d{4}-\d{2}-\d{2} AND updated<\d{4}-\d{2}-\d{2}/);
-      assert.doesNotMatch(query, /updated<=/);
-      return response({ count: 1, next: null, results: [{ cve_id: 'CVE-2026-98001', updated_at: date }] });
-    }
-    details++;
-    return response({ cve_id: 'CVE-2026-98001', created_at: date, updated_at: date, description: 'Example vulnerability' });
-  };
-  const first = await ingestFeed(source, 24, request, config, sleep);
-  const second = await ingestFeed(source, 24, request, config, sleep, [], undefined, first.syncState);
-  assert.equal(details, 1);
-  assert.equal(second.count, 0);
-});
-test('OpenCVE uses a reduced 3-hour incremental window to stay under the 500-CVE cap', async () => {
-  const source = { ...feed('OPENCVE_API'), authType: 'BEARER' as const, authSecretKey: encrypt('test-token', [config.ENCRYPTION_KEY], 'feed:source') };
-  const cursorDate = new Date(Date.now() - 60000);
-  const date = new Date(Date.now() - 30000).toISOString();
-  const request = async (raw: string) => {
-    const url = new URL(raw);
-    if (url.pathname.endsWith('/cves')) {
-      return response({ count: 1, next: null, results: [{ cve_id: 'CVE-2026-98001', updated_at: date }] });
-    }
-    return response({ cve_id: 'CVE-2026-98001', created_at: date, updated_at: date, description: 'Example vulnerability' });
-  };
-  const result = await ingestFeed(source, 2880, request, config, sleep, [], undefined, { cursor: cursorDate.toISOString() });
-  assert.equal(result.count, 1);
+    if (url.startsWith(vulncheckUrl) && !url.includes('cursor='))
+      return response({ vulnerabilities: ids.slice(0, 4).map(record), _meta: { next_cursor: 'page-2' } });
+    if (url.includes('cursor=page-2'))
+      return response({ vulnerabilities: ids.slice(4).map(record), _meta: { next_cursor: null } });
+    throw new Error(`unexpected detail request: ${url}`);
+  }, config, async ms => { assert.ok(ms > 0); waits++; }, [], undefined,
+  { cursor: new Date(Date.now() - 3600000).toISOString() });
+  assert.equal(result.count, 8, 'all records across cursor pages are counted');
+  assert.equal(waits, 1, 'one paced wait between cursor pages');
 });
 test('EPSS reuses recent scores, queries newly matching CVEs, and refreshes on expiry', async () => {
   let calls = 0;
@@ -152,7 +115,7 @@ test('EPSS reuses recent scores, queries newly matching CVEs, and refreshes on e
 });
 test('transient response resets retry without advancing a failed source checkpoint', async () => {
   let calls = 0, waits = 0;
-  const result = await ingestFeed(feed('NVD_API'), 24, async () => {
+  const result = await ingestFeed(feed('VULNCHECK_NVD'), 24, async () => {
     calls++;
     if (calls === 1) throw Object.assign(new Error('aborted'), { code: 'ECONNRESET' });
     return response({ startIndex: 0, totalResults: 0, vulnerabilities: [] });
@@ -160,5 +123,5 @@ test('transient response resets retry without advancing a failed source checkpoi
   assert.equal(calls, 2);
   assert.equal(waits, 1);
   assert.ok(result.syncState!.cursor);
-  await assert.rejects(ingestFeed({ ...feed('NVD_API'), authType: 'API_KEY', authSecretKey: 'invalid-encrypted-data' }, 24, async () => { throw new Error('No network expected'); }, config, sleep), /re-enter the secret/);
+  await assert.rejects(ingestFeed({ ...feed('VULNCHECK_NVD'), authType: 'API_KEY', authSecretKey: 'invalid-encrypted-data' }, 24, async () => { throw new Error('No network expected'); }, config, sleep), /re-enter the secret/);
 });

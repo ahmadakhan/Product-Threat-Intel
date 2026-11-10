@@ -5,7 +5,7 @@ import { mkdir } from 'node:fs/promises';
 const output = '/home/admin1/.codex/visualizations/2026/10/28/01a18360-2c1e-7d71-84d8-c188585994ad';
 await mkdir(output, { recursive: true });
 const hits = Array.from({ length: 16 }, (_, i) => ({
-  source: i % 3 ? 'NVD_API' : 'NVD_KEYWORD',
+  source: i % 3 ? 'VULNCHECK_NVD' : 'VULNCHECK_KEYWORD',
   matchingCpes: ['cpe:2.3:o:microsoft:windows_server_2022:*:*:*:*:*:*:*:*'],
   cve: {
     cveId: `CVE-2026-${90001 + i}`,

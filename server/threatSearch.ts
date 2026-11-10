@@ -17,7 +17,7 @@ import type { Db } from './db';
 import { list } from './db';
 import { HttpError } from './validation';
 
-const NVD_CVE_ENDPOINT = 'https://services.nvd.nist.gov/rest/json/cves/2.0';
+const VULNCHECK_NVD_ENDPOINT = 'https://api.vulncheck.com/v3/index/nvd';
 
 interface AliasEntry {
   scope: 'VENDOR' | 'PRODUCT';
@@ -128,7 +128,7 @@ export async function searchThreatIntelligence(
   let answered = false;
   for (const cpePrefix of cpePrefixes) {
     try {
-      const result = await fetchNvdCves(request, apiKey, cpePrefix, limit, nvdStartDate);
+      const result = await fetchVulncheckCves(request, apiKey, cpePrefix, limit, nvdStartDate);
       answered = true;
       for (const cve of result.cves) {
         const matchingCpes = findMatchingCpes(
@@ -151,7 +151,7 @@ export async function searchThreatIntelligence(
           hits.push({
             cve,
             matchingCpes: acceptedCpes,
-            source: 'NVD_API',
+            source: 'KEYWORD_FALLBACK',
           });
           exactHits++;
         }
@@ -197,7 +197,7 @@ export async function searchThreatIntelligence(
 
     try {
       for (const keyword of keywordCandidates) {
-        const result = await fetchNvdCvesByKeyword(request, apiKey, keyword, limit * 2, nvdStartDate);
+        const result = await fetchVulncheckCvesByKeyword(request, apiKey, keyword, limit * 2, nvdStartDate);
         answered = true;
         for (const cve of result.cves) {
           const matchingCpes = findMatchingCpesByAlias(
@@ -281,7 +281,7 @@ export async function searchThreatIntelligence(
   };
 }
 
-interface NvdFetchResult {
+interface VulncheckFetchResult {
   cves: NormalizedCVE[];
   /** Records in the upstream response, before normalization filtered any out. */
   returned: number;
@@ -289,14 +289,14 @@ interface NvdFetchResult {
   skipped: number;
 }
 
-async function fetchNvdCves(
+async function fetchVulncheckCves(
   request: Requester,
   apiKey: string,
   matchString: string,
   limit: number,
   startDate?: string,
-): Promise<NvdFetchResult> {
-  const url = new URL(NVD_CVE_ENDPOINT);
+): Promise<VulncheckFetchResult> {
+  const url = new URL(VULNCHECK_NVD_ENDPOINT);
   // `cpeName` requires an exact dictionary entry; a wildcard version suffix
   // (…:product:*:*) returns 404. `virtualMatchString` matches every version
   // of the CPE prefix, which is what an operator searching a product expects.
@@ -305,26 +305,26 @@ async function fetchNvdCves(
   if (apiKey) url.searchParams.set('apiKey', apiKey);
   if (startDate) url.searchParams.set('pubStartDate', startDate);
 
-  return fetchNvdResponse(request, url.href);
+  return fetchVulncheckResponse(request, url.href);
 }
 
-async function fetchNvdCvesByKeyword(
+async function fetchVulncheckCvesByKeyword(
   request: Requester,
   apiKey: string,
   keyword: string,
   limit: number,
   startDate?: string,
-): Promise<NvdFetchResult> {
-  const url = new URL(NVD_CVE_ENDPOINT);
+): Promise<VulncheckFetchResult> {
+  const url = new URL(VULNCHECK_NVD_ENDPOINT);
   url.searchParams.set('keywordSearch', keyword);
   url.searchParams.set('resultsPerPage', String(Math.min(Math.max(1, limit), 2000)));
   if (apiKey) url.searchParams.set('apiKey', apiKey);
   if (startDate) url.searchParams.set('pubStartDate', startDate);
 
-  return fetchNvdResponse(request, url.href);
+  return fetchVulncheckResponse(request, url.href);
 }
 
-async function fetchNvdResponse(request: Requester, url: string): Promise<NvdFetchResult> {
+async function fetchVulncheckResponse(request: Requester, url: string): Promise<VulncheckFetchResult> {
   const response = await request(url, {
     timeoutMs: 30000,
     socketTimeoutMs: 20000,
@@ -338,31 +338,31 @@ async function fetchNvdResponse(request: Requester, url: string): Promise<NvdFet
         ? parseRetryAfter(retryAfterHeader)
         : parseRetryAfter(retryAfterHeader[0])
       : null;
-    throw new ThreatSearchRateLimitError('NVD rate limit reached; retry later', retryAfter);
+    throw new ThreatSearchRateLimitError('VulnCheck rate limit reached; retry later', retryAfter);
   }
 
   if (response.status !== 200) {
-    throw new Error(`NVD CVE search returned HTTP ${response.status}`);
+    throw new Error(`VulnCheck CVE search returned HTTP ${response.status}`);
   }
 
   let data: any;
   try {
     data = JSON.parse(response.body);
   } catch {
-    throw new Error('NVD returned a non-JSON CVE search response');
+    throw new Error('VulnCheck returned a non-JSON CVE search response');
   }
 
   const vulns = Array.isArray(data?.vulnerabilities) ? data.vulnerabilities : [];
   const cves: NormalizedCVE[] = [];
   let skipped = 0;
   for (const item of vulns) {
-    // NVD occasionally returns a record that does not satisfy our normalized
+    // VulnCheck occasionally returns a record that does not satisfy our normalized
     // schema (invalid CPE criteria, a CVSS score outside 0–10, a missing
     // timestamp). normalizeNvd() throws a ZodError for those. One malformed
     // record must not fail the operator's whole query, and it must not be
     // confused with an upstream transport failure — skip it and count it.
     try {
-      const normalized = normalizeNvd(item, 'NVD_API');
+      const normalized = normalizeNvd(item, 'VULNCHECK_NVD');
       if (normalized) cves.push(normalized);
     } catch {
       skipped++;
@@ -372,7 +372,7 @@ async function fetchNvdResponse(request: Requester, url: string): Promise<NvdFet
     console.warn(
       JSON.stringify({
         level: 'warn',
-        event: 'nvd_search_record_skipped',
+        event: 'vulncheck_search_record_skipped',
         skipped,
         returned: vulns.length,
       }),

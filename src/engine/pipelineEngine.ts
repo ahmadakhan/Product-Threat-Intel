@@ -30,6 +30,11 @@ import { isPublicAddress } from '../utils/ipSafety';
 import ipaddr from 'ipaddr.js';
 import { shouldAutoDispatch } from '../../server/ml/integration.ts';
 
+/** Feed types treated as authoritative for vendor/product autodispatch
+ * even when the CVE record has no CPE applicability data.
+ */
+const AUTHORITATIVE_FEED_TYPES = new Set(['RSS_ATOM', 'JSON_SEARCH_API', 'VULNCHECK_NVD']);
+
 /** Package identity (`npm/express`) used to index PURL inventory.
  *
  * Audit H-2: one parser only. The engine previously kept a private copy whose
@@ -45,6 +50,7 @@ export interface PipelineRunResult {
   updatedAlertedCves: AlertedCVE[];
   newEmailLogs: EmailDeliveryLog[];
   newAuditLogs: AuditLog[];
+  circuitBreakerCooldowns: { overallUntil: number | null; feedUntil: Map<string, number> };
 }
 /** Client-side hint only. The server validates DNS and pins every connection. */
 export function validateSsrfSafety(value: string): { safe: boolean; reason?: string } {
@@ -121,7 +127,27 @@ export interface ZeroDayDigest {
  * vendor `legacy` and product `prod`. Anything unparseable degrades to the tag
  * rather than inventing structured identity.
  */
-function assetIdentity(assetName: string): { vendor: string; product: string; tag: string } {
+/**
+ * Identity of the asset a match belongs to, used to group zero-day digests.
+ *
+ * Prefers the structured vendor/product the matcher records. Parsing the
+ * `"tag (vendor product)"` display label is only a fallback for matches built
+ * before those fields existed, and it is inherently lossy: a product name
+ * containing whitespace or a parenthesis cannot be split back into vendor and
+ * product. Grouping on a wrong identity merges unrelated products into one
+ * digest, so the structured fields are the source of truth whenever present.
+ */
+function assetIdentity(match: IntelligenceMatch): { vendor: string; product: string; tag: string } {
+  if (match.assetVendor && match.assetProduct)
+    return {
+      vendor: match.assetVendor,
+      product: match.assetProduct,
+      tag: match.assetName.split(' (')[0]?.trim() || match.assetName.trim(),
+    };
+  // Legacy fallback: anchor on the LAST '(' because the asset tag itself may
+  // contain a parenthesis (`prod (legacy) (acme web)`). Anything unparseable
+  // degrades to the tag rather than inventing structured identity.
+  const assetName = match.assetName;
   const openParen = assetName.lastIndexOf('(');
   const closeParen = openParen >= 0 ? assetName.indexOf(')', openParen) : -1;
   const tail = openParen >= 0 && closeParen > openParen ? assetName.slice(openParen + 1, closeParen) : '';
@@ -149,7 +175,9 @@ function assetIdentity(assetName: string): { vendor: string; product: string; ta
  *    empty, leaving every digest unactionable.
  *  - grouping is by vendor/product, as documented. Keying on `assetId` produced
  *    one digest per asset, i.e. exactly the notification storm the cap exists to
- *    prevent.
+ *    prevent. The digest prefers the matcher's structured `assetVendor`/
+ *    `assetProduct`; parsing the display label is a lossy fallback only for
+ *    matches built before those fields existed.
  *  - the digest id uses a `DIGEST_` namespace instead of `ZDIGEST_`, which
  *    mimicked `formatAdvisoryId()` output for an advisory that is never written.
  *  - the counterpart findings of suppressed matches are removed from the
@@ -163,8 +191,12 @@ export function rankAndRateLimitZeroDays(
 ): { findings: Finding[]; matches: IntelligenceMatch[]; digests: ZeroDayDigest[] } {
   if (!Number.isInteger(cap) || cap < 1 || cap > MAX_ZERO_DAYS_PER_RUN)
     throw new Error('Zero-day cap must be an integer within the configured maximum');
-  const isZeroDayEvidence = (m: IntelligenceMatch) =>
-    Boolean(m.zeroDay) || (!m.cveId && m.status === 'REVIEW_REQUIRED');
+  // `zeroDay` is set by the matcher from the article's own flag. The previous
+  // `!cveId && REVIEW_REQUIRED` fallback predates that field and is now wrong:
+  // it counts every unlinked, uncorroborated intelligence match as a zero-day,
+  // which both mislabels CVE-less coverage notes and lets ordinary review-rated
+  // matches consume the zero-day budget ahead of real ones.
+  const isZeroDayEvidence = (m: IntelligenceMatch) => m.zeroDay === true;
   const zeroDayMatches = matches.filter(isZeroDayEvidence);
   if (zeroDayMatches.length <= cap) {
     return { findings, matches, digests: [] };
@@ -183,7 +215,7 @@ export function rankAndRateLimitZeroDays(
   if (!dropped.length) return { findings, matches, digests: [] };
   const byProduct = new Map<string, { vendor: string; product: string; matches: IntelligenceMatch[] }>();
   for (const match of dropped) {
-    const { vendor, product } = assetIdentity(match.assetName);
+    const { vendor, product } = assetIdentity(match);
     const key = `${vendor.toLowerCase()}\u0000${product.toLowerCase()}`;
     const group = byProduct.get(key) || { vendor, product, matches: [] };
     group.matches.push(match);
@@ -229,13 +261,58 @@ export function runVulnerabilityPipeline(
    * range a few days after they are written.
    */
   evaluatedAt: Date = new Date(),
+  circuitBreakerCooldowns: { overallUntil: number | null; feedUntil: Map<string, number> } = {
+    overallUntil: null,
+    feedUntil: new Map(),
+  },
+  cpeChangedCveIds: Set<string> = new Set(),
 ): PipelineRunResult {
   const started = evaluatedAt,
     known = new Set(existing.map((f) => `${normalizeCveId(f.cveId)}:${f.matchedAssetId}`)),
     knownCves = new Set(existing.map((f) => normalizeCveId(f.cveId)).filter((id): id is string => Boolean(id)));
   const newFindings: Finding[] = [];
   const executionId = crypto.randomUUID();
+  const feedAuthority = new Map(
+    _feeds.map((f) => [f.id, AUTHORITATIVE_FEED_TYPES.has(f.type) || f.authoritative === true]),
+  );
   let processed = 0;
+  let authoritativeSourceDispatchCount = 0;
+  // Circuit-breaker accounting for this run. A cap trip opens a cooldown that
+  // the pipeline persists; the next run loads it and skips dispatch from the
+  // tripped source while the cooldown is active. Cooldown expiry is automatic:
+  // the caller passes the loaded state and entries older than `now` are simply
+  // not enforced here.
+  const nowMs = started.getTime();
+  const overallCap = Math.max(1, settings.maxFindingsPerRun ?? 10000);
+  const totalCap = Math.max(1, settings.maxTotalFindingsPerRun ?? 50000);
+  const perFeedCap = Math.max(1, settings.maxDispatchesPerRunPerFeed ?? 10000);
+  const overallCooldownActive =
+    circuitBreakerCooldowns.overallUntil !== null && circuitBreakerCooldowns.overallUntil > nowMs;
+  const feedCooldownActive = (feedId: string) =>
+    (circuitBreakerCooldowns.feedUntil.get(feedId) ?? 0) > nowMs;
+  const dispatchesByFeed = new Map<string, number>();
+  let dispatchesThisRun = 0;
+  let totalFindingsThisRun = 0;
+  const cooldownMs = Math.max(1, settings.circuitBreakerCooldownMinutes ?? 60) * 60_000;
+  const feedCooldownMs = Math.max(1, settings.circuitBreakerFeedCooldownMinutes ?? 60) * 60_000;
+  const newAuditLogs: AuditLog[] = [];
+  const addAudit = (event: string, details: string, level: 'INFO' | 'WARNING' = 'INFO') => {
+    newAuditLogs.push({
+      id: crypto.randomUUID(),
+      timestamp: new Date(nowMs).toISOString(),
+      category: 'PIPELINE',
+      level,
+      event,
+      details,
+      actor: 'Server worker',
+      ipAddress: '',
+      context: { outcome: 'RECORDED' },
+      // The hash chain is computed by server/db.ts appendAudit when the entry
+      // is persisted; these placeholders are never stored.
+      prevHash: '',
+      hash: '',
+    });
+  };
   const normalizationStarted = performance.now();
   const latest = mergeCveRecords(corpus);
   const duplicates = corpus.filter((cve) => normalizeCveId(cve.cveId)).length - latest.size;
@@ -510,20 +587,44 @@ export function runVulnerabilityPipeline(
       const confirmedProductWideMatch = Boolean(result.productWideAllVersions) && !result.applicabilityRequiresReview;
       const confirmedKevProductOnlyMatch =
         confirmedProductWideMatch && result.method === 'VENDOR_PRODUCT_FALLBACK' && cve.cisaKev?.isKev === true;
+      const isAuthoritativeSource = cve.sourceFeeds?.some((feedId) => feedAuthority.get(feedId) === true);
+      const authoritativeSourceDispatch =
+        isAuthoritativeSource &&
+        (result.method === 'VENDOR_PRODUCT_FALLBACK' || result.method === 'VENDOR_PRODUCT_ALIAS');
+      // Build a human-readable source label for the enrichment evidence.
+      const sourceLabels = cve.sourceFeeds?.map((feedId) => {
+        const feed = _feeds.find((f) => f.id === feedId);
+        if (!feed) return feedId;
+        const t = feed.type;
+        if (t === 'RSS_ATOM' || t === 'JSON_SEARCH_API') return 'vendor advisory';
+        // VulnCheck NVD++ mirrors both the NVD and MITRE CVE lists, so the
+        // label names both upstream registries the record was sourced from.
+        if (t === 'VULNCHECK_NVD') return 'authoritative source (NVD/MITRE via VulnCheck NVD++)';
+        return `authoritative source (${t})`;
+      }).filter(Boolean);
+      const sourceLabel = sourceLabels.length > 0 ? sourceLabels.join(' ') : '';
       const cveReviewOverride =
         cve.applicabilityRequiresReview && !advisoryLacksApplicabilityData && !confirmedProductWideMatch;
       const sourceRequiresReview = cve.applicabilityPolicy === 'REVIEW_ONLY' && !confirmedKevProductOnlyMatch;
       const unverifiableMatch = sourceRequiresReview || cveReviewOverride || result.applicabilityRequiresReview;
-      const threshold = settings.autoDispatchConfidenceThreshold ?? 90;
+      const threshold = settings.confirmedFindingThreshold ?? 90;
       if (sourceRequiresReview || cveReviewOverride) result.confidence = 0;
       else if (confirmedKevProductOnlyMatch) result.confidence = Math.max(result.confidence, threshold);
+      else if (authoritativeSourceDispatch) result.confidence = Math.max(result.confidence, threshold);
       (result as MatchResult & { contradicted?: true }).contradicted = packageRejected || undefined;
       const confirmed =
         !packageRejected &&
         !sourceRequiresReview &&
         !cveReviewOverride &&
         (!unverifiableMatch || settings.autoDispatchUnverifiableMatches) &&
-        shouldAutoDispatch(result.confidence, settings);
+        shouldAutoDispatch(result.confidence, settings) &&
+        // Circuit breakers (evaluated after eligibility: a breaker gates
+        // delivery, it does not change whether the match itself is real).
+        !overallCooldownActive &&
+        !cve.sourceFeeds?.some((feedId) => feedCooldownActive(feedId)) &&
+        dispatchesThisRun < overallCap &&
+        totalFindingsThisRun < totalCap &&
+        !(cve.sourceFeeds ?? []).some((feedId) => (dispatchesByFeed.get(feedId) ?? 0) >= perFeedCap);
       // Say *why* a match is held. A held finding is re-derived before every
       // delivery attempt, so the reason has to name the actual blocker (policy
       // threshold vs. missing inventory version vs. unverifiable CVE evidence)
@@ -543,9 +644,11 @@ export function runVulnerabilityPipeline(
               : 'the available CVE evidence cannot verify this version'
             : `${result.confidence}% confidence is below the ${threshold}% auto-dispatch threshold`;
       const evidence = confirmed
-        ? advisoryLacksApplicabilityData
-          ? `Product correlation; the advisory has no CPE data yet, so the ${result.confidence}% match was dispatched under the workspace policy`
-          : 'Structured package/version correlation'
+        ? authoritativeSourceDispatch
+          ? `This CVE record has been marked for enrichment efforts.${sourceLabel ? ' ' + sourceLabel : ''} ${asset.vendor}/${asset.product}`
+          : advisoryLacksApplicabilityData
+            ? `Product correlation; the advisory has no CPE data yet, so the ${result.confidence}% match was dispatched under the workspace policy`
+            : 'Structured package/version correlation'
         : `Product correlation; held for review because ${holdReason}`;
       newFindings.push({
         id: crypto.randomUUID(),
@@ -577,6 +680,46 @@ export function runVulnerabilityPipeline(
           },
         ],
       });
+      if (confirmed) {
+        dispatchesThisRun++;
+        totalFindingsThisRun++;
+        for (const feedId of cve.sourceFeeds ?? [])
+          dispatchesByFeed.set(feedId, (dispatchesByFeed.get(feedId) ?? 0) + 1);
+        if (
+          dispatchesThisRun >= overallCap ||
+          totalFindingsThisRun >= totalCap ||
+          (cve.sourceFeeds ?? []).some((feedId) => (dispatchesByFeed.get(feedId) ?? 0) >= perFeedCap)
+        ) {
+          const trippedOverall = dispatchesThisRun >= overallCap;
+          const trippedTotal = totalFindingsThisRun >= totalCap;
+          const trippedFeeds = (cve.sourceFeeds ?? []).filter(
+            (feedId) => (dispatchesByFeed.get(feedId) ?? 0) >= perFeedCap,
+          );
+          if (trippedOverall)
+            circuitBreakerCooldowns.overallUntil = Math.max(
+              circuitBreakerCooldowns.overallUntil ?? 0,
+              nowMs + cooldownMs,
+            );
+          for (const feedId of trippedFeeds)
+            circuitBreakerCooldowns.feedUntil.set(feedId, Math.max(
+              circuitBreakerCooldowns.feedUntil.get(feedId) ?? 0,
+              nowMs + feedCooldownMs,
+            ));
+          addAudit(
+            'circuit_breaker.tripped',
+            [
+              trippedOverall && `run dispatch cap (${overallCap}) reached`,
+              trippedTotal && `total findings cap (${totalCap}) reached`,
+              trippedFeeds.length &&
+                `per-feed cap (${perFeedCap}) reached for ${trippedFeeds.join(', ')}`,
+            ]
+              .filter(Boolean)
+              .join('; '),
+            'WARNING',
+          );
+        }
+      }
+      if (authoritativeSourceDispatch && confirmed) authoritativeSourceDispatchCount++;
       known.add(key);
     }
   }
@@ -616,6 +759,7 @@ export function runVulnerabilityPipeline(
       advisoriesDispatched: 0,
       webhooksFired: 0,
       vexSuppressedCount: 0,
+      authoritativeSourceDispatchCount,
     },
     logs: [],
   };
@@ -625,6 +769,20 @@ export function runVulnerabilityPipeline(
     newAdvisories: [],
     updatedAlertedCves: structuredClone(alerted),
     newEmailLogs: [],
-    newAuditLogs: [],
+    newAuditLogs,
+    circuitBreakerCooldowns,
   };
+}
+
+/**
+ * Findings dispatched via an authoritative source without CPE data are pending
+ * enrichment re-evaluation. Returns findings whose `matchedCpe` is empty or
+ * whitespace, i.e. the correlation engine could not bind them to a CPE and
+ * they need a re-scan once CPE data becomes available.
+ */
+export function enrichmentBacklogCandidates(findings: Finding[]): Finding[] {
+  return findings.filter(
+    (f) => f.notificationStatus === 'QUEUED_FOR_DISPATCH' &&
+      (!f.matchedCpe || !f.matchedCpe.trim()),
+  );
 }

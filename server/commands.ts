@@ -102,6 +102,16 @@ export interface CommandResult {
   webhookId?: string;
   cveId?: string;
   action?: string;
+  circuitBreaker?: {
+    totalDispatchCount: number;
+    authoritativeSourceDispatchCount: number;
+    dispatchedAt: string | null;
+    maxTotalFindingsPerRun: number;
+    maxFindingsPerRun: number;
+    maxDispatchesPerRunPerFeed: number;
+    totalCapTripped: boolean;
+    authoritativeCapTripped: boolean;
+  };
 }
 
 /**
@@ -152,6 +162,7 @@ export const OPERATOR_COMMAND_ACTIONS: ReadonlySet<string> = new Set([
   'finding.delete',
   'asset.delete',
   'asset.toggle',
+  'circuit-breaker.status',
 ]);
 
 /**
@@ -773,12 +784,24 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
       );
     await put(db, 'emailConfig', 'main', { ...input, apiKey, smtpPassword, mailjetApiSecret });
   } else if (action === 'settings.save') {
+    // `autoDispatchConfidenceThreshold` was renamed to `confirmedFindingThreshold`
+    // (migration 042 migrated stored rows). Accept the old key on an incoming
+    // patch so an older API client or a stale SPA bundle can still save settings
+    // without silently resetting the operator's tuned value.
+    const migrateThresholdKey = (record: Record<string, unknown> | undefined | null) => {
+      if (!record) return record;
+      if (record.autoDispatchConfidenceThreshold !== undefined && record.confirmedFindingThreshold === undefined) {
+        const { autoDispatchConfidenceThreshold, ...rest } = record;
+        return { ...rest, confirmedFindingThreshold: autoDispatchConfidenceThreshold };
+      }
+      return record;
+    };
     // Validate the payload shape before touching the database. `{}` and `null`
     // both spread to nothing, so the previous order produced a no-op write that
     // still took the row lock and re-serialised the settings — and an empty
     // change is a client error, not a successful save. Requiring at least one
     // key also keeps the merge from silently accepting array/scalar payloads.
-    const patch = z.record(z.string(), z.unknown()).parse(data);
+    const patch = migrateThresholdKey(z.record(z.string(), z.unknown()).parse(data) as Record<string, unknown>) ?? {};
     if (Object.keys(patch).length === 0) throw new HttpError(400, 'No settings were supplied');
     const old = (await getForUpdate<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
     await put(db, 'settings', 'main', settingsSchema.parse({ ...old, ...patch }));
@@ -842,6 +865,29 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
       "UPDATE records SET data = jsonb_set(data, '{findingIds}', (data->'findingIds') - $1::text) WHERE kind='advisories' AND data ? 'findingIds'",
       [id],
     );
+  } else if (action === 'circuit-breaker.status') {
+    if (data === null || data === undefined || (typeof data === 'object' && Object.keys(data).length === 0)) {
+      throw new HttpError(400, 'Record data required');
+    }
+    const state = await get<any>(db, 'systemState', 'circuit-breaker-state');
+    const settings = await get<AppSettings>(db, 'settings', 'main');
+    const effectiveSettings = settings ?? DEFAULT_SETTINGS;
+    const totalDispatchCount = state?.totalDispatchCount ?? 0;
+    const authoritativeDispatchCount = state?.authoritativeSourceDispatchCount ?? 0;
+    const dispatchedAt = state?.dispatchedAt ?? null;
+      return {
+        success: true,
+        circuitBreaker: {
+          totalDispatchCount,
+          authoritativeSourceDispatchCount: authoritativeDispatchCount,
+          dispatchedAt,
+          maxTotalFindingsPerRun: effectiveSettings.maxTotalFindingsPerRun,
+          maxFindingsPerRun: effectiveSettings.maxFindingsPerRun,
+          maxDispatchesPerRunPerFeed: effectiveSettings.maxDispatchesPerRunPerFeed,
+          totalCapTripped: totalDispatchCount > effectiveSettings.maxTotalFindingsPerRun,
+          authoritativeCapTripped: authoritativeDispatchCount > effectiveSettings.maxFindingsPerRun,
+        },
+      };
   } else if (/^(feed|asset|recipient|webhook)\.(delete|toggle)$/.test(action)) {
     const [entity, operation] = action.split('.'),
       kind = (
@@ -853,8 +899,8 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
     if (!id) throw new HttpError(400, 'Record ID required');
     const old = await getForUpdate<any>(db, kind, id);
     if (!old) throw new HttpError(404, 'Record not found');
-    if (entity === 'feed' && operation === 'delete' && (old.vendorSeed || old.type === 'NVD_API'))
-      throw new HttpError(403, 'Vendor-seeded feeds and NVD sources cannot be deleted');
+    if (entity === 'feed' && operation === 'delete' && old.vendorSeed)
+      throw new HttpError(403, 'Vendor-seeded feeds cannot be deleted');
     if (entity === 'asset')
       await syncCorrelationAsset(db, { ...old, active: operation === 'delete' ? false : !old.active });
     if (operation === 'delete') {

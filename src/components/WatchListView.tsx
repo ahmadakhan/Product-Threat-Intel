@@ -86,8 +86,8 @@ export const WatchListView: React.FC = () => {
     deleteWatchlistItem,
     bulkImportWatchlist,
     simulateCorrelation,
-    searchNvdCpes,
-    verifyNvdCpe,
+    searchVulncheckCpes,
+    verifyVulncheckCpe,
     saveRegisteredProducts,
     settings,
   } = useApp();
@@ -479,7 +479,7 @@ export const WatchListView: React.FC = () => {
     setNvdResults([]);
     setNvdResultsFilter('');
     try {
-      const result = await searchNvdCpes(vendorInput.trim(), nvdSearchProductTerm, 50);
+      const result = await searchVulncheckCpes(vendorInput.trim(), nvdSearchProductTerm, 50);
       if (sequence !== nvdSearchSequence.current) return;
       const found = withProductWildcards(result?.results || []);
       setNvdResults(found);
@@ -494,7 +494,7 @@ export const WatchListView: React.FC = () => {
   };
 
   const verifySelectedCpe = (cpe: string) =>
-    verifyNvdCpe(cpe, nvdDictionaryIds.current.get(cpe.toLowerCase()));
+    verifyVulncheckCpe(cpe, nvdDictionaryIds.current.get(cpe.toLowerCase()));
 
   const addNvdCpe = (cpe: string) => {
     const dictionaryEntry = nvdResults.find((entry) => entry.cpeName === cpe);

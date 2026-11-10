@@ -10,8 +10,6 @@ import { renderFindingsDocument } from '../server/deliveryDocument';
 import { flushDueDigest } from '../server/digest';
 import { loadConfig } from '../server/config.ts';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
-import { MITRE_DELTA_URL } from '../server/mitre';
-import { mitreRecord, mitreDelta } from './fixtures/mitre';
 import { applyCommand } from '../server/commands.ts';
 import type { Advisory, AliasEntry, Finding, NormalizedCVE, WatchListItem } from '../src/types/index.ts';
 import { deriveInventoryAliases } from '../src/utils/aliasLifecycle.ts';
@@ -75,8 +73,17 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
   const save = (kind: string, id: string, value: unknown) =>
     transaction(pool, (db) => put(db, kind, id, value));
   const reset = async () => {
-    await pool.query('DELETE FROM records; DELETE FROM outbox');
-    await save('settings', 'main', { ...DEFAULT_SETTINGS, autoDispatchEnabled: false });
+    // Delivery claims live in their own table, not `records`: they outlive this
+    // reset and, because finding ids are deterministic (`sha256(cve:asset)`), a
+    // claim left by an earlier sub-suite holds the same finding id for every
+    // case that follows, so the consolidated queue queues nothing and the case
+    // sees an empty outbox. Tests that need a clean queue need a clean claim
+    // ledger too; production release path is TTL expiry + explicit release.
+    await pool.query('DELETE FROM records; DELETE FROM outbox; DELETE FROM delivery_claims');
+    // There is no review queue: `autoDispatchEnabled: false` does not withhold
+    // alerts, it only labels every finding review-required. Most cases here
+    // assert dispatch outcomes, so the suite runs with the shipped default.
+    await save('settings', 'main', { ...DEFAULT_SETTINGS });
   };
   try {
     await migrate(pool);
@@ -97,7 +104,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
     await t.test('incremental checkpoints commit atomically, survive failures, and reset after source changes', async () => {
       await reset();
       await save('settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: false });
-      const source = { id: 'incremental', name: 'NVD incremental', type: 'NVD_API', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
+      const source = { id: 'incremental', name: 'NVD incremental', type: 'VULNCHECK_NVD', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
       await save('feeds', source.id, source);
       let requestedStart = '', requestedEnd = '';
       const success = async (raw: string) => {
@@ -127,7 +134,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
     await t.test('disabled scheduler leaves catch-up work queued until scheduling is enabled', async () => {
       await reset();
       await save('settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: false });
-      const source = { id: 'catchup', name: 'NVD catch-up', type: 'NVD_API', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
+      const source = { id: 'catchup', name: 'NVD catch-up', type: 'VULNCHECK_NVD', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
       await save('feeds', source.id, source);
       const windows: Array<{ start: number; end: number }> = [];
       const request = async (raw: string) => {
@@ -162,7 +169,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
     await t.test('catch-up cooldown blocks immediate re-run after a partial catch-up', async () => {
       await reset();
       await save('settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: true, schedulerIntervalMinutes: 60 });
-      const source = { id: 'catchup-cd', name: 'NVD cooldown', type: 'NVD_API', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
+      const source = { id: 'catchup-cd', name: 'NVD cooldown', type: 'VULNCHECK_NVD', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
       await save('feeds', source.id, source);
       // First run to establish a cursor with the correct fingerprint.
       await queueRun(pool, 24, 'test');
@@ -194,11 +201,14 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       await save('watchlist', 'asset', asset());
       const date = new Date(Date.now() - 1000).toISOString();
       const common = { authType: 'NONE', enabled: true, rateLimitPerMin: 600 };
-      await save('feeds', 'mitre', { ...common, id: 'mitre', name: 'MITRE CVE', type: 'MITRE_CVE', url: MITRE_DELTA_URL });
-      await save('feeds', 'nvd', { ...common, id: 'nvd', name: 'NVD', type: 'NVD_API', url: 'https://example.com/nvd' });
+      await save('feeds', 'mitre', { ...common, id: 'mitre', name: 'VulnCheck NVD++', type: 'VULNCHECK_NVD', url: 'https://api.vulncheck.com/v3/index/nvd' });
+      await save('feeds', 'nvd', { ...common, id: 'nvd', name: 'NVD', type: 'VULNCHECK_NVD', url: 'https://example.com/nvd' });
       const sourceRequest = async (url: string) => {
-        const data = url === MITRE_DELTA_URL ? mitreDelta(undefined, date)
-          : url.startsWith('https://raw.githubusercontent.com/') ? mitreRecord(undefined, date)
+        const data = url === 'https://api.vulncheck.com/v3/index/nvd' ? { vulnerabilities: [{ cve: {
+            id: 'CVE-2026-98001', published: date, lastModified: date, vulnStatus: 'Analyzed',
+            descriptions: [{ lang: 'en', value: 'Example widget vulnerability' }],
+            configurations: [{ nodes: [{ cpeMatch: [{ vulnerable: true, criteria: cpe('*') }] }] }],
+          } }], totalResults: 1 }
           : { startIndex: 0, totalResults: 1, vulnerabilities: [{ cve: {
               id: 'CVE-2026-98001', published: date, lastModified: date, vulnStatus: 'Analyzed',
               descriptions: [{ lang: 'en', value: 'Example widget vulnerability' }],
@@ -523,7 +533,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         // 80% keeps the 85% alias correlation dispatchable; the tightened 90% run
         // below is the policy change this scenario exercises.
         await save('settings', 'main', {
-          ...DEFAULT_SETTINGS, autoDispatchEnabled: true, autoDispatchConfidenceThreshold: 80,
+          ...DEFAULT_SETTINGS, autoDispatchEnabled: true, confirmedFindingThreshold: 80,
         });
         // The asset declares its version explicitly. Without it a version-bound
         // advisory can only be a review candidate, never a confirmed match.
@@ -553,7 +563,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         if (tightenPolicy)
           await save('settings', 'main', {
             // Above the 85% alias correlation, so the queued finding is now held.
-            ...DEFAULT_SETTINGS, autoDispatchEnabled: true, autoDispatchConfidenceThreshold: 87,
+            ...DEFAULT_SETTINGS, autoDispatchEnabled: true, confirmedFindingThreshold: 87,
           });
         let emails = 0, webhooks = 0;
         const webhookRequest = async () => {
@@ -589,7 +599,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       await save('settings', 'main', {
         ...DEFAULT_SETTINGS,
         autoDispatchEnabled: true,
-        autoDispatchConfidenceThreshold: 90,
+        confirmedFindingThreshold: 90,
         digestBatchingEnabled: false,
       });
       await save('recipients', 'sonicwall-recipient', {
@@ -650,7 +660,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       await save('settings', 'main', {
         ...DEFAULT_SETTINGS,
         autoDispatchEnabled: true,
-        autoDispatchConfidenceThreshold: 90,
+        confirmedFindingThreshold: 90,
         digestBatchingEnabled: false,
       });
       await save('recipients', 'sonicwall-kev-recipient', {
@@ -1654,8 +1664,10 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       await reset();
       const cve = vulnerability();
       // A real pipeline-matched finding, so delivery revalidation reproduces
-      // the same CPE verdict the digest was built from.
-      await save('settings', 'main', { ...DEFAULT_SETTINGS, autoDispatchEnabled: false });
+      // the same CPE verdict the digest was built from. There is no review
+      // queue, so leaving autodispatch disabled would only relabel the finding
+      // and the digest rematch would then hold it instead of requeueing it.
+      await save('settings', 'main', { ...DEFAULT_SETTINGS });
       await save('watchlist', 'asset', asset());
       await save('cveData', cve.cveId, cve);
       await run();
@@ -1870,7 +1882,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       await save('settings', 'main', {
         ...DEFAULT_SETTINGS,
         autoDispatchEnabled: false,
-        autoDispatchConfidenceThreshold: 100,
+        confirmedFindingThreshold: 100,
       });
       // A 90% correlation is held only by the 100% bar, so the hold is purely
       // policy-driven and dropping the bar makes the same match deliverable.
@@ -1901,7 +1913,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         timezone: 'UTC',
         schedulerEnabled: false,
         autoDispatchEnabled: true,
-        autoDispatchConfidenceThreshold: 90,
+        confirmedFindingThreshold: 90,
         dailyDigest: { enabled: true, time: '00:00', includeHealthReport: false },
       });
       // The digest only sees findings created in the last 24 hours, and the day is
@@ -1957,7 +1969,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         ...DEFAULT_SETTINGS,
         timezone: 'UTC',
         schedulerEnabled: false,
-        autoDispatchConfidenceThreshold: 100,
+        confirmedFindingThreshold: 100,
         dailyDigest: { enabled: true, time: '00:00', includeHealthReport: false },
       });
       await pool.query('DELETE FROM outbox');
@@ -2044,7 +2056,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       assert.ok(held && confirmed, JSON.stringify(findings.map((f) => [f.cveId, f.matchingMethod, f.matchingEvidence])));
       // The operator tightens the policy before delivery: the 85% alias correlation
       // is now held, while the 100% strict-CPE correlation stays deliverable.
-      await save('settings', 'main', { ...DEFAULT_SETTINGS, autoDispatchEnabled: false, autoDispatchConfidenceThreshold: 95 });
+      await save('settings', 'main', { ...DEFAULT_SETTINGS, autoDispatchEnabled: false, confirmedFindingThreshold: 95 });
       const advisory: Advisory = {
         id: 'ADV-mixed',
         title: 'Mixed bundle',
@@ -2101,7 +2113,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       // A policy above every match confidence holds the finding — and it is a
       // runVulnerabilityPipeline alias correlation (85%), so the delivered
       // document must state the confidence limitation on the finding.
-      await save('settings', 'main', { ...DEFAULT_SETTINGS, autoDispatchEnabled: false, autoDispatchConfidenceThreshold: 101 });
+      await save('settings', 'main', { ...DEFAULT_SETTINGS, autoDispatchEnabled: false, confirmedFindingThreshold: 101 });
       await save('aliases', 'vendor-alias', {
         id: 'vendor-alias', scope: 'VENDOR', canonical: 'example', aliases: ['example_alias'],
         source: 'MANUAL', createdAt: new Date().toISOString(),
@@ -2164,7 +2176,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       const source = {
         id: 'nvd',
         name: 'NVD test',
-        type: 'NVD_API',
+        type: 'VULNCHECK_NVD',
         url: 'https://8.8.8.8/nvd',
         authType: 'NONE',
         rateLimitPerMin: 60,
@@ -2281,7 +2293,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         createdAt: new Date().toISOString(),
       };
       await save('watchlist', aliasedAsset.id, aliasedAsset);
-      const feedSource = { id: 'alias-nvd', name: 'NVD', type: 'NVD_API', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
+      const feedSource = { id: 'alias-nvd', name: 'NVD', type: 'VULNCHECK_NVD', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
       await save('feeds', feedSource.id, feedSource);
       const cve: NormalizedCVE = {
         ...vulnerability(),
@@ -2334,7 +2346,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         createdAt: new Date().toISOString(),
       };
       await save('watchlist', aliasedAsset.id, aliasedAsset);
-      const feedSource = { id: 'revoke-nvd', name: 'NVD', type: 'NVD_API', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
+      const feedSource = { id: 'revoke-nvd', name: 'NVD', type: 'VULNCHECK_NVD', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
       await save('feeds', feedSource.id, feedSource);
       const cve: NormalizedCVE = {
         ...vulnerability(),

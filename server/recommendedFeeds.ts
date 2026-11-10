@@ -1,14 +1,11 @@
 /** Provider integrations shown on fresh and existing deployments. */
 const recommendedFeedEntries = [
-  { id: 'feed-nvd', name: 'NVD CVE API 2.0', type: 'NVD_API' as const,
-    url: 'https://services.nvd.nist.gov/rest/json/cves/2.0',
-    authType: 'NONE' as const, rateLimitPerMin: 10, enabled: true, vendorSeed: true },
-  { id: 'feed-mitre-cve', name: 'MITRE CVE — Official CVE List', type: 'MITRE_CVE' as const,
-    url: 'https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/deltaLog.json',
-    authType: 'NONE' as const, rateLimitPerMin: 120, enabled: true, vendorSeed: true },
   { id: 'feed-cisa-kev', name: 'CISA Known Exploited Vulnerabilities', type: 'CISA_KEV' as const,
     url: 'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json',
     authType: 'NONE' as const, rateLimitPerMin: 5, enabled: true, vendorSeed: true },
+  { id: 'feed-vulncheck-nvd', name: 'VulnCheck NVD++ — Full NVD/MITRE Mirror with Enriched CPEs, CVSS, and KEV', type: 'VULNCHECK_NVD' as const,
+    url: 'https://api.vulncheck.com/v3/index/nvd',
+    authType: 'BEARER' as const, rateLimitPerMin: 60, enabled: false, vendorSeed: true },
   { id: 'feed-epss', name: 'FIRST EPSS Exploit Prediction Scores', type: 'EPSS_API' as const,
     url: 'https://api.first.org/data/v1/epss',
     authType: 'NONE' as const, rateLimitPerMin: 60, enabled: true, vendorSeed: true },
@@ -26,16 +23,6 @@ const recommendedFeedEntries = [
     url:'https://api.msrc.microsoft.com/update-guide/rss', authType:'NONE' as const, rateLimitPerMin:5, enabled:false, vendorSeed:true },
   { id:'feed-fortiguard-psirt', name:'Fortinet FortiGuard PSIRT Security Advisories', type:'RSS_ATOM' as const,
     url:'https://filestore.fortinet.com/fortiguard/rss/ir.xml', authType:'NONE' as const, rateLimitPerMin:5, enabled:false, vendorSeed:true },
-  {
-    id: 'feed-opencve',
-    name: 'OpenCVE CVE Enrichment',
-    type: 'OPENCVE_API' as const,
-    url: 'https://app.opencve.io/api/v2/cves',
-    authType: 'BEARER' as const,
-    rateLimitPerMin: 30,
-    enabled: false,
-    vendorSeed: true,
-  },
   {
     id: 'feed-vulncheck-kev',
     name: 'VulnCheck Known Exploited Vulnerabilities',
@@ -81,9 +68,9 @@ const recommendedFeedEntries = [
     // endpoints are dead (tools.cisco.com 404) and sec.cloudapps.cisco.com/rss.xml
     // serves HTML, not XML (verified 2026-11). Cisco publishes advisories via
     // a REST API requiring authentication, not a public syndication feed.
-    // Disabled; operators needing Cisco data should use NVD_API filtered to
+    // Disabled; operators needing Cisco data should use VulnCheck NVD++ filtered to
     // vendor=cisco or configure a custom JSON_SEARCH_API feed.
-    url: 'https://sec.cloudapps.cisco.com/security/center/rss.xml', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: false, vendorSeed: false, healthStatus: 'DOWN' as const, errorLog: 'Cisco PSIRT does not provide a valid RSS/Atom feed; endpoint serves HTML. Use NVD_API with vendor filter or custom JSON feed.' },
+    url: 'https://sec.cloudapps.cisco.com/security/center/rss.xml', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: false, vendorSeed: false, healthStatus: 'DOWN' as const, errorLog: 'Cisco PSIRT does not provide a valid RSS/Atom feed; endpoint serves HTML. Use VulnCheck NVD++ with vendor filter or custom JSON feed.' },
   { id: 'feed-paloalto-psirt', name: 'Palo Alto Networks Security Advisories', type: 'RSS_ATOM' as const,
     url: 'https://security.paloaltonetworks.com/rss.xml', authType: 'NONE' as const, rateLimitPerMin: 5, enabled: false, vendorSeed: true },
   {

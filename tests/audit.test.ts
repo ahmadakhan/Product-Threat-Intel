@@ -36,8 +36,8 @@ test('audit formatting redacts credentials, bounds data and describes commands w
   assert.equal(auditText('x'.repeat(500), 100).length, 100);
   assert.equal(auditText('x\ud83d\ude00', 2), 'x\ufffd');
   assert.ok(!auditText('operator\u202eforged', 100).includes('\u202e'));
-  const context = auditContext({ action: 'settings.save', fields: ['autoDispatchConfidenceThreshold', 'password', 'bad\nfield', 'password'] }, 'INFO');
-  assert.deepEqual(context.fields, ['autoDispatchConfidenceThreshold', 'password']);
+  const context = auditContext({ action: 'settings.save', fields: ['confirmedFindingThreshold', 'password', 'bad\nfield', 'password'] }, 'INFO');
+  assert.deepEqual(context.fields, ['confirmedFindingThreshold', 'password']);
   assert.equal(context.outcome, 'RECORDED');
   const command = commandAudit('email.configure', 'main', { smtpPassword: 'do-not-log', fromEmail: 'private@example.com' });
   assert.equal(command.category, 'EMAIL');
@@ -59,7 +59,7 @@ test('audit context is tamper-evident without changing historical hashes', () =>
   assert.equal(verifyAuditChain([legacy]), true);
   const modern = chainAuditLogs([{ ...legacy, id: 'modern', context: {
     action: 'settings.save', resourceType: 'settings', resourceId: 'main', outcome: 'SUCCESS',
-    fields: ['autoDispatchConfidenceThreshold'],
+    fields: ['confirmedFindingThreshold'],
   } }], legacy.hash)[0];
   assert.equal(verifyAuditChain([modern, legacy]), true);
   assert.equal(verifyAuditChain([{ ...modern, context: { ...modern.context!, resourceId: 'other' } }, legacy]), false);
@@ -184,6 +184,7 @@ test('pipeline correctly distinguishes non-intersecting, intersecting, and exact
   //   *   vs 1.5  → CONFIRMED (registered all-version product)
   //   1.5 vs 1.5  → CONFIRMED (exact token match, auto-dispatch eligible)
   const { cve, settings } = fixture();
+  const unverifiableSettings = { ...settings, autoDispatchUnverifiableMatches: false };
   cve.cpeMatches = [cpe('1.5')];
   cve.cpeMatchDetails = [];
   cve.versionRange = undefined;
@@ -201,7 +202,7 @@ test('pipeline correctly distinguishes non-intersecting, intersecting, and exact
     { version: '1.5', expected: 1, expectedStatus: undefined },
   ]) {
     const asset = makeAsset(version);
-    const result = runVulnerabilityPipeline([], [cve], [asset], [], [], settings);
+    const result = runVulnerabilityPipeline([], [cve], [asset], [], [], unverifiableSettings);
     assert.equal(result.newFindings.length, expected, `version ${version}: expected ${expected} findings`);
     if (expectedStatus)
       assert.equal(
@@ -223,7 +224,7 @@ test('all-version product registration is dispatchable without the unverifiable 
   cve.cpeMatchDetails = [];
   cve.versionRange = { versionEndExcluding: '2.0' };
   const product = { ...asset, cpes: [cpe('*')] };
-  const policy = { ...settings, autoDispatchConfidenceThreshold: 90, autoDispatchUnverifiableMatches: false };
+  const policy = { ...settings, confirmedFindingThreshold: 90, autoDispatchUnverifiableMatches: false };
   const findings = runVulnerabilityPipeline([], [cve], [product], [], [], policy).newFindings;
   assert.equal(findings.length, 1);
   assert.equal(findings[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
@@ -254,7 +255,10 @@ test('autoDispatchUnverifiableMatches releases the version-uncertain hold at thr
   cve.cpeMatchDetails = [];
   cve.versionRange = undefined;
   const wildcardAsset = { ...asset, id: 'asset-pattern', assetTag: 'asset-pattern', cpes: [cpe('1.*')] };
-  const held = runVulnerabilityPipeline([], [cve], [wildcardAsset], [], [], settings);
+  const held = runVulnerabilityPipeline([], [cve], [wildcardAsset], [], [], {
+    ...settings,
+    autoDispatchUnverifiableMatches: false,
+  });
   assert.equal(held.newFindings.length, 1);
   assert.equal(
     held.newFindings[0].notificationStatus,
@@ -280,7 +284,7 @@ test('autoDispatchUnverifiableMatches still respects the configured confidence t
   const wildcardAsset = { ...asset, id: 'asset-pattern', assetTag: 'asset-pattern', cpes: [cpe('1.*')] };
   const held = runVulnerabilityPipeline([], [cve], [wildcardAsset], [], [], {
     ...settings,
-    autoDispatchConfidenceThreshold: 80,
+    confirmedFindingThreshold: 80,
     autoDispatchUnverifiableMatches: true,
   });
   assert.equal(held.newFindings.length, 1);
@@ -291,7 +295,7 @@ test('autoDispatchUnverifiableMatches still respects the configured confidence t
     'a version-uncertain match below the configured minimum stays held even with the flag on',
   );
   const eligible = runVulnerabilityPipeline([], [cve], [wildcardAsset], [], [], {
-    ...settings, autoDispatchConfidenceThreshold: 70, autoDispatchUnverifiableMatches: true,
+    ...settings, confirmedFindingThreshold: 70, autoDispatchUnverifiableMatches: true,
   });
   assert.equal(eligible.newFindings[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
 });
@@ -582,8 +586,9 @@ test('package without installed version produces a review finding for a ranged v
 });
 test('unknown architecture cannot confirm an architecture-specific vulnerability', () => {
   const { cve, asset, settings } = fixture();
+  const unverifiableSettings = { ...settings, autoDispatchUnverifiableMatches: false };
   cve.cpeMatches = ['cpe:2.3:a:vendor:widget:*:*:*:*:*:*:arm64:*'];
-  const result = runVulnerabilityPipeline([], [cve], [asset], [], [], settings);
+  const result = runVulnerabilityPipeline([], [cve], [asset], [], [], unverifiableSettings);
   assert.equal(result.newFindings.length, 1);
   assert.equal(result.newFindings[0].notificationStatus, 'REVIEW_REQUIRED');
 });
@@ -617,10 +622,24 @@ test('a CPE range cannot override an explicit vulnerable version token', () => {
 });
 test('unsupported vendor version ordering creates a review candidate rather than a false exclusion', () => {
   const { cve, asset, settings } = fixture();
+  // The advisory must name the same version token as the asset, or the version
+  // range never gets evaluated at all (the fixture's default advisory CPE is
+  // `*`) and the case passes without exercising the ordering logic.
   asset.cpes = [cpe('2026release')];
+  cve.cpeMatches = [cpe('2026release')];
   cve.versionRange = { versionEndExcluding: '2.0' };
-  const findings = runVulnerabilityPipeline([], [cve], [asset], [], [], settings).newFindings;
+  // The seed settings use threshold 0 + autoDispatchUnverifiableMatches, which
+  // dispatches literally any match and so cannot distinguish "held" from
+  // "dispatched". Use the production default policy for this assertion.
+  const findings = runVulnerabilityPipeline(
+    [], [cve], [asset], [], [],
+    { ...settings, confirmedFindingThreshold: 90, autoDispatchUnverifiableMatches: false },
+  ).newFindings;
   assert.equal(findings.length, 1);
+  // `2026release` cannot be ordered against `2.0`, so applicability is
+  // unprovable. An authoritative source must not promote it: no later
+  // enrichment can make that comparison, and dispatching it reports an
+  // unaffected asset as affected.
   assert.equal(findings[0].notificationStatus, 'REVIEW_REQUIRED');
 });
 test('NVD per-CPE version bounds are applied independently during correlation', () => {
@@ -773,8 +792,9 @@ test('pipeline scopeHours supports 1 / 2 / 3 / 4 week windows', () => {
       {},
       {},
       undefined,
-      [],
+      undefined,
       NOW_FOR_PIPELINE,
+      undefined,
     );
 
     assert.equal(
@@ -798,7 +818,7 @@ test('out-of-window CVEs refresh tracked findings without creating new matches',
     cpes: ['cpe:2.3:a:vendor:widget:2.0:*:*:*:*:*:*:*'],
     active: true,
   };
-  const unrestricted = runVulnerabilityPipeline(
+    const unrestricted = runVulnerabilityPipeline(
     INITIAL_FEEDS,
     [cve],
     [trackedAsset],
@@ -810,8 +830,8 @@ test('out-of-window CVEs refresh tracked findings without creating new matches',
     {},
     {},
     undefined,
-    [],
-    evaluatedAt,
+    undefined,
+    undefined,
   );
   const trackedFinding = unrestricted.newFindings[0];
   assert.ok(trackedFinding);
@@ -828,8 +848,8 @@ test('out-of-window CVEs refresh tracked findings without creating new matches',
     {},
     {},
     undefined,
-    [],
-    evaluatedAt,
+    undefined,
+    undefined,
   );
   assert.deepEqual(scoped.newFindings.map((finding) => finding.matchedAssetId), ['tracked-asset']);
   assert.notEqual(reconcileFindings([trackedFinding], scoped.newFindings)[0].notificationStatus, 'NOT_APPLICABLE');

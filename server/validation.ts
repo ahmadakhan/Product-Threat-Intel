@@ -48,16 +48,6 @@ export const feedSchema = z
   })
   .refine(
     (feed) =>
-      feed.type !== 'MITRE_CVE' ||
-      (feed.authType === 'NONE' &&
-        feed.url === 'https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/deltaLog.json'),
-    {
-      message: 'MITRE CVE requires the official CVE List deltaLog.json URL and no authentication',
-      path: ['url'],
-    },
-  )
-  .refine(
-    (feed) =>
       feed.type !== 'OTX_API' ||
       (feed.authType === 'API_KEY' &&
         feed.url === 'https://otx.alienvault.com/api/v1/pulses/subscribed/'),
@@ -81,6 +71,24 @@ export const feedSchema = z
       (feed.authType === 'NONE' && feed.url === 'https://api.github.com/advisories'),
     {
       message: 'GitHub advisories require the official global advisories endpoint without authentication',
+      path: ['url'],
+    },
+  )
+  .refine(
+    (feed) =>
+      feed.type !== 'VULNCHECK_NVD' ||
+      (feed.authType === 'BEARER' && feed.url === 'https://api.vulncheck.com/v3/index/nvd'),
+    {
+      message: 'VulnCheck NVD++ requires Bearer authentication and the official NVD++ index endpoint',
+      path: ['url'],
+    },
+  )
+  .refine(
+    (feed) =>
+      feed.type !== 'VULNCHECK_KEV' ||
+      (feed.authType === 'BEARER' && feed.url === 'https://api.vulncheck.com/v3/index/vulncheck-kev'),
+    {
+      message: 'VulnCheck KEV requires Bearer authentication and the official KEV index endpoint',
       path: ['url'],
     },
   );
@@ -215,7 +223,7 @@ export const cveSchema = z.object({
   // CVSS payloads are persisted verbatim. The base `score` is the source of
   // truth for severity and is range-validated (fail-closed: a non-finite or
   // out-of-range score aborts the source run); vector strings are intentionally
-  // NOT structurally validated at ingest, because NVD/MITRE vectors can be
+  // NOT structurally validated at ingest, because provider CVSS vectors can be
   // partial or truncated and rejecting them would discard otherwise matching
   // intelligence. `cvssVectorIsValid` (server/cvss.ts) is an advisory validator
   // retained for tooling and tests; it is deliberately not a schema gate.
@@ -450,11 +458,28 @@ export const settingsSchema = z
     advisoryPrefix: z.string().regex(/^[A-Za-z0-9_-]{1,30}$/),
     autoDispatchEnabled: z.boolean(),
     emailEnabled: z.boolean().default(true),
-    autoDispatchConfidenceThreshold: z.number().int().min(0).max(100).default(90),
-    // Unverifiable matches are review-only by design. Opt-in releases them so the
-    // confidence threshold governs them too — pair with a threshold of 0 to
-    // auto-dispatch every finding.
-    autoDispatchUnverifiableMatches: z.boolean().default(false),
+    confirmedFindingThreshold: z.number().int().min(0).max(100).default(90),
+    // Must match DEFAULT_SETTINGS (shared/state.ts) and the UI coercion
+    // (SettingsView). There is no review queue, so this governs labelling,
+    // not delivery.
+    autoDispatchUnverifiableMatches: z.boolean().default(true),
+    // Circuit breaker: cap authoritative-source auto-dispatches per run so a bad
+    // feed cannot flood the delivery queue. Default 10000.
+    maxFindingsPerRun: z.number().int().min(1).max(100000).default(10000),
+    // Per-feed dispatch quota: max auto-dispatched findings per run from any
+    // single feed ID. Default 10000.
+    maxDispatchesPerRunPerFeed: z.number().int().min(1).max(100000).default(10000),
+    // Circuit breaker: max total findings (all dispatch paths) per run.
+    // Default 50000.
+    maxTotalFindingsPerRun: z.number().int().min(1).max(500000).default(50000),
+    // Circuit breaker cooldown: after a breaker trips, additional dispatches
+    // are held for this many minutes before auto-reset. Default 60 minutes.
+    circuitBreakerCooldownMinutes: z.number().int().min(1).max(10080).default(60),
+    // Circuit breaker feed cooldown: per-feed cooldown in minutes. Default 60.
+    circuitBreakerFeedCooldownMinutes: z.number().int().min(1).max(10080).default(60),
+    // Optional template for enrichment evidence messages. Placeholders:
+    // {cveId}, {sourceLabel}, {vendor}, {product}, {confidence}, {method}.
+    enrichmentMessageTemplate: z.string().max(2000).optional(),
     // News evidence auto-dispatch is opt-in so existing deployments keep their
     // review-only behavior for intelligence matches.
     autoDispatchNewsToSecurityTeam: z.boolean().default(false),

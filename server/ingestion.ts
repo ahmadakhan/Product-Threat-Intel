@@ -1,6 +1,5 @@
 import type { ThreatFeed, NormalizedCVE, IntelligenceArticle } from '../src/types/index.ts';
-import { ingestMitre } from './mitre';
-import { ingestionWindow, recentRevisions, type IngestionState, OPENCVE_MAX_WINDOW_HOURS } from './ingestionState';
+import { ingestionWindow, recentRevisions, type IngestionState } from './ingestionState';
 import { parseSyndication, RSS_MAX_BYTES, RSS_USER_AGENT } from './rss';
 import type { Requester, RequestOptions, ResponseData } from './network';
 import { cveSchema } from './validation';
@@ -277,7 +276,10 @@ export async function ingestFeed(
     requestOptions: RequestOptions = {},
     retryTransient = false,
   ): Promise<{ data: any; etag: string | undefined; headers: ResponseData['headers'] }> => {
-    if (conditional && feed.etag) headers['If-None-Match'] = feed.etag;
+    // Cursor-paginated sources store their index ETag in the sync state rather
+    // than the feed record, because it advances per window, not per config.
+    if (conditional && (feed.etag || context.indexEtag))
+      headers['If-None-Match'] = feed.etag || context.indexEtag!;
     let response: ResponseData;
     for (let attempt = 0; ; attempt++) {
       try {
@@ -311,8 +313,10 @@ export async function ingestFeed(
       await sleep(Math.max(nvdInterval, retryDelay));
     }
     if (response.status === 304) {
-      if (!conditional || !feed.etag) throw new Error('Feed returned an unexpected conditional response');
-      return { data: undefined, etag: feed.etag, headers: response.headers };
+      // Cursor-paginated sources carry their index ETag in the sync state.
+      if (!conditional || (!feed.etag && !context.indexEtag))
+        throw new Error('Feed returned an unexpected conditional response');
+      return { data: undefined, etag: feed.etag || context.indexEtag, headers: response.headers };
     }
     if (response.status !== 200)
       throw new Error(
@@ -327,7 +331,6 @@ export async function ingestFeed(
       throw new Error('Feed did not return valid JSON');
     }
   };
-  if (feed.type === 'MITRE_CVE') return ingestMitre(feed, scopeHours, request, sleep, context);
   if (feed.type === 'RSS_ATOM') {
     const baseHeaders = { ...headers, 'user-agent': RSS_USER_AGENT,
       ...(feed.etag ? { 'If-None-Match': feed.etag } : {}) };
@@ -523,152 +526,6 @@ export async function ingestFeed(
       syncState: { cursor: end.toISOString(), hasMore },
     };
   }
-  if (feed.type === 'NVD_API') {
-    // NVD API key is recommended: without one, rate limits are 5 req/30s and
-    // responses can exceed 60s for large windows. Configure authType='API_KEY'
-    // with the encrypted key and rateLimitPerMin=100 for 50 req/30s throughput.
-    const cves: NormalizedCVE[] = [];
-    const withdrawals: NonNullable<IngestResult['withdrawals']> = [];
-    const rejections: NonNullable<IngestResult['rejections']> = [];
-    let rawCount = 0;
-    let hasMore = false;
-    const ctx = { ...context };
-    const now = Date.now();
-    // Multi-run catch-up: when the NVD checkpoint is stale from extended
-    // downtime, process up to MAX_CATCHUP_WINDOWS consecutive 24-hour windows
-    // in a single run. Each window is bounded by NVD's 120-day API limit and
-    // by the per-request 50,000-record ceiling.
-    const MAX_CATCHUP_WINDOWS = 7;
-    for (let windowIdx = 0; windowIdx < MAX_CATCHUP_WINDOWS; ) {
-      const { start, end, hasMore: windowHasMore } = ingestionWindow(scopeHours, ctx, now);
-      if (end.getTime() - start.getTime() > 120 * 24 * 3600000)
-        throw new Error('NVD checkpoint exceeds the 120-day API limit; a bounded re-baseline is required');
-      let expectedTotal: number | undefined;
-      const seen = new Set<string>();
-      for (let offset = 0; ;) {
-        const url = new URL(feed.url);
-        url.searchParams.set('lastModStartDate', start.toISOString());
-        url.searchParams.set('lastModEndDate', end.toISOString());
-        url.searchParams.set('startIndex', String(offset));
-        // NVD permits up to 2,000 results per response; larger pages reduce
-        // network round trips and provider pacing delays during catch-up runs.
-        url.searchParams.set('resultsPerPage', '2000');
-        // Each page has a distinct URL and the time window moves on every run;
-        // a single feed-level ETag cannot safely validate this paginated query.
-        const { data } = await json(
-          url.href,
-          false,
-          { timeoutMs: 120000, socketTimeoutMs: 60000, maxResponseBytes: 32 * 1024 * 1024 },
-          true,
-        );
-        if (data === undefined) throw new Error('NVD returned an unexpected conditional response');
-        const page = data;
-        if (
-          !page ||
-          !Array.isArray(page.vulnerabilities) ||
-          page.vulnerabilities.length > 2000 ||
-          offset + page.vulnerabilities.length > page.totalResults ||
-          (expectedTotal !== undefined && page.totalResults !== expectedTotal) ||
-          !Number.isInteger(page.totalResults) ||
-          page.totalResults < 0 ||
-          page.startIndex !== offset
-        )
-          throw new Error('Invalid NVD pagination response');
-        if (page.totalResults > 50000) throw new Error('NVD window exceeds 50,000 records; reduce scope');
-        // A page short of the requested 2,000 before the claimed total is
-        // reached means the API stopped returning records it said were still
-        // available. The checks above only catch totalResults changing mid-run
-        // or the final count missing the total; neither catches a total that is
-        // wrong (too low) from the first page, since the loop and the final
-        // `seen.size !== expectedTotal` check both trust that same number.
-        if (offset + page.vulnerabilities.length < page.totalResults && page.vulnerabilities.length < 2000)
-          throw new Error('NVD page was short of a full page before reaching the declared total');
-        expectedTotal = page.totalResults;
-        for (const item of page.vulnerabilities) {
-          const id = normalizeCveId(item?.cve?.id);
-          if (!id || seen.has(id)) throw new Error('NVD returned an invalid or duplicate CVE');
-          seen.add(id);
-          if (item.cve?.vulnStatus === 'Rejected') {
-            const cveId = normalizeCveId(item.cve.id);
-            if (cveId) {
-              const modifiedDate = iso(item.cve.lastModified);
-              const knownWithdrawal = Date.parse(ctx.knownWithdrawalAt?.get(cveId) || '');
-              if (!Number.isFinite(knownWithdrawal) || knownWithdrawal < Date.parse(modifiedDate))
-                withdrawals.push({ cveId, modifiedDate });
-            }
-            continue;
-          }
-          const cachedModified = Date.parse(ctx.knownCveModifiedAt?.get(id) || '');
-          const incomingModified = Date.parse(item.cve?.lastModified || '');
-          // A publisher that corrects a score, CPE set or remediation without
-          // advancing lastModified produced a record this guard dropped, so the
-          // cached copy kept an understated severity indefinitely. The timestamp
-          // stays the fast path, but a normalised record is still compared when
-          // the incoming timestamp is not newer: identical content is skipped,
-          // changed content is ingested.
-          if (
-            Number.isFinite(cachedModified) &&
-            Number.isFinite(incomingModified) &&
-            cachedModified >= incomingModified
-          ) {
-            const normalized = normalizeNvdResult(item, feed.id);
-            if (normalized.rejection) rejections.push(normalized.rejection);
-            const cve = normalized.cve;
-            const cached = ctx.knownCveContent?.get(id);
-            // Strict content check: a cached revision that cannot be compared
-            // (map entry missing) is skipped. The pipeline always constructs
-            // knownCveContent from the same cache as knownCveModifiedAt, so a
-            // missing entry here means the caller supplied a partial context
-            // and has no content to diff against — re-normalizing would emit a
-            // redundant record for every overlapping re-fetch. See
-            // tests/ecosystem.test.ts "NVD resumes from an overlapping
-            // checkpoint" which pins this contract.
-            if (!cve || !cached) continue;
-            const sourceRevision = cached.sourceApplicability?.[feed.id];
-            if (
-              sourceRevision
-                ? sourceRevision.contentHash === sourceCveContentHash(cve)
-                : stableJson(cve) === stableJson(cached)
-            )
-              continue;
-            cves.push(cve);
-            continue;
-          }
-          const normalized = normalizeNvdResult(item, feed.id);
-          if (normalized.rejection) rejections.push(normalized.rejection);
-          if (normalized.cve) cves.push(normalized.cve);
-        }
-        rawCount += page.vulnerabilities.length;
-        offset += page.vulnerabilities.length;
-        await onNvdProgress?.({ offset, total: page.totalResults, records: rawCount });
-        if (offset >= page.totalResults) break;
-        if (!page.vulnerabilities.length) throw new Error('NVD pagination stopped before completion');
-        await sleep(nvdInterval);
-      }
-      // Invariant: every vulnerability in the page set was added to `seen` and
-      // duplicates already threw above, so the number of unique records fetched
-      // must equal the provider-asserted total. A shortfall means NVD under-
-      // reported its window; advancing the cursor past silently-dropped records
-      // would lose intelligence until the next re-baseline, so fail instead.
-      if (expectedTotal !== undefined && seen.size !== expectedTotal)
-        throw new Error(
-          `NVD totalResults mismatch: fetched ${seen.size} unique record${seen.size === 1 ? '' : 's'} of ${expectedTotal}`,
-        );
-      // Advance the context cursor for the next catch-up window.
-      ctx.cursor = end.toISOString();
-      hasMore = windowHasMore;
-      if (!hasMore) break;
-      windowIdx++;
-    }
-    // Multi-run continuation: if catch-up didn't complete in this run,
-    // schedule the next catch-up run for the scheduler to prioritize.
-    const syncState: IngestionState = { cursor: ctx.cursor, hasMore };
-    if (hasMore) {
-      syncState.catch_up = true;
-      syncState.next_catchup_at = new Date(Date.now() + 60000).toISOString();
-    }
-    return { cves, count: rawCount, withdrawals, rejections, syncState };
-  }
   if (feed.type === 'CISA_KEV') {
     const { data: rawData, etag } = await json(feed.url);
     if (rawData === undefined) return { cves: [], count: 0, notModified: true, etag };
@@ -780,90 +637,6 @@ export async function ingestFeed(
     }
     return { cves: [], epss, epssScope: scope, count, syncState: epssSync };
   }
-  if (feed.type === 'OPENCVE_API') {
-    if (feed.authType !== 'BEARER') throw new Error('OpenCVE API v2 requires an organization Bearer token');
-    const { start, end, hasMore } = ingestionWindow(scopeHours, context, Date.now(), OPENCVE_MAX_WINDOW_HOURS);
-    const revisions = recentRevisions(context.revisions || {}, start);
-    const base = new URL(feed.url);
-    const listUrl = new URL(base);
-    listUrl.search = '';
-    const listPath = listUrl.pathname.replace(/\/$/, '');
-    if (!listPath.endsWith('/cves')) throw new Error('OpenCVE endpoint must end in /api/v2/cves');
-    const records = new Map<string, any>();
-    let next: string | null = listUrl.href;
-    const visited = new Set<string>();
-    // OpenCVE's advanced-search date filters accept calendar dates. An
-    // inclusive `updated<=YYYY-MM-DD` may stop at midnight at the start of
-    // that day, dropping the rest of the frozen ingestion window while still
-    // advancing its checkpoint. Use the next calendar day as an exclusive
-    // upper bound, then retain the exact timestamp filter below.
-    const endExclusive = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate() + 1));
-    const updatedQuery = `updated>=${start.toISOString().slice(0, 10)} AND updated<${endExclusive.toISOString().slice(0, 10)}`;
-    for (let pageNo = 0; next; pageNo++) {
-      if (pageNo >= 100) throw new Error('OpenCVE query exceeds 10,000 records; reduce ingestion window');
-      const pageUrl = new URL(next);
-      if (pageUrl.origin !== listUrl.origin || pageUrl.pathname !== listUrl.pathname || visited.has(pageUrl.href))
-        throw new Error('OpenCVE returned an invalid pagination URL');
-      visited.add(pageUrl.href);
-      pageUrl.searchParams.set('page_size', '100');
-      pageUrl.searchParams.set('q', updatedQuery);
-      const { data: page } = await json(pageUrl.href, false, { timeoutMs: 60000, socketTimeoutMs: 30000, maxResponseBytes: 4 * 1024 * 1024 }, true);
-      if (!page || !Array.isArray(page.results) || page.results.length > 100 || !Number.isInteger(page.count) || page.count < page.results.length)
-        throw new Error('Invalid OpenCVE pagination response');
-      for (const row of page.results) {
-        const id = normalizeCveId(row?.cve_id);
-        if (!id || typeof row.updated_at !== 'string' || !Number.isFinite(Date.parse(row.updated_at)))
-          throw new Error('OpenCVE returned a malformed CVE record');
-        const updated = Date.parse(row.updated_at);
-        if (updated >= start.getTime() && updated <= end.getTime() && !(Date.parse(revisions[id] || '') >= updated)) {
-          const previous = records.get(id);
-          if (!previous || updated > Date.parse(previous.updated_at)) records.set(id, row);
-        }
-      }
-      next = typeof page.next === 'string' && page.next ? page.next : null;
-      if (records.size > 500) throw new Error('OpenCVE window exceeds 500 CVEs; reduce ingestion window');
-      if (next) await sleep(Math.max(1000, 60000 / feed.rateLimitPerMin));
-    }
-    // OpenCVE's detail endpoint does not provide CPE configurations by default.
-    // One detail request per changed CVE is unavoidable, but paced concurrent
-    // requests overlap network latency while respecting the configured rate.
-    const fetched = await paceConcurrent(
-      [...records.keys()], Math.max(1000, 60000 / feed.rateLimitPerMin), 8, sleep,
-      async (id) => {
-        const cachedModified = Date.parse(context.knownCveModifiedAt?.get(id) || '');
-        const listedModified = Date.parse(records.get(id)?.updated_at || '');
-        // A publisher can correct a score, CPE set or remediation without
-        // advancing `updated_at`; the listing filter above drops only records
-        // whose timestamp moved, so a non-newer timestamp here is not by itself
-        // proof the content is unchanged. When a cached copy exists, re-fetch and
-        // compare the normalised record (mirroring the NVD path) so a silent
-        // correction is surfaced instead of being dropped indefinitely.
-        let cached: NormalizedCVE | undefined;
-        if (Number.isFinite(cachedModified) && Number.isFinite(listedModified) && cachedModified >= listedModified) {
-          cached = context.knownCveContent?.get(id);
-          if (!cached) return null;
-        }
-        const detailUrl = new URL(`${listPath}/${encodeURIComponent(id)}`, listUrl.origin);
-        detailUrl.searchParams.set('include', 'nvd_cpe_configurations');
-        const { data } = await json(detailUrl.href, false, { timeoutMs: 60000, socketTimeoutMs: 30000, maxResponseBytes: 4 * 1024 * 1024 }, true);
-        if (!data || normalizeCveId(data.cve_id) !== id) throw new Error('OpenCVE detail response did not match requested CVE');
-        const cve = normalizeOpenCve(data, feed.id);
-        if (cached) {
-          const sourceRevision = cached.sourceApplicability?.[feed.id];
-          if (
-            sourceRevision
-              ? sourceRevision.contentHash === sourceCveContentHash(cve)
-              : stableJson(cve) === stableJson(cached)
-          )
-            return null;
-        }
-        revisions[id] = cve.modifiedDate;
-        return cve;
-      },
-    );
-    const cves = fetched.filter((cve): cve is NormalizedCVE => !!cve && Date.parse(cve.modifiedDate) >= start.getTime() && Date.parse(cve.modifiedDate) <= end.getTime());
-    return { cves, count: cves.length, syncState: { cursor: end.toISOString(), hasMore, revisions } };
-  }
   if (feed.type === 'VULNCHECK_KEV') {
     if (feed.authType !== 'BEARER') throw new Error('VulnCheck KEV requires a Bearer API token');
     const url = new URL(feed.url);
@@ -942,5 +715,241 @@ export async function ingestFeed(
       etag,
     };
   }
+  if (feed.type === 'VULNCHECK_NVD') {
+    if (feed.authType !== 'BEARER') throw new Error('VulnCheck NVD++ requires a Bearer API token');
+    if (!feed.authSecretKey) throw new Error('VulnCheck NVD++ requires a configured Bearer API token');
+    let apiKey: string;
+    try {
+      apiKey = decrypt(feed.authSecretKey, encryptionKeys(config), `feed:${feed.id}`);
+    } catch {
+      throw new Error('VulnCheck NVD++ credentials could not be decrypted; re-enter the secret');
+    }
+    const { start, end } = ingestionWindow(scopeHours, context);
+    const url = new URL(feed.url);
+    url.searchParams.set('lastModStartDate', start.toISOString());
+    url.searchParams.set('lastModEndDate', end.toISOString());
+    url.searchParams.set('limit', '1000');
+    // The NVD++ index changes only when records change, so the index-level ETag
+    // is a valid conditional handle for the whole paginated window: a 304 means
+    // no record in the window changed and the previous cursor stays valid.
+    const { data: firstOr304, etag } = await json(url.href, true, {
+      timeoutMs: 60000,
+      socketTimeoutMs: 30000,
+      maxResponseBytes: 32 * 1024 * 1024,
+      headers: { Authorization: `Bearer ${apiKey}` },
+    }, true);
+    if (firstOr304 === undefined)
+      return { cves: [], count: 0, notModified: true, etag, syncState: context };
+    let cursor: string | undefined;
+    const cves: NormalizedCVE[] = [];
+    const withdrawals: NonNullable<IngestResult['withdrawals']> = [];
+    const rejections: NonNullable<IngestResult['rejections']> = [];
+    const seenCursors = new Set<string>();
+    // Duplicate IDs across pages mean the provider (or the cursor relay) reused
+    // records; advancing the cursor past them would silently lose integrity, so
+    // the whole run fails atomically instead.
+    const seenIds = new Set<string>();
+    const revisions: Record<string, string> = {};
+    let totalFetched = 0;
+    /** Processes one response page: normalizes records, dedupes, records
+     *  revisions, and returns the provider's next cursor when paging continues. */
+    const processPage = (page: any): string | undefined => {
+      if (!page || !Array.isArray(page.vulnerabilities)) throw new Error('Invalid VulnCheck NVD++ response');
+      for (const item of page.vulnerabilities) {
+        const id = normalizeCveId(item?.cve?.id);
+        if (!id || seenIds.has(id)) throw new Error('VulnCheck NVD++ returned an invalid or duplicate CVE');
+        seenIds.add(id);
+        const incomingModified = Date.parse(item.cve?.lastModified || '');
+        // The persisted revision map (syncState.revisions) is the cheap skip: a
+        // record whose revision was already ingested is neither re-emitted nor
+        // re-counted.
+        const revisionSeen = context.revisions?.[id];
+        if (
+          revisionSeen !== undefined &&
+          Number.isFinite(incomingModified) &&
+          Date.parse(revisionSeen) >= incomingModified
+        )
+          continue;
+        totalFetched++;
+        if (item.cve?.vulnStatus === 'Rejected') {
+          // Report the provider's own lastModified, not the local clock: the
+          // pipeline compares withdrawal times against the cached revision to
+          // decide whether the withdrawal is newer than the record it retracts.
+          const modifiedDate = item.cve?.lastModified
+            ? iso(item.cve.lastModified)
+            : new Date().toISOString();
+          withdrawals.push({ cveId: id, modifiedDate });
+          continue;
+        }
+        const cachedModified = Date.parse(context.knownCveModifiedAt?.get(id) || '');
+        // Fast path: the cached revision is not older, so re-emit only when the
+        // normalized content actually differs (a publisher can correct a score,
+        // CPE set or remediation without advancing lastModified).
+        if (
+          Number.isFinite(cachedModified) &&
+          Number.isFinite(incomingModified) &&
+          cachedModified >= incomingModified
+        ) {
+          const cached = context.knownCveContent?.get(id);
+          if (!cached) continue;
+          const candidate = normalizeNvdItem(item, feed.id);
+          if (!candidate) continue;
+          const sourceRevision = cached.sourceApplicability?.[feed.id];
+          if (
+            sourceRevision
+              ? sourceRevision.contentHash === sourceCveContentHash(candidate)
+              : stableJson(candidate) === stableJson(cached)
+          )
+            continue;
+          cves.push(candidate);
+          revisions[id] = candidate.modifiedDate;
+          continue;
+        }
+        const normalized = normalizeNvdItem(item, feed.id);
+        if (normalized) {
+          cves.push(normalized);
+          revisions[id] = normalized.modifiedDate;
+        } else {
+          rejections.push({
+            feedId: feed.id,
+            cveId: id,
+            recordHash: stableJson(item).slice(0, 128),
+            category: 'SCHEMA_VALIDATION',
+            summary: 'VulnCheck NVD++ record failed normalization',
+            rejectedAt: new Date().toISOString(),
+          });
+        }
+      }
+      const nextCursor = page._meta?.next_cursor || page.next_cursor || page.next;
+      if (typeof nextCursor !== 'string' || !nextCursor) return undefined;
+      if (seenCursors.has(nextCursor)) throw new Error('VulnCheck NVD++ cursor did not advance or repeated a previous cursor');
+      seenCursors.add(nextCursor);
+      return nextCursor;
+    };
+    // The first page was already fetched by the conditional probe; process it
+    // before paging so no record is lost or fetched twice.
+    cursor = processPage(firstOr304);
+    for (let pageNo = 0; pageNo < 100 && cursor; pageNo++) {
+      const pageUrl = new URL(url);
+      for (const key of ['cursor', 'start_cursor', 'page', 'startIndex', 'resultsPerPage']) pageUrl.searchParams.delete(key);
+      pageUrl.searchParams.set('cursor', cursor);
+      const { data: page } = await json(pageUrl.href, false, {
+        timeoutMs: 60000,
+        socketTimeoutMs: 30000,
+        maxResponseBytes: 32 * 1024 * 1024,
+        headers: { Authorization: `Bearer ${apiKey}` },
+      }, true);
+      cursor = processPage(page);
+      if (pageNo === 98 && cursor) throw new Error('VulnCheck NVD++ pagination exceeded 100,000 records');
+      // Every fetched continuation page is paced, whether or not another page
+      // follows: the request itself consumed provider quota.
+      await sleep(Math.max(1000, 60000 / feed.rateLimitPerMin));
+      if (!cursor) break;
+    }
+    return {
+      cves,
+      count: totalFetched,
+      withdrawals,
+      rejections,
+      etag,
+      syncState: { cursor: end.toISOString(), hasMore: cursor !== undefined, revisions, ...(etag ? { indexEtag: etag } : {}) },
+    };
+  }
   throw new Error(`Unsupported feed adapter: ${feed.type}`);
+}
+
+/**
+ * Normalize a VulnCheck NVD++ item (mirrors NVD CVE API 2.0 format) into a
+ * NormalizedCVE. VulnCheck enriches CPEs, CVSS scores, and vendor product tags
+ * faster than NIST, but the record structure is compatible with NVD parsing.
+ */
+function normalizeNvdItem(item: any, feedId: string): NormalizedCVE | null {
+  const cve = item.cve;
+  if (!cve || cve.vulnStatus === 'Rejected') return null;
+
+  // Extract CVSS metric: prefer NVD primary, fall back to CNA secondary
+  const cvssData =
+    cve.metrics?.cvssMetricV40?.[0]?.cvssData ||
+    cve.metrics?.cvssMetricV31?.[0]?.cvssData ||
+    cve.metrics?.cvssMetricV30?.[0]?.cvssData ||
+    cve.metrics?.cvssMetricV2?.[0]?.cvssData ||
+    cve.metrics?.cvssMetricV40?.find((m: any) => m.type === 'Secondary')?.cvssData ||
+    cve.metrics?.cvssMetricV31?.find((m: any) => m.type === 'Secondary')?.cvssData;
+  const score = cvssData?.baseScore ?? 0;
+  const version = cvssData ? normalizeCvssVersion(
+    cve.metrics?.cvssMetricV40?.[0]?.version ||
+    cve.metrics?.cvssMetricV31?.[0]?.version ||
+    cve.metrics?.cvssMetricV30?.[0]?.version ||
+    cve.metrics?.cvssMetricV2?.[0]?.version ||
+    '3.1',
+  ) : 'UNKNOWN';
+  const vector =
+    cvssData?.vectorString || '';
+
+  const details: NonNullable<NormalizedCVE['cpeMatchDetails']> = [];
+  const walk = (node: any) => {
+    if (!node || typeof node !== 'object') return;
+    for (const m of node.cpeMatch || []) {
+      if (m.vulnerable === true && typeof m.criteria === 'string' && m.criteria.startsWith('cpe:2.3:')) {
+        details.push({
+          criteria: m.criteria,
+          range: {
+            versionStartIncluding: m.versionStartIncluding,
+            versionStartExcluding: m.versionStartExcluding,
+            versionEndIncluding: m.versionEndIncluding,
+            versionEndExcluding: m.versionEndExcluding,
+          },
+        });
+      }
+    }
+    for (const child of node.nodes || node.children || []) walk(child);
+  };
+
+  for (const config of cve.configurations || []) walk(config);
+  const validDetails = details.filter((d) => parseCPE23(d.criteria).isValid);
+
+  const description =
+    cve.descriptions?.find((d: any) => d.lang === 'en')?.value || cve.id || '';
+
+  const cwe =
+    (cve.weaknesses || [])
+      .flatMap((w: any) => (w.description || []).filter((d: any) => d.lang === 'en').map((d: any) => d.value))
+      .slice(0, 100) || [];
+
+  const cpeMatches = validDetails.map((d) => d.criteria);
+
+  try {
+    return cveSchema.parse({
+      cveId: cve.id,
+      title: description.slice(0, 500),
+      description,
+      publishedDate: new Date(cve.published).toISOString(),
+      modifiedDate: new Date(cve.lastModified).toISOString(),
+      cvss: {
+        version,
+        score,
+        vector: sanitizeCvssVector(vector),
+        severity: cvssData ? cvssSeverity(score) : 'UNKNOWN',
+      },
+      cwe,
+      cpeMatches,
+      cpeMatchDetails: validDetails,
+      applicabilityRequiresReview: ['Received', 'Awaiting Analysis', 'Undergoing Analysis'].includes(cve.vulnStatus),
+      sourceFeeds: [feedId],
+      epss: { score: 0, percentile: 0 },
+      cisaKev: { isKev: false },
+      exploitStatus: 'None',
+      remediation: {
+        patchUrl: '',
+        vendorAdvisoryRef:
+          (cve.references || []).find((r: any) => r.tags?.includes('Vendor Advisory'))?.url || '',
+        immediateActions: [],
+        workarounds: [],
+        rollbackPlan: '',
+        stepByStep: [],
+      },
+    });
+  } catch {
+    return null;
+  }
 }

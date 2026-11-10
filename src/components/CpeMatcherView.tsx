@@ -4,9 +4,9 @@ import { useApp } from '../context/AppContext';
 import {
   CpeMatchSimulation,
   CpeParseResult,
-  NvdCpeSearchResponse,
-  NvdCpeSearchResult,
   SeverityClassification,
+  VulncheckCpeSearchResponse,
+  VulncheckCpeSearchResult,
 } from '../types';
 import {
   ScanLine,
@@ -114,7 +114,7 @@ const CPE_PRESETS: CpePreset[] = [
 ];
 
 export const CpeMatcherView: React.FC = () => {
-  const { simulateCpeMatch, searchNvdCpes } = useApp();
+  const { simulateCpeMatch, searchVulncheckCpes } = useApp();
   const [assetCpe, setAssetCpe] = useState('cpe:2.3:o:microsoft:windows_10:10.0.19041:*:*:*:*:*:*:*');
   const [vulnerabilityCpe, setVulnerabilityCpe] = useState('cpe:2.3:o:microsoft:windows_10:*:*:*:*:*:*:*:*');
   const [assetVendor, setAssetVendor] = useState('microsoft');
@@ -134,7 +134,7 @@ export const CpeMatcherView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'match' | 'lookup'>('match');
   const [lookupVendor, setLookupVendor] = useState('microsoft');
   const [lookupProduct, setLookupProduct] = useState('windows_10');
-  const [lookupResults, setLookupResults] = useState<NvdCpeSearchResponse | null>(null);
+  const [lookupResults, setLookupResults] = useState<VulncheckCpeSearchResponse | null>(null);
   const [lookupLoading, setLookupLoading] = useState(false);
   const [lookupError, setLookupError] = useState<string | null>(null);
 
@@ -230,7 +230,7 @@ export const CpeMatcherView: React.FC = () => {
     setLookupError(null);
     setLookupResults(null);
     try {
-      const resp = await searchNvdCpes(lookupVendor.trim(), lookupProduct.trim(), 50);
+      const resp = await searchVulncheckCpes(lookupVendor.trim(), lookupProduct.trim(), 50);
       setLookupResults(resp);
     } catch (err) {
       setLookupError(err instanceof Error ? err.message : 'NVD CPE lookup failed');
@@ -773,7 +773,7 @@ export const CpeMatcherView: React.FC = () => {
                 </p>
               ) : (
                 <div className="cpe-lookup-results">
-                  {(lookupResults.results as NvdCpeSearchResult[]).map((cpe) => (
+                  {(lookupResults.results as VulncheckCpeSearchResult[]).map((cpe) => (
                     <div
                       key={cpe.cpeNameId || cpe.cpeName}
                       className="bg-zinc-950/70 dark:bg-zinc-950/70 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-lg p-2 flex items-center justify-between"

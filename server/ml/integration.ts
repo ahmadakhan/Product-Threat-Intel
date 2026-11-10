@@ -136,17 +136,41 @@ export function calibrateCredibilityScore(rawScore: number): {
  *
  * The configured threshold is authoritative; trained models only recommend.
  */
-export function shouldAutoDispatch(confidence: number, settings: Pick<AppSettings, 'autoDispatchConfidenceThreshold'>): boolean {
-  const model = ctx.runtime?.autoDispatchThreshold;
-  const threshold = settings.autoDispatchConfidenceThreshold ?? DEFAULT_AUTO_DISPATCH_THRESHOLD;
+export function shouldAutoDispatch(confidence: number, settings: Pick<AppSettings, 'confirmedFindingThreshold'>): boolean {
+  const threshold = settings.confirmedFindingThreshold ?? DEFAULT_AUTO_DISPATCH_THRESHOLD;
+  let modelTrained = false;
+  let modelError: string | undefined;
+  // Fail closed: if the ML model errors, hold for review rather than dispatching blindly.
+  try {
+    const model = ctx.runtime?.autoDispatchThreshold;
+    modelTrained = model?.isTrained() === true;
+    if (!modelTrained) {
+      // Model untrained: use the static threshold only; do not trust ML recommendation.
+      void logMlEvent('ml.auto_dispatch', 'Model untrained; using static threshold only', {
+        confidence,
+        threshold,
+        modelTrained: false,
+      });
+      return Number.isFinite(confidence) && confidence >= 0 && confidence <= 100 &&
+        Number.isFinite(threshold) && threshold >= 0 && threshold <= 100 && confidence >= threshold;
+    }
+  } catch (err) {
+    modelError = err instanceof Error ? err.message : String(err);
+    void logMlEvent('ml.auto_dispatch', 'Model error; fail closed — holding for review', {
+      confidence,
+      threshold,
+      modelTrained: false,
+      modelError,
+    });
+    return false;
+  }
   const result = Number.isFinite(confidence) && confidence >= 0 && confidence <= 100 &&
     Number.isFinite(threshold) && threshold >= 0 && threshold <= 100 && confidence >= threshold;
-  const trained = model?.isTrained() === true;
   void logMlEvent('ml.auto_dispatch', result ? 'Eligible under configured policy' : 'Held under configured policy', {
     confidence,
     threshold,
-    modelTrained: trained,
-    recommendedThreshold: trained ? model?.getThreshold() : undefined,
+    modelTrained,
+    recommendedThreshold: modelTrained ? ctx.runtime?.autoDispatchThreshold?.getThreshold() : undefined,
   });
   return result;
 }

@@ -1,7 +1,7 @@
-import type { NvdCpeSearchResult } from '../types/index.ts';
+import type { VulncheckCpeSearchResult } from '../types/index.ts';
 import { normalizeCpeForComparison, parseCPE23 } from './cpeMatcher.ts';
 
-export type RegistrationCpeSearchResult = NvdCpeSearchResult & { generatedWildcard?: boolean };
+export type RegistrationCpeSearchResult = VulncheckCpeSearchResult & { generatedWildcard?: boolean };
 
 function hasUnescapedWildcard(value: string): boolean {
   let escaped = false;
@@ -56,7 +56,7 @@ export function dictionaryEntryMatchesWildcard(pattern: string, dictionaryName: 
 }
 
 /** Keep one wildcard per dictionary product at the front, followed by exact entries. */
-export function withProductWildcards(entries: NvdCpeSearchResult[]): RegistrationCpeSearchResult[] {
+export function withProductWildcards(entries: VulncheckCpeSearchResult[]): RegistrationCpeSearchResult[] {
   const wildcards = new Map<string, RegistrationCpeSearchResult>();
   const exact = new Map(entries.map((entry) => [normalizeCpeForComparison(entry.cpeName), entry]));
   for (const entry of entries) {

@@ -1,4 +1,5 @@
 import { get, getForUpdate, list, put, transaction } from './db';
+import { createHash } from 'node:crypto';
 import { getHeapStatistics } from 'node:v8';
 import { totalmem } from 'node:os';
 import type { Db } from './db';
@@ -33,7 +34,7 @@ import type { AppSettings, EmailRecipient, PipelineExecution, ThreatFeed } from 
  * tick: no alert was ever sent and no recovery ever ran.
  */
 
-type Component = 'PIPELINE' | 'FEED' | 'SYSTEM' | 'SCHEDULER';
+type Component = 'PIPELINE' | 'FEED' | 'SYSTEM' | 'SCHEDULER' | 'SETTINGS';
 
 const DEFAULT_COOLDOWN_MINUTES = 30;
 /** Node's default V8 ceiling is ~1.4 GB; 90% of `heapTotal` is a false alarm. */
@@ -429,4 +430,56 @@ export async function runSelfHealCheck(pool: Pool): Promise<void> {
       context: { staleMinutes: Math.round((now - heartbeat) / 60_000) },
     }).catch(() => undefined);
   }
+
+  // SETTINGS: when auto-dispatch or other workspace settings change, existing
+  // findings must be re-evaluated. A setting that moved from false to true (or
+  // vice versa) can change whether a held finding should dispatch or a dispatched
+  // finding should be re-reviewed. Detect the change and queue a full
+  // re-correlation so no finding stays in the wrong state.
+  const currentSettingsHash = createHash('sha256')
+    .update(JSON.stringify({
+      autoDispatchEnabled: settings?.autoDispatchEnabled,
+      confirmedFindingThreshold: settings?.confirmedFindingThreshold,
+      autoDispatchUnverifiableMatches: settings?.autoDispatchUnverifiableMatches,
+      scopeHours: settings?.scopeHours,
+      maxFindingsPerRun: settings?.maxFindingsPerRun,
+      maxDispatchesPerRunPerFeed: settings?.maxDispatchesPerRunPerFeed,
+      maxTotalFindingsPerRun: settings?.maxTotalFindingsPerRun,
+    }))
+    .digest('hex');
+  const previousSettings = await get<{ settingsHash?: string }>(
+    pool,
+    'systemState',
+    'settings-change-state',
+  ).catch(() => undefined);
+  if (previousSettings?.settingsHash && previousSettings.settingsHash !== currentSettingsHash) {
+    // Settings changed: queue a full re-correlation so every finding is
+    // re-evaluated under the new policy. The pipeline dedupes runs, so this is
+    // safe even if multiple settings changed in the same tick.
+    const { queueRun } = await import('./pipeline');
+    if (await claimRecoverySlot(pool, 'SETTINGS', RECOVERY_RETRY_MS)) {
+      await queueRun(pool, undefined, 'settings-change');
+      await writeEvent(pool, {
+        category: 'SYSTEM',
+        level: 'INFO',
+        code: 'settings.changed_re_evaluating',
+        message: 'Workspace settings changed; all findings will be re-evaluated',
+        context: { previousHash: previousSettings.settingsHash, currentHash: currentSettingsHash },
+      }).catch(() => undefined);
+    }
+    await queueSecurityAlert(
+      pool,
+      'SETTINGS',
+      'settings-changed',
+      'Workspace settings changed; findings re-evaluation queued',
+      `Workspace settings changed at ${new Date().toISOString()}. A full pipeline run was queued to re-evaluate all findings under the new policy. ` +
+        `Previous settings hash: ${previousSettings.settingsHash.slice(0, 12)}...`,
+      cooldown,
+      emailNotifications,
+    );
+  }
+  await put(pool, 'systemState', 'settings-change-state', {
+    settingsHash: currentSettingsHash,
+    updatedAt: new Date().toISOString(),
+  });
 }

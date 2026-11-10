@@ -33,12 +33,10 @@ export type FindingStatus =
  */
 export const FEED_TYPES = [
   'JSON_SEARCH_API',
-  'NVD_API',
-  'MITRE_CVE',
   'CISA_KEV',
   'EPSS_API',
-  'OPENCVE_API',
   'VULNCHECK_KEV',
+  'VULNCHECK_NVD',
   'OTX_API',
   'OSV_API',
   'GITHUB_ADVISORIES',
@@ -76,7 +74,13 @@ export interface IntelligenceMatch {
   id: string;
   cveId: string | null;
   assetId: string;
+  /** Display label, `"<tag> (<vendor> <product>)"`. Never parse this — use the
+   *  structured fields below, which a product name containing parentheses or
+   *  spaces would otherwise corrupt. */
   assetName: string;
+  /** Structured identity of the matched asset, when known. */
+  assetVendor?: string;
+  assetProduct?: string;
   articleIds: string[];
   status: 'CORROBORATED' | 'REVIEW_REQUIRED';
   evidence: string;
@@ -213,6 +217,8 @@ export interface ReviewEdits {
   customFields?: Record<string, string>;
   recipientMode?: 'SINGLE_EMAIL' | 'SECURITY_TEAM' | 'EVERYONE';
   customEmail?: string;
+  /** When true, the exact rendered HTML body is attached to the outgoing email as an .html file. */
+  attachHtml?: boolean;
 }
 
 /**
@@ -372,6 +378,8 @@ export interface ThreatFeed {
   consecutiveFailures?: number;
   circuitOpenUntil?: string | null;
   lastRecoveryAttemptAt?: string;
+  /** When true, this feed's records are treated as authoritative for vendor/product autodispatch even if their feed type is not in the default authoritative set. */
+  authoritative?: boolean;
 }
 
 /**
@@ -379,7 +387,7 @@ export interface ThreatFeed {
  * NVD-maintained official CPE names offered as verified alternatives when an
  * operator registers a monitored product.
  */
-export interface NvdCpeSearchResult {
+export interface VulncheckCpeSearchResult {
   cpeName: string;
   cpeNameId: string;
   part: string;
@@ -389,18 +397,18 @@ export interface NvdCpeSearchResult {
   update: string;
   targetSw: string;
   targetHw: string;
-  /** Human-readable title from the NVD CPE dictionary, when available. */
+  /** Human-readable title from the VulnCheck CPE dictionary, when available. */
   title?: string;
   /**
    * True when this entry was found via the wildcard-vendor dictionary search
    * (matched on product name alone), not the vendor-scoped keyword search.
-   * Still a verified, exact NVD dictionary CPE — only the search path differs.
+   * Still a verified, exact VulnCheck dictionary CPE — only the search path differs.
    */
   viaWildcardVendor?: boolean;
 }
 
-export interface NvdCpeSearchResponse {
-  results: NvdCpeSearchResult[];
+export interface VulncheckCpeSearchResponse {
+  results: VulncheckCpeSearchResult[];
   totalResults: number;
 }
 
@@ -408,8 +416,8 @@ export interface ThreatSearchHit {
   cve: NormalizedCVE;
   /** CPE 2.3 strings that matched the requested vendor/product. */
   matchingCpes: string[];
-  /** Origin of the result: `NVD_API` for the CVE Search API, `KEYWORD_FALLBACK` for keyword-search results. */
-  source: 'NVD_API' | 'KEYWORD_FALLBACK';
+  /** Origin of the result: `KEYWORD_FALLBACK` for keyword-search results. */
+  source: 'KEYWORD_FALLBACK';
 }
 
 export interface ThreatSearchResponse {
@@ -426,7 +434,7 @@ export interface ThreatSearchResponse {
 }
 
 /** Databases and public feeds that can contribute a vulnerability-search result. */
-export type VulnerabilitySource = 'OSV' | 'NVD' | 'CISA_KEV' | 'OSINT';
+export type VulnerabilitySource = 'OSV' | 'VULNCHECK_NVD' | 'CISA_KEV' | 'OSINT';
 
 export interface VulnerabilityReference {
   /** Source label such as `ADVISORY`, `FIX`, `WEB`, or `Vendor Advisory`. */
@@ -733,6 +741,10 @@ export interface PipelineExecution {
     advisoriesDispatched: number;
     webhooksFired: number;
     vexSuppressedCount: number;
+    /** How many findings were auto-dispatched via an authoritative source with no CPE applicability data. */
+    authoritativeSourceDispatchCount?: number;
+    /** Total number of findings auto-dispatched across all paths this run (including circuit-breaker-tripped holds). */
+    totalDispatchCount?: number;
     notificationsQueued?: number;
     advisoriesQueued?: number;
     /**
@@ -1067,7 +1079,7 @@ export interface AppSettings {
    * recipient's own verification (`REVIEW_REQUIRED`); it does not withhold the
    * alert. The default (90) matches the previous hardcoded threshold.
    */
-  autoDispatchConfidenceThreshold: number;
+  confirmedFindingThreshold: number;
   /**
    * When true, unverifiable matches (whose version range cannot be confirmed)
    * participate in the confidence threshold like any other match. When false
@@ -1076,6 +1088,48 @@ export interface AppSettings {
    * and the advisory states the limitation on the finding itself.
    */
   autoDispatchUnverifiableMatches: boolean;
+  /**
+   * Circuit breaker: maximum number of auto-dispatched findings per run.
+   * When exceeded, remaining matches are held for review instead of dispatching,
+   * and a WARNING log entry is written. Prevents a bad feed or a broad wildcard
+   * registration from flooding the delivery queue. Default 10000.
+   */
+  maxFindingsPerRun: number;
+  /**
+   * Per-feed dispatch quota: maximum number of auto-dispatched findings per
+   * run that may originate from any single feed ID. When a feed exceeds its
+   * quota, further matches from that feed are held for review. Prevents a
+   * single misbehaving feed from dominating the delivery queue. Default 10000.
+   */
+  maxDispatchesPerRunPerFeed: number;
+  /**
+   * Circuit breaker: maximum total number of findings (all dispatch paths
+   * combined: authoritative, KEV, STRICT_CPE, text fallback) per run. When
+   * exceeded, remaining matches are held for review instead of dispatching.
+   * Prevents a bad feed, broad wildcard registration, or cascading CVE
+   * publication from flooding the delivery queue. Default 50000.
+   */
+  maxTotalFindingsPerRun: number;
+  /**
+   * Optional template for the enrichment evidence message shown on findings
+   * auto-dispatched via an authoritative source with no CPE data. Use
+   * placeholders: {cveId}, {sourceLabel}, {vendor}, {product}, {confidence},
+   * {method}. When empty, the built-in default message is used.
+   */
+  enrichmentMessageTemplate?: string;
+  /**
+   * Circuit breaker cooldown: after a feed or the overall run trips a circuit
+   * breaker, additional dispatches from that source are held for this many
+   * minutes before the breaker auto-resets. Prevents a chronically misbehaving
+   * feed from tripping every run indefinitely. Default 60 minutes.
+   */
+  circuitBreakerCooldownMinutes: number;
+  /**
+   * Circuit breaker feed cooldown: per-feed cooldown in minutes. When a feed
+   * trips its per-feed quota, further dispatches from that feed are held for
+   * this duration before the feed-level breaker auto-resets. Default 60 minutes.
+   */
+  circuitBreakerFeedCooldownMinutes: number;
   /**
    * Retained for settings compatibility.
    *
