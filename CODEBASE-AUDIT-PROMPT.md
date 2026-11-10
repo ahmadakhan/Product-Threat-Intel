@@ -34,6 +34,20 @@ dashboard, watchlist, findings, threat-intelligence-search, vulnerability-search
 
 The codebase has undergone multiple audit passes. Known fixed areas include: delivery false positives/negatives, stale-bundle recovery, CPE wildcard bypass, provider confirmation, real cancellation via AbortSignal, digest-window index, outbox isolation, concurrent-query-on-single-client fix, template XSS escaping, retention advisory-lock fix, stuck-promise guard releases, ML quality gate, pipeline hardening, fail-closed command authorization, unauthenticated `/api/state`, resend subscription governance, retention claim TTL, ML training cross-replica claim, digest lock-connection failure flags, daily-digest lock-event spam, Mailgun egress hosts, legacy ciphertext envelopes, stale seeded feed URLs, RSS XXE-guard false positives, unbounded execution-table scans, webhook blank-keeps, findings/ActionCenter/EmailQueue layout defects, template editor draft preservation, client-side hex color validation, consolidated findings custom advisory template passing. Verify these fixes still hold and look for regressions, edge cases, and uncovered paths.
 
+### Changes deployed since last full audit (Nov 10, 2026)
+
+- **`server/advisoryRender.ts`**: HTML entity escaping non-null assertion fixed (`?? ch` instead of `!`) — prevented `undefined` concatenation into rendered email HTML.
+- **`src/context/AppContext.tsx`**: Validation error details null check (`Array.isArray(data.details)` guard) — prevented `.map()` crash on non-array/undefined details.
+- **`src/components/ThreatFeedsView.tsx`**: `rateLimitPerMin ?? 60` default on feed edit form load; catch block added to `handleConfirmedSave` so server validation errors surface to operator instead of generic message.
+- **`server/validation.ts`**: `rateLimitPerMin` schema max raised 600 → 1000 to permit VulnCheck feed rate limit; VulnCheck NVD++ validation rule updated to `https://api.vulncheck.com/v3/index/nist-nvd2`.
+- **`server/ingestion.ts`**: `normalizeOpenCve` wrapped in try/catch around `cveSchema.parse()`; return type `NormalizedCVE | null`.
+- **`src/components/VulnerabilitySearchView.tsx`**: Sort capability added (`severity`/`score`/`published`/`id` sort dropdown in results toolbar; client-side tie-breaking KEV→severity→score→date).
+- **VulnCheck NVD++ endpoint**: `https://api.vulncheck.com/v3/index/nvd` → `https://api.vulncheck.com/v3/index/nist-nvd2` across all server, component, and test files.
+- **VulnCheck feeds disabled by default**: `feed-vulncheck-nvd` and `feed-vulncheck-kev` both `enabled: false` in `recommendedFeeds.ts`; pipeline filter respects `feed.enabled` (removed force-include of VULNCHECK_NVD).
+- **Bootstrap credential check**: `feedBootstrap.ts` re-fetches all feeds after seeding so newly seeded VulnCheck feeds lacking a Bearer token (or with prior HTTP 401 error) are auto-disabled.
+- **`server/config.ts`**: `services.nvd.nist.gov` added to `DEFAULT_EGRESS_HOSTS`; compose `.env` updated accordingly.
+- **Graceful shutdown**: `server/main.ts` has SIGTERM/SIGINT/unhandledRejection/uncaughtException handlers, pool close, pipeline abort, 30s forced-exit deadline.
+
 ## Audit Dimensions
 
 ### 1. Boot & Lifecycle (`server/main.ts`, `server/app.ts`)
