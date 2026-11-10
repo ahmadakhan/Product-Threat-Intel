@@ -1723,6 +1723,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           feeds, finalCves, changedInventory, snapshot.alertedCves, snapshot.findings,
           { ...settings, scopeHours: 0 }, 'Inventory registration', true,
           finalVendorAliases, finalProductAliases, finalPairs.size ? finalPairs : undefined, aliasEntries,
+          undefined, circuitBreakerCooldowns,
         );
         const known = new Set(correlated.newFindings.map(findingIdentity));
         correlated.newFindings.push(...historical.newFindings.filter((finding) => !known.has(findingIdentity(finding))));

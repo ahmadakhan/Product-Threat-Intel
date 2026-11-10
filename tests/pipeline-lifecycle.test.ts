@@ -102,6 +102,31 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       const findings = await list<Finding>(pool, 'findings');
       assert.equal(findings.some((finding) => finding.cveId === cached.cveId), true);
     });
+    await t.test('historical inventory matches preserve dispatch cooldowns until expiry', async () => {
+      await reset();
+      await save('settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: false });
+      await save('watchlist', 'asset', asset());
+      const cached = { ...vulnerability(), publishedDate: '2020-01-01T00:00:00Z', modifiedDate: '2020-01-01T00:00:00Z' };
+      await save('cveData', cached.cveId, cached);
+      await save('recipients', 'cooldown-recipient', {
+        id: 'cooldown-recipient', email: 'cooldown@example.invalid', name: 'SOC', enabled: true,
+        deliveryGroup: 'SECURITY_TEAM', subscriptionTier: 'ALL_SEVERITIES',
+      });
+      await save('systemState', 'circuit-breaker-state', {
+        cooldowns: { overallUntil: new Date(Date.now() + 3600000).toISOString(), feeds: {} },
+      });
+      await run();
+      const [held] = await list<Finding>(pool, 'findings');
+      assert.ok(held, 'the historical match must remain visible');
+      assert.equal(held.dispatchDeferred, true);
+      assert.equal((await pool.query('SELECT id FROM outbox')).rowCount, 0);
+      await save('systemState', 'circuit-breaker-state', {
+        cooldowns: { overallUntil: new Date(Date.now() - 1000).toISOString(), feeds: {} },
+      });
+      await run();
+      assert.equal((await list<Finding>(pool, 'findings'))[0].dispatchDeferred, false);
+      assert.equal((await pool.query('SELECT id FROM outbox')).rowCount, 1, 'expiry releases the retained match');
+    });
     await t.test('incremental checkpoints commit atomically, survive failures, and reset after source changes', async () => {
       await reset();
       await save('settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: false });

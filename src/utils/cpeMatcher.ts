@@ -317,7 +317,7 @@ function textWordPattern(word: string): RegExp {
   const cached = textWordPatterns.get(word);
   if (cached) return cached;
   const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`);
+  const pattern = new RegExp(`(?<![\\p{L}\\p{N}+#])${escaped}(?![\\p{L}\\p{N}+#])`, 'u');
   if (textWordPatterns.size >= MAX_TEXT_WORD_PATTERNS) {
     // Evict oldest 10% instead of clearing all
     const toEvict = Math.max(1, Math.floor(textWordPatterns.size * 0.1));
@@ -330,10 +330,12 @@ function textWordPattern(word: string): RegExp {
 
 function containsIdentityWords(text: string, value: string): boolean {
   const words = value
+    .normalize('NFKC')
     .toLowerCase()
-    .split(/[^a-z0-9]+/)
+    .split(/[^\p{L}\p{N}+#]+/u)
     .filter(Boolean);
-  const significant = words.filter((word) => word.length >= TEXT_IDENTITY_MIN_WORD);
+  const significant = words.filter((word) => word.length >= TEXT_IDENTITY_MIN_WORD ||
+    (/[+#]/.test(word) && /[\p{L}\p{N}]/u.test(word)));
   // `os`, `ai`, `go` and `3m` are real names but not usable as prose evidence.
   if (!significant.length) return false;
   // Prefer the long words; for a multi-word identity that also contains short
@@ -1352,7 +1354,8 @@ export function matchesWatchlistItem(
   }
 
   // 5. Fallback Heuristic
-  const fullText = `${vulnTitle} ${vulnDescription}`.toLowerCase();
+  const fullText = `${vulnTitle} ${vulnDescription}`.normalize('NFKC').toLowerCase()
+    .replace(/(^|[^\p{L}\p{N}+#])#(?=[\p{L}\p{N}])/gu, '$1');
   const productOnlyKevFallback =
     allowProductOnlyFallback &&
     hasProductWideRegistration &&

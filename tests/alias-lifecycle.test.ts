@@ -84,6 +84,7 @@ test('correlation evidence teaches an alias only after confirmation', () => {
     cveId: 'CVE-2026-90001',
     matchedAssetId: 'asset-auto',
     matchingMethod: 'VENDOR_PRODUCT_FALLBACK',
+    matchedCpe: cpe('acme_corp', 'widget_pro', '1.0'),
     notificationStatus: 'REVIEW_REQUIRED',
     status: 'MONITORED',
     autoDispatchedAt: null,

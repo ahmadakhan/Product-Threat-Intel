@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine.ts';
 import { matchIntelligence } from '../src/utils/intelligenceMatcher.ts';
+import { deriveCorrelationAliases } from '../src/utils/aliasLifecycle.ts';
+import { buildAliasMap } from '../src/utils/cpeMatcher.ts';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
-import type { IntelligenceArticle, NormalizedCVE, WatchListItem } from '../src/types/index.ts';
+import type { IntelligenceArticle, NormalizedCVE, WatchListItem, ThreatFeed } from '../src/types/index.ts';
 
 const now = new Date('2026-11-11T00:00:00Z');
 const cpe = (vendor: string, product: string, version = '1.5') =>
@@ -79,4 +81,37 @@ test('news preserves product symbols while accepting separators and Unicode norm
   const sharp = asset('microsoft', 'visual_c#');
   assert.equal(matchIntelligence([article('Microsoft Visual C++ flaw')], [sharp], []).length, 0);
   assert.equal(matchIntelligence([article('Microsoft Visual C# flaw')], [sharp], []).length, 1);
+});
+
+
+test('CVE text fallback preserves symbols and word boundaries before dispatch', () => {
+  const source = { id: 'vc', name: 'VC', type: 'VULNCHECK_NVD', enabled: true } as ThreatFeed;
+  const run = (product: string, title: string) => runVulnerabilityPipeline(
+    [source], [advisory({ title, description: title, cpeMatches: [], sourceFeeds: ['vc'] })],
+    [asset('microsoft', product)], [], [], { ...DEFAULT_SETTINGS, scopeHours: 0 },
+  ).newFindings;
+  for (const product of ['visual_c++', 'visual_c#', 'visual_c']) {
+    const own = product.replace('_', ' ');
+    assert.equal(run(product, `Microsoft ${own} vulnerability`)[0]?.notificationStatus, 'QUEUED_FOR_DISPATCH');
+    for (const other of ['visual c++', 'visual c#', 'visual c'].filter((name) => name !== own)) {
+      assert.equal(run(product, `Microsoft ${other} vulnerability`).length, 0, `${product} vs ${other}`);
+    }
+  }
+  assert.equal(run('visual_c++', '#Microsoft Visual Ｃ＋＋ vulnerability').length, 1);
+  assert.equal(run('visual_c++', 'Microsoft Visual C+++ vulnerability').length, 0);
+});
+
+test('correlation aliases use only the matched criterion of a multi-product CVE', () => {
+  const watch = asset('cisco', 'gateway');
+  const record = advisory({
+    cpeMatches: [cpe('cisco_systems', 'gateway'), cpe('cisco_systems', 'gateway_agent')],
+  });
+  const [matched] = runVulnerabilityPipeline([], [record], [watch], [], [], { ...DEFAULT_SETTINGS, scopeHours: 0 }).newFindings;
+  assert.ok(matched);
+  assert.equal(matched.matchingMethod, 'VENDOR_PRODUCT_ALIAS');
+  const confirmed = { ...matched, autoDispatchedAt: now.toISOString(), notificationStatus: 'AUTO_DISPATCHED' as const };
+  const learned = deriveCorrelationAliases([confirmed], [watch], new Map([[record.cveId, record]]));
+  assert.equal(buildAliasMap(learned, 'PRODUCT').gateway?.includes('gateway_agent') ?? false, false);
+  assert.deepEqual(deriveCorrelationAliases([{ ...confirmed, matchedCpe: '' }], [watch]), []);
+  assert.deepEqual(deriveCorrelationAliases([{ ...confirmed, matchedCpe: cpe('cisco_systems', 'removed_product') }], [watch]), []);
 });

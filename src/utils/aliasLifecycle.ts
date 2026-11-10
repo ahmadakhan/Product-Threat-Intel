@@ -319,12 +319,16 @@ export function deriveCorrelationAliases(
       ? cve.cpeMatchDetails.map((detail) => detail.criteria)
       : cve.cpeMatches;
 
-    // Collect per finding first so multiple criteria for the same relation do
-    // not inflate the evidence count.
+    // A CVE may name multiple distinct products. Only the criterion recorded
+    // as this finding's match can establish a naming relation; prose fallbacks
+    // and legacy findings without that evidence cannot teach new aliases.
+    const matchedCriteria = finding.matchedCpe
+      ? criteria?.filter((criterion) => criterion === finding.matchedCpe) ?? []
+      : [];
     const perFinding = new Map<string, AliasEntry>();
     const vendor = asset.vendor.trim().toLowerCase();
     const product = asset.product.trim().toLowerCase();
-    for (const criterion of criteria ?? []) {
+    for (const criterion of matchedCriteria) {
       const parsed = parseCPE23(criterion);
       if (!parsed.isValid) continue;
       if (
