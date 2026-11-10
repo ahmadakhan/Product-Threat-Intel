@@ -687,6 +687,14 @@ const CANONICAL_PRODUCT_MAP: Record<string, string> = {
   'ubuntu server': 'ubuntu',
 };
 
+// Lookup keys are normalized the same way as the inputs. The map literals use
+// spaced keys ("sonic wall"), but lookups use normalizeAliasToken, which strips
+// separators, so unnormalized keys could never match.
+const normalizeMapKeys = (map: Record<string, string>): Record<string, string> =>
+  Object.fromEntries(Object.entries(map).map(([key, value]) => [normalizeAliasToken(key), value]));
+const CANONICAL_VENDOR_LOOKUP = normalizeMapKeys(CANONICAL_VENDOR_MAP);
+const CANONICAL_PRODUCT_LOOKUP = normalizeMapKeys(CANONICAL_PRODUCT_MAP);
+
 /**
  * Returns the canonical vendor identity for a raw vendor string, or the
  * normalized input when no canonical mapping exists. Case-insensitive and
@@ -694,7 +702,8 @@ const CANONICAL_PRODUCT_MAP: Record<string, string> = {
  */
 export function canonicalVendor(vendor: string): string {
   const key = normalizeAliasToken(vendor);
-  return CANONICAL_VENDOR_MAP[key] ?? normalizeAliasToken(vendor);
+  // hasOwn: a plain-object lookup would return Object.prototype members for keys like "constructor".
+  return Object.hasOwn(CANONICAL_VENDOR_LOOKUP, key) ? CANONICAL_VENDOR_LOOKUP[key] : key;
 }
 
 /**
@@ -704,7 +713,7 @@ export function canonicalVendor(vendor: string): string {
  */
 export function canonicalProduct(product: string): string {
   const key = normalizeAliasToken(product);
-  return CANONICAL_PRODUCT_MAP[key] ?? normalizeAliasToken(product);
+  return Object.hasOwn(CANONICAL_PRODUCT_LOOKUP, key) ? CANONICAL_PRODUCT_LOOKUP[key] : key;
 }
 
 /**
@@ -716,9 +725,16 @@ export function canonicalProduct(product: string): string {
 export function identityTokens(value: string): string[] {
   const normalized = normalizeAliasToken(value);
   if (!normalized) return [];
-  // Split into word tokens for multi-word matching, but keep the full
-  // normalized string as the primary token so exact matches still win.
-  const words = normalized.split(/(?=[A-Z])|[\s._-]+/).filter(Boolean);
+  // Split the raw value: separators and camel-case boundaries (lowercase then
+  // uppercase) disappear once normalizeAliasToken lowercases and strips them.
+  // Only a lowercase-to-uppercase boundary splits camel case, so "PAN-OS" stays
+  // whole instead of breaking into single letters. One-letter fragments are
+  // dropped so they cannot create a spurious overlap.
+  const words = value
+    .split(/(?<=[a-z])(?=[A-Z])|[\s._-]+/)
+    .map((word) => normalizeAliasToken(word))
+    .filter((word) => word.length >= 2);
+  // Keep the full normalized string as the primary token so exact matches still win.
   return [normalized, ...words];
 }
 

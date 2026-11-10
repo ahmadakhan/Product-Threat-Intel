@@ -112,12 +112,15 @@ export async function claimItems(
            WHERE o.id = delivery_claims.job_id
              AND o.status = 'FAILED'
         )
+        -- A superseded job holds its claims only if a transport attempt may have
+        -- reached the recipient (UNKNOWN) or succeeded (ACCEPTED). A job that was
+        -- never attempted (NOT_ATTEMPTED) or was refused (REJECTED) releases them,
+        -- so the newer revision can deliver the findings it was blocked on.
         AND NOT EXISTS (
           SELECT 1 FROM outbox o
            WHERE o.id = delivery_claims.job_id
              AND o.status = 'SUPERSEDED'
-             AND o.delivery_outcome IS DISTINCT FROM 'ACCEPTED'
-             AND o.delivery_outcome IS DISTINCT FROM 'REJECTED'
+             AND o.delivery_outcome IN ('UNKNOWN','ACCEPTED')
         )
      RETURNING recipient_id,kind,item_id`,
     [
@@ -291,11 +294,11 @@ export async function activeClaims(
             SELECT 1 FROM outbox o
              WHERE o.id = c.job_id AND o.status = 'FAILED'
           )
+          -- Same rule as the reclaim path: only UNKNOWN/ACCEPTED superseded jobs hold.
           OR EXISTS (
             SELECT 1 FROM outbox o
              WHERE o.id = c.job_id AND o.status = 'SUPERSEDED'
-               AND o.delivery_outcome IS DISTINCT FROM 'ACCEPTED'
-               AND o.delivery_outcome IS DISTINCT FROM 'REJECTED'
+             AND o.delivery_outcome IN ('UNKNOWN','ACCEPTED')
           ))`,
     [kind, [...recipientIds], [...itemIds]],
   );

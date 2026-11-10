@@ -508,7 +508,9 @@ export function createApp(
   // /healthz: comprehensive health for Kubernetes probes and load balancers.
   // Includes leader status, circuit breaker state, dead letter count, and
   // pipeline status so operators can see the full autonomy picture at a glance.
-  app.get('/healthz', asyncRoute(async (_req, res) => {
+  app.get('/healthz', asyncRoute(async (req, res) => {
+    const detailsAuthorized = Boolean(config.METRICS_TOKEN) &&
+      secureEqual(req.headers.authorization || '', `Bearer ${config.METRICS_TOKEN}`);
     const started = Date.now();
     await pool.query('SELECT 1');
     const databaseLatencyMs = Date.now() - started;
@@ -546,8 +548,13 @@ export function createApp(
     };
     const allOk = Object.values(healthChecks).every((c) => c.status === 'ok');
     const anyError = Object.values(healthChecks).some((c) => c.status === 'error');
-    res.status(anyError ? 503 : allOk ? 200 : 200).json({
-      status: anyError ? 'unhealthy' : allOk ? 'healthy' : 'degraded',
+    const overall = anyError ? 'unhealthy' : allOk ? 'healthy' : 'degraded';
+    if (!detailsAuthorized) {
+      res.status(anyError ? 503 : 200).json({ status: overall });
+      return;
+    }
+    res.status(anyError ? 503 : 200).json({
+      status: overall,
       checks: healthChecks,
       databaseLatencyMs,
       leaderId: leaderState?.leaderId ?? null,

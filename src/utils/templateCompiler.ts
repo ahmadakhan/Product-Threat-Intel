@@ -680,7 +680,7 @@ export function renderDailyFindingSummary(findings: DigestFinding[], config: Tem
             `<span style="display:inline-block;margin:3px 5px 0 0;padding:2px 6px;border:1px solid #dbe2ea;border-radius:3px;background:#f8fafc;color:#475569;font-size:10px;line-height:15px;">${digestEscapeHtml(tag)}</span>`,
           ).join('');
           return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 10px;border-collapse:collapse;table-layout:fixed;">
-    <tr class="vulnstream-pdf-card" data-pdf-accent="${style.border}" data-pdf-cve="${digestEscapeHtml(f.cveId)}" data-pdf-severity="${f.severity}">
+    <tr class="vulnstream-pdf-card" data-pdf-accent="${style.border}" data-pdf-cve="${digestEscapeHtml(f.cveId)}" data-pdf-severity="${digestEscapeHtml(f.severity)}">
         <td style="padding:12px 14px;border:1px solid #e2e8f0;border-left:4px solid ${style.border};background:#ffffff;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;table-layout:fixed;">
                 <tr>
