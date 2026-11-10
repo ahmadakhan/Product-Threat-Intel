@@ -15,6 +15,7 @@ import type { Advisory, AliasEntry, Finding, NormalizedCVE, WatchListItem } from
 import { deriveInventoryAliases } from '../src/utils/aliasLifecycle.ts';
 import { registrationAssetsFromCpes } from '../src/utils/watchlist.ts';
 import { encrypt } from '../server/secrets.ts';
+import { encryptionKeys } from '../server/secrets.ts';
 const database = process.env.TEST_DATABASE_URL;
 const cpe = (version: string) => `cpe:2.3:a:example:widget:${version}:*:*:*:*:*:*:*`;
 const asset = (version = '1.5'): WatchListItem => ({
@@ -200,27 +201,25 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       await reset();
       await save('watchlist', 'asset', asset());
       const date = new Date(Date.now() - 1000).toISOString();
-      const common = { authType: 'NONE', enabled: true, rateLimitPerMin: 600 };
-      await save('feeds', 'mitre', { ...common, id: 'mitre', name: 'VulnCheck NVD++', type: 'VULNCHECK_NVD', url: 'https://api.vulncheck.com/v3/index/nvd' });
-      await save('feeds', 'nvd', { ...common, id: 'nvd', name: 'NVD', type: 'VULNCHECK_NVD', url: 'https://example.com/nvd' });
+      const common = { enabled: true, rateLimitPerMin: 600 };
+      await save('feeds', 'feed-a', { ...common, id: 'feed-a', name: 'Primary NVD++', type: 'VULNCHECK_NVD', url: 'https://api.vulncheck.com/v3/index/nvd', authType: 'BEARER', authSecretKey: encrypt('token-a', encryptionKeys(config), 'feed:feed-a') });
+      await save('feeds', 'feed-b', { ...common, id: 'feed-b', name: 'Mirror NVD++', type: 'VULNCHECK_NVD', url: 'https://mirror.example.com/v3/index/nvd', authType: 'BEARER', authSecretKey: encrypt('token-b', encryptionKeys(config), 'feed:feed-b') });
+      const record = (id: string) => ({ cve: {
+        id, published: date, lastModified: date, vulnStatus: 'Analyzed',
+        descriptions: [{ lang: 'en', value: 'Example widget vulnerability' }],
+        configurations: [{ nodes: [{ cpeMatch: [{ vulnerable: true, criteria: cpe('*') }] }] }],
+      } });
       const sourceRequest = async (url: string) => {
-        const data = url === 'https://api.vulncheck.com/v3/index/nvd' ? { vulnerabilities: [{ cve: {
-            id: 'CVE-2026-98001', published: date, lastModified: date, vulnStatus: 'Analyzed',
-            descriptions: [{ lang: 'en', value: 'Example widget vulnerability' }],
-            configurations: [{ nodes: [{ cpeMatch: [{ vulnerable: true, criteria: cpe('*') }] }] }],
-          } }], totalResults: 1 }
-          : { startIndex: 0, totalResults: 1, vulnerabilities: [{ cve: {
-              id: 'CVE-2026-98001', published: date, lastModified: date, vulnStatus: 'Analyzed',
-              descriptions: [{ lang: 'en', value: 'Example widget vulnerability' }],
-              configurations: [{ nodes: [{ cpeMatch: [{ vulnerable: true, criteria: cpe('*') }] }] }],
-            } }] };
+        // Both feeds are VulnCheck NVD++ now; each returns the same CVE so the
+        // merge produces one record with both sources attributed.
+        const data = { vulnerabilities: [record('CVE-2026-98001')], totalResults: 1 };
         return { status: 200, body: JSON.stringify(data), headers: {} };
       };
       await queueRun(pool, 24, 'test');
       await processPipeline(pool, config, sourceRequest);
       const cves = await list<NormalizedCVE>(pool, 'cveData');
       assert.equal(cves.length, 1);
-      assert.deepEqual(cves[0].sourceFeeds, ['mitre', 'nvd']);
+      assert.deepEqual(cves[0].sourceFeeds, ['feed-a', 'feed-b']);
       const first = await list<Finding>(pool, 'findings');
       assert.equal(first.length, 1);
       assert.equal(
@@ -241,7 +240,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         0,
         'a run that only refreshes existing matches detects nothing new',
       );
-      assert.equal((await get<any>(pool, 'feeds', 'mitre')).healthStatus, 'HEALTHY');
+      assert.equal((await get<any>(pool, 'feeds', 'feed-a')).healthStatus, 'HEALTHY');
     });
     await t.test('consolidated finding emails carry a stable advisory identity in subject and body', async () => {
       await reset();

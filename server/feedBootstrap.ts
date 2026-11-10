@@ -60,11 +60,28 @@ export async function reconcileRecommendedFeeds(db: PoolClient, bootstrap = fals
       errorLog: 'Retired: VulnCheck NVD++ is the sole authoritative CVE source. NIST NVD, MITRE CVE, and OpenCVE feeds are disabled.',
     });
   }
+  // Disable any VulnCheck feeds (NVD++ or KEV) that lack a configured Bearer
+  // token, preventing HTTP 401 errors from the VulnCheck API on every run.
+  for (const feed of existing) {
+    if (feed.type !== 'VULNCHECK_KEV' && feed.type !== 'VULNCHECK_NVD') continue;
+    if (!feed.enabled) continue;
+    if (!feed.authSecretKey || feed.authType !== 'BEARER') {
+      await put(db, 'feeds', feed.id, {
+        ...feed,
+        enabled: false,
+        healthStatus: 'DOWN' as const,
+        errorLog: feed.type === 'VULNCHECK_NVD'
+          ? 'Disabled: VulnCheck NVD++ requires a configured Bearer API token.'
+          : 'Disabled: VulnCheck KEV requires a configured Bearer API token.',
+      });
+    }
+  }
   for (const { duplicateId, canonicalId } of RETIRED_DUPLICATE_FEEDS) {
     const [duplicate, canonical] = await Promise.all([
       get<ThreatFeed>(db, 'feeds', duplicateId),
       get<ThreatFeed>(db, 'feeds', canonicalId),
     ]);
+
     if (
       !duplicate?.vendorSeed ||
       !canonical?.vendorSeed ||
