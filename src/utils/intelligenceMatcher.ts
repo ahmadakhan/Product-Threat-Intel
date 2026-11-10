@@ -1,13 +1,16 @@
 import type { Finding, IntelligenceArticle, IntelligenceMatch, WatchListItem, NormalizedCVE, ThreatFeed } from '../types';
 import { quickHash } from './cryptoChain';
 import { isWithinTimelineScope } from './deduplicator';
-import { normalizeAliasToken } from './cpeMatcher';
+import { normalizeAliasToken, DEFAULT_VENDOR_ALIASES, DEFAULT_PRODUCT_ALIASES } from './cpeMatcher';
 
 const text = (value: string) =>
   value
     .normalize('NFKC')
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    // Keep symbols that distinguish identities such as C++, C#, and C.
+    .replace(/[^\p{L}\p{N}+#]+/gu, ' ')
+    // A leading social hashtag is punctuation; the suffix in C# is identity.
+    .replace(/(^|\s)#(?=[\p{L}\p{N}])/gu, '$1')
     .trim();
 
 /** Source feed weight: higher for authoritative threat intel feeds (0–40).
@@ -67,14 +70,22 @@ export function computeCredibilityScore(
  * matchIntelligence, so the Thesaurus page controls both CVE matching
  * and news evidence matching from a single place.
  */
-const BUILTIN_VENDOR_ALIASES: Record<string, string[]> = {
+function mergeNewsAliases(...tables: Record<string, string[]>[]): Record<string, string[]> {
+  const merged: Record<string, string[]> = Object.create(null);
+  for (const table of tables)
+    for (const [canonical, aliases] of Object.entries(table))
+      merged[canonical] = [...new Set([...(merged[canonical] ?? []), ...aliases])];
+  return merged;
+}
+
+const BUILTIN_VENDOR_ALIASES = mergeNewsAliases(DEFAULT_VENDOR_ALIASES, {
   paloaltonetworks: ['palo alto networks'],
   checkpoint: ['check point'],
   f5networks: ['f5'],
   juniper: ['juniper networks'],
   microsoft: ['microsoft'],
   redhat: ['red hat'],
-};
+});
 /**
  * Whole-token mention test with a bounded plural tolerance.
  *
@@ -166,7 +177,7 @@ function decomposedVariants(value: string): string[] {
   const variants = new Set<string>();
   // Whole token compressed and spaced (`paloaltonetworks` / `palo alto networks`).
   variants.add(normalized);
-  variants.add(normalized.replace(/[^a-z0-9]+/g, ' ').trim());
+  variants.add(text(normalized));
   // Trailing corporate/plural forms an article normally elides. A strip whose
   // stem is a generic English word is discarded (see GENERIC_STEMS): matching
   // `progress` because inventory says `progresssoftware` would correlate any
@@ -176,7 +187,7 @@ function decomposedVariants(value: string): string[] {
       const stem = normalized.slice(0, -suffix.length);
       if (stem.length >= 3 && !GENERIC_STEMS.has(stem)) {
         variants.add(stem);
-        variants.add(stem.replace(/[^a-z0-9]+/g, ' ').trim());
+        variants.add(text(stem));
       }
     }
   const segmented = segmentCompressedToken(normalized).filter(Boolean);
@@ -241,7 +252,7 @@ export function newsIdentityVariants(
   for (const entry of ownGroup ?? [])
     for (const derived of decomposedVariants(entry))
       if (GENERIC_STEMS.has(derived)) declaredGenericStems.push(derived);
-  for (const [canonical, aliases] of Object.entries({ ...builtin, ...customAliases })) {
+  for (const [canonical, aliases] of Object.entries(mergeNewsAliases(builtin, customAliases))) {
     const group = [canonical, ...aliases];
     const groupTokens = group.map((entry) => normalizeAliasToken(entry)).filter(Boolean);
     if (!groupTokens.length) continue;
@@ -322,7 +333,7 @@ function identityVariants(
   const variants = newsIdentityVariants(
     value,
     customAliases,
-    scope === 'VENDOR' ? BUILTIN_VENDOR_ALIASES : {},
+    scope === 'VENDOR' ? BUILTIN_VENDOR_ALIASES : DEFAULT_PRODUCT_ALIASES,
   );
   if (table.size >= IDENTITY_VARIANT_CACHE_LIMIT) {
     const first = table.keys().next().value;
