@@ -1069,6 +1069,12 @@ export function createApp(
         )
         .parse(req.query);
       const apiKey = await loadNvdApiKey(pool, config);
+      // No configured VulnCheck NVD++ credential: CPE search cannot be served
+      // from the authenticated upstream. Return empty results instead of a 502
+      // so the UI can render a "not configured" state rather than an error.
+      if (!apiKey) {
+        return res.json({ results: [], totalResults: 0, notConfigured: true });
+      }
       try {
         res.json(await searchNvdCpes(request, apiKey, vendor || '', product, limit, cpe, cpeNameId));
       } catch (error) {

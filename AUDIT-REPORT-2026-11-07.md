@@ -378,6 +378,9 @@ Key behavioral changes since baseline:
 - `delivery.ts:1757-1772` — Supersede stale QUEUED rows before claim in `deliverNext`
 - `delivery.ts:1917-1919` — Revalidation failure now applies to consolidated batches too
 - `delivery.ts:2418` — Defensive `typeof` guard on `job.advisory_id.startsWith()` to prevent runtime TypeError if advisory_id is ever null at runtime
+- `server/app.ts:1071-1074` — CPE search returns `{ results: [], totalResults: 0, notConfigured: true }` instead of 502 when no VulnCheck NVD++ API key is configured
+- `src/types/index.ts:411-417` — Added `notConfigured?: boolean` to `VulncheckCpeSearchResponse`
+- `src/components/CpeMatcherView.tsx:765-855` — UI renders amber "not configured" alert when CPE search lacks credentials instead of an error
 - `server/pipeline.ts:874-878` — VULNCHECK_NVD now respects `enabled` flag
 
 ---

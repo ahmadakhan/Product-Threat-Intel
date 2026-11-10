@@ -411,6 +411,10 @@ export interface VulncheckCpeSearchResult {
 export interface VulncheckCpeSearchResponse {
   results: VulncheckCpeSearchResult[];
   totalResults: number;
+  /** True when no VulnCheck NVD++ credential is configured and CPE search
+   * cannot be served from the authenticated upstream. The UI should render a
+   * "not configured" state rather than an error. */
+  notConfigured?: boolean;
 }
 
 export interface ThreatSearchHit {

@@ -764,15 +764,28 @@ export const CpeMatcherView: React.FC = () => {
           )}
           {lookupResults && (
             <div className="space-y-2">
-              <div className="text-xs text-zinc-500 light:text-zinc-600">
-                {lookupResults.totalResults} result{lookupResults.totalResults !== 1 ? 's' : ''} found
-              </div>
-              {lookupResults.results.length === 0 ? (
-                <p className="text-xs text-zinc-500 light:text-zinc-600">
-                  No verified CPEs found in the NVD dictionary for this vendor/product.
-                </p>
+              {lookupResults.notConfigured ? (
+                <div
+                  role="alert"
+                  className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 flex items-center gap-2"
+                >
+                  <AlertCircle className="h-4 w-4 text-amber-400 light:text-amber-800" />
+                  <span className="text-sm text-amber-300 light:text-amber-800">
+                    CPE dictionary search is not configured. A VulnCheck NVD++ feed
+                    with a Bearer API token is required to look up verified CPEs.
+                  </span>
+                </div>
               ) : (
-                <div className="cpe-lookup-results">
+                <>
+                  <div className="text-xs text-zinc-500 light:text-zinc-600">
+                    {lookupResults.totalResults} result{lookupResults.totalResults !== 1 ? 's' : ''} found
+                  </div>
+                  {lookupResults.results.length === 0 ? (
+                    <p className="text-xs text-zinc-500 light:text-zinc-600">
+                      No verified CPEs found in the NVD dictionary for this vendor/product.
+                    </p>
+                  ) : (
+                    <div className="cpe-lookup-results">
                   {(lookupResults.results as VulncheckCpeSearchResult[]).map((cpe) => (
                     <div
                       key={cpe.cpeNameId || cpe.cpeName}
@@ -834,6 +847,8 @@ export const CpeMatcherView: React.FC = () => {
                     </div>
                   ))}
                 </div>
+              )}
+                </>
               )}
             </div>
           )}
