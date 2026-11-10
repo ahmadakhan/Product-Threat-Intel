@@ -273,7 +273,7 @@ test('NVD resumes from an overlapping checkpoint and avoids normalizing cached r
     },
   );
   const url = new URL(requestedUrl);
-  assert.equal(Date.parse(url.searchParams.get('lastModStartDate')!), checkpoint.getTime() - 10 * 60 * 1000);
+  assert.equal(url.searchParams.get('lastModStartDate'), new Date(checkpoint.getTime() - 10 * 60 * 1000).toISOString().slice(0, 10));
   assert.equal(result.count, 1);
   assert.equal(result.cves.length, 0);
   assert.ok(result.syncState?.cursor);

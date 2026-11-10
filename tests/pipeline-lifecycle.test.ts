@@ -105,7 +105,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
     await t.test('incremental checkpoints commit atomically, survive failures, and reset after source changes', async () => {
       await reset();
       await save('settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: false });
-      const source = { id: 'incremental', name: 'NVD incremental', type: 'VULNCHECK_NVD', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
+      const source = { id: 'incremental', name: 'NVD incremental', type: 'NVD_API', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
       await save('feeds', source.id, source);
       let requestedStart = '', requestedEnd = '';
       const success = async (raw: string) => {
@@ -135,7 +135,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
     await t.test('disabled scheduler leaves catch-up work queued until scheduling is enabled', async () => {
       await reset();
       await save('settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: false });
-      const source = { id: 'catchup', name: 'NVD catch-up', type: 'VULNCHECK_NVD', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
+      const source = { id: 'catchup', name: 'NVD catch-up', type: 'NVD_API', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
       await save('feeds', source.id, source);
       const windows: Array<{ start: number; end: number }> = [];
       const request = async (raw: string) => {
@@ -160,8 +160,17 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       // individual provider request must remain bounded to one day.
       assert.ok(windows.length > 0);
       for (const window of windows) assert.ok(window.end - window.start <= 86400000);
-      const next = await get<any>(pool, 'feedCursors', source.id);
+      let next = await get<any>(pool, 'feedCursors', source.id);
       assert.ok(Date.parse(next.cursor) > old);
+      assert.equal(next.hasMore, true);
+      assert.ok(Date.parse(next.next_catchup_at) >= Date.now() + (DEFAULT_SETTINGS.schedulerIntervalMinutes * 60000) - 60000);
+      assert.equal(await processPipeline(pool, config, request), false, 'catch-up must respect the schedule interval');
+      // Explicit runs can finish the remaining bounded daily windows immediately.
+      for (let attempt = 0; next.hasMore && attempt < 4; attempt++) {
+        await queueRun(pool, 24, 'test');
+        await processPipeline(pool, config, request);
+        next = await get<any>(pool, 'feedCursors', source.id);
+      }
       assert.ok(Date.parse(next.cursor) >= Date.now() - 60000);
       assert.equal(next.hasMore, false);
       await save('feeds', source.id, { ...source, enabled: false });
@@ -170,7 +179,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
     await t.test('catch-up cooldown blocks immediate re-run after a partial catch-up', async () => {
       await reset();
       await save('settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: true, schedulerIntervalMinutes: 60 });
-      const source = { id: 'catchup-cd', name: 'NVD cooldown', type: 'VULNCHECK_NVD', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
+      const source = { id: 'catchup-cd', name: 'NVD cooldown', type: 'NVD_API', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
       await save('feeds', source.id, source);
       // First run to establish a cursor with the correct fingerprint.
       await queueRun(pool, 24, 'test');
@@ -2176,8 +2185,9 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         id: 'nvd',
         name: 'NVD test',
         type: 'VULNCHECK_NVD',
-        url: 'https://8.8.8.8/nvd',
-        authType: 'NONE',
+        url: 'https://api.vulncheck.com/v3/index/nist-nvd2',
+        authType: 'BEARER',
+        authSecretKey: encrypt('fixture-token', encryptionKeys(config), 'feed:nvd'),
         rateLimitPerMin: 60,
         enabled: true,
       };
@@ -2278,6 +2288,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
     });
     await t.test('alias changes during ingestion are reloaded inside the commit transaction', async () => {
       await reset();
+      await save('feeds', 'alias-source', { id:'alias-source', name:'Alias source', type:'NVD_API', url:'https://services.nvd.nist.gov/rest/json/cves/2.0', authType:'NONE', rateLimitPerMin:5, enabled:true });
       await save('settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: false });
       // Asset whose CPE vendor (acme_inc) differs from the inventory vendor
       // (Acme Corp) so an AUTO alias is derivable from inventory.
@@ -2292,7 +2303,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         createdAt: new Date().toISOString(),
       };
       await save('watchlist', aliasedAsset.id, aliasedAsset);
-      const feedSource = { id: 'alias-nvd', name: 'NVD', type: 'VULNCHECK_NVD', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
+      const feedSource = { id: 'alias-nvd', name: 'NVD', type: 'NVD_API', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
       await save('feeds', feedSource.id, feedSource);
       const cve: NormalizedCVE = {
         ...vulnerability(),
@@ -2333,6 +2344,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
     });
     await t.test('alias revocation during ingestion is reloaded and blocks re-learning', async () => {
       await reset();
+      await save('feeds', 'alias-source', { id:'alias-source', name:'Alias source', type:'NVD_API', url:'https://services.nvd.nist.gov/rest/json/cves/2.0', authType:'NONE', rateLimitPerMin:5, enabled:true });
       await save('settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: false });
       const aliasedAsset: WatchListItem = {
         id: 'revoked-asset',
@@ -2345,7 +2357,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         createdAt: new Date().toISOString(),
       };
       await save('watchlist', aliasedAsset.id, aliasedAsset);
-      const feedSource = { id: 'revoke-nvd', name: 'NVD', type: 'VULNCHECK_NVD', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
+      const feedSource = { id: 'revoke-nvd', name: 'NVD', type: 'NVD_API', url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true };
       await save('feeds', feedSource.id, feedSource);
       const cve: NormalizedCVE = {
         ...vulnerability(),

@@ -15,10 +15,10 @@
 -- represents neither a failure nor something the operator must action. It also
 -- must not stay 'QUEUED', or the worker would claim and send it.
 --
--- Existing rows are unaffected: the expanded constraint is a superset, so it is
--- validated in place rather than deferred.
+-- Enforce the expanded constraint for new writes without scanning retained
+-- outbox history under an exclusive table lock during deployment.
 ALTER TABLE outbox DROP CONSTRAINT IF EXISTS outbox_status_check;
 ALTER TABLE outbox ADD CONSTRAINT outbox_status_check
-  CHECK(status IN ('REVIEW','QUEUED','SENDING','ACCEPTED','FAILED','REJECTED','SUPERSEDED'));
+  CHECK(status IN ('REVIEW','QUEUED','SENDING','ACCEPTED','FAILED','REJECTED','SUPERSEDED')) NOT VALID;
 
 INSERT INTO schema_migrations(version) VALUES(41) ON CONFLICT DO NOTHING;

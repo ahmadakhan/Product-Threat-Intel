@@ -1270,7 +1270,13 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         );
         execution!.logs.push('All feeds failed; proceeding with cached CVE correlation');
       }
+      const catchupSettings = (await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
       for (const result of acceptedResults) {
+        if (result.syncState?.hasMore) {
+          // Remaining daily windows obey the configured automatic run frequency.
+          result.syncState = { ...result.syncState, catch_up: true,
+            next_catchup_at: new Date(Date.now() + catchupSettings.schedulerIntervalMinutes * 60000).toISOString() };
+        }
         if (result.syncState) {
           const source = currentFeeds.get(result.sourceId!)!;
           // Clear catch_up flag when hasMore is false (catch-up complete).
@@ -2086,6 +2092,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           // Status and advisoryId are global bookkeeping. A DELIVERED finding
           // can still be new to a recipient added later. Only a recipient's
           // durable delivery claim determines whether that mailbox is notified.
+          !f.dispatchDeferred &&
           !['NOT_APPLICABLE', 'SUPPRESSED_VEX_NOT_AFFECTED', 'SECURITY_REJECTED'].includes(f.notificationStatus) &&
           !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(f.status),
       );

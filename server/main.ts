@@ -1,3 +1,4 @@
+import { WorkerLeadership } from './leadership.ts';
 import { readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
@@ -124,94 +125,11 @@ const app = createApp(pool, config, request, { correlation, mlRuntime,
   // comfortably above the block threshold; see the option's documentation.
   hangDetection: config.HANG_DETECTION_ENABLED === 'true',
 });
-/**
- * Distributed leader election via PostgreSQL advisory lock with TTL.
- *
- * Only the leader replica runs background jobs (pipeline, outbox, digest,
- * retention, ML training, enrichment backlog, self-healing, dead-letter retry,
- * session cleanup). All replicas serve API requests and health checks. This
- * prevents multiple replicas from running the same background job concurrently,
- * which would cause duplicate findings, duplicate emails, and race conditions.
- *
- * The lock is held with pg_advisory_xact_lock (session-scoped). A heartbeat
- * row in systemState records the leader identity and last heartbeat time.
- * Followers detect a stale heartbeat (> LEADER_STALE_MS) and start an election.
- */
-const LEADER_STALE_MS = 30_000;
-const LEADER_HEARTBEAT_MS = 10_000;
-let isLeader = false;
-let leaderHeartbeatTimer: NodeJS.Timer | null = null;
-let leaderLockSession: { release: () => Promise<void> } | null = null;
-
-async function tryAcquireLeadership(): Promise<boolean> {
-  // Try to acquire a session-scoped advisory lock. Only one session holds it.
-  const result = await pool.query(
-    `SELECT pg_try_advisory_xact_lock(784921) AS locked`,
-  );
-  const locked = result.rows[0]?.locked === true;
-  if (!locked) return false;
-  // We hold the lock for this session. Record leadership in systemState with
-  // a TTL so followers can detect a dead leader and start a new election.
-  await put(pool, 'systemState', 'leader-election', {
-    leaderId: config.INSTANCE_ID ?? randomUUID(),
-    acquiredAt: new Date().toISOString(),
-    heartbeatAt: new Date().toISOString(),
-    ttlMs: LEADER_STALE_MS,
-  });
-  return true;
-}
-
-async function refreshLeaderHeartbeat(): Promise<void> {
-  if (!isLeader) return;
-  try {
-    await put(pool, 'systemState', 'leader-election', {
-      leaderId: config.INSTANCE_ID ?? randomUUID(),
-      acquiredAt: new Date().toISOString(),
-      heartbeatAt: new Date().toISOString(),
-      ttlMs: LEADER_STALE_MS,
-    });
-  } catch {
-    // Heartbeat failure: we may have lost the lock (session ended). Step down.
-    isLeader = false;
-    leaderHeartbeatTimer?.unref?.();
-    leaderHeartbeatTimer = null;
-    leaderLockSession = null;
-    await writeEvent(pool, {
-      category: 'SYSTEM',
-      level: 'WARNING',
-      code: 'leader.lost',
-      message: 'Leadership lost; stepping down from background jobs',
-    }).catch(() => undefined);
-  }
-}
-
-async function checkLeadership(): Promise<void> {
-  if (isLeader) {
-    // We believe we are leader; verify our heartbeat is still fresh.
-    // The heartbeat timer refreshes it every LEADER_HEARTBEAT_MS.
-    return;
-  }
-  // Check if the current leader is stale. If so, start an election.
-  const row = await get<any>(pool, 'systemState', 'leader-election');
-  const now = Date.now();
-  const leaderStale = !row ||
-    !(row.heartbeatAt && Date.parse(row.heartbeatAt) > now - LEADER_STALE_MS);
-  if (leaderStale) {
-    const acquired = await tryAcquireLeadership();
-    if (acquired) {
-      isLeader = true;
-      leaderLockSession = { release: async () => {} }; // session-scoped lock, released on disconnect
-      leaderHeartbeatTimer = setInterval(refreshLeaderHeartbeat, LEADER_HEARTBEAT_MS);
-      leaderHeartbeatTimer.unref();
-      await writeEvent(pool, {
-        category: 'SYSTEM',
-        level: 'INFO',
-        code: 'leader.elected',
-        message: 'This replica elected leader for background jobs',
-      }).catch(() => undefined);
-    }
-  }
-}
+// A dedicated database session owns worker leadership for its entire term.
+const leadership = new WorkerLeadership(pool, config.INSTANCE_ID || randomUUID(), () => {
+  pipelineController?.abort(new Error('Worker leadership lost'));
+});
+const checkLeadership = () => leadership.check().catch(report('leader-election'));
 /**
  * Start listening on `port`, retrying up to `maxAttempts` times when the port
  * is already in use (for example a `tsx watch` restart race). The process that
@@ -346,7 +264,7 @@ const tick = () => {
   // Periodically check/acquire leadership so followers can take over when the
   // leader dies. Only the leader runs background jobs.
   void checkLeadership();
-  if (!isLeader) return;
+  if (!leadership.isLeader) return;
   if (pipeline && !pipelineController?.signal.aborted && Date.now() - pipelineStartedAt > STUCK_PROMISE_MS) {
     const reason = new Error('Pipeline stopped making progress; cancelling the current attempt');
     void report('pipeline')(reason);
@@ -443,7 +361,7 @@ timer.unref();
 tick();
 // Initial leadership election attempt. All replicas start as followers and
 // compete for the advisory lock; only the winner runs background jobs.
-void checkLeadership();
+if (config.WORKER_ENABLED === 'true') void checkLeadership();
 // Retention runs on its own cadence because the policy is operator-configurable
 // and can be much slower than the worker tick. The last successful run is
 // persisted in the database so replicas do not each schedule the same cleanup,
@@ -510,7 +428,7 @@ const retentionTick = () => {
     retentionGeneration++;
     retentionRunning = null;
   }
-  if (stopping || config.WORKER_ENABLED !== 'true' || retentionRunning) return;
+  if (stopping || config.WORKER_ENABLED !== 'true' || !leadership.isLeader || retentionRunning) return;
   retentionStartedAt = Date.now();
   const generation = ++retentionGeneration;
   retentionRunning = (async () => {
@@ -571,7 +489,7 @@ const dailyDigestTick = () => {
     dailyDigestGeneration++;
     dailyDigestRunning = null;
   }
-  if (stopping || config.WORKER_ENABLED !== 'true' || dailyDigestRunning) return;
+  if (stopping || config.WORKER_ENABLED !== 'true' || !leadership.isLeader || dailyDigestRunning) return;
   dailyDigestStartedAt = Date.now();
   const generation = ++dailyDigestGeneration;
   dailyDigestRunning = (async () => {
@@ -592,7 +510,7 @@ let trainingRunning: Promise<unknown> | null = null;
 let trainingStartedAt = 0;
 let trainingGeneration = 0;
 const mlTrainingTick = () => {
-  if (stopping || config.WORKER_ENABLED !== 'true') return;
+  if (stopping || config.WORKER_ENABLED !== 'true' || !leadership.isLeader) return;
   if (trainingRunning && Date.now() - trainingStartedAt > STUCK_PROMISE_MS) {
     void report('ml.training')(new Error('Previous ML training run is still running; starting a new attempt'));
     trainingGeneration++;
@@ -673,7 +591,7 @@ mlTrainingTick();
 
 let enrichmentBacklogRunning: Promise<unknown> | null = null;
 const enrichmentBacklogTick = async () => {
-  if (stopping || config.WORKER_ENABLED !== 'true' || enrichmentBacklogRunning) return;
+  if (stopping || config.WORKER_ENABLED !== 'true' || !leadership.isLeader || enrichmentBacklogRunning) return;
   enrichmentBacklogRunning = (async () => {
     try {
       // Push the cheap predicates (kind, dispatch status) into the database so
@@ -714,7 +632,7 @@ enrichmentBacklogTick();
 let deadLetterRetryRunning: Promise<unknown> | null = null;
 const DEAD_LETTER_RETRY_INTERVAL_MS = Number(process.env.DEAD_LETTER_RETRY_INTERVAL_MS ?? 15 * 60_000);
 const deadLetterRetryTick = async () => {
-  if (stopping || config.WORKER_ENABLED !== 'true' || !isLeader || deadLetterRetryRunning) return;
+  if (stopping || config.WORKER_ENABLED !== 'true' || !leadership.isLeader || deadLetterRetryRunning) return;
   deadLetterRetryRunning = (async () => {
     try {
       const rows = await pool.query<{ id: string; data: string }>(
@@ -775,7 +693,7 @@ deadLetterRetryTick();
 let mlTelemetryRunning: Promise<void> | null = null;
 let mlTelemetryPrevious = { time: Date.now(), completed: correlation.supervisor.ingestor.telemetry.completed };
 const mlTelemetryTimer = setInterval(() => {
-  if (stopping || config.WORKER_ENABLED !== 'true' || mlTelemetryRunning ||
+  if (stopping || config.WORKER_ENABLED !== 'true' || !leadership.isLeader || mlTelemetryRunning ||
       !shouldSampleMlTelemetry(correlation.pendingDepth, correlation.pendingSampledAt)) return;
   const telemetry = correlation.supervisor.ingestor.telemetry;
   const now = Date.now();
@@ -808,7 +726,7 @@ const cleanup = setInterval(() => {
   // DELETE statements against the same rows. Only the worker replica owns it,
   // like every other periodic job below, so the API replica stays free of
   // background write load.
-  if (config.WORKER_ENABLED !== 'true') return;
+  if (config.WORKER_ENABLED !== 'true' || !leadership.isLeader) return;
   // Session and login-attempt expiry are security invariants, not retained
   // business data. Queue rows and operational events follow the retention
   // policy in runRetention so an operator's configured window stays authoritative.
@@ -848,6 +766,7 @@ async function shutdown() {
   );
   await correlation.stop();
   await closePdfRenderer();
+  await leadership.close();
   await pool.end();
   clearTimeout(deadline);
 }

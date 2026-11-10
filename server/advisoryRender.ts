@@ -395,7 +395,7 @@ export function renderAdvisory(
       )
       .join(', '),
     cve_details: vulnerabilityDetails.map((v) => `
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8fafc;border:1px solid #e2e8f0;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:12px;">
+      <table data-pdf-cve="${v.cve_id}" data-pdf-severity="${v.severity}" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8fafc;border:1px solid #e2e8f0;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:12px;">
       <tr><td style="padding:12px;">
         <div style="font-size:14px;font-weight:700;color:#0f172a;">
           <a href="${v.cve_url}" target="_blank" style="color:#0f172a;text-decoration:none;">${v.cve_id}</a>

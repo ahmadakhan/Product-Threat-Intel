@@ -8,10 +8,10 @@ import type { ThreatFeed, VulncheckCpeSearchResult, VulncheckCpeSearchResponse }
 
 import { isProductWildcard, dictionaryEntryMatchesWildcard } from '../src/utils/registrationCpe.ts';
 
-const VULNCHECK_NVD_CPE_ENDPOINT = 'https://api.vulncheck.com/v3/index/nist-nvd2';
+const VULNCHECK_NVD_CPE_ENDPOINT = 'https://api.vulncheck.com/rest/json/cpes/2.0';
 
 export function buildCpeUrl(keyword: string, resultsPerPage: number): URL {
-  const url = new URL(VULNCHECK_NVD_CPE_ENDPOINT);
+  const url = new URL('https://services.nvd.nist.gov/rest/json/cpes/2.0');
   url.searchParams.set('keywordSearch', keyword);
   url.searchParams.set('resultsPerPage', String(resultsPerPage));
   return url;
@@ -104,20 +104,7 @@ function parseNvdCpeProducts(
   return { results, totalResults: total };
 }
 
-/**
- * Reads the API key from the first enabled NVD feed configured with API-key
- * authentication. Returns an empty string when no NVD key is configured, in
- * which case the NVD CPE search is served from the public, unauthenticated
- * rate budget (5 requests / 30s).
- *
- * NVD feeds have been removed in favor of VulnCheck NVD++; this function
- * always returns an empty string.
- */
-/**
- * CPE dictionary search rides on the VulnCheck NVD++ credential (the source that
- * replaced the standalone NVD feed): an enabled VULNCHECK_NVD feed with a stored
- * Bearer token supplies the key for keyword searches and cpeNameId verifications.
- */
+/** Load the VulnCheck Bearer token; never send it to the NIST host. */
 export async function loadNvdApiKey(db: Db, config: Config): Promise<string> {
   let feeds: ThreatFeed[];
   try {
@@ -190,36 +177,24 @@ export async function searchNvdCpes(
   if (exactCpe) {
     if (!parseCPE23(exactCpe).isValid) throw new Error('Invalid CPE 2.3 expression');
     url.searchParams.delete('keywordSearch');
+    if (apiKey) url.hostname = 'api.vulncheck.com';
     if (cpeNameId) url.searchParams.set('cpeNameId', cpeNameId);
     else url.searchParams.set('cpeMatchString', exactCpe);
   }
-  const fetchPage = (key: string, urlObj: URL = url) =>
-    request(urlObj.href, {
-      headers: { Accept: 'application/json', ...(key ? { apiKey: key } : {}) },
+  const fetchPage = (key: string, urlObj: URL = url) => {
+    const target = new URL(urlObj);
+    if (!key) target.hostname = 'services.nvd.nist.gov';
+    return request(target.href, {
+      headers: { Accept: 'application/json', ...(key && target.hostname === 'api.vulncheck.com' ? { Authorization: `Bearer ${key}` } : {}) },
       timeoutMs: 20000,
       socketTimeoutMs: 15000,
       maxResponseBytes: 4 * 1024 * 1024,
       sameHostRedirects: true,
     });
-  let response = await fetchPage(apiKey);
+  };
+  const response = await fetchPage(apiKey);
 
-  let effectiveKey = apiKey;
-
-  // NVD reports rejected credentials with 404 and a diagnostic message header.
-  // Only that case can fall back to the public budget: an unrelated 404 is an
-  // upstream failure, never evidence that the dictionary has no matches.
-  // HTTP headers are case-insensitive; access by lowercased key to avoid relying
-  // on the implementation detail that Node lowercases response header names.
-  const allHeaders = response.headers as Record<string, string | string[] | undefined>;
-  const message = allHeaders['message'] ?? allHeaders['Message'] ?? allHeaders['MESSAGE'];
-  if (
-    response.status === 404 &&
-    apiKey &&
-    /invalid\s+api\s*key/i.test(Array.isArray(message) ? message.join(' ') : message || '')
-  ) {
-    effectiveKey = '';
-    response = await fetchPage(effectiveKey);
-  }
+  const effectiveKey = apiKey;
 
   if (response.status === 429) {
     throw {

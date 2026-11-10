@@ -44,11 +44,11 @@ test('NVD requests only changes since its checkpoint and reports the frozen end 
   let end = '';
   const result = await ingestFeed(feed('VULNCHECK_NVD'), 2880, async raw => {
     const url = new URL(raw);
-    assert.equal(url.searchParams.get('lastModStartDate'), new Date(Date.parse(cursor) - SYNC_OVERLAP_MS).toISOString());
+    assert.equal(url.searchParams.get('lastModStartDate'), new Date(Date.parse(cursor) - SYNC_OVERLAP_MS).toISOString().slice(0, 10));
     end = url.searchParams.get('lastModEndDate')!;
     return response({ startIndex: 0, totalResults: 0, vulnerabilities: [], _meta: { next_cursor: null } });
   }, config, sleep, [], undefined, { cursor });
-  assert.equal(result.syncState!.cursor, end);
+  assert.ok(result.syncState!.cursor!.startsWith(end));
   assert.equal(result.count, 0);
 });
 test('VULNCHECK_NVD skips unchanged record revisions and uses conditional requests for an unchanged index', async () => {
@@ -84,7 +84,7 @@ test('VULNCHECK_NVD re-fetches revised records and paces paginated cursors', asy
   // Two cursor pages: the first returns half the CVEs plus a next cursor, the
   // second returns the rest. Each page hop must honor the rate-limit pacing.
   const result = await ingestFeed(source, 24, async url => {
-    if (url.startsWith(vulncheckUrl) && !url.includes('cursor='))
+    if (url.startsWith(vulncheckUrl) && !new URL(url).searchParams.has('cursor'))
       return response({ vulnerabilities: ids.slice(0, 4).map(record), _meta: { next_cursor: 'page-2' } });
     if (url.includes('cursor=page-2'))
       return response({ vulnerabilities: ids.slice(4).map(record), _meta: { next_cursor: null } });

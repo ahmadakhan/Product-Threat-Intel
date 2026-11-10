@@ -335,6 +335,8 @@ export interface Finding {
   exploitRisk: ExploitRiskLevel;
   /** Per-source VEX lattice result captured at correlation time. */
   exploitability?: ExploitabilityAssessment;
+  /** Deferred by a dispatch circuit breaker, independently of confidence. */
+  dispatchDeferred?: boolean;
   notificationStatus: NotificationStatus;
   status: FindingStatus;
   autoDispatchedAt: string | null;
@@ -439,7 +441,7 @@ export interface ThreatSearchResponse {
 }
 
 /** Databases and public feeds that can contribute a vulnerability-search result. */
-export type VulnerabilitySource = 'OSV' | 'VULNCHECK_NVD' | 'CISA_KEV' | 'OSINT';
+export type VulnerabilitySource = 'NVD' | 'OSV' | 'VULNCHECK_NVD' | 'CISA_KEV' | 'OSINT';
 
 export interface VulnerabilityReference {
   /** Source label such as `ADVISORY`, `FIX`, `WEB`, or `Vendor Advisory`. */

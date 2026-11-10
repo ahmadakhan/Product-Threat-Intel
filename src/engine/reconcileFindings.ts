@@ -91,6 +91,7 @@ export function reconcileFindings(
     return {
       ...old,
       cve: candidate.cve,
+      dispatchDeferred: candidate.dispatchDeferred,
       matchedAssetName: candidate.matchedAssetName,
       matchedAssetVendor: candidate.matchedAssetVendor,
       matchedAssetProduct: candidate.matchedAssetProduct,

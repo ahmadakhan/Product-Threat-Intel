@@ -55,14 +55,16 @@ test('searchNvdCpes parses verified NVD CPE configurations and forwards the API 
   const keywordUrl = new URL(calls[0].url);
   const wildcardUrl = new URL(calls[1].url);
 
-  assert.equal(keywordUrl.origin + keywordUrl.pathname, 'https://api.vulncheck.com/v3/index/nist-nvd2');
+  assert.equal(keywordUrl.origin + keywordUrl.pathname, 'https://services.nvd.nist.gov/rest/json/cpes/2.0');
+  assert.equal(wildcardUrl.origin + wildcardUrl.pathname, 'https://api.vulncheck.com/rest/json/cpes/2.0');
   assert.equal(keywordUrl.searchParams.get('keywordSearch'), 'microsoft windows 10');
   assert.equal(wildcardUrl.searchParams.get('cpeMatchString'), 'cpe:2.3:*:*:windows_10:*:*:*:*:*:*:*:*');
   assert.equal(wildcardUrl.searchParams.has('keywordSearch'), false);
 
   // Both calls forward the API key in headers (never in the URL).
   for (const entry of calls) {
-    assert.equal(entry.options?.headers?.apiKey, 'secret-key');
+    assert.equal(entry.options?.headers?.Authorization, new URL(entry.url).hostname === 'api.vulncheck.com' ? 'Bearer secret-key' : undefined);
+    assert.equal(entry.options?.headers?.apiKey, undefined);
     assert.equal(entry.options?.sameHostRedirects, true);
   }
 
@@ -163,28 +165,16 @@ test('loadNvdApiKey returns empty when no NVD key is configured', async () => {
   assert.equal(await loadNvdApiKey(db, config), '');
 });
 
-test('an invalid key retries once without credentials using the same CPE query', async () => {
-  const calls: { url: string; options: RequestOptions | undefined }[] = [];
-  const requester: Requester = async (url, options) => {
-    calls.push({ url, options });
-    if (calls.length === 1) return { status: 404, body: '', headers: { message: 'Invalid apiKey.' } };
-    return { status: 200, body: JSON.stringify({ totalResults: 0, products: [] }), headers: {} };
+test('a rejected VulnCheck token is reported without an anonymous retry', async () => {
+  let calls = 0;
+  const requester: Requester = async (_url, options) => {
+    calls++;
+    assert.equal(options?.headers?.Authorization, 'Bearer expired-key');
+    return { status: 401, body: '', headers: {} };
   };
-  assert.deepEqual(
-    await searchNvdCpes(requester, 'expired-key', 'Cisco', 'adaptive_security_appliance', 50),
-    { results: [], totalResults: 0 },
-  );
-  // Three calls: keyword search (404 → retry), keyword search retry, wildcard vendor search.
-  assert.equal(calls.length, 3);
-  assert.equal(calls[0].url, calls[1].url, 'keyword search retry uses same URL');
-  assert.equal(calls[0].options?.headers?.apiKey, 'expired-key');
-  assert.equal(calls[1].options?.headers?.apiKey, undefined);
-  assert.equal(calls[2].options?.headers?.apiKey, undefined, 'wildcard search also uses the effective key');
-  assert.equal(new URL(calls[0].url).searchParams.get('keywordSearch'), 'Cisco adaptive security appliance');
-  assert.equal(
-    new URL(calls[2].url).searchParams.get('cpeMatchString'),
-    'cpe:2.3:*:*:adaptive_security_appliance:*:*:*:*:*:*:*:*',
-  );
+  await assert.rejects(searchNvdCpes(requester, 'expired-key', '', '', 50,
+    'cpe:2.3:a:cisco:asa:1.0:*:*:*:*:*:*:*'), /HTTP 401/);
+  assert.equal(calls, 1);
 });
 
 test('a genuine 404 is an upstream error rather than an empty dictionary result', async () => {
@@ -199,17 +189,13 @@ test('a genuine 404 is an upstream error rather than an empty dictionary result'
   }
 });
 
-test('a public fallback preserves rate-limit guidance and never repeats indefinitely', async () => {
+test('public NIST rate limits preserve guidance without credential retries', async () => {
   let calls = 0;
-  const requester: Requester = async () =>
-    ++calls === 1
-      ? { status: 404, body: '', headers: { message: 'Invalid apiKey.' } }
-      : { status: 429, body: '', headers: { 'retry-after': '30' } };
-  await assert.rejects(
-    searchNvdCpes(requester, 'bad-key', 'vendor', 'product', 50),
-    (error: unknown) => isNvdRateLimitError(error) && nvdRetryAfterSeconds(error) === 30,
-  );
-  assert.equal(calls, 2);
+  await assert.rejects(searchNvdCpes(async () => {
+    calls++; return { status:429, body:'', headers:{ 'retry-after':'30' } };
+  }, '', 'vendor', 'product', 50),
+    (error: unknown) => isNvdRateLimitError(error) && nvdRetryAfterSeconds(error) === 30);
+  assert.equal(calls, 1);
 });
 
 test('malformed JSON payloads cannot masquerade as zero matching CPEs', async () => {

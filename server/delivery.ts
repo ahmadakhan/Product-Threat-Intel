@@ -1,3 +1,4 @@
+import { limitFindingDispatches } from '../src/engine/dispatchLimits.ts';
 ﻿import { validateNativeDelivery, type NativeDelivery } from './correlation/notificationEvidence.ts';
 import { describeError, writeEvent } from './events';
 import { classifyDeliveryError, computeRetryDelay, getMlRuntime } from './ml/integration.ts';
@@ -1250,7 +1251,7 @@ export async function queueConsolidatedFindingNotifications(
   // findings silently dropped them for every recipient who had not been told
   // yet. It is retained for aggregate reporting and for builds that predate
   // `delivery_claims`; the per-recipient claim below is the deduplication key.
-  const unique = [...new Map(findings.filter((finding) => finding?.id).map((finding) => [finding.id, finding])).values()]
+  let unique = [...new Map(findings.filter((finding) => finding?.id).map((finding) => [finding.id, finding])).values()]
     .filter((finding) => !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status))
     .sort((left, right) => left.cveId.localeCompare(right.cveId) || left.id.localeCompare(right.id));
   if (!unique.length) return 0;
@@ -1275,6 +1276,15 @@ export async function queueConsolidatedFindingNotifications(
     'finding',
     unique.map((finding) => finding.id),
   );
+  const hooks = (await list<WebhookEndpoint>(db, 'webhooks')).filter((hook) => hook.enabled);
+  const relevant = unique.filter((finding) =>
+    recipients.some((recipient) => recipientAllows(recipient, finding) &&
+      !(recipient.deliveryGroup === 'EVERYONE' && deferForFinding(finding)) &&
+      !configuredRecipients.filter((alias) => alias.email.trim().toLowerCase() === recipient.email.trim().toLowerCase())
+        .some((alias) => alreadyClaimed.get(alias.id)?.has(finding.id))) ||
+    hooks.some((hook) => webhookAllows(hook, finding)));
+  unique = limitFindingDispatches(relevant, settings);
+  if (!unique.length) return 0;
   let queued = 0;
   const generatedAt = new Date();
   // Resolved once per pass: every recipient's document is rendered from the same
@@ -1391,7 +1401,6 @@ export async function queueConsolidatedFindingNotifications(
   // A batch is queued for a hook even when the recipient loop queued nothing:
   // recipient claims must never silence a hook's POST, and a hook whose
   // subscription permits nothing gets no job at all instead of an empty one.
-  const hooks = (await list<WebhookEndpoint>(db, 'webhooks')).filter((hook) => hook.enabled);
   let webhooksQueued = 0;
   for (const hook of hooks) {
     const permitted = unique.filter((finding) => webhookAllows(hook, finding));

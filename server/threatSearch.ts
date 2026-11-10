@@ -1,3 +1,4 @@
+import { bearerHeaders, vulncheckNvdItems } from './vulncheck.ts';
 import type { Config } from './config';
 import type { Requester } from './network';
 import type { NormalizedCVE, ThreatSearchHit, ThreatSearchResponse } from '../src/types/index.ts';
@@ -17,7 +18,7 @@ import type { Db } from './db';
 import { list } from './db';
 import { HttpError } from './validation';
 
-const VULNCHECK_NVD_ENDPOINT = 'https://api.vulncheck.com/v3/index/nist-nvd2';
+const VULNCHECK_NVD_ENDPOINT = 'https://api.vulncheck.com/rest/json/cves/2.0';
 
 interface AliasEntry {
   scope: 'VENDOR' | 'PRODUCT';
@@ -302,10 +303,12 @@ async function fetchVulncheckCves(
   // of the CPE prefix, which is what an operator searching a product expects.
   url.searchParams.set('virtualMatchString', matchString);
   url.searchParams.set('resultsPerPage', String(Math.min(Math.max(1, limit), 2000)));
-  if (apiKey) url.searchParams.set('apiKey', apiKey);
-  if (startDate) url.searchParams.set('pubStartDate', startDate);
+  if (startDate) {
+    url.searchParams.set('pubStartDate', startDate);
+    url.searchParams.set('pubEndDate', new Date().toISOString().replace(/Z$/, ''));
+  }
 
-  return fetchVulncheckResponse(request, url.href);
+  return fetchVulncheckResponse(request, url.href, apiKey);
 }
 
 async function fetchVulncheckCvesByKeyword(
@@ -315,17 +318,20 @@ async function fetchVulncheckCvesByKeyword(
   limit: number,
   startDate?: string,
 ): Promise<VulncheckFetchResult> {
-  const url = new URL(VULNCHECK_NVD_ENDPOINT);
+  const url = new URL('https://services.nvd.nist.gov/rest/json/cves/2.0');
   url.searchParams.set('keywordSearch', keyword);
   url.searchParams.set('resultsPerPage', String(Math.min(Math.max(1, limit), 2000)));
-  if (apiKey) url.searchParams.set('apiKey', apiKey);
-  if (startDate) url.searchParams.set('pubStartDate', startDate);
+  if (startDate) {
+    url.searchParams.set('pubStartDate', startDate);
+    url.searchParams.set('pubEndDate', new Date().toISOString().replace(/Z$/, ''));
+  }
 
   return fetchVulncheckResponse(request, url.href);
 }
 
-async function fetchVulncheckResponse(request: Requester, url: string): Promise<VulncheckFetchResult> {
+async function fetchVulncheckResponse(request: Requester, url: string, apiKey?: string): Promise<VulncheckFetchResult> {
   const response = await request(url, {
+    headers: new URL(url).hostname === 'api.vulncheck.com' ? bearerHeaders(apiKey) : { Accept: 'application/json' },
     timeoutMs: 30000,
     socketTimeoutMs: 20000,
     maxResponseBytes: 10 * 1024 * 1024,
@@ -352,7 +358,7 @@ async function fetchVulncheckResponse(request: Requester, url: string): Promise<
     throw new Error('VulnCheck returned a non-JSON CVE search response');
   }
 
-  const vulns = Array.isArray(data?.vulnerabilities) ? data.vulnerabilities : [];
+  const vulns = vulncheckNvdItems(data);
   const cves: NormalizedCVE[] = [];
   let skipped = 0;
   for (const item of vulns) {

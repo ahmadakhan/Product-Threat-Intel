@@ -9,11 +9,8 @@ const RETIRED_DUPLICATE_FEEDS = [{ duplicateId: 'feed-darkreading-full', canonic
 export async function reconcileRecommendedFeeds(db: PoolClient, bootstrap = false): Promise<void> {
   const existing = await list<ThreatFeed>(db, 'feeds');
   const ids = new Set(existing.map((feed) => feed.id));
-  // Seed any recommended feeds that are missing from the database, on both
-  // fresh bootstrap and existing deployments. This ensures newly added
-  // recommended feeds (e.g. VulnCheck NVD++) appear in the Threat Feeds view
-  // even on databases created before they were added to the catalog.
-  for (const feed of RECOMMENDED_FEEDS) {
+  // Catalog insertion is opt-in; repairs below still preserve existing feeds.
+  if (bootstrap) for (const feed of RECOMMENDED_FEEDS) {
     if (ids.has(feed.id) || findDuplicateFeedSource(feed, existing)) continue;
     await put(db, 'feeds', feed.id, {
       ...feed,

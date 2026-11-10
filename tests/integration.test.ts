@@ -565,7 +565,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
     await t.test('vendor-seeded feeds cannot be deleted but can be toggled', async () => {
       const seeded = await command('feed.save', {
         name: 'Seeded NVD',
-        type: 'VULNCHECK_NVD',
+        type: 'NVD_API',
         url: 'https://8.8.8.8/nvd',
         authType: 'NONE',
         rateLimitPerMin: 10,
@@ -578,7 +578,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       assert.equal(
         (await command('feed.save', {
           name: 'Duplicate Seeded NVD',
-          type: 'VULNCHECK_NVD',
+          type: 'NVD_API',
           url: 'https://8.8.8.8/nvd#duplicate',
           authType: 'NONE',
           rateLimitPerMin: 10,
@@ -591,7 +591,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
         (await command('feed.import', [{
           id: 'duplicate-seeded-nvd',
           name: 'Imported Duplicate NVD',
-          type: 'VULNCHECK_NVD',
+          type: 'NVD_API',
           url: 'https://8.8.8.8/nvd',
           authType: 'NONE',
           rateLimitPerMin: 10,
@@ -624,10 +624,10 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       const customResult = await command('feed.delete', undefined, customFeed.id);
       assert.equal(customResult.status, 200);
     });
-    await t.test('non-vendor-seeded NVD feeds cannot be deleted but can be toggled', async () => {
+    await t.test('non-vendor-seeded NVD feeds can be toggled and deleted', async () => {
       const nvd = await command('feed.save', {
         name: 'Custom NVD',
-        type: 'VULNCHECK_NVD',
+        type: 'NVD_API',
         url: 'https://8.8.8.8/custom-nvd',
         authType: 'NONE',
         rateLimitPerMin: 10,
@@ -638,15 +638,12 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       const nvdFeed = (await list<any>(pool, 'feeds')).find((f) => f.name === 'Custom NVD');
       assert.ok(nvdFeed, 'Custom NVD feed should exist in database');
       assert.equal(
-        (await command('feed.delete', undefined, nvdFeed.id)).status,
-        403,
-        'non-vendor-seeded NVD feed should be rejected',
-      );
-      assert.equal(
         (await command('feed.toggle', undefined, nvdFeed.id)).status,
         200,
         'non-vendor-seeded NVD feed should be toggleable',
       );
+      assert.equal((await command('feed.delete', undefined, nvdFeed.id)).status, 200);
+      assert.equal(await get(pool, 'feeds', nvdFeed.id), undefined);
     });
     await t.test('retention policy persists through settings.save', async () => {
       const retentionConfig = {
@@ -724,11 +721,11 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       // Later pipeline tests consume every cveData record, so never leave fixtures behind.
       await pool.query("DELETE FROM records WHERE id LIKE 'retention-%'");
     });
-    await t.test('monitored product search requests NVD CPE API 2.0 with header authentication', async () => {
+    await t.test('monitored product search separates public keywords from Bearer CPE verification', async () => {
       const feedId = 'cpe-search-test-key';
       const cpeName = 'cpe:2.3:o:microsoft:windows_10:22h2:*:*:*:*:*:*:*';
       await put(pool, 'feeds', feedId, {
-        id: feedId, type: 'VULNCHECK_NVD', authType: 'API_KEY', enabled: true,
+        id: feedId, type: 'VULNCHECK_NVD', authType: 'BEARER', enabled: true,
         authSecretKey: encrypt('cpe-test-api-key', [key], `feed:${feedId}`),
       });
       try {
@@ -738,10 +735,11 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
         assert.equal(result.body.results[0].cpeName, cpeName);
         assert.equal(capturedUrls.length, 2, 'keyword search followed by wildcard-vendor search');
         const keywordUrl = new URL(capturedUrls[0]);
-        assert.equal(keywordUrl.origin + keywordUrl.pathname, 'https://api.vulncheck.com/v3/index/nist-nvd2');
+        assert.equal(keywordUrl.origin + keywordUrl.pathname, 'https://services.nvd.nist.gov/rest/json/cpes/2.0');
         assert.equal(keywordUrl.searchParams.get('keywordSearch'), 'Microsoft windows 10');
         assert.equal(keywordUrl.searchParams.has('apiKey'), false);
-        assert.equal(capturedHeaders.apiKey, 'cpe-test-api-key');
+        assert.equal(capturedHeaders.Authorization, 'Bearer cpe-test-api-key');
+        assert.equal(capturedHeaders.apiKey, undefined);
         const wildcardUrl = new URL(capturedUrls[1]);
         assert.equal(wildcardUrl.searchParams.get('cpeMatchString'), 'cpe:2.3:*:*:windows_10:*:*:*:*:*:*:*:*');
         assert.equal(wildcardUrl.searchParams.has('keywordSearch'), false);

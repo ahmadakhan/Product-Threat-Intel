@@ -104,7 +104,7 @@ test('wildcard verification fetches active structural matches in one request', a
   const request: Requester = async (url, options) => {
     calls++;
     assert.equal(new URL(url).searchParams.get('cpeMatchString'), wildcard);
-    assert.equal(options?.headers?.apiKey, 'test-key');
+    assert.equal(options?.headers?.Authorization, 'Bearer test-key');
     return {
       status: 200,
       headers: {},

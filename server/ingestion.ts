@@ -1,3 +1,4 @@
+import { vulncheckNvdItems } from './vulncheck.ts';
 import type { ThreatFeed, NormalizedCVE, IntelligenceArticle } from '../src/types/index.ts';
 import { ingestionWindow, recentRevisions, type IngestionState } from './ingestionState';
 import { parseSyndication, RSS_MAX_BYTES, RSS_USER_AGENT } from './rss';
@@ -282,14 +283,13 @@ export async function ingestFeed(
   ): Promise<{ data: any; etag: string | undefined; headers: ResponseData['headers'] }> => {
     // Cursor-paginated sources store their index ETag in the sync state rather
     // than the feed record, because it advances per window, not per config.
-    if (conditional && (feed.etag || context.indexEtag))
-      headers['If-None-Match'] = feed.etag || context.indexEtag!;
+    const conditionalEtag = conditional ? feed.etag || context.indexEtag : undefined;
     let response: ResponseData;
     for (let attempt = 0; ; attempt++) {
       try {
         response = await request(url, {
           ...requestOptions,
-          headers: { ...headers, ...requestOptions.headers },
+          headers: { ...headers, ...(conditionalEtag ? { 'If-None-Match': conditionalEtag } : {}), ...requestOptions.headers },
         });
       } catch (error) {
         const transient = error instanceof Error && (/timed out|timeout|^aborted$|socket hang up|premature close/i.test(error.message) || ['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'UND_ERR_SOCKET'].includes((error as NodeJS.ErrnoException).code || ''));
@@ -728,11 +728,12 @@ export async function ingestFeed(
     } catch {
       throw new Error('VulnCheck NVD++ credentials could not be decrypted; re-enter the secret');
     }
-    const { start, end } = ingestionWindow(scopeHours, context);
+    const { start, end, hasMore: windowHasMore } = ingestionWindow(scopeHours, context);
     const url = new URL(feed.url);
-    url.searchParams.set('lastModStartDate', start.toISOString());
-    url.searchParams.set('lastModEndDate', end.toISOString());
+    url.searchParams.set('lastModStartDate', start.toISOString().slice(0, 10));
+    url.searchParams.set('lastModEndDate', end.toISOString().slice(0, 10));
     url.searchParams.set('limit', '1000');
+    url.searchParams.set('start_cursor', 'true');
     // The NVD++ index changes only when records change, so the index-level ETag
     // is a valid conditional handle for the whole paginated window: a 304 means
     // no record in the window changed and the previous cursor stays valid.
@@ -758,8 +759,8 @@ export async function ingestFeed(
     /** Processes one response page: normalizes records, dedupes, records
      *  revisions, and returns the provider's next cursor when paging continues. */
     const processPage = (page: any): string | undefined => {
-      if (!page || !Array.isArray(page.vulnerabilities)) throw new Error('Invalid VulnCheck NVD++ response');
-      for (const item of page.vulnerabilities) {
+      const items = vulncheckNvdItems(page);
+      for (const item of items) {
         const id = normalizeCveId(item?.cve?.id);
         if (!id || seenIds.has(id)) throw new Error('VulnCheck NVD++ returned an invalid or duplicate CVE');
         seenIds.add(id);
@@ -856,17 +857,17 @@ export async function ingestFeed(
       withdrawals,
       rejections,
       etag,
-      syncState: { cursor: end.toISOString(), hasMore: cursor !== undefined, revisions, ...(etag ? { indexEtag: etag } : {}) },
+      syncState: { cursor: end.toISOString(), hasMore: windowHasMore || cursor !== undefined, revisions, ...(etag ? { indexEtag: etag } : {}) },
     };
   }
   if (feed.type === 'NVD_API') {
     // NIST NVD 2.0 — free community vulnerability data service. No
     // authentication required; unauthenticated rate limit is 5 requests per
     // 30 seconds, so requests are paced at 6-second intervals.
-    const { start, end } = ingestionWindow(scopeHours, context);
+    const { start, end, hasMore: windowHasMore } = ingestionWindow(scopeHours, context);
     const url = new URL(feed.url);
-    url.searchParams.set('pubStartDate', start.toISOString());
-    url.searchParams.set('pubEndDate', end.toISOString());
+    url.searchParams.set('lastModStartDate', start.toISOString());
+    url.searchParams.set('lastModEndDate', end.toISOString());
     url.searchParams.set('resultsPerPage', '2000');
     url.searchParams.set('startIndex', '0');
 
@@ -954,7 +955,7 @@ export async function ingestFeed(
       count: totalFetched,
       withdrawals,
       rejections,
-      syncState: { cursor: end.toISOString(), hasMore: false, revisions },
+      syncState: { cursor: end.toISOString(), hasMore: windowHasMore, revisions },
     };
   }
   throw new Error(`Unsupported feed adapter: ${feed.type}`);

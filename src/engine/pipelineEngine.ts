@@ -271,6 +271,8 @@ export function runVulnerabilityPipeline(
     known = new Set(existing.map((f) => `${normalizeCveId(f.cveId)}:${f.matchedAssetId}`)),
     knownCves = new Set(existing.map((f) => normalizeCveId(f.cveId)).filter((id): id is string => Boolean(id)));
   const newFindings: Finding[] = [];
+  const alreadyNotified = new Set(existing.filter((f) => f.reviewNotifiedAt || f.autoDispatchedAt)
+    .map((f) => `${normalizeCveId(f.cveId)}:${f.matchedAssetId}`));
   const executionId = crypto.randomUUID();
   const feedAuthority = new Map(
     _feeds.map((f) => [f.id, AUTHORITATIVE_FEED_TYPES.has(f.type) || f.authoritative === true]),
@@ -612,19 +614,19 @@ export function runVulnerabilityPipeline(
       else if (confirmedKevProductOnlyMatch) result.confidence = Math.max(result.confidence, threshold);
       else if (authoritativeSourceDispatch) result.confidence = Math.max(result.confidence, threshold);
       (result as MatchResult & { contradicted?: true }).contradicted = packageRejected || undefined;
+      const previouslyNotified = alreadyNotified.has(key);
+      const dispatchDeferred = !previouslyNotified && (
+        overallCooldownActive ||
+        cve.sourceFeeds?.some((feedId) => feedCooldownActive(feedId)) ||
+        dispatchesThisRun >= overallCap || totalFindingsThisRun >= totalCap ||
+        (cve.sourceFeeds ?? []).some((feedId) => (dispatchesByFeed.get(feedId) ?? 0) >= perFeedCap)
+      );
       const confirmed =
         !packageRejected &&
         !sourceRequiresReview &&
         !cveReviewOverride &&
         (!unverifiableMatch || settings.autoDispatchUnverifiableMatches) &&
-        shouldAutoDispatch(result.confidence, settings) &&
-        // Circuit breakers (evaluated after eligibility: a breaker gates
-        // delivery, it does not change whether the match itself is real).
-        !overallCooldownActive &&
-        !cve.sourceFeeds?.some((feedId) => feedCooldownActive(feedId)) &&
-        dispatchesThisRun < overallCap &&
-        totalFindingsThisRun < totalCap &&
-        !(cve.sourceFeeds ?? []).some((feedId) => (dispatchesByFeed.get(feedId) ?? 0) >= perFeedCap);
+        shouldAutoDispatch(result.confidence, settings) && !dispatchDeferred;
       // Say *why* a match is held. A held finding is re-derived before every
       // delivery attempt, so the reason has to name the actual blocker (policy
       // threshold vs. missing inventory version vs. unverifiable CVE evidence)
@@ -632,6 +634,8 @@ export function runVulnerabilityPipeline(
       // the finding's notificationStatus so the evidence and the hold agree.
       const holdReason = confirmed
         ? undefined
+        : dispatchDeferred
+          ? 'delivery is deferred by the dispatch circuit breaker'
         : packageRejected
           ? 'the package identifiers prove a different version, while the product matches by CPE; confirm which identifier is authoritative'
           : sourceRequiresReview
@@ -665,6 +669,7 @@ export function runVulnerabilityPipeline(
         confidence: result.confidence,
         exposure: asset.exposure,
         exploitRisk: determineExploitRisk(cve),
+        dispatchDeferred: Boolean(dispatchDeferred),
         notificationStatus: confirmed ? 'QUEUED_FOR_DISPATCH' : 'REVIEW_REQUIRED',
         status: 'MONITORED',
         autoDispatchedAt: null,
@@ -680,7 +685,7 @@ export function runVulnerabilityPipeline(
           },
         ],
       });
-      if (confirmed) {
+      if (!dispatchDeferred && !previouslyNotified) {
         dispatchesThisRun++;
         totalFindingsThisRun++;
         for (const feedId of cve.sourceFeeds ?? [])
@@ -695,7 +700,7 @@ export function runVulnerabilityPipeline(
           const trippedFeeds = (cve.sourceFeeds ?? []).filter(
             (feedId) => (dispatchesByFeed.get(feedId) ?? 0) >= perFeedCap,
           );
-          if (trippedOverall)
+          if (trippedOverall || trippedTotal)
             circuitBreakerCooldowns.overallUntil = Math.max(
               circuitBreakerCooldowns.overallUntil ?? 0,
               nowMs + cooldownMs,
