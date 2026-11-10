@@ -97,10 +97,10 @@ test('searchNvdCpes omits the API key and falls back to public rate budget', asy
   const wildcardUrl = new URL(calls[1].url);
 
   assert.ok(!keywordUrl.searchParams.has('apiKey'), 'should not append an apiKey when none configured');
-  assert.equal(keywordUrl.searchParams.get('keywordSearch'), 'cisco ios');
+  assert.equal(keywordUrl.searchParams.get('cpeName'), 'cisco ios');
   assert.equal(keywordUrl.searchParams.get('resultsPerPage'), '20');
 
-  assert.equal(wildcardUrl.searchParams.get('cpeMatchString'), 'cpe:2.3:*:*:ios:*:*:*:*:*:*:*:*');
+  assert.equal(wildcardUrl.searchParams.get('cpeName'), 'cpe:2.3:*:*:ios:*:*:*:*:*:*:*:*');
   assert.equal(wildcardUrl.searchParams.get('resultsPerPage'), '20');
 });
 
@@ -247,7 +247,7 @@ test('exact CPE verification queries cpeMatchString and excludes deprecated or d
   };
   const result = await searchNvdCpes(requester, '', '', '', 200, name);
   const url = new URL(requested);
-  assert.equal(url.searchParams.get('cpeMatchString'), name);
+  assert.equal(url.searchParams.get('cpeName'), name);
   assert.equal(url.searchParams.has('keywordSearch'), false);
   assert.deepEqual(
     result.results.map((entry) => entry.cpeNameId),
@@ -368,6 +368,6 @@ test('wildcard vendor search is skipped for exact CPE verification', async () =>
   // Only the cpeMatchString exact-lookup call is made; no wildcard search.
   assert.equal(calls.length, 1);
   const url = new URL(calls[0].url);
-  assert.equal(url.searchParams.get('cpeMatchString'), 'cpe:2.3:a:example:widget:1.0:*:*:*:*:*:*:*');
+  assert.equal(url.searchParams.get('cpeName'), 'cpe:2.3:a:example:widget:1.0:*:*:*:*:*:*:*');
   assert.equal(url.searchParams.has('keywordSearch'), false);
 });

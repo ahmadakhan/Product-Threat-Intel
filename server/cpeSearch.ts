@@ -9,6 +9,7 @@ import type { ThreatFeed, VulncheckCpeSearchResult, VulncheckCpeSearchResponse }
 import { isProductWildcard, dictionaryEntryMatchesWildcard } from '../src/utils/registrationCpe.ts';
 
 const VULNCHECK_NVD_CPE_ENDPOINT = 'https://api.vulncheck.com/v3/index/nist-nvd2';
+const NVD_CPE_ENDPOINT = 'https://services.nvd.nist.gov/rest/json/cves/2.0';
 
 export function buildCpeUrl(keyword: string, resultsPerPage: number): URL {
   const url = new URL(VULNCHECK_NVD_CPE_ENDPOINT);
@@ -186,13 +187,33 @@ export async function searchNvdCpes(
   // NVD keywordSearch matches titles/reference text, not CPE component names.
   const keyword = `${vendor} ${product}`.replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
   const pageSize = Math.min(Math.max(1, limit), 200);
-  const url = buildCpeUrl(keyword, pageSize);
-  if (exactCpe) {
-    if (!parseCPE23(exactCpe).isValid) throw new Error('Invalid CPE 2.3 expression');
-    url.searchParams.delete('keywordSearch');
-    if (cpeNameId) url.searchParams.set('cpeNameId', cpeNameId);
-    else url.searchParams.set('cpeMatchString', exactCpe);
+
+  // Use VulnCheck NVD++ when an API key is available; otherwise fall back to
+  // the direct NIST NVD 2.0 API which does not require authentication.
+  const useVulncheck = Boolean(apiKey);
+  const endpoint = useVulncheck
+    ? new URL(VULNCHECK_NVD_CPE_ENDPOINT)
+    : new URL(NVD_CPE_ENDPOINT);
+  endpoint.searchParams.set('resultsPerPage', String(pageSize));
+  if (useVulncheck) {
+    endpoint.searchParams.set('keywordSearch', keyword);
+    if (exactCpe) {
+      if (!parseCPE23(exactCpe).isValid) throw new Error('Invalid CPE 2.3 expression');
+      endpoint.searchParams.delete('keywordSearch');
+      if (cpeNameId) endpoint.searchParams.set('cpeNameId', cpeNameId);
+      else endpoint.searchParams.set('cpeMatchString', exactCpe);
+    }
+  } else {
+    // NIST NVD 2.0 API: cpeName does structural CPE matching.
+    if (exactCpe) {
+      if (!parseCPE23(exactCpe).isValid) throw new Error('Invalid CPE 2.3 expression');
+      endpoint.searchParams.set('cpeName', exactCpe);
+      if (cpeNameId) endpoint.searchParams.set('cpeNameId', cpeNameId);
+    } else if (keyword) {
+      endpoint.searchParams.set('cpeName', keyword);
+    }
   }
+  const url = endpoint;
   const fetchPage = (key: string, urlObj: URL = url) =>
     request(urlObj.href, {
       headers: { Accept: 'application/json', ...(key ? { apiKey: key } : {}) },
@@ -207,7 +228,7 @@ export async function searchNvdCpes(
 
   // NVD reports rejected credentials with 404 and a diagnostic message header.
   // Only that case can fall back to the public budget: an unrelated 404 is an
-  // upstream failure, never evidence that the dictionary has no matches.
+  // upstream failure, not evidence that the dictionary has no matches.
   // HTTP headers are case-insensitive; access by lowercased key to avoid relying
   // on the implementation detail that Node lowercases response header names.
   const allHeaders = response.headers as Record<string, string | string[] | undefined>;
@@ -217,6 +238,10 @@ export async function searchNvdCpes(
     apiKey &&
     /invalid\s+api\s*key/i.test(Array.isArray(message) ? message.join(' ') : message || '')
   ) {
+    // VulnCheck rejected the API key. Retry once without credentials against
+    // VulnCheck; if that also fails, the user needs a valid key. Do not fall
+    // back to NIST NVD here - that path is only for when no VulnCheck key is
+    // configured at all (apiKey === '' from the start).
     effectiveKey = '';
     response = await fetchPage(effectiveKey);
   }
@@ -259,7 +284,9 @@ export async function searchNvdCpes(
   if (!exactCpe && product.trim()) {
     const escapedProduct = escapeCpeComponent(product.trim());
     const matchString = `cpe:2.3:*:*:${escapedProduct}:*:*:*:*:*:*:*:*`;
-    const wildcardUrl = buildCpeMatchStringUrl(matchString, pageSize);
+    const wildcardUrl = new URL(useVulncheck ? VULNCHECK_NVD_CPE_ENDPOINT : NVD_CPE_ENDPOINT);
+    wildcardUrl.searchParams.set('resultsPerPage', String(pageSize));
+    wildcardUrl.searchParams.set('cpeName', matchString);
     try {
       const wildcardResponse = await fetchPage(effectiveKey, wildcardUrl);
       if (wildcardResponse.status === 429) {
@@ -293,7 +320,9 @@ export async function searchNvdCpes(
     if (parsed.isValid && parsed.product && parsed.product !== '*') {
       const escapedProduct = escapeCpeComponent(parsed.product);
       const matchString = `cpe:2.3:*:*:${escapedProduct}:*:*:*:*:*:*:*:*`;
-      const wildcardUrl = buildCpeMatchStringUrl(matchString, pageSize);
+      const wildcardUrl = new URL(useVulncheck ? VULNCHECK_NVD_CPE_ENDPOINT : NVD_CPE_ENDPOINT);
+      wildcardUrl.searchParams.set('resultsPerPage', String(pageSize));
+      wildcardUrl.searchParams.set('cpeName', matchString);
       try {
         const wildcardResponse = await fetchPage(effectiveKey, wildcardUrl);
         if (wildcardResponse.status === 429) {
