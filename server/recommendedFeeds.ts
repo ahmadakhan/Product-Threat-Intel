@@ -5,7 +5,7 @@ const recommendedFeedEntries = [
     authType: 'NONE' as const, rateLimitPerMin: 5, enabled: true, vendorSeed: true },
   { id: 'feed-nvd-community', name: 'NIST NVD 2.0 — Free Community Vulnerability Data', type: 'NVD_API' as const,
     url: 'https://services.nvd.nist.gov/rest/json/cves/2.0',
-    authType: 'NONE' as const, rateLimitPerMin: 5, enabled: false, vendorSeed: true },
+    authType: 'NONE' as const, rateLimitPerMin: 5, enabled: true, vendorSeed: true },
   { id: 'feed-vulncheck-nvd', name: 'VulnCheck NVD++ — Full NVD/MITRE Mirror with Enriched CPEs, CVSS, and KEV', type: 'VULNCHECK_NVD' as const,
     url: 'https://api.vulncheck.com/v3/index/nist-nvd2',
     authType: 'BEARER' as const, rateLimitPerMin: 1000, enabled: false, vendorSeed: true },
