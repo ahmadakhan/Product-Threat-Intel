@@ -389,9 +389,11 @@ export function runVulnerabilityPipeline(
       continue;
     }
     const seenProducts = new Set<string>();
+    let usableIdentity = false;
     for (const cpe of asset.cpes) {
       const parsed = parseCPE23(cpe);
       if (!parsed.isValid) continue;
+      usableIdentity = true;
       if (/[?*]/.test(parsed.vendor) || /[?*]/.test(parsed.product)) {
         assetsWithBroadCpes.push(asset);
         break;
@@ -407,12 +409,22 @@ export function runVulnerabilityPipeline(
           assetsByProduct.set(key, bucket);
         }
     }
-    // Keep assets with non-empty but invalid CPE lists out of text fallback;
-    // the matcher correctly treats structured identifiers as authoritative.
+    // A CPE list that is non-empty but entirely malformed yields no structured
+    // identity the matcher can use. The candidate prefilter would otherwise make
+    // the asset permanently invisible to every CVE with CPE data, so treat it
+    // like an unstructured asset and let the alias/text fallback reach it. A
+    // PURL still supplies a usable identity, so package-only assets stay in
+    // their own bucket.
+    if (!usableIdentity && !asset.purls?.length) assetsWithoutIdentifiers.push(asset);
   }
   const candidateAssets = (cve: NormalizedCVE): WatchListItem[] => {
+    // A feed may supply per-criterion details *and* additional product criteria
+    // in `cpeMatches`. The details carry the authoritative ranges, but the extra
+    // criteria are still applicability claims from the same record; ignoring
+    // them made the asset invisible to the candidate prefilter and silently
+    // dropped a real finding.
     const criteria = cve.cpeMatchDetails?.length
-      ? cve.cpeMatchDetails.map((detail) => detail.criteria)
+      ? [...new Set([...cve.cpeMatchDetails.map((detail) => detail.criteria), ...cve.cpeMatches])]
       : cve.cpeMatches;
     const candidates = new Map<string, WatchListItem>();
     const add = (items: WatchListItem[]) => items.forEach((asset) => candidates.set(asset.id, asset));
@@ -483,11 +495,21 @@ export function runVulnerabilityPipeline(
       // product-level versionRange must not be applied across all criteria. The
       // product-level range is only a fallback when the CVE has no match details
       // at all.
+      // Criteria present in `cpeMatches` but not in `cpeMatchDetails` still
+      // describe affected products; match them with the product-level range
+      // rather than discarding them.
+      const detailCriteria = new Set((cve.cpeMatchDetails ?? []).map((detail) => detail.criteria));
+      const extraCriteria = cve.cpeMatchDetails?.length
+        ? cve.cpeMatches.filter((criteria) => !detailCriteria.has(criteria))
+        : [];
       const applicabilitySets = cve.cpeMatchDetails?.length
-        ? cve.cpeMatchDetails.map(({ criteria, range }) => ({
-            cpes: [criteria],
-            range: range && Object.values(range).some(Boolean) ? range : undefined,
-          }))
+        ? [
+            ...cve.cpeMatchDetails.map(({ criteria, range }) => ({
+              cpes: [criteria],
+              range: range && Object.values(range).some(Boolean) ? range : undefined,
+            })),
+            ...(extraCriteria.length ? [{ cpes: extraCriteria, range: cve.versionRange }] : []),
+          ]
         : [{ cpes: cve.cpeMatches, range: cve.versionRange }];
       // Per-CPE ranges apply only to that CPE criterion. PURLs use the
       // package-level range and must never borrow another product's bounds.

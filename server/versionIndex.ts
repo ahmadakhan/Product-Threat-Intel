@@ -158,16 +158,29 @@ interface CveIndexRow {
 function cveIndexRows(cve: NormalizedCVE, options: MatchIndexOptions): CveIndexRow[] | null {
   const rows: CveIndexRow[] = [];
   const details = cve.cpeMatchDetails?.length
-    ? cve.cpeMatchDetails.map((detail, index) => ({
-        id: `cpe-${index}`,
-        criteria: detail.criteria,
-        // A per-detail criterion without bounds means "any version of this
-        // product"; the product-level range must not leak onto it. This mirrors
-        // the pipeline's applicabilitySets, so the index cannot exclude a pair
-        // the matcher would accept.
-        range:
-          detail.range && Object.values(detail.range).some(Boolean) ? detail.range : undefined,
-      }))
+    ? [
+        ...cve.cpeMatchDetails.map((detail, index) => ({
+          id: `cpe-${index}`,
+          criteria: detail.criteria,
+          // A per-detail criterion without bounds means "any version of this
+          // product"; the product-level range must not leak onto it. This mirrors
+          // the pipeline's applicabilitySets, so the index cannot exclude a pair
+          // the matcher would accept.
+          range:
+            detail.range && Object.values(detail.range).some(Boolean) ? detail.range : undefined,
+        })),
+        // `cpeMatches` can carry criteria that `cpeMatchDetails` does not list.
+        // They are still affected products, matched with the product-level range
+        // by the engine, so the pushdown must index them too or the SQL join
+        // would drop the pair before the matcher sees it.
+        ...cve.cpeMatches
+          .filter((criteria) => !cve.cpeMatchDetails!.some((detail) => detail.criteria === criteria))
+          .map((criteria, index) => ({
+            id: `cpe-extra-${index}`,
+            criteria,
+            range: cve.versionRange,
+          })),
+      ]
     : cve.cpeMatches.map((criteria, index) => ({
         id: `cpe-${index}`,
         criteria,

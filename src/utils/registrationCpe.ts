@@ -58,8 +58,16 @@ export function dictionaryEntryMatchesWildcard(pattern: string, dictionaryName: 
 /** Keep one wildcard per dictionary product at the front, followed by exact entries. */
 export function withProductWildcards(entries: VulncheckCpeSearchResult[]): RegistrationCpeSearchResult[] {
   const wildcards = new Map<string, RegistrationCpeSearchResult>();
-  const exact = new Map(entries.map((entry) => [normalizeCpeForComparison(entry.cpeName), entry]));
+  // First occurrence wins and preserves the caller's ordering. Mapping the
+  // array directly (as the previous implementation did) kept every duplicate
+  // exact entry, so a caller that concatenated two searches — or a provider
+  // that repeated a page — rendered the same dictionary CPE twice.
+  const exact = new Map<string, VulncheckCpeSearchResult>();
   for (const entry of entries) {
+    const key = normalizeCpeForComparison(entry.cpeName);
+    if (!exact.has(key)) exact.set(key, entry);
+  }
+  for (const entry of exact.values()) {
     const cpeName = productWildcardCpe(entry.cpeName);
     if (!cpeName) continue;
     const key = normalizeCpeForComparison(cpeName);
@@ -82,6 +90,8 @@ export function withProductWildcards(entries: VulncheckCpeSearchResult[]): Regis
   }
   return [
     ...wildcards.values(),
-    ...entries.filter((entry) => !wildcards.has(normalizeCpeForComparison(entry.cpeName))),
+    ...[...exact.entries()]
+      .filter(([key]) => !wildcards.has(key))
+      .map(([, entry]) => entry),
   ];
 }

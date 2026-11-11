@@ -583,14 +583,14 @@ export const ThreatFeedsView: React.FC = () => {
                       setFormData({
                         ...formData,
                         type,
-                        ...(type === 'MITRE_CVE'
+                        ...(type === 'VULNCHECK_NVD'
                           ? {
-                              url: 'https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/deltaLog.json',
-                              authType: 'NONE' as FeedAuthType,
-                              rateLimitPerMin: 120,
+                              url: 'https://api.vulncheck.com/v3/index/nist-nvd2',
+                              authType: 'BEARER' as FeedAuthType,
+                              rateLimitPerMin: 1000,
                             }
                           : {}),
-                        ...(type === 'OPENCVE_API' || type === 'VULNCHECK_KEV'
+                        ...(type === 'VULNCHECK_KEV'
                           ? { authType: 'BEARER' as FeedAuthType }
                           : {}),
                         ...(type === 'OTX_API'
@@ -606,10 +606,9 @@ export const ThreatFeedsView: React.FC = () => {
                   >
                     <option value="JSON_SEARCH_API">Normalized CVE JSON array</option>
                     <option value="NVD_API">NVD CVE API 2.0</option>
-                    <option value="MITRE_CVE">MITRE CVE (official CVE JSON 5 list)</option>
                     <option value="CISA_KEV">CISA KEV JSON catalog</option>
                     <option value="EPSS_API">FIRST EPSS API</option>
-                    <option value="OPENCVE_API">OpenCVE API v2 (Bearer token)</option>
+                    <option value="VULNCHECK_NVD">VulnCheck NVD++ (Bearer token)</option>
                     <option value="VULNCHECK_KEV">VulnCheck KEV (Bearer token)</option>
                     <option value="OTX_API">AlienVault OTX subscribed Pulses (API key)</option>
                     <option value="RSS_ATOM">RSS / Atom news and advisory evidence</option>

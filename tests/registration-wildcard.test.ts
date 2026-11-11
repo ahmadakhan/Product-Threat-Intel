@@ -58,6 +58,22 @@ test('one wildcard per product appears before the exact dictionary versions', ()
   assert.deepEqual(withProductWildcards([]), []);
 });
 
+test('duplicate dictionary entries produce one wildcard and one exact row', () => {
+  const results = withProductWildcards([
+    entry(first),
+    entry(first),
+    entry(second),
+    entry(second),
+    entry(other),
+  ]);
+  assert.equal(results.length, 5);
+  assert.equal(new Set(results.map((result) => result.cpeName.toLowerCase())).size, 5);
+  assert.deepEqual(
+    results.map((result) => result.cpeName),
+    [wildcard, other.replace(':2.4.62:', ':*:'), first, second, other],
+  );
+});
+
 test('an official wildcard dictionary name stays first without a generated duplicate', () => {
   const results = withProductWildcards([entry(first), entry(wildcard, 'official-wildcard-id')]);
   assert.equal(results.length, 2);

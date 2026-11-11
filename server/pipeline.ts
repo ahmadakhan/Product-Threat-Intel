@@ -244,8 +244,11 @@ function cveContentView(cve: NormalizedCVE): string {
  * poisoned CVE claim another vulnerability's rulings).
  */
 function cveClusterIdentities(cve: NormalizedCVE): { vendor: string; product: string }[] {
+  // `cpeMatches` may list criteria that `cpeMatchDetails` does not. Both are
+  // applicability claims, and a cluster that resolved to such a criterion must
+  // still bind to the CVE, so the union is the correct identity set.
   const criteria = cve.cpeMatchDetails?.length
-    ? cve.cpeMatchDetails.map((detail) => detail.criteria)
+    ? [...new Set([...cve.cpeMatchDetails.map((detail) => detail.criteria), ...cve.cpeMatches])]
     : cve.cpeMatches;
   const identities = new Map<string, { vendor: string; product: string }>();
   for (const criterion of criteria) {

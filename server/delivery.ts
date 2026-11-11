@@ -4,7 +4,9 @@ import { classifyDeliveryError, computeRetryDelay, getMlRuntime } from './ml/int
 import { advisoryEmail } from './advisoryEmail';
 import { advisoryFilename, renderAdvisoryPdf } from './pdf';
 import {
+  HTML_ATTACHMENT_MAX_BYTES,
   deliveryHtmlIsAttachable,
+  htmlAttachmentIsAttachable,
   renderFindingsDocument,
   renderFindingsText,
 } from './deliveryDocument.ts';
@@ -221,6 +223,32 @@ export interface EmailAttachment {
   filename: string;
   content: Buffer;
   contentType: string;
+}
+
+/**
+ * Builds the HTML attachment for a findings delivery from the exact body being
+ * sent. Findings bundles carry their rendered document as a file so the
+ * recipient keeps the evidence even when the mail body is truncated.
+ *
+ * The HTML ceiling is deliberately separate from the PDF renderer's limit: an
+ * HTML file is just the body bytes, so a large digest can still be attached
+ * when a PDF cannot be rendered. An oversized document throws here, before any
+ * provider call, instead of failing the send after the body has been prepared.
+ */
+export function findingHtmlAttachment(job: Job): EmailAttachment | undefined {
+  const advisoryId = job.advisory_id || '';
+  if (!(isFindingDelivery(advisoryId) || advisoryId.startsWith('FINDINGS:'))) return undefined;
+  const html = job.payload.html;
+  if (!html) return undefined;
+  if (!htmlAttachmentIsAttachable(html))
+    throw new Error(
+      `Findings HTML attachment exceeds the attachment limit of ${HTML_ATTACHMENT_MAX_BYTES} bytes`,
+    );
+  return {
+    filename: `${deliveryAttachmentStem(job)}.html`,
+    content: Buffer.from(html, 'utf8'),
+    contentType: 'text/html; charset=utf-8',
+  };
 }
 export interface EmailRetryPolicy {
   /** When false, a transient failure becomes terminal after the first attempt. */
@@ -658,16 +686,8 @@ export function createMailSender(
     // body being sent, so the PDF is byte-identical to the email.
     const content = applyJobEdits(job);
     const pdfAttachment = await buildPdfAttachment(content, config, db);
-    const htmlAttachment: EmailAttachment | undefined =
-      (isFindingDelivery(content.advisory_id) || content.advisory_id.startsWith('FINDINGS:')) &&
-      deliveryHtmlIsAttachable(content.payload.html)
-        ? {
-            filename: `${deliveryAttachmentStem(content)}.html`,
-            content: Buffer.from(content.payload.html, 'utf8'),
-            contentType: 'text/html; charset=utf-8',
-          }
-        : undefined;
     // The HTML file contains precisely the HTML sent as the email body.
+    const htmlAttachment = findingHtmlAttachment(content);
     const attachments = [htmlAttachment, pdfAttachment].filter(
       (item): item is EmailAttachment => Boolean(item),
     );

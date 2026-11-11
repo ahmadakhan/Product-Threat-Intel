@@ -2,10 +2,11 @@ import type { FeedType, Finding } from '../../src/types/index.ts';
 import { parseCPE23 } from '../../src/utils/cpeMatcher.ts';
 import type { FindingFeatures } from './models/reviewRanker.ts';
 
+// VulnCheck NVD++ replaced the retired MITRE CVE and OpenCVE sources as the
+// authoritative registry, so it carries the same weight NVD_API did.
 const APPLICABILITY_FEED_WEIGHTS: Partial<Record<FeedType, number>> = {
+  VULNCHECK_NVD: 40,
   NVD_API: 40,
-  MITRE_CVE: 35,
-  OPENCVE_API: 25,
   OSV_API: 40,
   GITHUB_ADVISORIES: 35,
 };

@@ -313,11 +313,22 @@ const TEXT_IDENTITY_MIN_WORD = 3;
 const textWordPatterns = new Map<string, RegExp>();
 const MAX_TEXT_WORD_PATTERNS = 2000;
 
+/**
+ * Identity token split that preserves the symbols distinguishing real products.
+ * `visual_c++`, `visual_c#` and `visual_c` must stay three different identities;
+ * splitting on every non-alphanumeric character collapsed all three to the same
+ * `visual` / `c` words and let an advisory for one product match another.
+ */
+const IDENTITY_TOKEN_SPLIT = /[^\p{L}\p{N}+#]+/u;
+
 function textWordPattern(word: string): RegExp {
   const cached = textWordPatterns.get(word);
   if (cached) return cached;
   const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`);
+  // A trailing `+`/`#` belongs to the token, so `c` must not match inside
+  // `c++`/`c#`, and `c++` must not match inside `c+++`. A leading `#` is a
+  // social hashtag, not part of the identity, so it does not block a match.
+  const pattern = new RegExp(`(?<![\\p{L}\\p{N}+])${escaped}(?![\\p{L}\\p{N}+#])`, 'u');
   if (textWordPatterns.size >= MAX_TEXT_WORD_PATTERNS) {
     // Evict oldest 10% instead of clearing all
     const toEvict = Math.max(1, Math.floor(textWordPatterns.size * 0.1));
@@ -330,17 +341,20 @@ function textWordPattern(word: string): RegExp {
 
 function containsIdentityWords(text: string, value: string): boolean {
   const words = value
+    .normalize('NFKC')
     .toLowerCase()
-    .split(/[^a-z0-9]+/)
+    .split(IDENTITY_TOKEN_SPLIT)
     .filter(Boolean);
   const significant = words.filter((word) => word.length >= TEXT_IDENTITY_MIN_WORD);
-  // `os`, `ai`, `go` and `3m` are real names but not usable as prose evidence.
+  // `os`, `ai`, `go` and `3m` are real names but not usable as prose evidence
+  // on their own.
   if (!significant.length) return false;
   // Prefer the long words; for a multi-word identity that also contains short
   // tokens (for example `f5 big_ip`) keep the short ones so `f5` cannot be
   // dropped from its own name.
   const required = significant.length >= 2 || words.length === 1 ? significant : words;
-  return required.every((word) => textWordPattern(word).test(text));
+  const haystack = text.normalize('NFKC').toLowerCase();
+  return required.every((word) => textWordPattern(word).test(haystack));
 }
 
 /**
@@ -399,13 +413,13 @@ function resolveGenericCpeIdentity(
   assetCpeStr: string,
   assetVendor: string,
   assetProduct: string,
-): { cpe: string; inferred: boolean } {
+): { cpe: string; generic: boolean } {
   const parsed = parseCPE23(assetCpeStr);
-  if (!parsed.isValid) return { cpe: assetCpeStr, inferred: false };
+  if (!parsed.isValid) return { cpe: assetCpeStr, generic: false };
 
   const genericVendor = isGenericCpeComponent(parsed.vendor);
   const genericProduct = isGenericCpeComponent(parsed.product);
-  if (!genericVendor && !genericProduct) return { cpe: assetCpeStr, inferred: false };
+  if (!genericVendor && !genericProduct) return { cpe: assetCpeStr, generic: false };
 
   let vendor = parsed.vendor;
   let product = parsed.product;
@@ -418,12 +432,19 @@ function resolveGenericCpeIdentity(
     product = inventoryCpeToken(assetProduct);
     inferred = true;
   }
-  if (!inferred) return { cpe: assetCpeStr, inferred: false };
+  if (!inferred)
+    return { cpe: assetCpeStr, generic: isGenericCpeComponent(vendor) || isGenericCpeComponent(product) };
 
   const tokens = splitCpeTokens(parsed.raw.slice(8));
   tokens[1] = vendor;
   tokens[2] = product;
-  return { cpe: `cpe:2.3:${tokens.join(':')}`, inferred: true };
+  return {
+    cpe: `cpe:2.3:${tokens.join(':')}`,
+    // Only an identity that is still wildcarded after substitution is generic.
+    // A fully resolved CPE is a concrete assertion of the inventory's own
+    // vendor/product, so it must not be held for review as an inferred match.
+    generic: isGenericCpeComponent(vendor) || isGenericCpeComponent(product),
+  };
 }
 
 export interface CpeAliasOptions {
@@ -896,7 +917,7 @@ export function matchesWatchlistItem(
   // criterion. On a large run the parse cache thrashes, so the repeated parses
   // were uncached work on the hottest loop in the engine.
   const preparedAssetCpes = assetCpes.map((rawAssetCpe) => {
-    const { cpe: assetCpe, inferred: genericIdentity } = resolveGenericCpeIdentity(
+    const { cpe: assetCpe, generic: genericIdentity } = resolveGenericCpeIdentity(
       rawAssetCpe,
       assetVendor,
       assetProduct,
