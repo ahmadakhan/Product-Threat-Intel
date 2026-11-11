@@ -379,3 +379,49 @@ test('the candidate index includes criteria absent from cpeMatchDetails', async 
   assert.ok(identities.includes('cpe:acme\u001fwidget'), 'extra criterion is indexed');
   assert.ok(insert!.values.includes('cpe-extra-0'), 'the extra criterion gets its own row');
 });
+
+/* ------------------------------------------ declared identity / stale CPEs */
+
+test('an asset whose declared product differs from a stale CPE still matches that identity', () => {
+  // The operator-declared vendor/product is what the alias and prose matchers
+  // read. Indexing only the CPE made the asset invisible to the candidate
+  // prefilter before the matcher could evaluate it.
+  const asset = assetRecord({ product: 'widget', cpes: [cpe('1.5', 'acme', 'gateway')] });
+  const cve = cveRecord({ cpeMatches: [cpe('1.5', 'acme', 'widget')] });
+  assert.equal(run([cve], [asset]).length, 1);
+});
+
+test('a package-only asset still matches a CPE advisory through its declared identity', () => {
+  const asset = assetRecord({ cpes: [], purls: ['pkg:npm/lodash@4.17.20'] });
+  assert.equal(run([cveRecord()], [asset]).length, 1);
+});
+
+test('the asset candidate index includes the declared vendor/product beside the CPE', async () => {
+  const statements: { sql: string; values: unknown[] }[] = [];
+  const db = {
+    query: async (sql: string, values: unknown[] = []) => {
+      statements.push({ sql, values });
+      return { rows: [] };
+    },
+  } as never;
+  const asset = assetRecord({ product: 'widget', cpes: [cpe('1.5', 'acme', 'gateway')] });
+  await syncMatchIndex(db, [cveRecord({ cpeMatches: [cpe('1.5', 'acme', 'widget')] })], [asset]);
+  const insert = statements.find((statement) => statement.sql.includes('INSERT INTO match_asset_index'));
+  assert.ok(insert, 'the asset index is written');
+  const identities = insert!.values.filter(Array.isArray).flat();
+  assert.ok(identities.includes('cpe:acme\u001fwidget'), 'the declared identity is indexed');
+  assert.ok(identities.includes('cpe:acme\u001fgateway'), 'the CPE identity is still indexed');
+});
+
+test('a declared version outside a concrete advisory criterion is not reported', () => {
+  // A concrete criterion version is as authoritative as an interval. Before the
+  // fix the alias path ignored it, so a 2.0 asset matched a 1.5-only advisory at
+  // 85% confidence with no review gate.
+  const asset = assetRecord({ cpes: [], version: '2.0' });
+  assert.equal(run([cveRecord()], [asset]).length, 0);
+});
+
+test('a declared version matching a concrete advisory criterion is reported', () => {
+  const asset = assetRecord({ cpes: [], version: '1.5' });
+  assert.equal(run([cveRecord()], [asset]).length, 1);
+});

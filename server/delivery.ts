@@ -1,4 +1,4 @@
-﻿import { validateNativeDelivery, type NativeDelivery } from './correlation/notificationEvidence.ts';
+import { validateNativeDelivery, type NativeDelivery } from './correlation/notificationEvidence.ts';
 import { describeError, writeEvent } from './events';
 import { classifyDeliveryError, computeRetryDelay, getMlRuntime } from './ml/integration.ts';
 import { advisoryEmail } from './advisoryEmail';
@@ -77,6 +77,16 @@ import { transaction, get, getMany, list, put, appendAudit, schemaLockKey } from
 import type { Db } from './db';
 import { createRequester, type Requester } from './network';
 import { isFindingDelivery } from '../src/utils/findingDelivery.ts';
+import {
+  activeClaims,
+  attachClaimsToJob,
+  claimItems,
+  claimsForJob,
+  markClaimsDelivered,
+  releaseClaims,
+  reconcileDuplicateOutboxClaims,
+} from './deliveryClaims.ts';
+import { newsArticleIdentity } from './newsEmail.ts';
 import {
   effectiveSubject,
   normalizeEmailSubject,
@@ -795,8 +805,8 @@ export async function enqueue(
   // re-opened without ever having been accepted by a transport. Transport,
   // recipient, and subscription failures are deliberately not resurrected.
   const inserted = await db.query(
-    `INSERT INTO outbox(id,dedupe_key,channel,target_id,advisory_id,payload,status,priority,edits)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+    `INSERT INTO outbox(id,dedupe_key,channel,target_id,advisory_id,payload,status,priority,edits,delivery_outcome)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,'NOT_ATTEMPTED')
      ON CONFLICT(dedupe_key) DO UPDATE SET
        advisory_id=EXCLUDED.advisory_id,
        payload=EXCLUDED.payload,
@@ -807,11 +817,14 @@ export async function enqueue(
        next_attempt=now(),
        error=NULL,
        provider_id=NULL,
+       delivery_outcome='NOT_ATTEMPTED',
        locked_at=NULL,
        lock_token=NULL,
        updated_at=now()
      WHERE outbox.status='FAILED'
-       AND (COALESCE(outbox.error,'') LIKE '%no longer applicable%'
+       AND outbox.delivery_outcome NOT IN ('UNKNOWN','ACCEPTED')
+       AND (outbox.delivery_outcome IN ('NOT_ATTEMPTED','REJECTED')
+         OR COALESCE(outbox.error,'') LIKE '%no longer applicable%'
          OR (outbox.advisory_id LIKE 'UNVERIFIABLE:%' AND COALESCE(outbox.error,'') LIKE 'Review notification%'))
      RETURNING id`,
     [
@@ -978,7 +991,7 @@ export async function queueEveryoneDeliveryJobs(
   const securityRecipient = await get<EmailRecipient>(db, 'recipients', acceptedJob.target_id);
   if (!securityRecipient || securityRecipient.deliveryGroup === 'EVERYONE') return 0;
   const advisory = await get<Advisory>(db, 'advisories', acceptedJob.advisory_id);
-  if (!advisory) return 0;
+  if (!advisory && !acceptedJob.advisory_id?.startsWith('FINDINGS:')) return 0;
   // Reuse the accepted delivery's payload verbatim, stripping only the
   // per-recipient email address so each Everyone job gets its own.
   const { recipientEmail: _omit, ...sharedPayload } = acceptedJob.payload as Job['payload'] & {
@@ -996,11 +1009,25 @@ export async function queueEveryoneDeliveryJobs(
   // Channel-scoped (audit M-5): a webhook job for the same advisory shares
   // nothing with an email recipient. `ACCEPTED` is included deliberately — an
   // operator resend of the same advisory must not re-queue the broadcast.
-  const pending = await db.query<{ target_id: string }>(
-    "SELECT target_id FROM outbox WHERE advisory_id=$1 AND channel='email' AND status IN ('REVIEW','QUEUED','SENDING','ACCEPTED')",
+  const pending = await db.query<{ target_id: string; recipient_email: string }>(
+    `SELECT o.target_id, COALESCE(NULLIF(o.payload->>'recipientEmail',''), r.data->>'email', '') AS recipient_email
+     FROM outbox o
+     LEFT JOIN records r ON r.kind='recipients' AND r.id=o.target_id
+     WHERE o.advisory_id=$1 AND o.channel='email' AND o.status IN ('REVIEW','QUEUED','SENDING','ACCEPTED')`,
     [acceptedJob.advisory_id],
   );
   const activeTargets = new Set(pending.rows.map((row) => row.target_id));
+  const activeEmails = new Set(
+    pending.rows
+      .map((row) => row.recipient_email.toLowerCase())
+      .filter((email) => email.length > 0),
+  );
+  if (securityRecipient?.email) {
+    activeEmails.add(securityRecipient.email.toLowerCase());
+  }
+  if (acceptedJob.payload.recipientEmail) {
+    activeEmails.add(acceptedJob.payload.recipientEmail.toLowerCase());
+  }
   const everyoneRecipients = (await list<EmailRecipient>(db, 'recipients')).filter(
     (r) => r.enabled && r.deliveryGroup === 'EVERYONE',
   );
@@ -1008,22 +1035,28 @@ export async function queueEveryoneDeliveryJobs(
   let queued = 0;
   const priority = acceptedJob.priority ?? 0;
   for (const recipient of everyoneRecipients) {
-    if (activeTargets.has(recipient.id)) continue;
-    // The recipient must still be subscribed to every finding in the accepted
-    // bundle; the consolidated document is delivered as-is.
-    if (
-      await enqueue(
-        db,
-        'email',
-        recipient.id,
-        acceptedJob.advisory_id,
-        { ...sharedPayload, recipientEmail: recipient.email },
-        `${dispatchKey}:everyone:${contentRevision}:email:${recipient.id}`,
-        'QUEUED',
-        priority,
-      )
-    )
+    if (activeTargets.has(recipient.id) || activeEmails.has(recipient.email.toLowerCase())) continue;
+    const findingIds = (acceptedJob.payload.includedFindingIds ?? advisory?.findingIds ?? []) as string[];
+    const claimRequests = claimsForJob(recipient.id, 'finding', findingIds);
+    const claim = await claimItems(db, claimRequests);
+    if (!claim.granted.length) continue;
+    const dedupeKey = `${dispatchKey}:everyone:${contentRevision}:email:${recipient.id}`;
+    const jobId = await enqueue(
+      db,
+      'email',
+      recipient.id,
+      acceptedJob.advisory_id,
+      { ...sharedPayload, recipientEmail: recipient.email },
+      dedupeKey,
+      'QUEUED',
+      priority,
+    );
+    if (jobId) {
+      await attachClaimsToJob(db, jobId, claim.granted);
       queued++;
+    } else {
+      await reconcileDuplicateOutboxClaims(db, dedupeKey, claim.granted);
+    }
   }
   if (queued) {
     await writeEvent(db, {
@@ -1206,42 +1239,108 @@ export async function queueConsolidatedFindingNotifications(
   const unique = [...new Map(findings.filter((finding) => finding?.id).map((finding) => [finding.id, finding])).values()]
     .filter(
       (finding) =>
-        !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) && !finding.reviewNotifiedAt,
+        !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status),
     )
     .sort((left, right) => left.cveId.localeCompare(right.cveId) || left.id.localeCompare(right.id));
   if (!unique.length) return 0;
   const recipients = (options.recipients ?? (await list<EmailRecipient>(db, 'recipients'))).filter(
     (recipient) => recipient.enabled,
   );
-if (!recipients.length) return 0;
-  // The content-revision dedupe key is not enough: a batch [A] and a later
-  // batch [A, B] have different keys. Exclude A before building the later mail.
-  // Scope this to each recipient so one recipient's pending mail cannot hide
-  // another recipient's finding. Include older advisory/digest jobs too.
-  const claimed = await db.query<{ target_id: string; finding_id: string }>(
-    `SELECT DISTINCT o.target_id, entries.finding_id
-       FROM outbox o
-       CROSS JOIN LATERAL jsonb_array_elements_text(
-         CASE WHEN jsonb_typeof(o.payload->'includedFindingIds')='array'
-           THEN o.payload->'includedFindingIds' ELSE '[]'::jsonb END
-       ) AS entries(finding_id)
-      WHERE o.channel='email' AND o.status IN ('QUEUED','SENDING','ACCEPTED')
-        AND o.target_id=ANY($1::text[]) AND entries.finding_id=ANY($2::text[])`,
-    [recipients.map((r) => r.id), unique.map((f) => f.id)],
+  if (!recipients.length) return 0;
+  const hooks = (await list<WebhookEndpoint>(db, 'webhooks')).filter((hook) => hook.enabled);
+
+  const settings = (await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
+  const deferEveryone = settings.deferEveryoneUntilSecurityDelivered;
+  const allRecipients = await list<EmailRecipient>(db, 'recipients');
+  const securityRecipients = allRecipients.filter(
+    (r) => r.enabled && (r.deliveryGroup === 'SECURITY_TEAM' || r.deliveryGroup === undefined),
   );
-  const claimedByRecipient = new Map<string, Set<string>>();
-  for (const row of claimed.rows) {
-    const ids = claimedByRecipient.get(row.target_id) ?? new Set<string>();
-    ids.add(row.finding_id);
-    claimedByRecipient.set(row.target_id, ids);
+  const securitySubscribedFindingIds = new Set<string>();
+  if (deferEveryone && securityRecipients.length > 0) {
+    for (const f of unique) {
+      if (securityRecipients.some((sec) => recipientAllows(sec, f))) {
+        securitySubscribedFindingIds.add(f.id);
+      }
+    }
   }
+
   let queued = 0;
   const generatedAt = new Date();
   const documentCache = new Map<string, { payload: Job['payload']; priority: number }>();
+
   for (const recipient of recipients) {
-    const claimedIds = claimedByRecipient.get(recipient.id) ?? new Set<string>();
-    const permitted = unique.filter((finding) =>
-      recipientAllows(recipient, finding) && !claimedIds.has(finding.id));
+    let permitted = unique.filter((finding) => recipientAllows(recipient, finding));
+    if (deferEveryone && recipient.deliveryGroup === 'EVERYONE' && securitySubscribedFindingIds.size > 0) {
+      permitted = permitted.filter((finding) => !securitySubscribedFindingIds.has(finding.id));
+    }
+    if (!permitted.length) continue;
+
+    const enqueueForRecipient = async (tx: Db) => {
+      const claimRequests = claimsForJob(
+        recipient.id,
+        'finding',
+        permitted.map((f) => f.id),
+      );
+      const claim = await claimItems(tx, claimRequests);
+      if (!claim.granted.length) return false;
+
+      const grantedIds = new Set(claim.granted.map((c) => c.itemId));
+      const ownedFindings = permitted.filter((f) => grantedIds.has(f.id));
+      if (!ownedFindings.length) return false;
+
+      const findingIds = ownedFindings.map((finding) => finding.id);
+      const bucket = consolidatedFindingBatchId(findingIds);
+      let built = documentCache.get(bucket);
+      if (!built) {
+        const { advisory, document } = consolidatedFindingsDocument(ownedFindings, generatedAt);
+        const evidence = deliveryRevisionEvidence(ownedFindings);
+        built = {
+          payload: {
+            ...document,
+            cveIds: advisory.cveIds,
+            includedFindingIds: findingIds,
+            ...evidence,
+            contentRevision: createHash('sha256')
+              .update(stableJson({ findingIds: [...findingIds].sort(), ...evidence }))
+              .digest('hex')
+              .slice(0, 20),
+            generatedAt: generatedAt.toISOString(),
+            digestKey: advisory.id,
+          },
+          priority: advisoryPriority(ownedFindings),
+        };
+        documentCache.set(bucket, built);
+      }
+
+      const dedupeKey = `findings:${built.payload.contentRevision}:email:${recipient.id}`;
+      const id = await enqueue(
+        tx,
+        'email',
+        recipient.id,
+        `FINDINGS:${bucket}`,
+        { ...built.payload, recipientEmail: recipient.email },
+        dedupeKey,
+        'QUEUED',
+        built.priority,
+      );
+
+      if (!id) {
+        await reconcileDuplicateOutboxClaims(tx, dedupeKey, claim.granted);
+        return false;
+      }
+      await attachClaimsToJob(tx, id, claim.granted);
+      return true;
+    };
+
+    const isPoolDb = typeof (db as any).connect === 'function';
+    const didQueue = isPoolDb
+      ? await transaction(db as pg.Pool, enqueueForRecipient)
+      : await enqueueForRecipient(db);
+    if (didQueue) queued++;
+  }
+
+  for (const hook of hooks) {
+    const permitted = unique.filter((finding) => webhookAllows(hook, finding));
     if (!permitted.length) continue;
     const findingIds = permitted.map((finding) => finding.id);
     const bucket = consolidatedFindingBatchId(findingIds);
@@ -1266,19 +1365,21 @@ if (!recipients.length) return 0;
       };
       documentCache.set(bucket, built);
     }
+    const dedupeKey = `findings:${built.payload.contentRevision}:webhook:${hook.id}`;
     if (
       await enqueue(
         db,
-        'email',
-        recipient.id,
+        'webhook',
+        hook.id,
         `FINDINGS:${bucket}`,
-        { ...built.payload, recipientEmail: recipient.email },
-        `findings:${built.payload.contentRevision}:email:${recipient.id}`,
+        built.payload,
+        dedupeKey,
         'QUEUED',
         built.priority,
       )
-    )
+    ) {
       queued++;
+    }
   }
   if (queued)
     await writeEvent(db, {
@@ -1463,9 +1564,19 @@ export async function queueDigestAdvisory(
   const recipients = (await list<EmailRecipient>(db, 'recipients')).filter((recipient) => recipient.enabled);
   const hooks = (await list<WebhookEndpoint>(db, 'webhooks')).filter((hook) => hook.enabled);
 
+  const activeFindingClaims = await activeClaims(
+    db,
+    recipients.map((r) => r.id),
+    'finding',
+    findings.map((f) => f.id),
+  );
+
   const recipientBatches = new Map<string, Finding[]>();
   for (const recipient of recipients) {
-    const permitted = findings.filter((finding) => recipientAllows(recipient, finding));
+    const blocked = activeFindingClaims.get(recipient.id) ?? new Set<string>();
+    const permitted = findings.filter(
+      (finding) => recipientAllows(recipient, finding) && !blocked.has(finding.id),
+    );
     if (permitted.length) recipientBatches.set(recipient.id, permitted);
   }
   const webhookBatches = new Map<string, Finding[]>();
@@ -1492,6 +1603,14 @@ export async function queueDigestAdvisory(
 
   for (const [recipientId, batch] of recipientBatches) {
     const recipient = recipients.find((candidate) => candidate.id === recipientId)!;
+    const dedupeKey = `${stableDispatchKey}:${contentRevision}:email:${recipient.id}`;
+    const claimRequests = claimsForJob(
+      recipient.id,
+      'finding',
+      batch.map((f) => f.id),
+    );
+    const claim = await claimItems(db, claimRequests);
+    if (!claim.granted.length) continue;
     const view = digestView(union, batch);
     const document = digestDocument(view, batch, render, generatedAt);
     const payload = {
@@ -1503,20 +1622,22 @@ export async function queueDigestAdvisory(
       contentRevision,
       recipientEmail: recipient.email,
     };
-    if (
-      await enqueue(
-        db,
-        'email',
-        recipient.id,
-        union.id,
-        payload,
-        `${stableDispatchKey}:${contentRevision}:email:${recipient.id}`,
-        'QUEUED',
-        priority,
-      )
-    ) {
+    const jobId = await enqueue(
+      db,
+      'email',
+      recipient.id,
+      union.id,
+      payload,
+      dedupeKey,
+      'QUEUED',
+      priority,
+    );
+    if (jobId) {
+      await attachClaimsToJob(db, jobId, claim.granted);
       jobs++;
       recipientCount++;
+    } else {
+      await reconcileDuplicateOutboxClaims(db, dedupeKey, claim.granted);
     }
   }
 
@@ -1576,7 +1697,7 @@ export async function deliverNext(
   const job = await transaction(pool, async (db) => {
     const claimed = await db.query(
       `WITH candidate AS (
-         SELECT id,
+         SELECT id, channel, target_id, advisory_id,
            CASE WHEN channel='email' AND attempts > 0 THEN
              (SELECT occurred_at FROM operational_events
               WHERE code='ml.delivery.outcome' AND context->>'jobId'=outbox.id::text
@@ -1586,13 +1707,27 @@ export async function deliverNext(
          WHERE ((status='QUEUED' AND next_attempt<=now()) OR
            (status='SENDING' AND locked_at<now()-interval '2 minutes'))
            AND (channel<>'email' OR $2::boolean)
-         ORDER BY priority DESC, next_attempt
+         ORDER BY priority DESC, next_attempt ASC, created_at DESC
          FOR UPDATE SKIP LOCKED LIMIT 1
+       ),
+       claimed AS (
+         UPDATE outbox AS o
+         SET status='SENDING',locked_at=now(),lock_token=$1,attempts=attempts+1,delivery_outcome='UNKNOWN',updated_at=now()
+         FROM candidate AS c WHERE o.id=c.id
+         RETURNING o.*,c.prior_attempt_at
+       ),
+       superseded AS (
+         UPDATE outbox
+         SET status='SUPERSEDED', updated_at=now()
+         FROM claimed
+         WHERE outbox.channel=claimed.channel
+           AND outbox.target_id=claimed.target_id
+           AND outbox.advisory_id=claimed.advisory_id
+           AND outbox.id <> claimed.id
+           AND outbox.status='QUEUED'
+         RETURNING outbox.id
        )
-       UPDATE outbox AS o
-       SET status='SENDING',locked_at=now(),lock_token=$1,attempts=attempts+1,updated_at=now()
-       FROM candidate AS c WHERE o.id=c.id
-       RETURNING o.*,c.prior_attempt_at`,
+       SELECT * FROM claimed`,
       [randomUUID(), settings.emailEnabled !== false],
     );
     return claimed.rows[0] as Job | undefined;
@@ -1672,7 +1807,14 @@ export async function deliverNext(
       // advisory states the limitation on each affected finding, so suppressing
       // the email only hid real exposure from the security team.
     }
-    const advisory = await get<Advisory>(pool, 'advisories', job.advisory_id);
+    let advisory = await get<Advisory>(pool, 'advisories', job.advisory_id);
+    if (!advisory && typeof job.advisory_id === 'string' && job.advisory_id.startsWith('FINDINGS:')) {
+      const findingIds = (job.payload.includedFindingIds ?? []) as string[];
+      const findingMap = await getMany<Finding>(pool, 'findings', findingIds);
+      const findings = findingIds.map((id) => findingMap.get(id)).filter((f): f is Finding => !!f);
+      const generatedAt = job.payload.generatedAt ? new Date(job.payload.generatedAt) : new Date();
+      advisory = consolidatedFindingsDocument(findings, generatedAt).advisory;
+    }
     const currentFindings: Finding[] = [];
     // Zero-day digest jobs are standalone summaries: their findings were
     // deliberately withheld from the dispatch path, so there is no advisory and
@@ -1807,7 +1949,7 @@ export async function deliverNext(
           revalidationError = 'Finding applicability could not be re-verified; delivery deferred';
           continue;
         }
-        if (match) currentFindings.push(match);
+        if (match) currentFindings.push({ ...match, id });
         // A finding the policy still holds for review is disclosed, not withheld.
         // Every match is dispatched; the rendered advisory annotates the finding
         // with its confidence limitation. Only a finding that no longer applies
@@ -1858,13 +2000,16 @@ export async function deliverNext(
       ]);
       const evidenceOnly = invalid.every((reason) => EVIDENCE_ONLY_REASONS.has(reason));
       if (invalid.length) {
-        if (surviving.length && (advisory.id.startsWith('FINDINGS:') || !evidenceOnly)) {
+        if (surviving.length && (job.advisory_id.startsWith('FINDINGS:') || advisory.id.startsWith('FINDINGS:') || !evidenceOnly)) {
           declaredFindingIds = surviving.map((finding) => finding.id);
           declaredCveIds = [...new Set(surviving.map((finding) => finding.cveId))];
           // Every shape is rebuilt with the canonical document builder so the
           // attachment stays the email. A digest keeps its batch key so the
           // advisory accounting still recognises the delivery.
-          job.payload = consolidatedPayloadFor(advisory, surviving, declaredCveIds);
+          job.payload = {
+            ...job.payload,
+            ...consolidatedPayloadFor(advisory, surviving, declaredCveIds),
+          };
         } else if (!surviving.length) {
           // Nothing in this bundle can still be delivered.
           permanent = true;
@@ -2057,11 +2202,13 @@ export async function deliverNext(
     const scheduledRetryDelaySource = retryNotBefore > retryDelayBaseAt + retryDelay.delayMs
       ? 'PROVIDER_RETRY_AFTER'
       : retryDelay.source;
+    const outcome = !error ? 'ACCEPTED' : (failed && transportRejected) ? 'REJECTED' : 'UNKNOWN';
     await db.query(
-      'UPDATE outbox SET status=$2,next_attempt=$3,error=$4,provider_id=$5,locked_at=NULL,lock_token=NULL,updated_at=now() WHERE id=$1',
+      'UPDATE outbox SET status=$2,delivery_outcome=$3,next_attempt=$4,error=$5,provider_id=$6,locked_at=NULL,lock_token=NULL,updated_at=now() WHERE id=$1',
       [
         job.id,
         error ? (failed ? 'FAILED' : 'QUEUED') : 'ACCEPTED',
+        outcome,
         next,
         // Keep the failure reason on the row so the Action Center can show why
         // a delivery is being retried or has failed.
@@ -2268,28 +2415,41 @@ export async function deliverNext(
     // produce a new key and re-notify evidence the recipient already had.
     // The timestamp is also the acceptance evidence for a finding whose group
     // email is delayed, so the delay gate below cannot re-send it.
-    if (job.channel === 'email' && !error) {
+    if (job.channel === 'email') {
       const notifiedIds = job.payload.includedFindingIds ?? [];
-      if (notifiedIds.length) {
+      if (!error && notifiedIds.length) {
         const now = new Date().toISOString();
         await db.query(
           `UPDATE records SET data=jsonb_set(data,'{reviewNotifiedAt}',to_jsonb($2::text)),updated_at=now()
            WHERE kind='findings' AND id=ANY($1::text[]) AND COALESCE(data->>'reviewNotifiedAt','')=''`,
           [notifiedIds, now],
         );
+        await markClaimsDelivered(db, claimsForJob(job.target_id, 'finding', notifiedIds), {
+          jobId: job.id,
+          deliveredAt: now,
+        });
+      }
+      if (failed && transportRejected && notifiedIds.length) {
+        await releaseClaims(db, claimsForJob(job.target_id, 'finding', notifiedIds), { jobId: job.id });
       }
     }
-// After a Security-team delivery is confirmed ACCEPTED, queue the same
+    // After a Security-team delivery is confirmed ACCEPTED, queue the same
     // email for Everyone-group recipients. This is the deferred half of the
     // `deferEveryoneUntilSecurityDelivered` setting; the function is a no-op when
     // the setting is off or the recipient is not Security-team.
     if (job.channel === 'email' && !error && job.target_id !== 'test') {
       await queueEveryoneDeliveryJobs(db, job, settings);
     }
-    if (job.channel === 'email' && !error && job.payload.newsEvidence?.articles?.length) {
-      // The notification is durable only after the transport accepts it.
-      await recordNewsDeliveries(db, job.target_id, job.advisory_id,
-        job.payload.newsEvidence.articles, new Date().toISOString());
+    if (job.channel === 'email' && job.payload.newsEvidence?.articles?.length) {
+      const articleIdentities = job.payload.newsEvidence.articles.map((a: any) => newsArticleIdentity(a));
+      if (!error) {
+        // The notification is durable only after the transport accepts it.
+        await recordNewsDeliveries(db, job.target_id, job.advisory_id,
+          job.payload.newsEvidence.articles, new Date().toISOString());
+        await markClaimsDelivered(db, claimsForJob(job.target_id, 'article', articleIdentities), { jobId: job.id });
+      } else if (failed && transportRejected) {
+        await releaseClaims(db, claimsForJob(job.target_id, 'article', articleIdentities), { jobId: job.id });
+      }
     }
     await writeEvent(db, {
       category: job.channel === 'email' ? 'EMAIL' : 'EVENT',

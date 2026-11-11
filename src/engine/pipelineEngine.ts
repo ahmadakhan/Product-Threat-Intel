@@ -384,11 +384,31 @@ export function runVulnerabilityPipeline(
       bucket.push(asset);
       assetsByPurl.set(identity, bucket);
     }
+    // The operator-declared vendor/product is an authoritative identity even
+    // when the asset's CPEs are stale, more specific, or absent. The matcher's
+    // alias and prose paths read these fields directly, so the candidate
+    // prefilter must make the asset reachable by them; otherwise a pair the
+    // matcher accepts is dropped before matching. Registering the declared
+    // identity is a superset (the matcher still decides), so it cannot create a
+    // finding on its own.
+    const seenProducts = new Set<string>();
+    const indexIdentity = (vendor: string, product: string) => {
+      if (!vendor || !product) return;
+      for (const vendorKey of aliasVendorKeys(vendor))
+        for (const productKey of aliasProductKeys(product)) {
+          const key = `${vendorKey}\u0000${productKey}`;
+          if (seenProducts.has(key)) continue;
+          seenProducts.add(key);
+          const bucket = assetsByProduct.get(key) || [];
+          bucket.push(asset);
+          assetsByProduct.set(key, bucket);
+        }
+    };
+    indexIdentity(asset.vendor, asset.product);
     if (!asset.cpes.length) {
       if (!asset.purls?.length) assetsWithoutIdentifiers.push(asset);
       continue;
     }
-    const seenProducts = new Set<string>();
     let usableIdentity = false;
     for (const cpe of asset.cpes) {
       const parsed = parseCPE23(cpe);
@@ -399,15 +419,7 @@ export function runVulnerabilityPipeline(
         break;
       }
       // Register asset under all alias-expanded vendor/product keys.
-      for (const vendorKey of aliasVendorKeys(parsed.vendor))
-        for (const productKey of aliasProductKeys(parsed.product)) {
-          const key = `${vendorKey}\u0000${productKey}`;
-          if (seenProducts.has(key)) continue;
-          seenProducts.add(key);
-          const bucket = assetsByProduct.get(key) || [];
-          bucket.push(asset);
-          assetsByProduct.set(key, bucket);
-        }
+      indexIdentity(parsed.vendor, parsed.product);
     }
     // A CPE list that is non-empty but entirely malformed yields no structured
     // identity the matcher can use. The candidate prefilter would otherwise make

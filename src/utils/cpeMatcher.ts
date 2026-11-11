@@ -1167,6 +1167,43 @@ export function matchesWatchlistItem(
             matchedVersion = inRangeVersions[0];
             applicabilityRequiresReview = false;
           }
+        } else {
+          // A concrete version on the criterion is just as authoritative as an
+          // interval. The alias path previously matched "acme/widget 1.5" to an
+          // inventory item declared 2.0 at 85% confidence with no review flag,
+          // which auto-dispatched under an authoritative source. Compare the
+          // declared/CPE versions against the criterion version with the same
+          // tri-state evaluator used for intervals: only a provable mismatch
+          // excludes, an incomparable version stays review-gated.
+          const concreteVersion =
+            parsedVuln.version !== '*' &&
+            parsedVuln.version !== '-' &&
+            !hasUnescapedCpeWildcard(parsedVuln.version)
+              ? cpeLiteral(parsedVuln.version)
+              : null;
+          if (concreteVersion) {
+            if (!assetVersions.length) {
+              applicabilityRequiresReview = true;
+            } else {
+              const exactRange: NvdVersionRange = {
+                versionStartIncluding: concreteVersion,
+                versionEndIncluding: concreteVersion,
+              };
+              const verdicts = assetVersions.map(
+                (version) => evaluateVersionInRange(version, exactRange).verdict,
+              );
+              const inRangeAt = verdicts.indexOf('IN_RANGE');
+              if (inRangeAt >= 0) {
+                versionVerified = true;
+                matchedVersion = assetVersions[inRangeAt];
+                applicabilityRequiresReview = false;
+              } else if (verdicts.every((verdict) => verdict === 'OUT_OF_RANGE')) {
+                continue;
+              } else {
+                applicabilityRequiresReview = true;
+              }
+            }
+          }
         }
         return {
           matched: true,
@@ -1180,6 +1217,47 @@ export function matchesWatchlistItem(
         };
       }
     }
+  }
+
+  // A same-identity criterion with a concrete version is authoritative even when
+  // the alias return above did not fire (for example, a stricter inventory CPE
+  // version also conflicts). Do not let the free-text fallback re-admit a
+  // release that the advisory's own criterion proved inapplicable.
+  if (!rangeHasBounds && assetVersions.length) {
+    const concreteCriterionVersions = [
+      ...new Set(
+        vulnCpeMatches
+          .map((vulnCpe) => parseCPE23(vulnCpe))
+          .filter(
+            (vuln) =>
+              vuln.isValid &&
+              matchVendorWithAliases(normVendor, vuln.vendor, customVendorAliases) &&
+              matchProductWithAliases(normProduct, vuln.product, customProductAliases) &&
+              vuln.version !== '*' &&
+              vuln.version !== '-' &&
+              !hasUnescapedCpeWildcard(vuln.version),
+          )
+          .map((vuln) => cpeLiteral(vuln.version)),
+      ),
+    ];
+    const everyCriterionExcludes =
+      concreteCriterionVersions.length > 0 &&
+      concreteCriterionVersions.every((criterionVersion) =>
+        assetVersions.every(
+          (version) =>
+            evaluateVersionInRange(version, {
+              versionStartIncluding: criterionVersion,
+              versionEndIncluding: criterionVersion,
+            }).verdict === 'OUT_OF_RANGE',
+        ),
+      );
+    if (everyCriterionExcludes)
+      return {
+        matched: false,
+        method: 'NONE',
+        confidence: 0,
+        evidence: 'Version outside the advisory criterion',
+      };
   }
 
   // 5. Fallback Heuristic

@@ -89,8 +89,28 @@ function cpeIdentities(cpe: string, options: MatchIndexOptions): string[] {
   return [...identities];
 }
 
+function declaredIdentityKeys(
+  vendor: string,
+  product: string,
+  options: MatchIndexOptions,
+): string[] {
+  if (!vendor || !product) return [];
+  const vendors = aliasKeys(vendor, DEFAULT_VENDOR_ALIASES, options.vendorAliases);
+  const products = aliasKeys(product, DEFAULT_PRODUCT_ALIASES, options.productAliases);
+  const identities = new Set<string>();
+  for (const vendorKey of vendors)
+    for (const productKey of products) identities.add(identityKey(vendorKey, productKey));
+  return [...identities];
+}
+
 function assetIdentities(asset: WatchListItem, options: MatchIndexOptions): string[] {
   const identities = new Set<string>();
+  // The operator-declared vendor/product is an authoritative identity in the
+  // matcher's alias and prose paths. Index it alongside the CPE/PURL identities;
+  // otherwise the SQL pushdown excludes an asset whose CPEs are stale, more
+  // specific, or absent, and the worker never evaluates the pair.
+  for (const identity of declaredIdentityKeys(asset.vendor, asset.product, options))
+    identities.add(identity);
   for (const cpe of asset.cpes) for (const identity of cpeIdentities(cpe, options)) identities.add(identity);
   for (const purl of asset.purls ?? []) {
     const identity = purlKey(purl);
