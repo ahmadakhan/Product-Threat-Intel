@@ -149,7 +149,7 @@ test('trained finding models produce recommendations without changing authoritat
       cve: { ...original.cve, sourceFeeds: ['nvd-source', 'kev-source'] },
     };
     const feedTypesById = new Map([
-      ['nvd-source', 'VULNCHECK_NVD'],
+      ['nvd-source', 'NVD_API'],
       ['kev-source', 'CISA_KEV'],
     ] as const);
     assert.equal(findingFeatures(sourceFinding, feedTypesById).sourceFeedWeight, 40);

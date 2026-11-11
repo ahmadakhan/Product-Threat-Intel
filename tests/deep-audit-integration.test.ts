@@ -22,7 +22,7 @@ import { recipientAllows } from '../server/delivery.ts';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
 import type { AppSettings, EmailRecipient, Finding, NormalizedCVE, WatchListItem } from '../src/types/index.ts';
 
-const settings: AppSettings = { ...DEFAULT_SETTINGS, scopeHours: 24 * 365 * 10, autoDispatchEnabled: true };
+const settings: AppSettings = { ...DEFAULT_SETTINGS, scopeHours: 24 * 365 * 10 };
 
 function baseCve(overrides: Partial<NormalizedCVE> = {}): NormalizedCVE {
   return {
@@ -35,7 +35,7 @@ function baseCve(overrides: Partial<NormalizedCVE> = {}): NormalizedCVE {
     cwe: [],
     cpeMatches: ['cpe:2.3:a:example:widget:*:*:*:*:*:*:*:*'],
     versionRange: { versionEndExcluding: '2.0' },
-    sourceFeeds: ['VULNCHECK_NVD'],
+    sourceFeeds: ['NVD_API'],
     epss: { score: 0.5, percentile: 0.9 },
     cisaKev: { isKev: false },
     exploitStatus: 'None',

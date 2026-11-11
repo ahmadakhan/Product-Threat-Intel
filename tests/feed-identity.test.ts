@@ -29,11 +29,7 @@ test('recommended feeds contain no duplicate endpoints and avoid one-request-per
 
 test('recommended public feeds are enabled while credentialed and known-unavailable feeds stay disabled', () => {
   assert.ok(RECOMMENDED_FEEDS.filter((feed) => feed.authType === 'NONE' && feed.vendorSeed && !['feed-twitter-security', 'feed-exploitdb'].includes(feed.id)).every((feed) => feed.enabled));
-  // VulnCheck NVD++ is disabled by default: it requires a Bearer API token.
-  // Operators configure a token and enable it via the Feeds UI. All credentialed
-  // feeds stay disabled unless explicitly enabled.
-  const credentialedFeeds = RECOMMENDED_FEEDS.filter((feed) => feed.authType !== 'NONE');
-  assert.ok(credentialedFeeds.every((feed) => !feed.enabled));
+  assert.ok(RECOMMENDED_FEEDS.filter((feed) => feed.authType !== 'NONE').every((feed) => !feed.enabled));
   assert.ok(RECOMMENDED_FEEDS.filter((feed) => ['feed-twitter-security', 'feed-exploitdb'].includes(feed.id)).every((feed) => !feed.enabled));
 });
 

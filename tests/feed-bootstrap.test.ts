@@ -64,22 +64,6 @@ test('feed bootstrap is opt-in and URL repair preserves operator intent without 
     assert.equal(await get<ThreatFeed>(pool, 'feeds', darkReading.id), undefined);
     assert.equal((await get<ThreatFeed>(pool, 'feeds', 'operator-darkreading'))?.enabled, false);
     assert.equal((await list(pool, 'feeds')).length, RECOMMENDED_FEEDS.length);
-    // A VulnCheck NVD++ feed enabled without a Bearer token would 401 on every
-    // run; bootstrap must disable it the same way it does for VulnCheck KEV.
-    const vulncheck = RECOMMENDED_FEEDS.find((feed) => feed.type === 'VULNCHECK_NVD');
-    assert.ok(vulncheck);
-    await put(pool, 'feeds', vulncheck.id, { ...vulncheck, enabled: true, authSecretKey: '' });
-    await transaction(pool, (db) => reconcileRecommendedFeeds(db, false));
-    const disabled = await get<ThreatFeed>(pool, 'feeds', vulncheck.id);
-    assert.equal(disabled?.enabled, false);
-    assert.equal(disabled?.healthStatus, 'DOWN');
-    assert.match(disabled?.errorLog ?? '', /VulnCheck NVD\+\+ requires a configured Bearer/);
-    // An operator-enabled feed with a real ciphertext survives reconciliation.
-    await put(pool, 'feeds', vulncheck.id, { ...vulncheck, enabled: true, authSecretKey: 'preserved-ciphertext' });
-    await transaction(pool, (db) => reconcileRecommendedFeeds(db, false));
-    const restored = await get<ThreatFeed>(pool, 'feeds', vulncheck.id);
-    assert.equal(restored?.enabled, true);
-    assert.equal(restored?.authSecretKey, 'preserved-ciphertext');
   } finally {
     await pool.end();
     await control.query(`DROP SCHEMA ${schema} CASCADE`);

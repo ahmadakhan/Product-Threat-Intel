@@ -317,7 +317,7 @@ function textWordPattern(word: string): RegExp {
   const cached = textWordPatterns.get(word);
   if (cached) return cached;
   const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(`(?<![\\p{L}\\p{N}+#])${escaped}(?![\\p{L}\\p{N}+#])`, 'u');
+  const pattern = new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`);
   if (textWordPatterns.size >= MAX_TEXT_WORD_PATTERNS) {
     // Evict oldest 10% instead of clearing all
     const toEvict = Math.max(1, Math.floor(textWordPatterns.size * 0.1));
@@ -330,12 +330,10 @@ function textWordPattern(word: string): RegExp {
 
 function containsIdentityWords(text: string, value: string): boolean {
   const words = value
-    .normalize('NFKC')
     .toLowerCase()
-    .split(/[^\p{L}\p{N}+#]+/u)
+    .split(/[^a-z0-9]+/)
     .filter(Boolean);
-  const significant = words.filter((word) => word.length >= TEXT_IDENTITY_MIN_WORD ||
-    (/[+#]/.test(word) && /[\p{L}\p{N}]/u.test(word)));
+  const significant = words.filter((word) => word.length >= TEXT_IDENTITY_MIN_WORD);
   // `os`, `ai`, `go` and `3m` are real names but not usable as prose evidence.
   if (!significant.length) return false;
   // Prefer the long words; for a multi-word identity that also contains short
@@ -396,13 +394,6 @@ export function verifyAliasNamespaceEdition(asset: ParsedCPE, vuln: ParsedCPE): 
  * identity: without help it intersects every advisory for the same part.
  * Resolve the wildcard side from the inventory's own vendor/product fields so
  * a generic inventory CPE matches the product it actually describes.
- *
- * When every wildcarded identity component is substituted, the resulting CPE
- * asserts a concrete vendor and product, so the match is no longer a generic
- * correlation: it is treated like a specific registered CPE (high confidence,
- * no review hold). A substitution that leaves a wildcard in place (the
- * inventory record itself has no vendor/product to fill in) stays generic and
- * remains review-gated.
  */
 function resolveGenericCpeIdentity(
   assetCpeStr: string,
@@ -432,13 +423,7 @@ function resolveGenericCpeIdentity(
   const tokens = splitCpeTokens(parsed.raw.slice(8));
   tokens[1] = vendor;
   tokens[2] = product;
-  // A fully substituted identity is concrete: vendor and product both resolve
-  // to specific tokens, so the match no longer needs the generic-identity
-  // review gate. A partially resolved one (a wildcard the inventory could not
-  // fill in) stays generic.
-  const fullyResolved =
-    !isGenericCpeComponent(vendor) && !isGenericCpeComponent(product);
-  return { cpe: `cpe:2.3:${tokens.join(':')}`, inferred: !fullyResolved };
+  return { cpe: `cpe:2.3:${tokens.join(':')}`, inferred: true };
 }
 
 export interface CpeAliasOptions {
@@ -615,169 +600,6 @@ export const normalizeAliasToken = (value: string) =>
     .toLowerCase()
     .replace(/\\(.)/g, '$1')
     .replace(/[\s._-]+/g, '');
-
-/**
- * Canonical vendor/product registry for enterprise-grade identity resolution.
- *
- * Maps common spelling variants, multi-word tokenizations, and case variants
- * to a single canonical identity so that "SonicWall", "sonicwall", "SONICWALL",
- * "Sonic Wall", and "Sonic-Wall" all correlate to the same finding without
- * requiring an operator-managed alias row.
- *
- * The registry is additive only: entries never remove or merge distinct
- * products (e.g. "sonicwall" and "sonicwall-remote-access" stay separate).
- */
-const CANONICAL_VENDOR_MAP: Record<string, string> = {
-  'sonicwall': 'sonicwall',
-  'sonic wall': 'sonicwall',
-  'sonic-wall': 'sonicwall',
-  'microsoft': 'microsoft',
-  'msft': 'microsoft',
-  'microsoft corporation': 'microsoft',
-  'cisco': 'cisco',
-  'cisco systems': 'cisco',
-  'ciscoproducts': 'cisco',
-  'adobe': 'adobe',
-  'adobe systems': 'adobe',
-  'oracle': 'oracle',
-  'oracle corporation': 'oracle',
-  'vmware': 'vmware',
-  'vmware inc': 'vmware',
-  'vmware, inc': 'vmware',
-  'red hat': 'redhat',
-  'redhat': 'redhat',
-  'redhat inc': 'redhat',
-  'ubuntu': 'ubuntu',
-  'canonical': 'ubuntu',
-  'canonical ltd': 'ubuntu',
-  'apache': 'apache',
-  'apache software foundation': 'apache',
-  'the apache software foundation': 'apache',
-  'nginx': 'nginx',
-  'nginx inc': 'nginx',
-  'nginx, inc': 'nginx',
-  'mysql': 'mysql',
-  'oracle mysql': 'mysql',
-  'postgresql': 'postgresql',
-  'postgres': 'postgresql',
-  'the postgresql global development group': 'postgresql',
-};
-
-const CANONICAL_PRODUCT_MAP: Record<string, string> = {
-  'sonicos': 'sonicos',
-  'sonicwall sonicos': 'sonicos',
-  'sonic-wall sonicos': 'sonicos',
-  'windows': 'windows',
-  'microsoft windows': 'windows',
-  'ms windows': 'windows',
-  'ios': 'cisco_ios',
-  'cisco ios': 'cisco_ios',
-  'cisco ios xe': 'cisco_ios_xe',
-  'cisco ios xr': 'cisco_ios_xr',
-  'windows server': 'windows_server',
-  'microsoft windows server': 'windows_server',
-  'vmware esxi': 'vmware_esxi',
-  'vmware esx': 'vmware_esxi',
-  'red hat enterprise linux': 'rhel',
-  'rhel': 'rhel',
-  'red hat linux': 'rhel',
-  'apache httpd': 'apache_httpd',
-  'apache http server': 'apache_httpd',
-  'nginx open source': 'nginx',
-  'mysql server': 'mysql',
-  'postgresql server': 'postgresql',
-  'ubuntu server': 'ubuntu',
-};
-
-// Lookup keys are normalized the same way as the inputs. The map literals use
-// spaced keys ("sonic wall"), but lookups use normalizeAliasToken, which strips
-// separators, so unnormalized keys could never match.
-const normalizeMapKeys = (map: Record<string, string>): Record<string, string> =>
-  Object.fromEntries(Object.entries(map).map(([key, value]) => [normalizeAliasToken(key), value]));
-const CANONICAL_VENDOR_LOOKUP = normalizeMapKeys(CANONICAL_VENDOR_MAP);
-const CANONICAL_PRODUCT_LOOKUP = normalizeMapKeys(CANONICAL_PRODUCT_MAP);
-
-/**
- * Returns the canonical vendor identity for a raw vendor string, or the
- * normalized input when no canonical mapping exists. Case-insensitive and
- * whitespace/separator tolerant so "Sonic Wall" matches "SonicWall".
- */
-export function canonicalVendor(vendor: string): string {
-  const key = normalizeAliasToken(vendor);
-  // hasOwn: a plain-object lookup would return Object.prototype members for keys like "constructor".
-  return Object.hasOwn(CANONICAL_VENDOR_LOOKUP, key) ? CANONICAL_VENDOR_LOOKUP[key] : key;
-}
-
-/**
- * Returns the canonical product identity for a raw product string, or the
- * normalized input when no canonical mapping exists. Case-insensitive and
- * whitespace/separator tolerant.
- */
-export function canonicalProduct(product: string): string {
-  const key = normalizeAliasToken(product);
-  return Object.hasOwn(CANONICAL_PRODUCT_LOOKUP, key) ? CANONICAL_PRODUCT_LOOKUP[key] : key;
-}
-
-/**
- * Tokenizes a multi-word vendor/product name into identity-bearing tokens
- * while preserving distinguishing characters (e.g. "c++" stays "c++").
- * Stops at whitespace/separators so "Sonic Wall" yields ["sonic", "wall"]
- * which can match "SonicWall" via canonical lookup.
- */
-export function identityTokens(value: string): string[] {
-  const normalized = normalizeAliasToken(value);
-  if (!normalized) return [];
-  // Split the raw value: separators and camel-case boundaries (lowercase then
-  // uppercase) disappear once normalizeAliasToken lowercases and strips them.
-  // Only a lowercase-to-uppercase boundary splits camel case, so "PAN-OS" stays
-  // whole instead of breaking into single letters. One-letter fragments are
-  // dropped so they cannot create a spurious overlap.
-  const words = value
-    .split(/(?<=[a-z])(?=[A-Z])|[\s._-]+/)
-    .map((word) => normalizeAliasToken(word))
-    .filter((word) => word.length >= 2);
-  // Keep the full normalized string as the primary token so exact matches still win.
-  return [normalized, ...words];
-}
-
-/**
- * Checks whether two vendor/product names share any canonical identity,
- * handling spelling variants, case differences, and multi-word tokenization.
- * Used only as a fallback signal — never overrides explicit CPE/PURL mismatch.
- */
-export function vendorProductIdentityOverlap(
-  assetVendor: string,
-  assetProduct: string,
-  vulnVendor: string,
-  vulnProduct: string,
-): { vendorOverlap: boolean; productOverlap: boolean; confidence: number } {
-  const av = canonicalVendor(assetVendor);
-  const ap = canonicalProduct(assetProduct);
-  const vv = canonicalVendor(vulnVendor);
-  const vp = canonicalProduct(vulnProduct);
-
-  const vendorExact = av === vv;
-  const vendorTokens = [...new Set([...identityTokens(assetVendor), ...identityTokens(vulnVendor)])];
-  const vendorTokenOverlap = vendorTokens.length > 1 &&
-    identityTokens(assetVendor).some((t) => identityTokens(vulnVendor).includes(t));
-
-  const productExact = ap === vp;
-  const productTokens = [...new Set([...identityTokens(assetProduct), ...identityTokens(vulnProduct)])];
-  const productTokenOverlap = productTokens.length > 1 &&
-    identityTokens(assetProduct).some((t) => identityTokens(vulnProduct).includes(t));
-
-  const vendorOverlap = vendorExact || vendorTokenOverlap;
-  const productOverlap = productExact || productTokenOverlap;
-
-  // Confidence tiers: exact canonical match > token overlap > no overlap
-  let confidence = 0;
-  if (vendorExact && productExact) confidence = 90;
-  else if (vendorExact && productTokenOverlap) confidence = 82;
-  else if (vendorTokenOverlap && productExact) confidence = 82;
-  else if (vendorTokenOverlap && productTokenOverlap) confidence = 75;
-
-  return { vendorOverlap, productOverlap, confidence };
-}
 
 /**
  * Returns every spelling in the alias group that contains `value`.
@@ -1083,8 +905,6 @@ export function matchesWatchlistItem(
     return {
       assetCpe,
       genericIdentity,
-      /** The inventory CPE was a wildcard and its identity came from the record. */
-      identityFromInventory: assetCpe !== rawAssetCpe,
       parsed,
       // Product-level registrations cover all versions. Partial patterns still
       // require intersection checks; unknown concrete versions stay review-gated.
@@ -1105,13 +925,7 @@ export function matchesWatchlistItem(
   const hasProductWideRegistration = preparedAssetCpes.some(({ genericIdentity, parsed, versionUnasserted }) =>
     isProductWideRegistration(parsed, versionUnasserted, genericIdentity),
   );
-  for (const {
-    assetCpe,
-    genericIdentity,
-    identityFromInventory,
-    parsed: assetParsed,
-    versionUnasserted,
-  } of preparedAssetCpes) {
+  for (const { assetCpe, genericIdentity, parsed: assetParsed, versionUnasserted } of preparedAssetCpes) {
     for (const vulnCpe of vulnCpeMatches) {
       const vulnParsed = parseCPE23(vulnCpe);
       const vulnConstrainsVersion =
@@ -1189,13 +1003,7 @@ export function matchesWatchlistItem(
           matchedCpe: vulnCpe,
           evidence: genericIdentity
             ? 'Matched CPE product identity inferred from the inventory record; confirm the generic CPE is intended (70% confidence)'
-            : identityFromInventory && !requiresReview
-              // A wildcard inventory CPE whose vendor and product were both
-              // substituted. Say so: the operator registered a wildcard and the
-              // match is asserted against the inventory record's own identity,
-              // not against tokens that were in the registered CPE.
-              ? `Matched the inventory record's vendor/product (${asset.vendor}/${asset.product}) substituted for the wildcard CPE; ${versionRange ? 'verified in version interval' : 'exact version token'} (${versionRange ? 100 : 90}% confidence)`
-              : versionRange
+            : versionRange
               ? requiresReview
                 ? 'Matched strict CPE 2.3 product identifiers; version or architecture applicability requires review'
                 : `Matched strict CPE 2.3 component tokens + verified in version interval [< ${versionRange.versionEndExcluding || versionRange.versionEndIncluding}] (100% confidence)`
@@ -1354,8 +1162,7 @@ export function matchesWatchlistItem(
   }
 
   // 5. Fallback Heuristic
-  const fullText = `${vulnTitle} ${vulnDescription}`.normalize('NFKC').toLowerCase()
-    .replace(/(^|[^\p{L}\p{N}+#])#(?=[\p{L}\p{N}])/gu, '$1');
+  const fullText = `${vulnTitle} ${vulnDescription}`.toLowerCase();
   const productOnlyKevFallback =
     allowProductOnlyFallback &&
     hasProductWideRegistration &&
@@ -1371,26 +1178,12 @@ export function matchesWatchlistItem(
     // explicitly excludes when every inventory version is comparable.
     if (rangeHasBounds && allVersionsProvablyOutside)
       return { matched: false, method: 'NONE', confidence: 0, evidence: 'Version outside advisory range' };
-
-    // Enterprise vendor/product identity: canonical registry and multi-word
-    // token overlap improve evidence quality. Confidence stays at the base
-    // fallback level here — the pipeline's authoritativeSourceDispatch rule
-    // (pipelineEngine.ts) is what raises confidence to the auto-dispatch
-    // threshold, and only for authoritative sources.
-    const identity = vendorProductIdentityOverlap(
-      normVendor, normProduct,
-      vulnCpeMatches[0] ? parseCPE23(vulnCpeMatches[0]).vendor : normVendor,
-      vulnCpeMatches[0] ? parseCPE23(vulnCpeMatches[0]).product : normProduct,
-    );
-
     return {
       matched: true,
       method: 'VENDOR_PRODUCT_FALLBACK',
       confidence: 70,
       matchedCpe: assetCpes[0] || `cpe:2.3:a:${normVendor}:${normProduct}:*:*:*:*:*:*:*:*`,
-      evidence: identity.confidence > 0
-        ? `Matched vendor "${normVendor}" and product "${normProduct}" in advisory text via canonical identity resolution (${identity.confidence}% identity confidence, fallback confidence 70%)`
-        : `Matched vendor "${normVendor}" and product "${normProduct}" in advisory text (70% confidence)`,
+      evidence: `Matched vendor "${normVendor}" and product "${normProduct}" in advisory text (70% confidence)`,
       productWideAllVersions: productOnlyKevFallback || undefined,
     };
   }
