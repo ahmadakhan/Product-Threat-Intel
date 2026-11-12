@@ -120,7 +120,11 @@ export function parseCPE23(cpeString: string): ParsedCPE {
     isValid: true,
   };
 
-    if (cpeCache.size >= MAX_CPE_CACHE_SIZE) evictCpeCache();
+  if (cpeCache.size >= MAX_CPE_CACHE_SIZE) evictCpeCache();
+  // The cached object is shared by every later parse of this CPE. Freezing it
+  // means a caller cannot accidentally poison the cache for the rest of the
+  // process (for example, a test that edits `parsed.product` in place).
+  Object.freeze(result);
   cpeCache.set(cpeString, { value: result, expiresAt: Date.now() + CPE_CACHE_TTL_MS });
   return result;
 }
@@ -150,7 +154,9 @@ function splitCpeTokens(str: string): string[] {
 }
 
 function createEmptyCPE(raw: string, isValid: boolean): ParsedCPE {
-  return {
+  // Invalid CPEs are cached too, so the sentinel must be immutable for the same
+  // reason as a successful parse.
+  return Object.freeze({
     prefix: 'cpe:2.3',
     part: '*',
     vendor: '*',
@@ -165,7 +171,7 @@ function createEmptyCPE(raw: string, isValid: boolean): ParsedCPE {
     other: '*',
     raw: raw || '',
     isValid,
-  };
+  });
 }
 
 type GlobToken = { type: 'star' } | { type: 'any' } | { type: 'literal'; value: string };
@@ -330,7 +336,9 @@ function textWordPattern(word: string): RegExp {
     const keys = [...textWordPatterns.keys()].slice(0, toEvict);
     for (const key of keys) textWordPatterns.delete(key);
   }
-  textWordPatterns.set(word, pattern);
+  // A non-global RegExp has no mutable state, but freezing makes the shared
+  // cache entry explicitly read-only so nobody can attach state to it.
+  textWordPatterns.set(word, Object.freeze(pattern));
   return pattern;
 }
 
@@ -344,12 +352,12 @@ function containsIdentityWords(text: string, value: string): boolean {
   // `os`, `ai`, `go` and `3m` are real names but not usable as prose evidence
   // on their own.
   if (!significant.length) return false;
-  // Prefer the long words; for a multi-word identity that also contains short
-  // tokens (for example `f5 big_ip`) keep the short ones so `f5` cannot be
-  // dropped from its own name.
-  const required = significant.length >= 2 || words.length === 1 ? significant : words;
+  // Require every token, including the short ones. Dropping a short token as
+  // soon as two long ones exist would let `f5 big_ip` match prose that only
+  // mentions "big ip", and `visual_c` match "visual" alone. The all-short case
+  // has already returned above, so each identity must be fully present.
   const haystack = text.normalize('NFKC').toLowerCase();
-  return required.every((word) => textWordPattern(word).test(haystack));
+  return words.every((word) => textWordPattern(word).test(haystack));
 }
 
 /**
@@ -669,6 +677,14 @@ function mergeAliasTables(
   const merged: Record<string, string[]> = Object.assign(Object.create(null), base);
   for (const [canonical, extra] of Object.entries(custom))
     merged[canonical] = [...new Set([...(merged[canonical] || []), ...extra])];
+  // The cached table is shared by every later lookup with this alias object.
+  // Freeze both the object and its arrays so a caller cannot mutate the cache
+  // (or the built-in arrays it shares) and change another caller's result.
+  for (const canonical of Object.keys(merged)) {
+    merged[canonical] = [...merged[canonical]];
+    Object.freeze(merged[canonical]);
+  }
+  Object.freeze(merged);
   if (mergedAliasCache.size >= MERGED_ALIAS_CACHE_LIMIT) {
     const first = mergedAliasCache.keys().next().value;
     if (first !== undefined) mergedAliasCache.delete(first);

@@ -101,6 +101,18 @@ test('CVE text fallback preserves symbols and word boundaries before dispatch', 
   assert.equal(run('visual_c++', 'Microsoft Visual C+++ vulnerability').length, 0);
 });
 
+test('news alias caches are isolated per operator table', () => {
+  const gateway = asset('xgateway', 'gateway');
+  const story = article('Xenon Gateway flaw');
+  assert.equal(matchIntelligence([story], [gateway], [], [], { xgateway: ['xenon'] }).length, 1);
+  assert.equal(
+    matchIntelligence([story], [gateway], [], [], { xgateway: ['otherbrand'] }).length,
+    0,
+    'a previous operator alias table must not leak into the next lookup',
+  );
+  assert.equal(matchIntelligence([story], [gateway], [], [], { xgateway: ['xenon'] }).length, 1);
+});
+
 test('correlation aliases use only the matched criterion of a multi-product CVE', () => {
   const watch = asset('cisco', 'gateway');
   const record = advisory({

@@ -435,6 +435,18 @@ export const MATCHING_CORPUS: MatchingCase[] = [
     expected: { matched: false },
   },
   {
+    id: 'negative-short-token-mixed-identity',
+    description: 'A short token inside a mixed identity cannot be dropped from prose evidence',
+    tags: ['fallback', 'token-boundary', 'negative'],
+    input: {
+      assetVendor: 'acme',
+      assetProduct: 'big_ip_2',
+      vulnTitle: 'Acme Big IP vulnerability',
+      vulnDescription: 'Acme Big IP is affected by a critical flaw.',
+    },
+    expected: { matched: false },
+  },
+  {
     id: 'negative-glued-words',
     description: 'Identity words must be whole tokens, not substrings of a longer word',
     tags: ['fallback', 'token-boundary', 'negative'],

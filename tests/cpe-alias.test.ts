@@ -7,6 +7,7 @@ import {
   matchVendorWithAliases,
   matchProductWithAliases,
   aliasGroupKeys,
+  parseCPE23,
   DEFAULT_VENDOR_ALIASES,
   DEFAULT_PRODUCT_ALIASES,
 } from '../src/utils/cpeMatcher.ts';
@@ -256,6 +257,31 @@ test('no catalog product name leaks into the vendor alias namespace', () => {
     0,
     `product names must not appear as vendor aliases: ${leakedProductNames.join(', ')}`,
   );
+});
+
+test('cached CPE parses are immutable', () => {
+  const raw = cpe('acme', 'widget', '1.0');
+  const parsed = parseCPE23(raw);
+  assert.ok(Object.isFrozen(parsed));
+  assert.throws(() => {
+    (parsed as { product: string }).product = 'poisoned';
+  }, TypeError);
+  assert.equal(parseCPE23(raw).product, 'widget', 'a caller must not poison the shared parse cache');
+});
+
+test('merged alias caches are isolated per custom table', () => {
+  const assetCpe = cpe('example', 'widget', '1.5');
+  const vulnCpe = cpe('example_corp', 'widget_pro', '1.5');
+  const first = { vendorAliases: { example: ['example_corp'] }, productAliases: { widget: ['widget_pro'] } };
+  const second = { vendorAliases: { example: ['unrelated'] }, productAliases: { widget: ['other'] } };
+
+  assert.equal(matchCPE(assetCpe, vulnCpe, undefined, first).matched, true);
+  assert.equal(
+    matchCPE(assetCpe, vulnCpe, undefined, second).matched,
+    false,
+    'a previous custom table must not make another table match',
+  );
+  assert.equal(matchCPE(assetCpe, vulnCpe, undefined, first).matched, true);
 });
 
 test('solarwinds is a built-in vendor alias for the current n-able vendor', () => {

@@ -312,13 +312,13 @@ export function mergeArticles(records: IntelligenceArticle[]): IntelligenceArtic
  * WeakMap holds one cache per operator-table identity, so two tables can never
  * serve each other's variants.
  */
-const identityVariantCache = new WeakMap<Record<string, string[]>, Map<string, string[]>>();
+const identityVariantCache = new WeakMap<Record<string, string[]>, Map<string, readonly string[]>>();
 const IDENTITY_VARIANT_CACHE_LIMIT = 20_000;
 function identityVariants(
   scope: 'VENDOR' | 'PRODUCT',
   value: string,
   customAliases: Record<string, string[]>,
-): string[] {
+): readonly string[] {
   // Cache per alias table. Keying on the identity alone was wrong: two calls
   // with different operator tables (different runs, different tests) would
   // reuse variants computed from the other table and silently drop aliases.
@@ -330,10 +330,15 @@ function identityVariants(
   const key = `${scope}\u0000${value.toLowerCase()}`;
   const cached = table.get(key);
   if (cached) return cached;
-  const variants = newsIdentityVariants(
-    value,
-    customAliases,
-    scope === 'VENDOR' ? BUILTIN_VENDOR_ALIASES : DEFAULT_PRODUCT_ALIASES,
+  // The cached array is shared by every later article evaluated against this
+  // inventory identity. Freeze it so a caller cannot change another caller's
+  // matching evidence by mutating the returned variants.
+  const variants = Object.freeze(
+    newsIdentityVariants(
+      value,
+      customAliases,
+      scope === 'VENDOR' ? BUILTIN_VENDOR_ALIASES : DEFAULT_PRODUCT_ALIASES,
+    ),
   );
   if (table.size >= IDENTITY_VARIANT_CACHE_LIMIT) {
     const first = table.keys().next().value;
