@@ -812,7 +812,7 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
     }).parse(data);
     const existing = (await getForUpdate<any>(db, 'template', 'main')) || {};
     const customAdvisoryTemplate = input.customAdvisoryTemplate === undefined
-      ? existing.customAdvisoryTemplate ?? null
+      ? null
       : input.customAdvisoryTemplate?.trim()
         ? input.customAdvisoryTemplate
         : null;
