@@ -472,19 +472,28 @@ ${classificationBanner}
 
     <!-- HEADER -->
     <tr>
-        <td bgcolor="${config.headerBg}" style="padding:24px 32px 22px;border-radius:12px 12px 0 0;">
+        <td bgcolor="${config.headerBg}" style="padding:12px 20px 16px;border-radius:12px 12px 0 0;">
 
             ${stampHtml}
-            <div style="font-size:10px;font-weight:bold;letter-spacing:1.5px;color:${headerMuted};margin-bottom:10px;">
-                BA Cyber | THREAT INTELLIGENCE
-            </div>
 
-             <div class="title" style="font-size:24px;line-height:30px;font-weight:bold;color:${headerText};margin-bottom:6px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:6px;">
+                <tr>
+                    <td>
+                        {{severity_header_badge}}
+                    </td>
+                </tr>
+            </table>
+
+             <div class="title" style="font-size:18px;line-height:22px;font-weight:700;color:${headerText};">
+                 BA Security Advisory
+             </div>
+
+             <div style="padding-top:3px;font-size:13px;line-height:18px;font-weight:600;color:${headerText};">
                  {{advisory_title}}
              </div>
 
-             <div style="font-size:12px;line-height:18px;color:${headerMuted};">
-                 Advisory ID: {{advisory_id}} &middot; Report Generated: {{report_generated}}
+             <div style="padding-top:4px;font-size:11px;line-height:15px;color:${headerMuted};">
+                 Advisory ID: {{advisory_id}} | Generated: {{report_generated}}
              </div>
              <meta name="dispatch-date" content="{{dispatch_date}}">
              <meta name="digest-severity" content="{{severity}}">
@@ -492,9 +501,24 @@ ${classificationBanner}
         </td>
     </tr>
 
+    <!-- SUMMARY -->
+    <tr>
+        <td class="mobile-padding" style="padding:16px 20px;border-bottom:1px solid #e2e8f0;">
+
+            <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:${config.accentColor};padding-bottom:4px;">
+                SUMMARY
+            </div>
+
+            <div style="font-size:13px;line-height:20px;color:${config.fontColor};">
+                {{executive_summary}}
+            </div>
+
+        </td>
+    </tr>
+
     <!-- KPI DASHBOARD -->
     <tr>
-        <td class="mobile-padding" style="padding:24px 32px 8px 32px;">
+        <td class="mobile-padding" style="padding:20px 20px 8px 20px;">
 
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:separate;border-spacing:6px 0;">
 
@@ -522,99 +546,79 @@ ${classificationBanner}
         </td>
     </tr>
 
-    <!-- EXECUTIVE SUMMARY -->
-     <tr>
-         <td class="mobile-padding" style="padding:16px 32px 28px 32px;">
-
-             <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:${config.accentColor};padding-bottom:6px;">
-                 EXECUTIVE SUMMARY
-             </div>
-
-            <h2 style="margin:0 0 10px 0;font-size:19px;line-height:25px;color:${config.headingColor};">
-                Vulnerability Overview
-            </h2>
-
-            <p style="margin:0;font-size:14px;line-height:23px;color:#475569;">
-                {{executive_summary}}
-            </p>
-
-        </td>
-    </tr>
-
-    <!-- FINDINGS -->
+    <!-- DETAILS -->
     <tr>
-        <td class="mobile-padding" style="padding:0 32px 28px 32px;border-top:1px solid #f1f5f9;padding-top:24px;">
+        <td class="mobile-padding" style="padding:20px;">
 
-            <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:${config.accentColor};padding-bottom:10px;">
-                FINDINGS
+            <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:${config.accentColor};padding-bottom:8px;">
+                DETAILS
             </div>
 
-            <h2 style="margin:0 0 14px;font-size:18px;line-height:24px;color:#0f172a;">
-                Vulnerability Findings
-            </h2>
+             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border:1px solid #e2e8f0;font-size:13px;line-height:18px;">
 
-     {{findings_summary}}
+                 <!-- SEVERITY BREAKDOWN -->
+                 <tr>
+                     <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;">
+                         Severity Breakdown
+                     </td>
+                    <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;">
+                        {{critical_summary}} {{high_summary}} {{medium_summary}} {{low_summary}}
+                    </td>
+                </tr>
 
-     </td>
- </tr>
+                 <!-- FINDINGS -->
+                 <tr>
+                     <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;border-bottom:1px solid #e2e8f0;vertical-align:top;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;">
+                         Findings (24h)
+                     </td>
+                     <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;">
+                         {{findings_summary}}
+                     </td>
+                 </tr>
 
-     <!-- LIMITED-CONFIDENCE FINDINGS -->
-     <tr>
-         <td class="mobile-padding" style="padding:0 32px 24px 32px;border-top:1px solid #f1f5f9;padding-top:24px;">
+                 <!-- CONFIDENCE FOLLOW-UP -->
+                 <tr>
+                     <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;border-bottom:1px solid #e2e8f0;vertical-align:top;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;">
+                         Confidence Follow-up
+                     </td>
+                     <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:13px;">
+                         {{held_for_review}}
+                     </td>
+                 </tr>
 
-             <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:${config.accentColor};padding-bottom:10px;">
-                 FOLLOW-UP
-             </div>
+                 <!-- PLATFORM HEALTH -->
+                 <tr>
+                     <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;vertical-align:top;">
+                         Platform Health
+                     </td>
+                     <td style="padding:8px 10px;">
+                         {{health_report}}
+                     </td>
+                 </tr>
 
-             <h2 style="margin:0 0 14px;font-size:18px;line-height:24px;color:#0f172a;">
-                 Confidence Follow-up
-             </h2>
-
-             {{held_for_review}}
-
-         </td>
-     </tr>
-
-     <!-- PLATFORM HEALTH -->
-    <tr>
-        <td class="mobile-padding" style="padding:0 32px 32px 32px;border-top:1px solid #f1f5f9;padding-top:24px;">
-
-            <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:${config.accentColor};padding-bottom:10px;">
-                PLATFORM
-            </div>
-
-            <h2 style="margin:0 0 14px;font-size:18px;line-height:24px;color:#0f172a;">
-                Platform Health Status
-            </h2>
-
-            {{health_report}}
+             </table>
 
         </td>
     </tr>
 
     <!-- FOOTER -->
     <tr>
-        <td style="padding:22px 32px;background:#fafafa;border-top:1px solid #e2e8f0;border-radius:0 0 12px 12px;">
+        <td style="padding:14px 20px;border-top:1px solid #d1d5db;background:#fafafa;border-radius:0 0 12px 12px;">
 
-            <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:6px;">
-                BA Threat Intelligence
+            <div style="font-size:12px;font-weight:700;color:#0f172a;">
+                BA Security Operations
             </div>
 
-             <div style="font-size:12px;line-height:20px;color:#64748b;">
+             <div style="font-size:12px;line-height:18px;color:#64748b;padding-top:4px;">
                  This digest provides a consolidated view of newly identified vulnerabilities and platform
-                 health status. Prioritize remediation activities according to asset criticality,
-                 business impact, and established vulnerability management SLAs. All implementation
-                 and remediation activities should follow approved change management procedures.
+                 health status. Assess applicability and prioritize remediation according to asset
+                 criticality and established vulnerability management SLAs.
              </div>
 
-             <div style="margin-top:12px;padding:9px 12px;border:1px solid #e2e8f0;border-radius:6px;background:#f8fafc;font-size:11px;line-height:18px;color:#475569;">
-                 Severity breakdown: {{critical_count}} Critical, {{high_count}} High, {{medium_count}} Medium, {{low_count}} Low
+             <div style="padding-top:8px;font-size:12px;color:#64748b;">
+                 Questions or assistance:
+                 <a href="mailto:DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com" style="color:${config.accentColor};text-decoration:underline;">DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com</a>
              </div>
-
-            <div style="margin-top:12px;font-size:12px;line-height:20px;color:#64748b;">
-                For questions or additional information, contact:
-                <a href="mailto:DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com" style="color:${config.accentColor};text-decoration:underline;">DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com</a>
-            </div>
 
         </td>
     </tr>
@@ -972,6 +976,19 @@ function digestSafeExecutiveSummary(value: string): string {
   return noForeignMarkup && generatedShape.test(value) ? value : digestEscapeHtml(value);
 }
 
+const DIGEST_SEVERITY_BADGE: Record<string, { label: string; color: string }> = {
+  CRITICAL: { label: 'CRITICAL SEVERITY', color: '#dc2626' },
+  HIGH: { label: 'HIGH SEVERITY', color: '#ea580c' },
+  MEDIUM: { label: 'MEDIUM SEVERITY', color: '#ca8a04' },
+  LOW: { label: 'LOW SEVERITY', color: '#16a34a' },
+};
+
+const digestHeaderBadge = (severity: string): string => {
+  const badge = DIGEST_SEVERITY_BADGE[severity];
+  if (!badge) return '';
+  return `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:${badge.color};color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">${digestEscapeHtml(badge.label)}</span>`;
+};
+
 export function renderDailyDigest(config: TemplateCustomization, parts: DailyDigestParts, template?: string): string {
   const compiled = template || compileDailyDigestTemplate(config);
   return compiled
@@ -1008,5 +1025,6 @@ export function renderDailyDigest(config: TemplateCustomization, parts: DailyDig
     .replace(/{{high_kpi}}/g, parts.high_kpi || '')
     .replace(/{{medium_kpi}}/g, parts.medium_kpi || '')
     .replace(/{{low_kpi}}/g, parts.low_kpi || '')
-    .replace(/{{held_for_review}}/g, parts.held_for_review || '');
+    .replace(/{{held_for_review}}/g, parts.held_for_review || '')
+    .replace(/{{severity_header_badge}}/g, digestHeaderBadge(parts.severity));
 }

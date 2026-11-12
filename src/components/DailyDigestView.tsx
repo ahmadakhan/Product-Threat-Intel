@@ -125,6 +125,7 @@ export const DailyDigestView: React.FC = () => {
       '{{asset_count}}',
       '{{severity_counts}}',
       '{{severity}}',
+      '{{severity_header_badge}}',
       '{{dispatch_date}}',
       '{{recipient_name}}',
       '{{executive_summary}}',
@@ -189,6 +190,10 @@ export const DailyDigestView: React.FC = () => {
       .replace(/{{severity_counts}}/g, '2 critical, 1 high, 1 medium, 1 low')
       .replace(/{{dispatch_date}}/g, previewTimestamp)
       .replace(/{{severity}}/g, 'HIGH')
+      .replace(
+        /{{severity_header_badge}}/g,
+        '<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:#ea580c;color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">HIGH SEVERITY</span>',
+      )
       .replace(/{{executive_summary}}/g, formatExecutiveSummary(SAMPLE_FINDINGS.length, {
         CRITICAL: criticalCount, HIGH: highCount, MEDIUM: mediumCount, LOW: lowCount,
       }))

@@ -156,8 +156,8 @@ test('renderDailyDigest populates KPI counts exactly', () => {
 
 test('renderDailyDigest embeds executive summary and report generated date', () => {
   const html = renderDailyDigest(DEFAULT_DAILY_DIGEST_CUSTOMIZATION, PARTS);
-  assert.ok(html.includes('Report Generated: 29 October 2026 | 22:48 GMT+4'));
-  assert.ok(html.includes('Vulnerability Overview'));
+  assert.ok(html.includes('Generated: 29 October 2026 | 22:48 GMT+4'));
+  assert.ok(html.includes('SUMMARY'));
   assert.ok(html.includes('<strong>5 findings</strong>'));
   assert.ok(html.includes('<strong>2 Critical</strong>'));
   assert.ok(html.includes('<strong>1 High</strong>'));
