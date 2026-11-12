@@ -126,10 +126,16 @@ test('VULNCHECK_NVD re-fetches revised records and paces paginated cursors', asy
   // Two cursor pages: the first returns half the CVEs plus a next cursor, the
   // second returns the rest. Each page hop must honor the rate-limit pacing.
   const result = await ingestFeed(source, 24, async url => {
-    if (url.startsWith(vulncheckUrl) && !new URL(url).searchParams.has('cursor'))
+    const parsed = new URL(url);
+    if (url.startsWith(vulncheckUrl) && !parsed.searchParams.has('cursor')) {
+      assert.equal(parsed.searchParams.get('start_cursor'), '');
+      assert.equal(parsed.searchParams.get('limit'), '1000');
       return response({ vulnerabilities: ids.slice(0, 4).map(record), _meta: { next_cursor: 'page-2' } });
-    if (url.includes('cursor=page-2'))
+    }
+    if (parsed.searchParams.get('cursor') === 'page-2') {
+      assert.equal(parsed.searchParams.has('start_cursor'), false);
       return response({ vulnerabilities: ids.slice(4).map(record), _meta: { next_cursor: null } });
+    }
     throw new Error(`unexpected detail request: ${url}`);
   }, config, async ms => { assert.ok(ms > 0); waits++; }, [], undefined,
   { cursor: new Date(Date.now() - 3600000).toISOString() });
