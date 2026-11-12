@@ -1960,12 +1960,29 @@ export function createApp(
             throw new HttpError(400, 'AlienVault OTX requires its subscribed-pulses API endpoint and an API key');
           testUrl.searchParams.set('limit', '1');
         }
+        // Probe large catalog/API endpoints with the smallest valid page so a
+        // connectivity test never downloads an entire corpus.
+        if (feed.type === 'VULNCHECK_NVD' || feed.type === 'VULNCHECK_KEV')
+          testUrl.searchParams.set('limit', '1');
+        if (feed.type === 'NVD_API') testUrl.searchParams.set('resultsPerPage', '1');
+        if (feed.type === 'EPSS_API') testUrl.searchParams.set('limit', '1');
         const osvProbe = feed.type === 'OSV_API';
+        // Match pipeline ingestion: allow the persisted feed endpoint itself
+        // plus same-site www/non-www redirects. Without this, a feed whose URL
+        // is valid but not pre-listed in EGRESS_ALLOWED_HOSTS fails the manual
+        // test even though the pipeline succeeds.
+        const configuredFeedHosts = config.EGRESS_ALLOWED_HOSTS.split(',')
+          .map((host) => host.trim().toLowerCase())
+          .filter(Boolean);
+        const additionalAllowedHosts = feedEgressHosts(feed.type, feed.url, configuredFeedHosts)
+          .filter((host) => !configuredFeedHosts.includes(host));
+        const egressOptions = { additionalAllowedHosts, sameSiteRedirects: true };
         const requestOptions =
           feed.type === 'RSS_ATOM'
-            ? { headers, timeoutMs: 25000, maxResponseBytes: RSS_MAX_BYTES }
+            ? { ...egressOptions, headers, timeoutMs: 25000, maxResponseBytes: RSS_MAX_BYTES }
             : feed.type === 'OTX_API'
               ? {
+                  ...egressOptions,
                   headers,
                   timeoutMs: (feed.requestTimeoutSeconds || 60) * 1000,
                   socketTimeoutMs: Math.min((feed.requestTimeoutSeconds || 60) * 1000, 30000),
@@ -1973,6 +1990,7 @@ export function createApp(
                 }
               : osvProbe
                       ? {
+                          ...egressOptions,
                           method: 'POST' as const,
                           headers: { ...headers, 'content-type': 'application/json' },
                           body: JSON.stringify({
@@ -1981,7 +1999,7 @@ export function createApp(
                           timeoutMs: 25000,
                           maxResponseBytes: 256 * 1024,
                         }
-                      : { headers };
+                      : { ...egressOptions, headers };
         response = await request(testUrl.href, requestOptions);
         if (response.status >= 200 && response.status < 300) {
           if (feed.type === 'RSS_ATOM') parseSyndication(response.body, feed.id, 2880);

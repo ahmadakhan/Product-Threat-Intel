@@ -341,7 +341,9 @@ const recommendedFeedEntries = [
     id: 'feed-pentestpartners',
     name: 'Pentest Partners Research',
     type: 'RSS_ATOM' as const,
-    url: 'https://www.pentestpartners.com/research/feed/',
+    // /research/feed/ returns HTTP 404 (verified 2026-11). The site-wide feed
+    // is the live RSS endpoint (200, valid RSS).
+    url: 'https://www.pentestpartners.com/feed/',
     authType: 'NONE' as const,
     rateLimitPerMin: 3,
     enabled: false,
@@ -351,37 +353,56 @@ const recommendedFeedEntries = [
     id: 'feed-cve-org',
     name: 'CVE.org — Official CVE Program',
     type: 'RSS_ATOM' as const,
+    // CVE.org does not publish an RSS/Atom feed: every /rss, /feed and
+    // /Media/News/rss path returns the SPA HTML shell (verified 2026-11).
+    // Programmatic CVE access is available through the CVE Services API
+    // (cveawg.mitre.org) or the CVEProject/cvelistV5 repository, not a feed.
     url: 'https://www.cve.org/verify/rss.xml',
     authType: 'NONE' as const,
     rateLimitPerMin: 5,
     enabled: false,
     vendorSeed: true,
+    healthStatus: 'DOWN' as const,
+    errorLog: 'CVE.org does not publish an RSS/Atom feed; endpoints return the site HTML shell. Use the CVE Services API or CVEProject/cvelistV5 instead.',
   },
   {
     id: 'feed-apple-security',
     name: 'Apple Security Advisories',
     type: 'RSS_ATOM' as const,
+    // support.apple.com/rss/security returns valid RSS with zero <item>
+    // entries (verified 2026-11). Apple publishes security releases only as
+    // the HTML index at support.apple.com/en-us/100100.
     url: 'https://support.apple.com/rss/security',
     authType: 'NONE' as const,
     rateLimitPerMin: 5,
     enabled: false,
     vendorSeed: true,
+    healthStatus: 'DOWN' as const,
+    errorLog: 'Apple security RSS is an empty feed (zero items). Apple publishes advisories as HTML only at support.apple.com/en-us/100100.',
   },
   {
     id: 'feed-adobe-security',
     name: 'Adobe Security Bulletins',
     type: 'RSS_ATOM' as const,
+    // helpx.adobe.com/security.html is an HTML bulletin page, not a feed. The
+    // historical .rss endpoints return 404 and adobe.com/security.rss is gone
+    // (verified 2026-11), so there is no public machine-readable feed.
     url: 'https://helpx.adobe.com/security.html',
     authType: 'NONE' as const,
     rateLimitPerMin: 5,
     enabled: false,
     vendorSeed: true,
+    healthStatus: 'DOWN' as const,
+    errorLog: 'Adobe publishes security bulletins as HTML only; its historical RSS endpoints return 404. No public machine-readable feed is available.',
   },
   {
     id: 'feed-redhat-security',
     name: 'Red Hat Security Advisories',
     type: 'RSS_ATOM' as const,
-    url: 'https://access.redhat.com/security/updates/rss',
+    // access.redhat.com/security/updates/rss returns HTTP 404 (verified
+    // 2026-11). Red Hat's live errata feed is served by the security data host
+    // (200, valid RSS, ~438 advisories); that host is allowlisted in config.ts.
+    url: 'https://security.access.redhat.com/data/meta/v1/rhsa.rss',
     authType: 'NONE' as const,
     rateLimitPerMin: 5,
     enabled: false,
@@ -391,7 +412,10 @@ const recommendedFeedEntries = [
     id: 'feed-ubuntu-security',
     name: 'Ubuntu Security Notices',
     type: 'RSS_ATOM' as const,
-    url: 'https://usn.ubuntu.com/usn/usn.rss',
+    // usn.ubuntu.com/usn/usn.rss redirects to ubuntu.com and then returns HTTP
+    // 404 (verified 2026-11). The live feed is ubuntu.com/security/notices
+    // /rss.xml (200, valid RSS); ubuntu.com is allowlisted in config.ts.
+    url: 'https://ubuntu.com/security/notices/rss.xml',
     authType: 'NONE' as const,
     rateLimitPerMin: 5,
     enabled: false,
@@ -428,7 +452,10 @@ export const RECOMMENDED_FEEDS = recommendedFeedEntries.map((feed) => ({
   ...feed,
   enabled:
     feed.enabled ||
-    (feed.authType === 'NONE' && feed.vendorSeed && !feedsRequiringManualReview.has(feed.id)),
+    (feed.authType === 'NONE' &&
+      feed.vendorSeed &&
+      !feedsRequiringManualReview.has(feed.id) &&
+      !('healthStatus' in feed && feed.healthStatus === 'DOWN')),
 }));
 
 /**

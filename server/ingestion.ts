@@ -1,6 +1,6 @@
 import { vulncheckNvdItems } from './vulncheck.ts';
 import type { ThreatFeed, NormalizedCVE, IntelligenceArticle } from '../src/types/index.ts';
-import { ingestionWindow, recentRevisions, type IngestionState } from './ingestionState';
+import { ingestionWindow, type IngestionState } from './ingestionState';
 import { parseSyndication, RSS_MAX_BYTES, RSS_USER_AGENT } from './rss';
 import type { Requester, RequestOptions, ResponseData } from './network';
 import { cveSchema } from './validation';
@@ -740,10 +740,13 @@ export async function ingestFeed(
     url.searchParams.set('lastModStartDate', start.toISOString().slice(0, 10));
     url.searchParams.set('lastModEndDate', end.toISOString().slice(0, 10));
     url.searchParams.set('limit', '1000');
-    url.searchParams.set('start_cursor', 'true');
+    // `start_cursor` is a no-value flag for the first page; continuation pages
+    // use the `_meta.next_cursor` value through the `cursor` parameter.
+    url.searchParams.set('start_cursor', '');
     // The NVD++ index changes only when records change, so the index-level ETag
     // is a valid conditional handle for the whole paginated window: a 304 means
-    // no record in the window changed and the previous cursor stays valid.
+    // no record in the window changed. The checkpoint must still advance, or a
+    // quiet feed would re-request the same window forever.
     const { data: firstOr304, etag } = await json(url.href, true, {
       timeoutMs: 60000,
       socketTimeoutMs: 30000,
@@ -751,7 +754,18 @@ export async function ingestFeed(
       headers: { Authorization: `Bearer ${apiKey}` },
     }, true);
     if (firstOr304 === undefined)
-      return { cves: [], count: 0, notModified: true, etag, syncState: context };
+      return {
+        cves: [],
+        count: 0,
+        notModified: true,
+        etag,
+        syncState: {
+          ...context,
+          cursor: end.toISOString(),
+          hasMore: windowHasMore,
+          ...(etag ? { indexEtag: etag } : {}),
+        },
+      };
     let cursor: string | undefined;
     const cves: NormalizedCVE[] = [];
     const withdrawals: NonNullable<IngestResult['withdrawals']> = [];
@@ -772,18 +786,11 @@ export async function ingestFeed(
         if (!id || seenIds.has(id)) throw new Error('VulnCheck NVD++ returned an invalid or duplicate CVE');
         seenIds.add(id);
         const incomingModified = Date.parse(item.cve?.lastModified || '');
-        // The persisted revision map (syncState.revisions) is the cheap skip: a
-        // record whose revision was already ingested is neither re-emitted nor
-        // re-counted.
-        const revisionSeen = context.revisions?.[id];
-        if (
-          revisionSeen !== undefined &&
-          Number.isFinite(incomingModified) &&
-          Date.parse(revisionSeen) >= incomingModified
-        )
-          continue;
-        totalFetched++;
+        // Rejections must be handled before any revision or content skip: a CVE
+        // withdrawn at a timestamp that was already processed still has to
+        // become a tombstone, otherwise the withdrawn record stays live forever.
         if (item.cve?.vulnStatus === 'Rejected') {
+          totalFetched++;
           // Report the provider's own lastModified, not the local clock: the
           // pipeline compares withdrawal times against the cached revision to
           // decide whether the withdrawal is newer than the record it retracts.
@@ -795,8 +802,9 @@ export async function ingestFeed(
         }
         const cachedModified = Date.parse(context.knownCveModifiedAt?.get(id) || '');
         // Fast path: the cached revision is not older, so re-emit only when the
-        // normalized content actually differs (a publisher can correct a score,
-        // CPE set or remediation without advancing lastModified).
+        // normalized content actually differs. A publisher can correct a score,
+        // CPE set or remediation without advancing lastModified, so comparing
+        // timestamps alone would preserve the stale copy indefinitely.
         if (
           Number.isFinite(cachedModified) &&
           Number.isFinite(incomingModified) &&
@@ -813,10 +821,12 @@ export async function ingestFeed(
               : stableJson(candidate) === stableJson(cached)
           )
             continue;
+          totalFetched++;
           cves.push(candidate);
           revisions[id] = candidate.modifiedDate;
           continue;
         }
+        totalFetched++;
         const normalized = normalizeNvdItem(item, feed.id);
         if (normalized) {
           cves.push(normalized);
@@ -901,15 +911,10 @@ export async function ingestFeed(
         if (!id || seenIds.has(id)) throw new Error('NVD returned an invalid or duplicate CVE');
         seenIds.add(id);
         const incomingModified = Date.parse(item.cve?.lastModified || '');
-        const revisionSeen = context.revisions?.[id];
-        if (
-          revisionSeen !== undefined &&
-          Number.isFinite(incomingModified) &&
-          Date.parse(revisionSeen) >= incomingModified
-        )
-          continue;
-        totalFetched++;
+        // Withdrawals are handled before any revision/content skip; otherwise a
+        // rejection at an already-seen lastModified would never be tombstoned.
         if (item.cve?.vulnStatus === 'Rejected') {
+          totalFetched++;
           const modifiedDate = item.cve?.lastModified
             ? iso(item.cve.lastModified)
             : new Date().toISOString();
@@ -917,6 +922,8 @@ export async function ingestFeed(
           continue;
         }
         const cachedModified = Date.parse(context.knownCveModifiedAt?.get(id) || '');
+        // Corrected records may keep the same lastModified; compare normalized
+        // content before skipping so a changed score or CPE set is re-ingested.
         if (
           Number.isFinite(cachedModified) &&
           Number.isFinite(incomingModified) &&
@@ -933,10 +940,12 @@ export async function ingestFeed(
               : stableJson(candidate) === stableJson(cached)
           )
             continue;
+          totalFetched++;
           cves.push(candidate);
           revisions[id] = candidate.modifiedDate;
           continue;
         }
+        totalFetched++;
         const normalized = normalizeNvdItem(item, feed.id);
         if (normalized) {
           cves.push(normalized);

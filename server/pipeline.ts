@@ -946,6 +946,9 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
               const response = await withAbortSignal(request(url, {
                 ...options,
                 additionalAllowedHosts,
+                // Publishers routinely move between the apex and www spelling;
+                // follow that hop when the target still passes the SSRF check.
+                sameSiteRedirects: true,
                 signal: requestSignal,
                 timeoutMs: Math.min(options?.timeoutMs ?? 20000, remaining),
                 socketTimeoutMs: Math.min(options?.socketTimeoutMs ?? 15000, remaining),

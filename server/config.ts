@@ -122,8 +122,10 @@ export const DEFAULT_EGRESS_HOSTS = [
   'support.apple.com',
   'helpx.adobe.com',
   'access.redhat.com',
+  'security.access.redhat.com', // live Red Hat errata RSS host
   'security.redhat.com',
   'usn.ubuntu.com',
+  'ubuntu.com', // Ubuntu Security Notices feed host (usn.ubuntu.com redirects here)
   'www.crowdstrike.com',
   'crowdstrike.com',
   'securelist.com',

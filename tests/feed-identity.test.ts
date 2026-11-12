@@ -28,9 +28,21 @@ test('recommended feeds contain no duplicate endpoints and avoid one-request-per
 });
 
 test('recommended public feeds are enabled while credentialed and known-unavailable feeds stay disabled', () => {
-  assert.ok(RECOMMENDED_FEEDS.filter((feed) => feed.authType === 'NONE' && feed.vendorSeed && !['feed-twitter-security', 'feed-exploitdb'].includes(feed.id)).every((feed) => feed.enabled));
-  assert.ok(RECOMMENDED_FEEDS.filter((feed) => feed.authType !== 'NONE').every((feed) => !feed.enabled));
-  assert.ok(RECOMMENDED_FEEDS.filter((feed) => ['feed-twitter-security', 'feed-exploitdb'].includes(feed.id)).every((feed) => !feed.enabled));
+  const manualReview = new Set(['feed-twitter-security', 'feed-exploitdb']);
+  for (const feed of RECOMMENDED_FEEDS) {
+    const down = 'healthStatus' in feed && feed.healthStatus === 'DOWN';
+    if (feed.authType !== 'NONE' || down || manualReview.has(feed.id))
+      assert.equal(feed.enabled, false, `${feed.id} must stay disabled`);
+    else if (feed.vendorSeed)
+      assert.equal(feed.enabled, true, `${feed.id} should be enabled`);
+  }
+  // Every feed marked DOWN must be represented in the disabled catalog; this
+  // prevents the enablement rule from silently re-enabling a dead source.
+  assert.ok(RECOMMENDED_FEEDS.filter((feed) => 'healthStatus' in feed && feed.healthStatus === 'DOWN')
+    .every((feed) => !feed.enabled));
+  assert.ok(RECOMMENDED_FEEDS.some((feed) => feed.id === 'feed-cve-org' && !feed.enabled));
+  assert.ok(RECOMMENDED_FEEDS.some((feed) => feed.id === 'feed-apple-security' && !feed.enabled));
+  assert.ok(RECOMMENDED_FEEDS.some((feed) => feed.id === 'feed-adobe-security' && !feed.enabled));
 });
 
 test('recommended catalog includes the official CISA KEV and FIRST EPSS adapters', () => {

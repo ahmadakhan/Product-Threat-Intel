@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ingestionWindow, SYNC_OVERLAP_MS } from '../server/ingestionState';
-import { ingestFeed } from '../server/ingestion';
+import { ingestFeed, normalizeNvd } from '../server/ingestion';
 import { loadConfig } from '../server/config.ts';
 import { encrypt } from '../server/secrets.ts';
 import type { ThreatFeed } from '../src/types/index.ts';
@@ -51,28 +51,70 @@ test('NVD requests only changes since its checkpoint and reports the frozen end 
   assert.ok(result.syncState!.cursor!.startsWith(end));
   assert.equal(result.count, 0);
 });
-test('VULNCHECK_NVD skips unchanged record revisions and uses conditional requests for an unchanged index', async () => {
+test('VULNCHECK_NVD skips unchanged content and advances the checkpoint on a 304', async () => {
   const date = new Date(Date.now() - 1000).toISOString();
-  let records = 0;
   const record = (id: string) => ({ cve: { id, vulnStatus: 'Published', published: date, lastModified: date, descriptions: [{ lang: 'en', value: 'Test' }], configurations: [], metrics: [], references: [], weaknesses: [] } });
   const vulncheckUrl = 'https://api.vulncheck.com/v3/index/nist-nvd2';
-  // The VulnCheck adapter is single-request: the whole window comes back on
-  // the conditional-probe request (its record payload embeds the CVE), so the
-  // unchanged-revision path is proven by the second run re-fetching nothing.
-  const request = async (url: string) => {
-    if (url.startsWith(vulncheckUrl)) return response({ vulnerabilities: [record('CVE-2026-98001')], _meta: { next_cursor: null } });
-    records++; return response(record('CVE-2026-98001'));
-  };
+  const request = async (url: string) =>
+    url.startsWith(vulncheckUrl)
+      ? response({ vulnerabilities: [record('CVE-2026-98001')], _meta: { next_cursor: null } })
+      : response(record('CVE-2026-98001'));
   const first = await ingestFeed(feed('VULNCHECK_NVD'), 24, request, config, sleep);
   assert.equal(first.count, 1);
-  const second = await ingestFeed(feed('VULNCHECK_NVD'), 24, request, config, sleep, [], undefined, first.syncState);
-  assert.equal(second.count, 0, 'unchanged cached revision is not re-emitted');
+  // Unchanged content at the same revision is skipped through the content
+  // comparison, not through the persisted revision map (which used to hide
+  // same-lastModified corrections).
+  const second = await ingestFeed(feed('VULNCHECK_NVD'), 24, request, config, sleep, [], undefined, {
+    ...first.syncState,
+    knownCveModifiedAt: new Map([['CVE-2026-98001', date]]),
+    knownCveContent: new Map([['CVE-2026-98001', first.cves[0]]]),
+  });
+  assert.equal(second.count, 0, 'unchanged content is not re-emitted');
+  assert.equal(second.cves.length, 0);
+  let conditionalEtag = '';
   const unchanged = await ingestFeed(feed('VULNCHECK_NVD'), 24, async (_url, options) => {
-    assert.equal(options!.headers!['If-None-Match'], 'index-v1');
+    conditionalEtag = String(options!.headers!['If-None-Match']);
     return { status: 304, body: '', headers: {} };
   }, config, sleep, [], undefined, second.syncState);
+  assert.equal(conditionalEtag, 'index-v1');
   assert.equal(unchanged.notModified, true);
-  assert.deepEqual(unchanged.syncState, second.syncState);
+  // A 304 must move the window forward; returning the old checkpoint made a
+  // quiet feed re-request the same window indefinitely.
+  assert.ok(unchanged.syncState?.cursor);
+  assert.ok(
+    Date.parse(unchanged.syncState!.cursor!) >= Date.parse(second.syncState!.cursor!),
+    'the checkpoint advances instead of stalling on 304',
+  );
+  assert.equal(unchanged.syncState?.indexEtag, 'index-v1');
+});
+
+test('VULNCHECK_NVD re-ingests a same-revision correction despite a persisted revision map', async () => {
+  const date = new Date(Date.now() - 1000).toISOString();
+  const base = {
+    cve: {
+      id: 'CVE-2026-98002',
+      vulnStatus: 'Published',
+      published: date,
+      lastModified: date,
+      descriptions: [{ lang: 'en', value: 'Old description' }],
+      configurations: [],
+      metrics: [],
+      references: [],
+      weaknesses: [],
+    },
+  };
+  const corrected = {
+    ...base,
+    cve: { ...base.cve, descriptions: [{ lang: 'en', value: 'Corrected description' }] },
+  };
+  const result = await ingestFeed(feed('VULNCHECK_NVD'), 24, async () =>
+    response({ vulnerabilities: [corrected], _meta: { next_cursor: null } }), config, sleep, [], undefined, {
+    revisions: { 'CVE-2026-98002': date },
+    knownCveModifiedAt: new Map([['CVE-2026-98002', date]]),
+    knownCveContent: new Map([['CVE-2026-98002', normalizeNvd(base, 'source')!]]),
+  });
+  assert.equal(result.cves.length, 1);
+  assert.equal(result.cves[0].description, 'Corrected description');
 });
 test('VULNCHECK_NVD re-fetches revised records and paces paginated cursors', async () => {
   const date = new Date(Date.now() - 1000).toISOString();
