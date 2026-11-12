@@ -159,7 +159,9 @@ const handleEnterEditor = () => {
       '{{remediation_link}}',
       '{{mitigation_steps}}',
       '{{references_link}}',
+      '{{references_html}}',
       '{{vendor_link}}',
+      '{{advisory_published_date}}',
       '{{recommended_actions}}',
     ];
 
@@ -355,7 +357,12 @@ const handleInsertToken = (token: string) => {
         '<ul>\n<li>Inventory all affected systems identified in this advisory.</li>\n<li>Apply vendor patches immediately following your change management process.</li>\n<li>Validate backup, restore, and operational functionality after remediation.</li>\n</ul>',
       )
       .replace(/{{vendor_link}}/g, 'https://example.com')
+      .replace(/{{advisory_published_date}}/g, previewDate)
       .replace(/{{remediation_link}}/g, 'https://example.com/patch-guidance')
+      .replace(
+        /{{references_html}}/g,
+        `<div><a href="https://example.com/vendor-advisory" target="_blank" rel="noopener noreferrer" style="color:${accentColor};text-decoration:underline;">Vendor advisory for CVE-2026-0001</a></div>\n<div><a href="https://example.com/vendor-advisory-2" target="_blank" rel="noopener noreferrer" style="color:${accentColor};text-decoration:underline;">Vendor advisory for CVE-2026-0002</a></div>`,
+      )
       .replace(/{{references_link}}/g, 'https://example.com/vendor-advisory');
   };
 

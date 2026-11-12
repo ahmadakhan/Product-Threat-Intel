@@ -387,6 +387,14 @@ export function renderAdvisory(
       safeHttpHref(
         findings?.find((f) => f.cve?.remediation?.vendorAdvisoryRef)?.cve?.remediation?.vendorAdvisoryRef || '',
       ),
+    references_html: referenceDetails.length
+      ? referenceDetails
+          .map(
+            (ref) =>
+              `<div><a href="${ref.url}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">${ref.title}</a></div>`,
+          )
+          .join('\n')
+      : '',
     cve_id_links: [...advisory.cveIds]
       .sort((a: string, b: string) => severityRank(b, advisory, findings) - severityRank(a, advisory, findings) || a.localeCompare(b))
       .map(

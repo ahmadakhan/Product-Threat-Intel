@@ -164,18 +164,18 @@ test('renderAdvisory produces template matching the studio HTML structure', () =
   const template = compileCustomizedTemplate(testCustomization);
   const html = renderAdvisory(template, baseAdvisory);
   assert.ok(template.includes('ul { margin:0; padding-left:20px; }'), 'template lists should use consistent left spacing');
-   assert.ok(html.includes('THREAT INTELLIGENCE &amp; BA CYBER SECURITY OPERATIONS'), 'studio label should appear');
-  assert.ok(html.includes('Security Advisory'), 'static heading should appear');
+  assert.ok(html.includes('BA Security Advisory'), 'studio heading should appear');
   assert.ok(html.includes('ADV-2026-001'), 'advisory id should be rendered');
   assert.ok(html.includes('Test vulnerability advisory'), 'advisory title should be rendered');
-  assert.ok(html.includes('BA Threat Intelligence'), 'footer label should appear');
-  assert.ok(html.includes('EXECUTIVE SUMMARY'), 'executive summary section should appear');
-  assert.ok(html.includes('ADVISORY DETAILS'), 'advisory details section should appear');
+  assert.ok(html.includes('BA Security Operations'), 'footer label should appear');
+  assert.ok(html.includes('SUMMARY'), 'summary section should appear');
+  assert.ok(html.includes('DETAILS'), 'details section should appear');
   assert.ok(!html.includes('Vulnerability Name'), 'vulnerability name row should not appear');
-  assert.ok(html.includes('Test vulnerability advisory'), 'advisory title should be rendered');
-  assert.ok(html.includes('Affected Products &amp; Versions'), 'affected products row should appear');
-  assert.ok(html.includes('Workaround / Mitigation'), 'mitigation row should appear');
+  assert.ok(html.includes('Affected Products'), 'affected products row should appear');
+  assert.ok(html.includes('Mitigation'), 'mitigation row should appear');
   assert.ok(html.includes('Honeywell Recommended Actions'), 'recommended action row should appear');
+  assert.ok(html.includes('CVE(s)'), 'CVE list row should appear');
+  assert.ok(html.includes('Advisory Dates'), 'advisory dates row should appear');
 });
 
 const findingsWithVendorLinks: Finding[] = [
@@ -230,8 +230,8 @@ const findingsWithVendorLinks: Finding[] = [
 test('renderAdvisory shows View Vendor Guidance and Advisory link from finding remediation data', () => {
   const template = compileCustomizedTemplate(testCustomization);
   const html = renderAdvisory(template, baseAdvisory, findingsWithVendorLinks);
-  assert.ok(html.includes('View Vendor Guidance'), 'view vendor guidance should appear with a link');
-  assert.ok(html.includes('Advisory link'), 'vendor security advisory should appear with a link');
+  assert.ok(html.includes('View Vendor Remediation Guidance'), 'view vendor guidance should appear with a link');
+  assert.ok(html.includes('Vendor advisory for'), 'vendor security advisory should appear with a link');
   assert.ok(html.includes('href="https://vendor.com/patch/CVE-2026-12345"'), 'view vendor guidance should point to the patch URL');
   assert.ok(html.includes('href="https://vendor.com/advisory/CVE-2026-12345"'), 'vendor security advisory should point to the advisory URL');
   assert.ok(!html.includes('href=""'), 'no empty href should remain');

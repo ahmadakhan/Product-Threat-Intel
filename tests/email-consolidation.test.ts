@@ -114,7 +114,7 @@ test('the email body is the document attached to it', () => {
   const generatedAt = new Date('2026-01-01T12:34:00Z');
   const document = renderFindingsDocument({ advisory: view, findings, generatedAt });
   assert.ok(document.html.includes('Security Advisory'));
-  assert.match(document.html, /Report Generated/);
+  assert.match(document.html, /Generated:/);
   assert.equal(deliveryHtmlIsAttachable(document.html), true);
   // Re-rendering with the pinned instant is byte-identical: the attachment render
   // can never drift from the body.

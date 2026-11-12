@@ -78,7 +78,7 @@ export function compileCustomizedTemplate(config: TemplateCustomization): string
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="x-apple-disable-message-reformatting">
-<title>Security Advisory</title>
+<title>BA Security Advisory</title>
 
 <style>
   body,table,td,a { -webkit-text-size-adjust:100%; -ms-text-size-adjust:100%; }
@@ -113,187 +113,164 @@ export function compileCustomizedTemplate(config: TemplateCustomization): string
     }
   }
 </style>
+
+<!--[if mso]>
+<style>
+body,table,td,div,p,a{font-family:Arial,sans-serif !important;}
+table{border-collapse:collapse !important;border-spacing:0 !important;}
+td{mso-line-height-rule:exactly;}
+</style>
+<![endif]-->
 </head>
 
 <body>
 
+<!-- Preview Text -->
+<div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">
+{{#if advisory_title}}{{advisory_title}}{{else}}Security Advisory{{/if}} - {{severity_text}}
+</div>
+
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${config.canvasBg}">
 <tr>
-<td align="center" style="padding:24px 12px;">
+<td align="center" style="padding:12px;">
 
-<table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" class="container" style="width:680px;max-width:680px;background:${config.cardBg};border:1px ${config.borderStyle} #e2e8f0;">
+<table role="presentation" width="700" cellpadding="0" cellspacing="0" border="0" class="container" style="width:700px;max-width:700px;background:${config.cardBg};border:1px ${config.borderStyle} #e2e8f0;">
 
     ${classificationBanner}
 
     <!-- HEADER -->
     <tr>
-        <td bgcolor="${config.headerBg}" style="padding:20px 32px;box-shadow:0 1px 3px rgba(0,0,0,0.2);">
+        <td bgcolor="${config.headerBg}" style="padding:12px 20px;">
 
             ${stampHtml}
 
-            <div style="font-size:10px;font-weight:bold;letter-spacing:1.5px;color:${headerMuted};margin-bottom:8px;">
-                THREAT INTELLIGENCE &amp; BA CYBER SECURITY OPERATIONS
+            {{severity_header_badge}}
+
+            <div class="title" style="padding-top:6px;font-size:18px;line-height:22px;font-weight:700;color:${headerText};">
+                BA Security Advisory
             </div>
 
-            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:8px;">
-                <tr>
-                    <td>
-                        {{severity_header_badge}}
-                    </td>
-                </tr>
-            </table>
-
-            <div class="title" style="font-size:24px;line-height:30px;font-weight:bold;color:${headerText};margin-bottom:6px;">
-                Security Advisory
-            </div>
-
-            <div style="font-size:16px;line-height:22px;font-weight:600;color:${headerText};margin-bottom:8px;">
+            <div style="padding-top:3px;font-size:13px;line-height:18px;font-weight:600;color:${headerText};">
                 {{advisory_title}}
             </div>
 
-            <div style="font-size:12px;line-height:18px;color:${headerMuted};">
-                Advisory ID: {{advisory_id}}<br>
-                Report Generated: {{dispatch_date}}
+            <div style="padding-top:4px;font-size:11px;line-height:15px;color:${headerMuted};">
+                Advisory ID: {{advisory_id}} | Generated: {{dispatch_date}}
             </div>
 
         </td>
     </tr>
 
-    <!-- SEVERITY SUMMARY -->
+    <!-- SUMMARY -->
     <tr>
-        <td style="padding:24px 32px;border-bottom:1px solid #e2e8f0;">
+        <td style="padding:16px 20px;border-bottom:1px solid #e2e8f0;">
 
-            <div style="font-size:11px;font-weight:bold;letter-spacing:1.5px;color:${config.accentColor};margin-bottom:8px;">
-                SEVERITY SUMMARY
+            <div style="font-size:11px;font-weight:bold;letter-spacing:1px;color:${config.accentColor};padding-bottom:4px;">
+                SUMMARY
             </div>
 
-            <div style="display:inline-flex;flex-wrap:wrap;gap:8px;align-items:center;">
-                {{severity_summary}}
-            </div>
-
-        </td>
-    </tr>
-
-    <!-- EXECUTIVE SUMMARY -->
-    <tr>
-        <td style="padding:24px 32px;border-bottom:1px solid #e2e8f0;">
-
-            <div style="font-size:11px;font-weight:bold;letter-spacing:1.5px;color:${config.accentColor};margin-bottom:8px;">
-                EXECUTIVE SUMMARY
-            </div>
-
-            <p style="margin:0;font-size:14px;line-height:24px;color:${config.fontColor};">
+            <div style="font-size:13px;line-height:20px;color:${config.fontColor};">
                 {{executive_summary}}
-            </p>
+            </div>
 
         </td>
     </tr>
 
-    <!-- ADVISORY DETAILS -->
+    <!-- DETAILS -->
     <tr>
-        <td class="mobile-padding" style="padding:32px;">
+        <td class="mobile-padding" style="padding:20px;">
 
-            <div style="font-size:11px;font-weight:bold;letter-spacing:1.5px;color:${config.accentColor};margin-bottom:12px;">
-                ADVISORY DETAILS
+            <div style="font-size:11px;font-weight:bold;letter-spacing:1px;color:${config.accentColor};padding-bottom:8px;">
+                DETAILS
             </div>
 
-             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="font-size:13px;line-height:22px;">
+             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border:1px solid #e2e8f0;font-size:13px;line-height:18px;">
 
                  <tr>
-                     <td bgcolor="#f8fafc" style="padding:12px;font-weight:bold;border:1px solid #e2e8f0;color:#0f172a;">
-                         CVE ID
+                     <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;">
+                         CVE(s)
                      </td>
-                    <td style="padding:12px;border:1px solid #e2e8f0;text-align:left;vertical-align:top;">
+                    <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;">
                         {{cve_id_links}}
                     </td>
                 </tr>
 
                 <tr>
-                    <td bgcolor="#f8fafc" style="padding:12px;font-weight:bold;border:1px solid #e2e8f0;color:#0f172a;">
+                    <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;">
                         Severity
                     </td>
-                    <td style="padding:12px;border:1px solid #e2e8f0;text-align:left;vertical-align:top;">
+                    <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;">
                         {{severity_badge}}
                     </td>
                 </tr>
 
                 <tr>
-                    <td bgcolor="#f8fafc" style="padding:12px;font-weight:bold;border:1px solid #e2e8f0;color:#0f172a;">
-                        Date of Release
+                    <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;">
+                        Advisory Dates
                     </td>
-                    <td style="padding:12px;border:1px solid #e2e8f0;text-align:left;vertical-align:top;">
-                        {{dispatch_date}}
-                    </td>
-                </tr>
-
-                <tr>
-                    <td bgcolor="#f8fafc" style="padding:12px;font-weight:bold;border:1px solid #e2e8f0;color:#0f172a;">
-                        Date of Update
-                    </td>
-                    <td style="padding:12px;border:1px solid #e2e8f0;text-align:left;vertical-align:top;">
-                        {{dispatch_date}}
+                    <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:13px;">
+                        <strong>Published:</strong> {{advisory_published_date}}
+                        &nbsp;&nbsp;|&nbsp;&nbsp;
+                        <strong>Updated:</strong> {{dispatch_date}}
                     </td>
                 </tr>
 
                 <tr>
-                    <td bgcolor="#f8fafc" style="padding:12px;font-weight:bold;border:1px solid #e2e8f0;color:#0f172a;">
-                        Vulnerability Details
+                    <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;border-bottom:1px solid #e2e8f0;vertical-align:top;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;">
+                        Affected Products
                     </td>
-
-                    <td style="padding:12px;border:1px solid #e2e8f0;text-align:left;vertical-align:top;">
-                        {{cve_details}}
-                    </td>
-                </tr>
-
-                <tr>
-                    <td bgcolor="#f8fafc" style="padding:12px;font-weight:bold;border:1px solid #e2e8f0;color:#0f172a;">
-                        Affected Products &amp; Versions
-                    </td>
-                    <td style="padding:12px;border:1px solid #e2e8f0;text-align:left;vertical-align:top;">
+                    <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;">
                         {{vendor_products_html}}
                     </td>
                 </tr>
 
                 <tr>
-                    <td bgcolor="#f8fafc" style="padding:12px;font-weight:bold;border:1px solid #e2e8f0;color:#0f172a;">
+                    <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;border-bottom:1px solid #e2e8f0;vertical-align:top;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;">
+                        Vulnerability Details
+                    </td>
+                    <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;">
+                        {{cve_details}}
+                    </td>
+                </tr>
+
+                <tr>
+                    <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;border-bottom:1px solid #e2e8f0;vertical-align:top;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;">
                         Remediation
                     </td>
-                    <td style="padding:12px;border:1px solid #e2e8f0;text-align:left;vertical-align:top;">
+                    <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:13px;">
                         {{remediation_steps}}
 
-                        {{#if remediation_link}}<p style="margin:12px 0 0;">
+                        {{#if remediation_link}}<div style="padding-top:6px;">
                             <a href="{{remediation_link}}" target="_blank">
-                                View Vendor Guidance
+                                View Vendor Remediation Guidance
                             </a>
-                        </p>{{/if}}
-                    </td>
-                </tr>
-
-                <tr>
-                    <td bgcolor="#f8fafc" style="padding:12px;font-weight:bold;border:1px solid #e2e8f0;color:#0f172a;">
-                        Workaround / Mitigation
-                    </td>
-                    <td style="padding:12px;border:1px solid #e2e8f0;text-align:left;vertical-align:top;">
-                        {{mitigation_steps}}
-                    </td>
-                </tr>
-
-                <tr>
-                    <td bgcolor="#f8fafc" style="padding:12px;font-weight:bold;border:1px solid #e2e8f0;color:#0f172a;">
-                        References
-                    </td>
-                    <td style="padding:12px;border:1px solid #e2e8f0;text-align:left;vertical-align:top;">
-                        {{#if references_link}}<div style="font-size:12px;line-height:18px;text-align:left;">
-                            <a href="{{references_link}}" target="_blank" rel="noopener noreferrer" style="color:#2563eb;text-decoration:underline;">Advisory link</a>
                         </div>{{/if}}
                     </td>
                 </tr>
 
                 <tr>
-                       <td bgcolor="#f8fafc" style="padding:12px;font-weight:bold;border:1px solid #e2e8f0;color:#0f172a;">
+                    <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;">
+                        Mitigation
+                    </td>
+                    <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:13px;">
+                        {{mitigation_steps}}
+                    </td>
+                </tr>
+
+                <tr>
+                    <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;">
+                        References
+                    </td>
+                    <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:13px;">
+                        {{references_html}}
+                    </td>
+                </tr>
+
+                <tr>
+                    <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;vertical-align:top;">
                         Honeywell Recommended Actions
                     </td>
-                    <td style="padding:12px;border:1px solid #e2e8f0;text-align:left;vertical-align:top;">
+                    <td style="padding:8px 10px;">
                         {{recommended_actions}}
                     </td>
                 </tr>
@@ -305,21 +282,20 @@ export function compileCustomizedTemplate(config: TemplateCustomization): string
 
     <!-- FOOTER -->
     <tr>
-        <td style="padding:24px 32px;border-top:1px solid #e2e8f0;background:#fafafa;">
+        <td style="padding:14px 20px;border-top:1px solid #d1d5db;background:#fafafa;">
 
-            <div style="font-size:13px;font-weight:bold;color:#0f172a;margin-bottom:8px;">
-                BA Threat Intelligence
+            <div style="font-size:12px;font-weight:700;color:#0f172a;">
+                BA Security Operations
             </div>
 
-             <div style="font-size:12px;line-height:20px;color:#64748b;">
-                This advisory was generated from monitored inventory, vendor security notifications,
-                and threat intelligence sources. Evaluate applicability to your environment before
-                implementing remediation actions. All remediation activities should follow approved
-                operational and change management procedures.
+             <div style="font-size:12px;line-height:18px;color:#64748b;padding-top:4px;">
+                This advisory is based on vendor disclosures, vulnerability intelligence, and threat
+                intelligence sources. Assess applicability before implementing remediation or
+                mitigation actions.
             </div>
 
-            <div style="margin-top:12px;font-size:12px;line-height:20px;color:#64748b;">
-                For questions or additional information, contact:
+            <div style="padding-top:8px;font-size:12px;color:#64748b;">
+                Questions or assistance:
                 <a href="mailto:DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com" style="color:${config.accentColor};text-decoration:underline;">DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com</a>
             </div>
 
