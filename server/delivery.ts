@@ -2196,7 +2196,11 @@ export async function deliverNext(
       mlDelayMs = getMlRuntime()?.deliveryOptimizer.isTrained() ? computeRetryDelay(job.attempts) : undefined,
       retryDelay = emailRetryDelayPlan(job.attempts, retryPolicy, mlDelayMs);
     const retryDelayBaseAt = Date.now();
-    const nextAttemptAt = Math.max(retryNotBefore, retryDelayBaseAt + retryDelay.delayMs);
+    // If the provider supplied a Retry-After, honour it exactly; otherwise
+    // fall back to the normal back-off calculation.
+    const nextAttemptAt = retryNotBefore
+      ? retryNotBefore
+      : Math.max(retryDelayBaseAt + retryDelay.delayMs, retryDelayBaseAt);
     const next = new Date(nextAttemptAt);
     const scheduledRetryDelayMs = nextAttemptAt - retryDelayBaseAt;
     const scheduledRetryDelaySource = retryNotBefore > retryDelayBaseAt + retryDelay.delayMs

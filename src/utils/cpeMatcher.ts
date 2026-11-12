@@ -24,8 +24,8 @@ export interface ParsedCPE {
 
 const cpeCache = new Map<string, { value: ParsedCPE; expiresAt: number }>();
 const MAX_CPE_CACHE_SIZE = 10000;
-const CPE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const MAX_INVALID_CPE_CACHE = 1000; // Limit invalid CPE cache to prevent pollution
+const CPE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 min TTL
+const MAX_INVALID_CPE_CACHE = 1000; // Prevent cache-pollution by malformed CPEs
 
 /**
  * Unescapes CPE 2.3 special characters and lowercases for semantic comparison.
@@ -49,18 +49,15 @@ export function normalizeCpeForComparison(cpe: string): string {
     .replace(/\\([+:\\*?()])/g, '$1');
 }
 
-function evictLRU(): void {
+/** Evict expired and LRU entries from the CPE cache. */
+function evictCpeCache(): void {
   const now = Date.now();
-  let evicted = false;
-  // First pass: remove expired entries
+  // Remove expired entries first.
   for (const [key, entry] of cpeCache) {
-    if (entry.expiresAt < now) {
-      cpeCache.delete(key);
-      evicted = true;
-    }
+    if (entry.expiresAt < now) cpeCache.delete(key);
   }
-  // Second pass: evict in batches if still over limit
-  if (!evicted && cpeCache.size > MAX_CPE_CACHE_SIZE) {
+  // If still over the size limit, evict the oldest 10% (approximate LRU).
+  if (cpeCache.size > MAX_CPE_CACHE_SIZE) {
     const toEvict = Math.max(1, Math.floor(cpeCache.size * 0.1));
     const keys = [...cpeCache.keys()].slice(0, toEvict);
     for (const key of keys) cpeCache.delete(key);
@@ -82,9 +79,8 @@ export function parseCPE23(cpeString: string): ParsedCPE {
   const trimmed = cpeString.trim();
   if (!trimmed.startsWith('cpe:2.3:')) {
     const empty = createEmptyCPE(trimmed, false);
-    const invalidCount = cpeCache.size; // Count before adding
-    if (invalidCount >= MAX_CPE_CACHE_SIZE) evictLRU();
-    // Limit invalid CPE entries to prevent cache pollution
+    if (cpeCache.size >= MAX_CPE_CACHE_SIZE) evictCpeCache();
+    // Guard against cache blow-up with malformed CPEs.
     if (cpeCache.size < MAX_INVALID_CPE_CACHE || cpeCache.has(cpeString)) {
       cpeCache.set(cpeString, { value: empty, expiresAt: Date.now() + CPE_CACHE_TTL_MS });
     }
@@ -99,7 +95,7 @@ export function parseCPE23(cpeString: string): ParsedCPE {
     tokens.some((token) => !token || /(?<!\\)(?:\\\\)*\\$/.test(token))
   ) {
     const empty = createEmptyCPE(trimmed, false);
-    if (cpeCache.size >= MAX_CPE_CACHE_SIZE) evictLRU();
+    if (cpeCache.size >= MAX_CPE_CACHE_SIZE) evictCpeCache();
     // Limit invalid CPE entries to prevent cache pollution
     if (cpeCache.size < MAX_INVALID_CPE_CACHE || cpeCache.has(cpeString)) {
       cpeCache.set(cpeString, { value: empty, expiresAt: Date.now() + CPE_CACHE_TTL_MS });
@@ -124,7 +120,7 @@ export function parseCPE23(cpeString: string): ParsedCPE {
     isValid: true,
   };
 
-  if (cpeCache.size >= MAX_CPE_CACHE_SIZE) evictLRU();
+    if (cpeCache.size >= MAX_CPE_CACHE_SIZE) evictCpeCache();
   cpeCache.set(cpeString, { value: result, expiresAt: Date.now() + CPE_CACHE_TTL_MS });
   return result;
 }
@@ -274,12 +270,11 @@ function matchComponent(assetAttr: string, vulnAttr: string): boolean {
   if (assetAttr === '-' && vulnAttr === '-') return true;
   if (assetAttr === '-' || vulnAttr === '-') return false;
 
-  // Wildcard components are compared as glob languages. Building a RegExp with
-  // one `.*` per wildcard allows catastrophic backtracking on hostile values,
-  // so the memoized intersection check handles every wildcard pair instead.
+  // Wildcard vs wildcard – use the memoised glob intersection algorithm.
   if (hasUnescapedCpeWildcard(assetAttr) || hasUnescapedCpeWildcard(vulnAttr)) {
     return globIntersects(assetAttr, vulnAttr);
   }
+  // Exact literal comparison (unescaped, lower-cased).
   return cpeLiteral(assetAttr) === cpeLiteral(vulnAttr);
 }
 

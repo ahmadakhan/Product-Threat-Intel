@@ -275,6 +275,13 @@ export async function ingestFeed(
     else
       headers.Authorization = `${feed.authType === 'BASIC' ? 'Basic' : 'Bearer'} ${feed.authType === 'BASIC' ? Buffer.from(secret).toString('base64') : secret}`;
   }
+  // -------------------------------------------------------------------------
+  // Helper: compute a deterministic vendor/product deduplication key.
+  // Used by feed items, news, RSS and advisory records.
+  // -------------------------------------------------------------------------
+  const vendorProductKey = (vendor: string, product: string): string =>
+    `${vendor?.trim().toLowerCase()}:${product?.trim().toLowerCase()}`;
+
   const json = async (
     url: string,
     conditional = true,
