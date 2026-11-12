@@ -853,7 +853,7 @@ export async function enqueue(
       status: 'QUEUED',
       attemptCount: 0,
       retrySchedule: emailRetrySchedule(emailRetryPolicy(settings)),
-      nextRetryTime: initialStatus === 'REVIEW' ? null : new Date().toISOString(),
+      nextRetryTime: new Date().toISOString(),
       sentAt: '',
     } satisfies EmailDeliveryLog);
   } else {
