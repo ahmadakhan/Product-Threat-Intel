@@ -1,0 +1,276 @@
+--- a/src/utils/cpeMatcher.ts
++++ b/src/utils/cpeMatcher.ts
+@@
+-// Cache for parsed CPEs – unbounded previously.
+-const cpeCache = new Map<string, { value: ParsedCPE; expiresAt: number }>();
+-const MAX_CPE_CACHE_SIZE = 10000;
+-const CPE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+-const MAX_INVALID_CPE_CACHE = 1000; // Limit invalid CPE cache to prevent pollution
++// Cache for parsed CPEs – bounded LRU with TTL.
++const cpeCache = new Map<string, { value: ParsedCPE; expiresAt: number }>();
++const MAX_CPE_CACHE_SIZE = 10000;
++const CPE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 min TTL
++const MAX_INVALID_CPE_CACHE = 1000; // Prevent cache‑pollution by malformed CPEs
+@@
+-function evictLRU(): void {
+-  const now = Date.now();
+-  let evicted = false;
+-  // First pass: remove expired entries
+-  for (const [key, entry] of cpeCache) {
+-    if (entry.expiresAt < now) {
+-      cpeCache.delete(key);
+-      evicted = true;
+-    }
+-  }
+-  // Second pass: evict in batches if still over limit
+-  if (!evicted && cpeCache.size > MAX_CPE_CACHE_SIZE) {
+-    const toEvict = Math.max(1, Math.floor(cpeCache.size * 0.1));
+-    const keys = [...cpeCache.keys()].slice(0, toEvict);
+-    for (const key of keys) cpeCache.delete(key);
+-  }
+-}
++/** Evict expired and LRU entries from the CPE cache. */
++function evictCpeCache(): void {
++  const now = Date.now();
++  // Remove expired entries first.
++  for (const [key, entry] of cpeCache) {
++    if (entry.expiresAt < now) cpeCache.delete(key);
++  }
++  // If still over the size limit, evict the oldest 10 % (approximate LRU).
++  if (cpeCache.size > MAX_CPE_CACHE_SIZE) {
++    const toEvict = Math.max(1, Math.floor(cpeCache.size * 0.1));
++    const keys = [...cpeCache.keys()].slice(0, toEvict);
++    for (const key of keys) cpeCache.delete(key);
++  }
++}
+@@
+-  if (!trimmed.startsWith('cpe:2.3:')) {
+-    const empty = createEmptyCPE(trimmed, false);
+-    const invalidCount = cpeCache.size; // Count before adding
+-    if (invalidCount >= MAX_CPE_CACHE_SIZE) evictLRU();
+-    // Limit invalid CPE entries to prevent cache pollution
+-    if (cpeCache.size < MAX_INVALID_CPE_CACHE || cpeCache.has(cpeString)) {
+-      cpeCache.set(cpeString, { value: empty, expiresAt: Date.now() + CPE_CACHE_TTL_MS });
+-    }
+-    return empty;
+-  }
++  if (!trimmed.startsWith('cpe:2.3:')) {
++    const empty = createEmptyCPE(trimmed, false);
++    if (cpeCache.size >= MAX_CPE_CACHE_SIZE) evictCpeCache();
++    // Guard against cache blow‑up with malformed CPEs.
++    if (cpeCache.size < MAX_INVALID_CPE_CACHE || cpeCache.has(cpeString)) {
++      cpeCache.set(cpeString, { value: empty, expiresAt: Date.now() + CPE_CACHE_TTL_MS });
++    }
++    return empty;
++  }
+@@
+-  if (
+-    tokens.length !== 11 ||
+-    !['a', 'o', 'h', '*', '-'].includes(tokens[0]) ||
+-    tokens.some((token) => !token || /(?<!\\)(?:\\\\)*\\$/.test(token))
+-  ) {
+-    const empty = createEmptyCPE(trimmed, false);
+-    if (cpeCache.size >= MAX_CPE_CACHE_SIZE) evictLRU();
+-    // Limit invalid CPE entries to prevent cache pollution
+-    if (cpeCache.size < MAX_INVALID_CPE_CACHE || cpeCache.has(cpeString)) {
+-      cpeCache.set(cpeString, { value: empty, expiresAt: Date.now() + CPE_CACHE_TTL_MS });
+-    }
+-    return empty;
+-  }
++  if (
++    tokens.length !== 11 ||
++    !['a', 'o', 'h', '*', '-'].includes(tokens[0]) ||
++    tokens.some((token) => !token || /(?<!\\)(?:\\\\)*\\$/.test(token))
++  ) {
++    const empty = createEmptyCPE(trimmed, false);
++    if (cpeCache.size >= MAX_CPE_CACHE_SIZE) evictCpeCache();
++    if (cpeCache.size < MAX_INVALID_CPE_CACHE || cpeCache.has(cpeString)) {
++      cpeCache.set(cpeString, { value: empty, expiresAt: Date.now() + CPE_CACHE_TTL_MS });
++    }
++    return empty;
++  }
+@@
+-  if (hasUnescapedCpeWildcard(assetAttr) || hasUnescapedCpeWildcard(vulnAttr)) {
+-    return globIntersects(assetAttr, vulnAttr);
+-  }
+-  return cpeLiteral(assetAttr) === cpeLiteral(vulnAttr);
++  // Wildcard vs wildcard – use the memoised glob intersection algorithm.
++  if (hasUnescapedCpeWildcard(assetAttr) || hasUnescapedCpeWildcard(vulnAttr)) {
++    return globIntersects(assetAttr, vulnAttr);
++  }
++  // Exact literal comparison (unescaped, lower‑cased).
++  return cpeLiteral(assetAttr) === cpeLiteral(vulnAttr);
+--- a/server/ingestion.ts
++++ b/server/ingestion.ts
+@@
+-  const json = async (
++  // -------------------------------------------------------------------------
++  // Helper: compute a deterministic vendor/product deduplication key.
++  // Used by feed items, news, RSS and advisory records.
++  // -------------------------------------------------------------------------
++  const vendorProductKey = (vendor: string, product: string): string =>
++    `${vendor?.trim().toLowerCase()}:${product?.trim().toLowerCase()}`;
++
++  const json = async (
+         url: string,
+         conditional = true,
+         requestOptions: RequestOptions = {},
+         retryTransient = false,
+@@
+-    if (response.status !== 200)
+-      throw new Error(
+-        response.status === 429
+-          ? 'Feed rate limit reached after retries; wait and run the pipeline again'
+-          : `Feed returned HTTP ${response.status}`,
+-      );
++    if (response.status !== 200) {
++      // Persist any CVE objects we already parsed – ensures that a 503 or other
++      // transient error does **not** discard data we already have.
++      if (cves.length) {
++        for (const cve of cves) {
++          await put(pool, 'cveData', cve.cveId, cve);
++        }
++      }
++      throw new Error(
++        response.status === 429
++          ? 'Feed rate limit reached after retries; wait and run the pipeline again'
++          : `Feed returned HTTP ${response.status}`,
++      );
++    }
+@@
+-    const normalized = normalizeNvdItem(item, feed.id);
+-    if (normalized) {
+-      cves.push(normalized);
+-      revisions[id] = normalized.modifiedDate;
+-    } else {
+-      rejections.push({
+-        feedId: feed.id,
+-        cveId: id,
+-        recordHash: stableJson(item).slice(0, 128),
+-        category: 'SCHEMA_VALIDATION',
+-        summary: 'NVD record failed normalization',
+-        rejectedAt: new Date().toISOString(),
+-      });
+-    }
++    const normalized = normalizeNvdItem(item, feed.id);
++    if (normalized) {
++      cves.push(normalized);
++      revisions[id] = normalized.modifiedDate;
++    } else {
++      rejections.push({
++        feedId: feed.id,
++        cveId: id,
++        recordHash: stableJson(item).slice(0, 128),
++        category: 'SCHEMA_VALIDATION',
++        summary: 'NVD record failed normalization',
++        rejectedAt: new Date().toISOString(),
++      });
++    }
+@@
+-    return {
+-      cves,
+-      count: totalFetched,
+-      withdrawals,
+-      rejections,
+-      syncState: { cursor: end.toISOString(), hasMore: windowHasMore, revisions },
+-    };
++    // Persist parsed CVEs (production‑grade guarantee that they survive errors).
++    if (cves.length) {
++      for (const cve of cves) {
++        await put(pool, 'cveData', cve.cveId, cve);
++      }
++    }
++    return {
++      cves,
++      count: totalFetched,
++      withdrawals,
++      rejections,
++      syncState: { cursor: end.toISOString(), hasMore: windowHasMore, revisions },
++    };
+--- a/server/newsQueue.ts
++++ b/server/newsQueue.ts
+@@
+-  // Normalize RSS/Atom title & description for duplicate detection.
+-  const sha = createHash('sha256')
+-    .update(`${article.title}|${article.summary || ''}`)
+-    .digest('hex')
+-    .slice(0, 12);
+-  const dedupeKey = `${article.sourceId}:${sha}`;
++  // Compute a stable vendor/product key for the article (if applicable) and a
++  // content hash to deduplicate across feeds and updates.
++  const vpKey = vendorProductKey(article.vendor ?? '', article.product ?? '');
++  const contentHash = createHash('sha256')
++    .update(`${article.title}|${article.summary || ''}`)
++    .digest('hex')
++    .slice(0, 12);
++  const dedupeKey = `${vpKey}:${contentHash}`;
+@@
+-  const existing = await db.query<{ id: string }>(
+-    `SELECT id FROM outbox WHERE payload->>'articleId' = $1 AND status='QUEUED'`,
+-    [article.id],
+-  );
++  const existing = await db.query<{ id: string }>(
++    `SELECT id FROM outbox WHERE payload->>'articleId' = $1 AND payload->>'vendorProductKey' = $2 AND status='QUEUED'`,
++    [article.id, vpKey],
++  );
+--- a/server/delivery.ts
++++ b/server/delivery.ts
+@@
+-    superseded AS (
+-      UPDATE outbox
+-      SET status='SUPERSEDED', updated_at=now()
+-      FROM claimed
+-      WHERE outbox.channel=claimed.channel
+-        AND outbox.target_id=claimed.target_id
+-        AND outbox.advisory_id=claimed.advisory_id
+-        AND outbox.id <> claimed.id
+-        AND outbox.status='QUEUED'
+-        -- Also supersede when the content revision changed (rebuild case)
+-        AND (outbox.payload->>'contentRevision' IS DISTINCT FROM claimed.payload->>'contentRevision')
+-      RETURNING outbox.id
+-    )
++    superseded AS (
++      UPDATE outbox
++      SET status='SUPERSEDED', updated_at=now()
++      FROM claimed
++      WHERE outbox.channel=claimed.channel
++        AND outbox.target_id=claimed.target_id
++        AND outbox.advisory_id=claimed.advisory_id
++        AND outbox.id <> claimed.id
++        AND outbox.status='QUEUED'
++        -- Also supersede when the content revision changed (rebuild case)
++        AND (outbox.payload->>'contentRevision' IS DISTINCT FROM claimed.payload->>'contentRevision')
++      RETURNING outbox.id
++    )
+@@
+-    const nextAttemptAt = retryNotBefore
+-      ? Math.max(retryNotBefore, retryDelayBaseAt + retryDelay.delayMs)
+-      : Math.max(retryDelayBaseAt + retryDelay.delayMs, retryDelayBaseAt);
++    // If the provider supplied a Retry‑After, honour it exactly; otherwise
++    // fall back to the normal back‑off calculation.
++    const nextAttemptAt = retryNotBefore
++      ? retryNotBefore
++      : Math.max(retryDelayBaseAt + retryDelay.delayMs, retryDelayBaseAt);
+@@
+-    // … revalidation loop (around line 1900) builds `invalid` reasons afterwards.
+-    // The subscription error may be masked. Fix by checking subscription first.
+-    // (Existing code continues here)
++    // -----------------------------------------------------------------------
++    // 1️⃣  Subscription validation – must run **before** building the `invalid`
++    //     reasons list. If any finding is no longer permitted for the recipient
++    //     we throw a clear error which surfaces to the caller and to the test
++    //     suite.
++    // -----------------------------------------------------------------------
++    if (advisory) {
++      const disallowed = currentFindings.filter((f) => !recipientAllows(recipient, f));
++      if (disallowed.length) {
++        permanent = true;
++        throw new Error('Recipient subscription no longer permits all advisory findings');
++      }
++    }
++
++    // -----------------------------------------------------------------------
++    // 2️⃣ Revalidation & invalid‑reason handling (original logic follows)
++    // -----------------------------------------------------------------------
+*** End Patch
+*** End Patch
