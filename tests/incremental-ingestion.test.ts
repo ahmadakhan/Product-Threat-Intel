@@ -173,3 +173,41 @@ test('transient response resets retry without advancing a failed source checkpoi
   assert.ok(result.syncState!.cursor);
   await assert.rejects(ingestFeed({ ...feed('VULNCHECK_NVD'), authType: 'API_KEY', authSecretKey: 'invalid-encrypted-data' }, 24, async () => { throw new Error('No network expected'); }, config, sleep), /re-enter the secret/);
 });
+
+test('VULNCHECK_NVD retries oversized pages at a reduced page size instead of failing the run', async () => {
+  const date = new Date(Date.now() - 1000).toISOString();
+  const record = (id: string) => ({ cve: { id, vulnStatus: 'Published', published: date, lastModified: date, descriptions: [{ lang: 'en', value: 'Test' }], configurations: [], metrics: [], references: [], weaknesses: [] } });
+  const requestedLimits: (string | null)[] = [];
+  const decodeLimitError = new Error('Decoded response exceeds configured 33554432-byte limit');
+  let pageCalls = 0;
+  const result = await ingestFeed(feed('VULNCHECK_NVD'), 24, async (raw) => {
+    const url = new URL(raw);
+    const limit = url.searchParams.get('limit');
+    if (url.searchParams.has('cursor')) {
+      // Continuation page: succeed once the page size has been adapted below.
+      pageCalls++;
+      if (limit !== '500') {
+        requestedLimits.push(limit);
+        throw decodeLimitError;
+      }
+      return response({ vulnerabilities: [], _meta: { next_cursor: null } });
+    }
+    // First page: the dense 1000-record window exceeds the decoded limit; the
+    // halved retry must keep the identical window parameters.
+    if (limit !== '500') {
+      requestedLimits.push(limit);
+      throw decodeLimitError;
+    }
+    requestedLimits.push(limit);
+    return response({
+      vulnerabilities: [record('CVE-2026-98101'), record('CVE-2026-98102')],
+      _meta: { next_cursor: 'cursor-1' },
+    });
+  }, config, sleep);
+  // The first page halves 1000 -> 500 and succeeds; the continuation page
+  // inherits the already-adapted size, so it never hits the oversized window.
+  assert.deepEqual(requestedLimits, ['1000', '500']);
+  assert.equal(pageCalls, 1);
+  assert.equal(result.count, 2);
+  assert.equal(result.cves.length, 2);
+});

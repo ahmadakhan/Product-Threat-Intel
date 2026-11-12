@@ -287,6 +287,7 @@ export async function ingestFeed(
     conditional = true,
     requestOptions: RequestOptions = {},
     retryTransient = false,
+    maxAttempts = 3,
   ): Promise<{ data: any; etag: string | undefined; headers: ResponseData['headers'] }> => {
     // Cursor-paginated sources store their index ETag in the sync state rather
     // than the feed record, because it advances per window, not per config.
@@ -300,12 +301,12 @@ export async function ingestFeed(
         });
       } catch (error) {
         const transient = error instanceof Error && (/timed out|timeout|^aborted$|socket hang up|premature close/i.test(error.message) || ['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'UND_ERR_SOCKET'].includes((error as NodeJS.ErrnoException).code || ''));
-        if (!retryTransient || !transient || attempt >= 2) throw error;
+        if (!retryTransient || !transient || attempt >= maxAttempts - 1) throw error;
         await sleep(Math.max(nvdInterval, 2000 * (attempt + 1)));
         continue;
       }
       const retryableStatus = [429, 502, 503, 504].includes(response.status);
-      if (!retryTransient || !retryableStatus || attempt >= 2) break;
+      if (!retryTransient || !retryableStatus || attempt >= maxAttempts - 1) break;
       const retryAfter = response.headers['retry-after'];
       const retryAfterValue = Array.isArray(retryAfter) ? retryAfter[0] : retryAfter;
       const retryAfterSeconds = retryAfterValue ? Number(retryAfterValue) : NaN;
@@ -739,20 +740,67 @@ export async function ingestFeed(
     const url = new URL(feed.url);
     url.searchParams.set('lastModStartDate', start.toISOString().slice(0, 10));
     url.searchParams.set('lastModEndDate', end.toISOString().slice(0, 10));
+    // Page size is adaptive: the NVD++ index's densest windows can exceed the
+    // configured decoded-response limit at 1000 records, which the transport
+    // correctly refuses but used to fail the whole run with. A page that fails
+    // with that error is retried at half the size (floor 50) — the record window
+    // is identical, only the page cut changes, so integrity is preserved.
+    let pageSize = 1000;
     url.searchParams.set('limit', '1000');
-    // `start_cursor` is a no-value flag for the first page; continuation pages
-    // use the `_meta.next_cursor` value through the `cursor` parameter.
+    /** Fetch one page, adapting the page size when the decoded payload is
+     *  larger than the configured limit. The window dates and cursor stay
+     *  fixed, so only the page cut changes — no record is skipped or repeated. */
+    const fetchNvdPage = async (href: string): Promise<any> => {
+      for (;;) {
+        try {
+          const { data } = await json(href, false, {
+            timeoutMs: 60000,
+            socketTimeoutMs: 30000,
+            maxResponseBytes: 32 * 1024 * 1024,
+            headers: { Authorization: `Bearer ${apiKey}` },
+          }, true, 5);
+          return data;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (/Decoded response exceeds configured/.test(message) && pageSize > 50) {
+            pageSize = Math.max(50, Math.floor(pageSize / 2));
+            const adapted = new URL(href);
+            adapted.searchParams.set('limit', String(pageSize));
+            href = adapted.href;
+            // Re-pacing after each enlarged attempt is handled by the caller's
+            // per-page sleep; continue immediately to retry the same window.
+            continue;
+          }
+          throw error;
+        }
+      }
+    };
+    const fetchInitialNvdPage = async (): Promise<{ data: any; etag: string | undefined }> => {
+      for (;;) {
+        try {
+          return await json(url.href, true, {
+            timeoutMs: 60000,
+            socketTimeoutMs: 30000,
+            maxResponseBytes: 32 * 1024 * 1024,
+            headers: { Authorization: `Bearer ${apiKey}` },
+          }, true, 5);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (/Decoded response exceeds configured/.test(message) && pageSize > 50) {
+            pageSize = Math.max(50, Math.floor(pageSize / 2));
+            url.searchParams.set('limit', String(pageSize));
+            continue;
+          }
+          throw error;
+        }
+      }
+    };
     url.searchParams.set('start_cursor', '');
     // The NVD++ index changes only when records change, so the index-level ETag
     // is a valid conditional handle for the whole paginated window: a 304 means
     // no record in the window changed. The checkpoint must still advance, or a
     // quiet feed would re-request the same window forever.
-    const { data: firstOr304, etag } = await json(url.href, true, {
-      timeoutMs: 60000,
-      socketTimeoutMs: 30000,
-      maxResponseBytes: 32 * 1024 * 1024,
-      headers: { Authorization: `Bearer ${apiKey}` },
-    }, true);
+    const { data: firstOr304, etag } = await fetchInitialNvdPage();
     if (firstOr304 === undefined)
       return {
         cves: [],
@@ -855,12 +903,8 @@ export async function ingestFeed(
       const pageUrl = new URL(url);
       for (const key of ['cursor', 'start_cursor', 'page', 'startIndex', 'resultsPerPage']) pageUrl.searchParams.delete(key);
       pageUrl.searchParams.set('cursor', cursor);
-      const { data: page } = await json(pageUrl.href, false, {
-        timeoutMs: 60000,
-        socketTimeoutMs: 30000,
-        maxResponseBytes: 32 * 1024 * 1024,
-        headers: { Authorization: `Bearer ${apiKey}` },
-      }, true);
+      pageUrl.searchParams.set('limit', String(pageSize));
+      const page = await fetchNvdPage(pageUrl.href);
       cursor = processPage(page);
       if (pageNo === 98 && cursor) throw new Error('VulnCheck NVD++ pagination exceeded 100,000 records');
       // Every fetched continuation page is paced, whether or not another page
