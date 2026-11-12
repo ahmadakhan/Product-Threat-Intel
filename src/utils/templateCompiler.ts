@@ -457,20 +457,25 @@ img{
 
 <body>
 
+<!-- Preview Text -->
+<div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">
+{{advisory_title}} - {{severity_counts}}
+</div>
+
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${config.canvasBg}">
 <tr>
 <td align="center" style="padding:24px 12px;">
 
-<table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" class="container" style="width:680px;max-width:680px;background:${config.cardBg};border:1px solid #e2e8f0;">
+<table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" class="container" style="width:680px;max-width:680px;background:${config.cardBg};border:1px solid #e2e8f0;border-radius:12px;">
 
 ${classificationBanner}
 
     <!-- HEADER -->
     <tr>
-        <td bgcolor="${config.headerBg}" style="padding:20px 32px;">
+        <td bgcolor="${config.headerBg}" style="padding:24px 32px 22px;border-radius:12px 12px 0 0;">
 
             ${stampHtml}
-            <div style="font-size:10px;font-weight:bold;letter-spacing:1.5px;color:${headerMuted};margin-bottom:8px;">
+            <div style="font-size:10px;font-weight:bold;letter-spacing:1.5px;color:${headerMuted};margin-bottom:10px;">
                 BA Cyber | THREAT INTELLIGENCE
             </div>
 
@@ -487,36 +492,17 @@ ${classificationBanner}
         </td>
     </tr>
 
-    <!-- EXECUTIVE SUMMARY -->
-     <tr>
-         <td class="mobile-padding" style="padding:28px 32px;">
-
-             <div style="font-size:11px;font-weight:bold;letter-spacing:1.5px;color:${config.accentColor};margin-bottom:8px;">
-                 EXECUTIVE SUMMARY
-             </div>
-
-            <h2 style="margin:0 0 12px 0;font-size:20px;color:${config.headingColor};">
-                Vulnerability Overview
-            </h2>
-
-            <p style="margin:0;font-size:14px;line-height:24px;color:#475569;">
-                {{executive_summary}}
-            </p>
-
-        </td>
-    </tr>
-
     <!-- KPI DASHBOARD -->
     <tr>
-        <td style="padding:0 32px 28px 32px;">
+        <td class="mobile-padding" style="padding:24px 32px 8px 32px;">
 
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:separate;border-spacing:6px 0;">
 
                 <tr>
 
-                    <td align="center" bgcolor="#f8fafc" style="padding:16px;border:1px solid #e2e8f0;">
-                        <div style="font-size:24px;font-weight:bold;color:#0f172a;">{{finding_count}}</div>
-                        <div style="font-size:11px;color:#64748b;">TOTAL FINDINGS</div>
+                    <td align="center" bgcolor="#f8fafc" style="padding:14px 8px;border:1px solid #e2e8f0;border-radius:8px;">
+                        <div style="font-size:22px;line-height:26px;font-weight:bold;color:#0f172a;">{{finding_count}}</div>
+                        <div style="padding-top:3px;font-size:10px;line-height:14px;font-weight:700;letter-spacing:0.5px;color:#64748b;">TOTAL FINDINGS</div>
                     </td>
 
                     {{critical_kpi}}
@@ -524,9 +510,9 @@ ${classificationBanner}
                     {{medium_kpi}}
                     {{low_kpi}}
 
-    <td align="center" bgcolor="#eff6ff" style="padding:16px;border:1px solid #e2e8f0;">
-                        <div style="font-size:24px;font-weight:bold;color:#2563eb;">{{asset_count}}</div>
-                        <div style="font-size:11px;color:#64748b;">ASSETS</div>
+    <td align="center" bgcolor="#eff6ff" style="padding:14px 8px;border:1px solid #e2e8f0;border-radius:8px;">
+                        <div style="font-size:22px;line-height:26px;font-weight:bold;color:#2563eb;">{{asset_count}}</div>
+                        <div style="padding-top:3px;font-size:10px;line-height:14px;font-weight:700;letter-spacing:0.5px;color:#64748b;">ASSETS</div>
                     </td>
 
                 </tr>
@@ -536,11 +522,34 @@ ${classificationBanner}
         </td>
     </tr>
 
+    <!-- EXECUTIVE SUMMARY -->
+     <tr>
+         <td class="mobile-padding" style="padding:16px 32px 28px 32px;">
+
+             <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:${config.accentColor};padding-bottom:6px;">
+                 EXECUTIVE SUMMARY
+             </div>
+
+            <h2 style="margin:0 0 10px 0;font-size:19px;line-height:25px;color:${config.headingColor};">
+                Vulnerability Overview
+            </h2>
+
+            <p style="margin:0;font-size:14px;line-height:23px;color:#475569;">
+                {{executive_summary}}
+            </p>
+
+        </td>
+    </tr>
+
     <!-- FINDINGS -->
     <tr>
-        <td class="mobile-padding" style="padding:0 32px 28px 32px;">
+        <td class="mobile-padding" style="padding:0 32px 28px 32px;border-top:1px solid #f1f5f9;padding-top:24px;">
 
-            <h2 style="margin:0 0 16px;font-size:18px;color:#0f172a;">
+            <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:${config.accentColor};padding-bottom:10px;">
+                FINDINGS
+            </div>
+
+            <h2 style="margin:0 0 14px;font-size:18px;line-height:24px;color:#0f172a;">
                 Vulnerability Findings
             </h2>
 
@@ -551,9 +560,13 @@ ${classificationBanner}
 
      <!-- LIMITED-CONFIDENCE FINDINGS -->
      <tr>
-         <td class="mobile-padding" style="padding:0 32px 24px 32px;">
+         <td class="mobile-padding" style="padding:0 32px 24px 32px;border-top:1px solid #f1f5f9;padding-top:24px;">
 
-             <h2 style="margin:0 0 16px;font-size:18px;color:#0f172a;">
+             <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:${config.accentColor};padding-bottom:10px;">
+                 FOLLOW-UP
+             </div>
+
+             <h2 style="margin:0 0 14px;font-size:18px;line-height:24px;color:#0f172a;">
                  Confidence Follow-up
              </h2>
 
@@ -564,9 +577,13 @@ ${classificationBanner}
 
      <!-- PLATFORM HEALTH -->
     <tr>
-        <td class="mobile-padding" style="padding:0 32px 32px 32px;">
+        <td class="mobile-padding" style="padding:0 32px 32px 32px;border-top:1px solid #f1f5f9;padding-top:24px;">
 
-            <h2 style="margin:0 0 16px;font-size:18px;color:#0f172a;">
+            <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:${config.accentColor};padding-bottom:10px;">
+                PLATFORM
+            </div>
+
+            <h2 style="margin:0 0 14px;font-size:18px;line-height:24px;color:#0f172a;">
                 Platform Health Status
             </h2>
 
@@ -577,9 +594,9 @@ ${classificationBanner}
 
     <!-- FOOTER -->
     <tr>
-        <td style="padding:24px 32px;background:#fafafa;border-top:1px solid #e2e8f0;">
+        <td style="padding:22px 32px;background:#fafafa;border-top:1px solid #e2e8f0;border-radius:0 0 12px 12px;">
 
-            <div style="font-size:13px;font-weight:bold;color:#0f172a;margin-bottom:8px;">
+            <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:6px;">
                 BA Threat Intelligence
             </div>
 
@@ -590,7 +607,7 @@ ${classificationBanner}
                  and remediation activities should follow approved change management procedures.
              </div>
 
-             <div style="margin-top:12px;font-size:11px;line-height:18px;color:#94a3b8;">
+             <div style="margin-top:12px;padding:9px 12px;border:1px solid #e2e8f0;border-radius:6px;background:#f8fafc;font-size:11px;line-height:18px;color:#475569;">
                  Severity breakdown: {{critical_count}} Critical, {{high_count}} High, {{medium_count}} Medium, {{low_count}} Low
              </div>
 
@@ -881,9 +898,9 @@ export const digestSeverityKpi = (
   if (count === 0) return '';
   const safe = normalizeDigestConfig(config);
   const sev = SEVERITY_KPI[severity] ?? { label: severity, color: safe.fontColor, bg: '#f8fafc' };
-  return `<td align="center" bgcolor="${sev.bg}" style="padding:16px;border:1px solid #e2e8f0;">
-    <div style="font-size:24px;font-weight:bold;color:${sev.color};">${count}</div>
-    <div style="font-size:11px;color:#64748b;">${sev.label}</div>
+  return `<td align="center" bgcolor="${sev.bg}" style="padding:14px 8px;border:1px solid #e2e8f0;border-radius:8px;">
+    <div style="font-size:22px;line-height:26px;font-weight:bold;color:${sev.color};">${count}</div>
+    <div style="padding-top:3px;font-size:10px;line-height:14px;font-weight:700;letter-spacing:0.5px;color:#64748b;">${sev.label}</div>
 </td>`;
 };
 
