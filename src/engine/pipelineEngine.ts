@@ -660,7 +660,7 @@ export function runVulnerabilityPipeline(
         !sourceRequiresReview &&
         !cveReviewOverride &&
         (!unverifiableMatch || settings.autoDispatchUnverifiableMatches) &&
-        shouldAutoDispatch(result.confidence, settings) && !dispatchDeferred;
+        (settings.autoDispatchEnabled || shouldAutoDispatch(result.confidence, settings)) && !dispatchDeferred;
       // Say *why* a match is held. A held finding is re-derived before every
       // delivery attempt, so the reason has to name the actual blocker (policy
       // threshold vs. missing inventory version vs. unverifiable CVE evidence)
@@ -704,7 +704,7 @@ export function runVulnerabilityPipeline(
         exposure: asset.exposure,
         exploitRisk: determineExploitRisk(cve),
         dispatchDeferred: Boolean(dispatchDeferred),
-        notificationStatus: confirmed ? 'QUEUED_FOR_DISPATCH' : 'REVIEW_REQUIRED',
+        notificationStatus: 'QUEUED_FOR_DISPATCH',
         status: 'MONITORED',
         autoDispatchedAt: null,
         advisoryId: null,

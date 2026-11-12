@@ -69,6 +69,7 @@ services:
       CORRELATION_DLQ_STORAGE_MODE: database
       ML_DIRECTORY: /var/lib/vulnstream/ml
       ML_STORAGE_MODE: database
+      BOOTSTRAP_RECOMMENDED_FEEDS: ${BOOTSTRAP_RECOMMENDED_FEEDS:-false}
     volumes:
       # Legacy-only: dead letters are stored in PostgreSQL (see
       # CORRELATION_DLQ_STORAGE_MODE). This volume exists solely so an upgrade
