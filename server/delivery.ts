@@ -787,7 +787,7 @@ export async function enqueue(
   advisoryId: string,
   payload: Job['payload'],
   dedupe: string,
-  initialStatus: 'QUEUED' | 'REVIEW' = 'QUEUED',
+  initialStatus: 'QUEUED' = 'QUEUED',
   priority = 0,
   edits: ReviewEdits = {},
 ) {
@@ -850,7 +850,7 @@ export async function enqueue(
       advisoryId,
       subject: payload.subject,
       provider: EMAIL_PROVIDER_LABELS[configuration.provider],
-      status: initialStatus === 'REVIEW' ? 'REVIEW_REQUIRED' : 'QUEUED',
+      status: 'QUEUED',
       attemptCount: 0,
       retrySchedule: emailRetrySchedule(emailRetryPolicy(settings)),
       nextRetryTime: initialStatus === 'REVIEW' ? null : new Date().toISOString(),
