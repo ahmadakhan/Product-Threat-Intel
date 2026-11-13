@@ -830,16 +830,24 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
     const input = z
       .object({
         dailyDigestCustomization: templateSchema,
-        dailyDigestCustomTemplate: z.string().nullish(),
+        // Mirror template.save: omission keeps the stored custom digest
+        // template (a customization-only save); explicit null/blank removes it.
+        // Treating omission as null silently deleted operator-authored HTML.
+        dailyDigestCustomTemplate: z.string().max(200_000).nullable().optional(),
       })
       .parse(data);
     const existing = (await getForUpdate<any>(db, 'template', 'main')) || {};
+    const dailyDigestCustomTemplate = input.dailyDigestCustomTemplate === undefined
+      ? existing.dailyDigestCustomTemplate ?? null
+      : input.dailyDigestCustomTemplate?.trim()
+        ? input.dailyDigestCustomTemplate
+        : null;
     await put(db, 'template', 'main', {
       ...existing,
       dailyDigestCustomization: input.dailyDigestCustomization,
-      dailyDigestCustomTemplate: input.dailyDigestCustomTemplate ?? null,
+      dailyDigestCustomTemplate,
       dailyDigestTemplate:
-        input.dailyDigestCustomTemplate || compileDailyDigestTemplate(input.dailyDigestCustomization),
+        dailyDigestCustomTemplate || compileDailyDigestTemplate(input.dailyDigestCustomization),
     });
   } else if (action === 'finding.status') {
     const input = z

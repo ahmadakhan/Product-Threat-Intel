@@ -178,6 +178,63 @@ test('template.save persists custom HTML and preserves it when visual settings a
   assert.equal(template.advisoryTemplate, customHtml);
 });
 
+test('dailyDigestTemplate.save preserves custom HTML when visual settings are saved', async () => {
+  const { applyCommand } = await import('../server/commands.ts');
+  const { loadConfig } = await import('../server/config.ts');
+  const { DEFAULT_DAILY_DIGEST_CUSTOMIZATION, compileDailyDigestTemplate } = await import(
+    '../src/utils/templateCompiler.ts'
+  );
+  const config = loadConfig({
+    NODE_ENV: 'test',
+    DATABASE_URL: 'postgresql://127.0.0.1:1/unused',
+    APP_ORIGIN: 'http://localhost',
+    ENCRYPTION_KEY: randomBytes(32).toString('base64'),
+    WORKER_ENABLED: 'false',
+  });
+  const customHtml = '<html><body><h1>Daily digest</h1></body></html>';
+  let template = { dailyDigestCustomization: DEFAULT_DAILY_DIGEST_CUSTOMIZATION } as Record<string, unknown>;
+  const db = {
+    query: async (sql: string, params?: unknown[]) => {
+      if (sql.startsWith('SELECT data FROM records WHERE kind=$1 AND id=$2 FOR UPDATE'))
+        return { rows: [{ data: template }] };
+      if (sql.startsWith('INSERT INTO records(kind,id,data)')) {
+        template = JSON.parse(String(params?.[2]));
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes('pg_advisory_xact_lock')) return { rows: [{ locked: true }] };
+      if (sql.startsWith('SELECT data FROM audit ORDER BY seq DESC LIMIT 1')) return { rows: [] };
+      if (sql.startsWith('INSERT INTO audit(data)')) return { rows: [], rowCount: 1 };
+      return { rows: [] };
+    },
+  } as never;
+
+  await applyCommand(db, config, {
+    action: 'dailyDigestTemplate.save',
+    data: { dailyDigestCustomization: DEFAULT_DAILY_DIGEST_CUSTOMIZATION, dailyDigestCustomTemplate: customHtml },
+    actor: 'admin',
+  });
+  assert.equal(template.dailyDigestCustomTemplate, customHtml);
+  assert.equal(template.dailyDigestTemplate, customHtml);
+
+  // A customization-only save (colors/layout) must not delete the custom HTML.
+  await applyCommand(db, config, {
+    action: 'dailyDigestTemplate.save',
+    data: { dailyDigestCustomization: DEFAULT_DAILY_DIGEST_CUSTOMIZATION },
+    actor: 'admin',
+  });
+  assert.equal(template.dailyDigestCustomTemplate, customHtml);
+  assert.equal(template.dailyDigestTemplate, customHtml);
+
+  // Explicit null remains the deliberate removal signal and recompiles defaults.
+  await applyCommand(db, config, {
+    action: 'dailyDigestTemplate.save',
+    data: { dailyDigestCustomization: DEFAULT_DAILY_DIGEST_CUSTOMIZATION, dailyDigestCustomTemplate: null },
+    actor: 'admin',
+  });
+  assert.equal(template.dailyDigestCustomTemplate, null);
+  assert.equal(template.dailyDigestTemplate, compileDailyDigestTemplate(DEFAULT_DAILY_DIGEST_CUSTOMIZATION));
+});
+
 test('pipeline state uses saved custom advisory HTML and falls back to generated customization', async () => {
   const { pipelineState } = await import('../server/db.ts');
   const { DEFAULT_TEMPLATE_CUSTOMIZATION, compileCustomizedTemplate } = await import('../src/utils/templateCompiler.ts');
