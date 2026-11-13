@@ -29,6 +29,7 @@ import { createPool, migrate, transaction, get, put, list, REQUIRED_SCHEMA_VERSI
 import { createApp } from './app';
 import { createRequester } from './network';
 import { createMailSender, deliverNext } from './delivery';
+import { releaseExpiredClaims } from './deliveryClaims';
 import { flushDueDigest } from './digest';
 import { runDailyDigest } from './dailyDigest';
 import { closePdfRenderer } from './pdf';
@@ -302,6 +303,19 @@ const tick = () => {
         const delivered = await deliverNext(pool, config, request, sendMail);
         if (!delivered) break;
         verboseLog('outbox.delivered');
+      }
+      // Audit V-2: reclaim expired delivery claims once per outbox pass.
+      // Correctness never depended on this sweep (claimItems re-judges expiry),
+      // but expired CLAIMED rows whose job was retention-deleted were never
+      // deleted by anything, so the table grew without bound. Running it at the
+      // end of the delivery pass keeps it off the hot path and gives it the
+      // same leadership/stopping guards as the pass itself.
+      try {
+        const reclaimed = await transaction(pool, (db) => releaseExpiredClaims(db));
+        if (reclaimed > 0)
+          verboseLog(`claims.swept ${reclaimed}`);
+      } catch (error) {
+        void report('claims.sweep')(error);
       }
     })()
       .catch(report('outbox'))
@@ -595,6 +609,11 @@ let enrichmentBacklogRunning: Promise<unknown> | null = null;
 const parseRecordData = <T,>(data: unknown): T =>
   (typeof data === 'string' ? JSON.parse(data) : data) as T;
 
+/** Upper bound for one enrichment-backlog scan (audit V-1: bounded tick).
+ *  Far above any realistic pending-enrichment count; when the backlog exceeds
+ *  this, the reported count is a floor, which is the correct semantics for an
+ *  observability signal. */
+const ENRICHMENT_BACKLOG_SCAN_LIMIT = 500;
 const enrichmentBacklogTick = async () => {
   if (stopping || config.WORKER_ENABLED !== 'true' || !leadership.isLeader || enrichmentBacklogRunning) return;
   enrichmentBacklogRunning = (async () => {
@@ -602,11 +621,17 @@ const enrichmentBacklogTick = async () => {
       // Push the cheap predicates (kind, dispatch status) into the database so
       // the scan narrows to queued findings only; the missing-CPE check stays
       // in JS because the JSONB shape varies between finding generations.
+      // Audit V-1: the backlog is bounded. This is an observability-only tick
+      // (it reports the count, it does not enrich), so a cap costs nothing —
+      // an unbounded scan over the whole findings table made tick latency grow
+      // with deployment age and held the pool connection for that whole read.
       const rows = await pool.query<{ data: unknown }>(
         `SELECT data FROM records
           WHERE kind='findings'
             AND data->>'notificationStatus' = 'QUEUED_FOR_DISPATCH'
-          ORDER BY created_at ASC`,
+          ORDER BY created_at ASC
+          LIMIT $1`,
+        [ENRICHMENT_BACKLOG_SCAN_LIMIT],
       );
       const queued = rows.rows.map((row) => parseRecordData<Finding>(row.data));
       const candidates = enrichmentBacklogCandidates(queued);
@@ -615,8 +640,8 @@ const enrichmentBacklogTick = async () => {
           category: 'PIPELINE',
           level: 'INFO',
           code: 'enrichment.backlog',
-          message: `${candidates.length} finding(s) dispatched via authoritative source without CPE data are pending enrichment re-evaluation`,
-          context: { count: candidates.length, cveIds: candidates.map((f) => f.cveId) },
+          message: `${candidates.length}${rows.rows.length >= ENRICHMENT_BACKLOG_SCAN_LIMIT ? '+' : ''} finding(s) dispatched via authoritative source without CPE data are pending enrichment re-evaluation`,
+          context: { count: candidates.length, cveIds: candidates.map((f) => f.cveId), scanLimit: ENRICHMENT_BACKLOG_SCAN_LIMIT },
         });
       }
     } catch (error) {
