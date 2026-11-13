@@ -399,6 +399,11 @@ export function createApp(
         directives: {
           defaultSrc: ["'self'"],
           scriptSrc: ["'self'"],
+          // Audit M-3: styleSrc keeps 'unsafe-inline' because the SPA renders
+          // React `style` attributes and sandboxed preview HTML; nonces cannot
+          // authorize style attributes, so removing it needs a build-time CSS
+          // extraction and a style-src-attr refactor, not a CSP tweak. Styles
+          // cannot execute script; every other directive stays strict.
           styleSrc: ["'self'", "'unsafe-inline'"],
           imgSrc: ["'self'", 'data:'],
           fontSrc: ["'self'"],
