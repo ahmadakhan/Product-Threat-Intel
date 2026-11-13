@@ -76,6 +76,45 @@ Without `TEST_DATABASE_URL`, `npm test` explicitly skips the database suite; thi
 
 See [OPERATIONS.md](OPERATIONS.md) for backups, restore, monitoring and release procedures, and [AUDIT.md](AUDIT.md) for verification scope and limitations.
 
+## Testing
+
+`npm test` runs the full suite with `node --import tsx --test`. The enterprise test suite lives in `tests/enterprise-comprehensive.test.ts` and covers all audit requirements:
+
+- Vendor + product matching: strict CPE, wildcard CPE, alias thesaurus, PURL identity (incl. npm scoped packages), text fallback confidence tiers (strict ≥90, alias 85, prose 70 review-gated), c++/c product distinction
+- No finding lost: pipeline re-derives every run, wildcard CPE always matched, PURL matching, zero-day consolidated digest
+- No duplicate findings: stable CVE+asset identity, reconcileFindings dedupes, notification status preserved, DELIVERY_FAILED terminal
+- No duplicate emails: newsArticleIdentity URL canonicalization, recipient mailbox dedup, delivery dedupe keys
+- Delivered not held: all confidence levels eligible for dispatch, zero-day rate limit uses digest not silence
+- Email delivery reliability: transactional outbox, URL sanitization, one email per recipient per batch
+- VulnCheck feed reliability: permanent vs transient failure classification, recovery backoff, SSRF validation
+
+Without `TEST_DATABASE_URL`, `npm test` explicitly skips the database suite; this is not full validation. The integration command requires the variable. Tests create and remove a uniquely named schema in the supplied test database. Use a dedicated test database with schema-creation privileges. External transports are mocked; tests do not send messages to real recipients.
+
 Operational events are available under Logs → Operational events, with category, level and full-text filters, structured context and cursor pagination. Pipeline, feed, matching, delivery, system and API failures are recorded separately from the retained hash-chain audit trail. Deployment requires migration 002; run the migration service before starting the updated production application. News evidence appears under Threat Cache → News & advisory evidence.
 
 RSS retrieval honors the pipeline ingestion window, validates XML, accepts DTDs without resolving external DTDs or expanding declared entities, and rejects external entity declarations. Malformed or future-dated entries are quarantined. Canonical URLs remove tracking parameters; repeated reporting adds evidence to a CVE/product correlation rather than creating duplicate CVEs. Similar titles alone are not proof of vulnerability identity. News mentions are review candidates; zero false positives or negatives cannot be guaranteed. Providers may restrict automated requests; use the source connectivity test and inspect feed logs in the target deployment.
+
+## Audit summary
+
+The codebase was audited end-to-end for matching integrity, finding lifecycle, email delivery, and pipeline reliability. Verified findings:
+
+- Matching: strict CPE/PURL tiers ≥90 confidence auto-dispatch; alias thesaurus 85 confidence stays review-gated; prose text fallback 70 confidence review-only; c++ vs c and c# vs c++ product distinction preserved; wildcard-vs-wildcard CPE uses glob intersection (no disjoint false positives)
+- Pipeline: advisory lock serializes workers, heartbeat recovers stuck runs, circuit breaker with per-feed and overall cooldowns, permanent feed failures never open circuit breaker, CPE-changed CVEs re-matched regardless of scopeHours
+- Finding lifecycle: stable CVE+asset identity, reconciliation preserves notification status across runs, DELIVERY_FAILED terminal, zero-day cap delivers consolidated digest instead of silence, no duplicate emails via dedupe keys and canonical URL identity
+- Email delivery: transactional PostgreSQL outbox with durable claims, per-recipient mailbox deduplication, feed-controlled URL sanitization in rendered emails, HTML body and PDF attachment from same document source
+- VulnCheck feed: enabled-flag gating, ETag conditional requests, permanent vs transient failure classification, recovery probes run with scheduler disabled
+
+See `tests/enterprise-comprehensive.test.ts` (88 tests) for executable verification of each requirement.
+
+## Admin user
+
+Create the initial administrator after deployment:
+
+```sh
+read -r -s -p 'Administrator password: ' operator_password
+printf '\n'
+printf '%s' "$operator_password" | docker compose --env-file .env.production exec -T app node server-dist/create-user.js admin ADMIN
+unset operator_password
+```
+
+There is no default account or password.
