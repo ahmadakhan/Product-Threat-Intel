@@ -642,7 +642,16 @@ export function runVulnerabilityPipeline(
       const cveReviewOverride =
         cve.applicabilityRequiresReview && !advisoryLacksApplicabilityData && !confirmedProductWideMatch;
       const sourceRequiresReview = cve.applicabilityPolicy === 'REVIEW_ONLY' && !confirmedKevProductOnlyMatch;
-      const unverifiableMatch = sourceRequiresReview || cveReviewOverride || result.applicabilityRequiresReview;
+      // Audit H-1: a vendor/product-only fallback carries no version or package
+      // evidence at all — it is text correlation, not applicability proof, so it
+      // is always an unverifiable match regardless of confidence. Otherwise the
+      // workspace master switch (autoDispatchEnabled) would override the review
+      // hold that the authoritative-source carve-out exists to enforce.
+      const fallbackWithoutVersionEvidence = result.method === 'VENDOR_PRODUCT_FALLBACK' &&
+        !cve.cpeMatches?.length && !cve.cpeMatchDetails?.length && !cve.purls?.length;
+      const unverifiableMatch =
+        sourceRequiresReview || cveReviewOverride || result.applicabilityRequiresReview ||
+        fallbackWithoutVersionEvidence;
       const threshold = settings.confirmedFindingThreshold ?? 90;
       if (sourceRequiresReview || cveReviewOverride) result.confidence = 0;
       else if (confirmedKevProductOnlyMatch) result.confidence = Math.max(result.confidence, threshold);
@@ -659,8 +668,16 @@ export function runVulnerabilityPipeline(
         !packageRejected &&
         !sourceRequiresReview &&
         !cveReviewOverride &&
+        // Audit H-1: two independent gates on an unverifiable match —
+        //   1. the operator's opt-in flag releases the review hold;
+        //   2. the configured confidence minimum always applies, even with
+        //      the flag on: the flag waives the review, not the quality bar.
+        // A fully verified match follows the workspace master switch.
         (!unverifiableMatch || settings.autoDispatchUnverifiableMatches) &&
-        (settings.autoDispatchEnabled || shouldAutoDispatch(result.confidence, settings)) && !dispatchDeferred;
+        (unverifiableMatch
+          ? result.confidence >= threshold
+          : settings.autoDispatchEnabled || shouldAutoDispatch(result.confidence, settings)) &&
+        !dispatchDeferred;
       // Say *why* a match is held. A held finding is re-derived before every
       // delivery attempt, so the reason has to name the actual blocker (policy
       // threshold vs. missing inventory version vs. unverifiable CVE evidence)
@@ -704,7 +721,13 @@ export function runVulnerabilityPipeline(
         exposure: asset.exposure,
         exploitRisk: determineExploitRisk(cve),
         dispatchDeferred: Boolean(dispatchDeferred),
-        notificationStatus: 'QUEUED_FOR_DISPATCH',
+        // Review gate (audit H-1): a match the policy holds — below threshold,
+        // unverifiable version evidence, review-only source, or circuit-breaker
+        // deferral — must land in REVIEW_REQUIRED so the delivery layer, the
+        // digest, and the UI action center treat it as unapproved. Commit
+        // 29e4c04 flattened this to an unconditional QUEUED_FOR_DISPATCH, which
+        // silently auto-emailed every held match to recipients.
+        notificationStatus: confirmed ? 'QUEUED_FOR_DISPATCH' : 'REVIEW_REQUIRED',
         status: 'MONITORED',
         autoDispatchedAt: null,
         advisoryId: null,

@@ -775,6 +775,11 @@ export function createApp(
     createDatabaseRateLimiter(pool, INGEST_LIMIT_CAPACITY, INGEST_LIMIT_REFILL_PER_MS);
   app.get(
     '/api/system-uptime',
+    // Audit M-1: authenticated like every other /api read. The uptime payload
+    // (exact start instant, restart cadence) has reconnaissance value and the
+    // route previously sat outside the global requireAuth mount.
+    requireAuth(pool, config),
+    requireRole('ADMIN', 'OPERATOR', 'VIEWER'),
     asyncRoute(async (_req, res) => {
       const seconds = Math.floor(process.uptime());
       const days = Math.floor(seconds / 86400);

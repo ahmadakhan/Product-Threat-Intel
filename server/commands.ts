@@ -808,11 +808,15 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
   } else if (action === 'template.save') {
     const input = z.object({
       templateCustomization: templateSchema,
+      // Omitted = keep the stored custom template (settings-only saves from the
+      // template studio); explicit null = the operator deliberately removed it.
+      // Treating omission as null made every settings-only save silently delete
+      // the operator's hand-written advisory HTML.
       customAdvisoryTemplate: z.string().max(200_000).nullable().optional(),
     }).parse(data);
     const existing = (await getForUpdate<any>(db, 'template', 'main')) || {};
     const customAdvisoryTemplate = input.customAdvisoryTemplate === undefined
-      ? null
+      ? existing.customAdvisoryTemplate ?? null
       : input.customAdvisoryTemplate?.trim()
         ? input.customAdvisoryTemplate
         : null;

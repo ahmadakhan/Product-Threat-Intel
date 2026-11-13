@@ -985,16 +985,20 @@ export function matchesWatchlistItem(
         );
         if (matchRes.viaAlias) {
           // A structured CPE pair resolved only through the thesaurus is a
-          // product correlation, not a verified exact token match. Keep it
-          // below the auto-dispatch threshold and require review when the
-          // advisory constrains a version the inventory cannot prove.
+          // product correlation, not a verified exact token match. It stays
+          // below the auto-dispatch threshold, and an advisory that pins a
+          // concrete version cannot be confirmed when the inventory asserts
+          // no version at all — that is the same unprovable-version shape the
+          // strict branch review-gates above.
           retain({
             matched: true,
             method: 'VENDOR_PRODUCT_ALIAS',
             confidence: 85,
             matchedCpe: vulnCpe,
             evidence: `Matched structured CPE through the symmetric alias thesaurus (${asset.vendor}/${asset.product} -> ${vuln.vendor}/${vuln.product}) (85% confidence)`,
-            applicabilityRequiresReview: rangeNeedsReview || genericIdentity,
+            applicabilityRequiresReview: Boolean(
+              rangeNeedsReview || genericIdentity || (versionUnasserted && vulnConstrainsVersion),
+            ),
           });
           continue;
         }
@@ -1026,8 +1030,19 @@ export function matchesWatchlistItem(
               hasUnescapedCpeWildcard(asset[field as keyof ParsedCPE] as string) ||
               hasUnescapedCpeWildcard(vuln[field as keyof ParsedCPE] as string),
           ));
-        const requiresReview = rangeNeedsReview || contextNeedsReview || genericIdentity ||
-          (Boolean(matchRes.unverifiedVersion) && !versionUnasserted);
+        // Audit H-1: an intersecting wildcard asset version ('1.*') against a
+        // version-constrained advisory cannot prove the asset's version falls
+        // inside the advisory's range — the match is uncertain by construction.
+        // The previous `matchRes.unverifiedVersion && !versionUnasserted`
+        // conjunction excluded exactly this shape from review, silently
+        // releasing it to auto-dispatch. A complete product-wide registration
+        // ('*' version, every other component concrete) remains deliberate
+        // operator intent: it covers every branch of the advisory's criteria
+        // tree by construction, so the same release reasoning that clears the
+        // context review clears the version hold too.
+        const requiresReview =
+          !productWideAllVersions &&
+          Boolean(rangeNeedsReview || contextNeedsReview || genericIdentity || matchRes.unverifiedVersion);
         retain({
           matched: true,
           method: versionRange ? 'STRICT_CPE_INTERVAL' : 'STRICT_CPE',

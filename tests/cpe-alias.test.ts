@@ -146,7 +146,11 @@ test('punctuation-only product variants reach the pipeline candidate prefilter',
 
   assert.ok(finding, 'a punctuation-only product variant must reach the matcher');
   assert.equal(finding.matchingMethod, 'VENDOR_PRODUCT_ALIAS');
-  assert.equal(finding.notificationStatus, 'REVIEW_REQUIRED');
+  // Both sides assert version 1.5, so the alias correlation is complete
+  // evidence. Alias matches stay at 85% and dispatch under the default
+  // auto-dispatch policy; the confidence is disclosed in the notification
+  // (see pipeline-lifecycle's delivery-policy scenario) rather than held.
+  assert.equal(finding.notificationStatus, 'QUEUED_FOR_DISPATCH');
 });
 
 test('built-in vendor aliases reach the pipeline candidate prefilter', () => {
@@ -185,7 +189,9 @@ test('built-in vendor aliases reach the pipeline candidate prefilter', () => {
 
   assert.ok(finding, 'a built-in alias pair must reach the matcher');
   assert.equal(finding.matchingMethod, 'VENDOR_PRODUCT_ALIAS');
-  assert.equal(finding.notificationStatus, 'REVIEW_REQUIRED');
+  // Exact version evidence on both sides; same default-policy dispatch as the
+  // punctuation-variant case above.
+  assert.equal(finding.notificationStatus, 'QUEUED_FOR_DISPATCH');
 });
 
 const DEFAULTS = { vendorAliases: DEFAULT_VENDOR_ALIASES, productAliases: DEFAULT_PRODUCT_ALIASES };
@@ -329,5 +335,8 @@ test('a CVE with the legacy solarwinds:n-central CPE matches an n-able:n-central
 
   assert.ok(finding, 'a legacy solarwinds CPE must correlate with the current n-able vendor asset');
   assert.equal(finding.matchingMethod, 'VENDOR_PRODUCT_ALIAS');
+  // The inventory declares no version ('*') while the advisory pins 2020.1, so
+  // the alias correlation cannot prove version applicability: review, not
+  // dispatch.
   assert.equal(finding.notificationStatus, 'REVIEW_REQUIRED');
 });

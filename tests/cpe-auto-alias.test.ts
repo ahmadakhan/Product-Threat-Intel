@@ -155,7 +155,9 @@ test('pipeline applies inventory auto aliases before candidate selection', () =>
 
   assert.ok(finding, 'the alias-expanded candidate prefilter must reach the matcher');
   assert.equal(finding.matchingMethod, 'VENDOR_PRODUCT_ALIAS');
-  assert.equal(finding.notificationStatus, 'REVIEW_REQUIRED');
+  // Both sides assert version 1.5; the 85% alias correlation dispatches under
+  // the default policy, with its confidence disclosed in the notification.
+  assert.equal(finding.notificationStatus, 'QUEUED_FOR_DISPATCH');
 });
 
 test('a generic inventory CPE resolves to the inventory vendor/product', () => {
