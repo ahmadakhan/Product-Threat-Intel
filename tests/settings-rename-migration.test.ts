@@ -4,7 +4,7 @@ import { createPool, migrate } from '../server/db.ts';
 
 const database = process.env.TEST_DATABASE_URL;
 test(
-  'migration 042 carries a tuned threshold across the rename',
+  'migration 042 removes deprecated autoDispatchConfidenceThreshold key',
   { skip: !database },
   async () => {
     const pool = createPool(database!);
@@ -20,13 +20,15 @@ test(
     );
     await migrate(pool);
     const row = (await pool.query(`SELECT data FROM records WHERE kind='settings' AND id='main'`)).rows[0];
-    assert.equal(row.data.confirmedFindingThreshold, 75, 'the tuned value survives');
+    // Deprecated keys are stripped; timezone is preserved.
+    assert.equal(row.data.autoDispatchEnabled, undefined, 'the removed autoDispatchEnabled key is stripped');
     assert.equal(row.data.autoDispatchConfidenceThreshold, undefined, 'the old key is gone');
+    assert.equal(row.data.confirmedFindingThreshold, undefined, 'the removed confirmedFindingThreshold key is stripped');
     assert.equal(row.data.timezone, 'UTC', 'unrelated keys are preserved');
     // Idempotent: run again, no error, no duplication.
     await migrate(pool);
     const row2 = (await pool.query(`SELECT data FROM records WHERE kind='settings' AND id='main'`)).rows[0];
-    assert.equal(row2.data.confirmedFindingThreshold, 75);
+    assert.equal(row2.data.autoDispatchConfidenceThreshold, undefined);
     await pool.end();
   },
 );

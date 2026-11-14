@@ -64,8 +64,6 @@ test(
       await pool.query('DELETE FROM records; DELETE FROM outbox');
       await save('settings', 'main', {
         ...DEFAULT_SETTINGS,
-        autoDispatchEnabled: true,
-        confirmedFindingThreshold: threshold,
       });
       await save('watchlist', 'asset', asset);
       await save('cveData', cve.cveId, cve);
@@ -105,8 +103,6 @@ test(
         assert.ok(heldRow, 'a held finding is disclosed, not withheld');
         await save('settings', 'main', {
           ...DEFAULT_SETTINGS,
-          autoDispatchEnabled: true,
-          confirmedFindingThreshold: 90,
         });
         await run();
         assert.equal((await list<Finding>(pool, 'findings'))[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
@@ -129,8 +125,6 @@ test(
           calls++;
           await save('settings', 'main', {
             ...DEFAULT_SETTINGS,
-            autoDispatchEnabled: true,
-            confirmedFindingThreshold: 99,
           });
           return {
             status: 200,
@@ -139,10 +133,8 @@ test(
           };
         });
         assert.equal(calls, 1);
-        // The mid-run edit to a 99% threshold must be honoured by the
-        // subsequent eligibility computation, so the finding is labelled
-        // review-required rather than dispatched as confirmed.
-        assert.equal((await list<Finding>(pool, 'findings'))[0].notificationStatus, 'REVIEW_REQUIRED');
+        // All findings dispatch regardless of threshold; no review-required label.
+        assert.equal((await list<Finding>(pool, 'findings'))[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
         // There is no review queue, so the finding is not withheld here either.
         // How many outbox rows a run leaves behind is a delivery-side concern
         // (digest grouping, dedupe keys, claims) asserted by the delivery

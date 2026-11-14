@@ -193,7 +193,6 @@ test(
       await migrate(pool);
       await put(pool, 'settings', 'main', {
         ...DEFAULT_SETTINGS,
-        autoDispatchEnabled: false,
         // The operator policy must allow retries for a retry to be possible at all.
         emailRetryEnabled: true,
         emailRetryMaxAttempts: 5,

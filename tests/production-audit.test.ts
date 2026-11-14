@@ -19,7 +19,7 @@ const feed = {id:'vc',name:'VC',type:'VULNCHECK_NVD',url:'https://api.vulncheck.
 const raw = {id:'CVE-2026-98001',vulnStatus:'Analyzed',published:date,lastModified:date,descriptions:[{lang:'en',value:'Acme Gateway flaw'}],configurations:[],metrics:{},references:[],weaknesses:[]};
 const cve = {cveId:raw.id,title:'Acme Gateway flaw',description:'Acme Gateway flaw',publishedDate:date,modifiedDate:date,cvss:{version:'3.1',score:9.8,severity:'CRITICAL',vector:''},exploitStatus:'None',cwe:[],cpeMatches:[cpe],sourceFeeds:['vc'],remediation:{immediateActions:[],vendorAdvisoryRef:'',patchUrl:'',workarounds:[],rollbackPlan:'',stepByStep:[]},cisaKev:{isKev:false},epss:{score:0,percentile:0}} as NormalizedCVE;
 const asset = {id:'a1',assetTag:'gateway',vendor:'acme',product:'gateway',version:'1.5',cpes:[cpe],purls:[],ownerGroup:'SOC',active:true,createdAt:date} as WatchListItem;
-const settings = {...DEFAULT_SETTINGS,scopeHours:0,maxFindingsPerRun:1,maxDispatchesPerRunPerFeed:1,maxTotalFindingsPerRun:1};
+const settings = {...DEFAULT_SETTINGS,scopeHours:0};
 
 test('VulnCheck ingestion accepts its actual v3 envelope and cursor continuation', async () => {
   let calls = 0;
@@ -43,7 +43,7 @@ test('NVD incremental windows request modifications to previously published reco
   assert.equal(result.withdrawals?.[0].cveId,raw.id);
 });
 
-test('breaker deferral is separate from confidence and reconciliation clears it',()=>{
+test('dispatchDeferred is always false; reconciliation preserves it',()=>{
   const findings=runVulnerabilityPipeline([feed],[cve,{...cve,cveId:'CVE-2026-98002'}],[asset],[],[],settings).newFindings;
   assert.equal(findings[1].dispatchDeferred,false);
   const refreshed=reconcileFindings([findings[1]],[{...findings[1],dispatchDeferred:false}]);

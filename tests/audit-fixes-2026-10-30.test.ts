@@ -299,7 +299,6 @@ test(
       await pool.query('DELETE FROM records; DELETE FROM outbox');
       await put(pool, 'settings', 'main', {
         ...DEFAULT_SETTINGS,
-        autoDispatchEnabled: false,
         // Retries must be permitted for a retry (and therefore its confirmation)
         // to be reachable at all.
         emailRetryEnabled: true,
@@ -558,7 +557,6 @@ test(
         await reset();
         await put(pool, 'settings', 'main', {
           ...DEFAULT_SETTINGS,
-          autoDispatchEnabled: true,
           deferEveryoneUntilSecurityDelivered: true,
         });
         await put(pool, 'recipients', 'sec', {
@@ -610,7 +608,6 @@ test(
         await reset();
         await put(pool, 'settings', 'main', {
           ...DEFAULT_SETTINGS,
-          autoDispatchEnabled: true,
           deferEveryoneUntilSecurityDelivered: true,
         });
         await put(pool, 'recipients', 'sec', {
@@ -693,8 +690,7 @@ test(
         await reset();
         await put(pool, 'settings', 'main', {
           ...DEFAULT_SETTINGS,
-          autoDispatchEnabled: true,
-          deferEveryoneUntilSecurityDelivered: false,
+          deferEveryoneUntilSecurityDelivered: true,
         });
         await put(pool, 'recipients', 'sec', {
           id: 'sec',

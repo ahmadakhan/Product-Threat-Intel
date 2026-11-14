@@ -1052,9 +1052,9 @@ test('same CVE from two authoritative feeds produces exactly one finding per ass
   assert.equal(findings.length, 1, 'mergeCveRecords deduplicates CVEs; one CVE:asset = one finding');
 });
 
-/* ------------------------------------------------------------------ Circuit breaker tests */
+/* ------------------------------------------------------------------ Circuit breaker tests (no caps — all findings dispatch) */
 
-test('maxFindingsPerRun caps authoritative dispatches; remaining matches held for review', () => {
+test('maxFindingsPerRun no longer caps dispatches; all findings dispatch', () => {
   const cve = cveRecord({
     cveId: 'CVE-2026-107180',
     title: 'SonicWall SonicOS vulnerability',
@@ -1068,7 +1068,7 @@ test('maxFindingsPerRun caps authoritative dispatches; remaining matches held fo
   const asset = assetRecord({
     vendor: 'sonicwall', product: 'sonicos', version: '*', cpes: [], purls: [],
   });
-  // Only one authoritative dispatch allowed per run.
+  // No dispatch cap: even with maxFindingsPerRun set to 1, all findings dispatch.
   const cappedSettings = { ...settings, maxFindingsPerRun: 1 };
   const findings = runVulnerabilityPipeline(
     [authoritativeFeed('nvd-1', 'VULNCHECK_NVD')], [cve], [asset], [], [], cappedSettings,
@@ -1077,7 +1077,7 @@ test('maxFindingsPerRun caps authoritative dispatches; remaining matches held fo
   assert.equal(findings[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
 });
 
-test('maxDispatchesPerRunPerFeed caps per-feed dispatches', () => {
+test('maxDispatchesPerRunPerFeed no longer caps dispatches; all findings dispatch', () => {
   const cve1 = cveRecord({
     cveId: 'CVE-2026-107181', title: 'SonicWall SonicOS vuln 1',
     description: 'A vulnerability affects SonicWall SonicOS firewall appliances.',
@@ -1093,18 +1093,17 @@ test('maxDispatchesPerRunPerFeed caps per-feed dispatches', () => {
   const asset = assetRecord({
     vendor: 'sonicwall', product: 'sonicos', version: '*', cpes: [], purls: [],
   });
-  // Only one dispatch per feed per run.
+  // No per-feed cap: both findings dispatch regardless of maxDispatchesPerRunPerFeed.
   const cappedSettings = { ...settings, maxDispatchesPerRunPerFeed: 1 };
   const findings = runVulnerabilityPipeline(
     [authoritativeFeed('nvd-1', 'VULNCHECK_NVD')], [cve1, cve2], [asset], [], [], cappedSettings,
   ).newFindings;
   assert.equal(findings.length, 2, 'both CVEs produce findings');
-  // Both findings dispatch; per-feed cap limits dispatch count but does not hold findings.
   assert.equal(findings[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
   assert.equal(findings[1].notificationStatus, 'QUEUED_FOR_DISPATCH');
 });
 
-test('maxTotalFindingsPerRun caps total dispatches across all paths', () => {
+test('maxTotalFindingsPerRun no longer caps dispatches; all findings dispatch', () => {
   const cve1 = cveRecord({
     cveId: 'CVE-2026-107183', title: 'SonicWall SonicOS vuln 1',
     description: 'A vulnerability affects SonicWall SonicOS firewall appliances.',
@@ -1120,7 +1119,7 @@ test('maxTotalFindingsPerRun caps total dispatches across all paths', () => {
   const asset = assetRecord({
     vendor: 'sonicwall', product: 'sonicos', version: '*', cpes: [], purls: [],
   });
-  // Only one total dispatch allowed per run.
+  // No total cap: all findings dispatch regardless of maxTotalFindingsPerRun.
   const cappedSettings = { ...settings, maxTotalFindingsPerRun: 1 };
   const findings = runVulnerabilityPipeline(
     [authoritativeFeed('nvd-1', 'VULNCHECK_NVD'), authoritativeFeed('mitre-1', 'VULNCHECK_NVD')],
@@ -1156,20 +1155,24 @@ test('enrichmentBacklogCandidates filters findings dispatched without CPE data',
     autoDispatchedAt: null, advisoryId: null, executionId: 'x', reviewNotifiedAt: null,
     timeline: [],
   } as any;
-  const held = {
+  // All findings dispatch; none are held for review. Only findings without CPE
+  // data are enrichment-backlog candidates.
+  const unconfirmed = {
     id: 'f3', cveId: 'CVE-2026-107187', cve: {} as any,
     matchedAssetId: 'a3', matchedAssetName: 'a3', matchedAssetVendor: 'sonicwall',
     matchedAssetProduct: 'sonicos', matchedAssetPurls: [], matchedCpe: '',
     matchingMethod: 'VENDOR_PRODUCT_FALLBACK',
-    matchingEvidence: 'Product correlation; held for review because ...',
+    matchingEvidence: 'Product correlation; version applicability not fully verified.',
     confidence: 70, exposure: 'INTERNAL', exploitRisk: 'CRITICAL',
-    notificationStatus: 'REVIEW_REQUIRED', status: 'MONITORED',
+    notificationStatus: 'QUEUED_FOR_DISPATCH', status: 'MONITORED',
     autoDispatchedAt: null, advisoryId: null, executionId: 'x', reviewNotifiedAt: null,
     timeline: [],
   } as any;
-  const candidates = enrichmentBacklogCandidates([dispatched, strictCpe, held]);
-  assert.equal(candidates.length, 1);
-  assert.equal(candidates[0].cveId, 'CVE-2026-107185');
+  const candidates = enrichmentBacklogCandidates([dispatched, strictCpe, unconfirmed]);
+  assert.equal(candidates.length, 2);
+  const candidateIds = new Set(candidates.map((c) => c.cveId));
+  assert.ok(candidateIds.has('CVE-2026-107185'));
+  assert.ok(candidateIds.has('CVE-2026-107187'));
 });
 
 /* ------------------------------------------------------------------ H-5 */

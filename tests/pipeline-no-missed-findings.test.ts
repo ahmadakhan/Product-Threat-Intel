@@ -27,8 +27,6 @@ const NOW = new Date('2026-11-12T12:00:00Z');
 const settings = {
   ...DEFAULT_SETTINGS,
   scopeHours: 0,
-  autoDispatchEnabled: true,
-  autoDispatchUnverifiableMatches: true,
 };
 
 const cpe = (version = '1.5', vendor = 'acme', product = 'gateway') =>

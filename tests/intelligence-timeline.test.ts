@@ -104,7 +104,7 @@ test('vendor + product fallback findings respect published and modified dates', 
     purls: [],
     active: true,
   };
-  const settings = { ...structuredClone(INITIAL_SETTINGS), scopeHours: 168, autoDispatchEnabled: false };
+  const settings = { ...structuredClone(INITIAL_SETTINGS), scopeHours: 168 };
   const run = (cve: NormalizedCVE) =>
     runVulnerabilityPipeline(INITIAL_FEEDS, [cve], [fallbackAsset], [], [], settings, 'test');
 

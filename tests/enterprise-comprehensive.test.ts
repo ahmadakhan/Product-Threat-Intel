@@ -119,14 +119,6 @@ const NOW = new Date('2026-11-12T12:00:00Z');
 const testSettings = {
   ...DEFAULT_SETTINGS,
   scopeHours: 0,
-  autoDispatchEnabled: true,
-  autoDispatchUnverifiableMatches: true,
-  confirmedFindingThreshold: 90,
-};
-
-const circuitBreakerCooldowns = {
-  overallUntil: null,
-  feedUntil: new Map<string, number>(),
 };
 
 const cpeStr = (vendor: string, product: string, version = '*') =>
@@ -1235,18 +1227,21 @@ describe('Pipeline Features', () => {
     assert.ok(recovery, 'recovery time is set after circuit opens');
   });
 
-  test('auto-dispatch threshold: confirmed findings (90+) auto-dispatch', () => {
+  test('confirmed findings dispatch at full confidence', () => {
     const cve = cveRecord();
     const asset = assetRecord();
     const result = runPipeline([cve], [asset]);
+    assert.equal(result.newFindings[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
     assert.equal(result.newFindings[0].confidence, 90);
   });
 
-  test('unverifiable matches stay below threshold unless autoDispatchUnverifiableMatches', () => {
+  test('unverifiable matches dispatch with low-confidence note', () => {
     const cve = cveRecord({ cpeMatches: [], cpeMatchDetails: [] });
     const asset = assetRecord({ cpes: [], vendor: 'acme', product: 'gateway' });
     const result = runPipeline([cve], [asset]);
+    assert.equal(result.newFindings[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
     assert.equal(result.newFindings[0].confidence, 70);
+    assert.match(result.newFindings[0].matchingEvidence, /confidence 70%/);
   });
 });
 

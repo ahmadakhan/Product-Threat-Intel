@@ -61,7 +61,7 @@ test('POST /api/send-bulk-notification links findings to an advisory', { skip: !
       stepByStep: [],
     },
   });
-  const settings = { ...DEFAULT_SETTINGS, autoDispatchEnabled: true, schedulerEnabled: false };
+  const settings = { ...DEFAULT_SETTINGS, schedulerEnabled: false };
   const noNetwork = async () => {
     throw new Error('No network expected during bulk notification');
   };

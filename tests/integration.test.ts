@@ -914,7 +914,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
           ).status,
           200,
         );
-        assert.equal((await command('settings.save', { autoDispatchEnabled: true })).status, 200);
+        assert.equal((await command('settings.save', { emailEnabled: true })).status, 200);
         const run = await post('/api/pipeline', {});
         assert.equal(run.status, 202);
         assert.equal(run.body.status, 'QUEUED');

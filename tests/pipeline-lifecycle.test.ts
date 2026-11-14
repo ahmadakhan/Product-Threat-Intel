@@ -102,7 +102,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       const findings = await list<Finding>(pool, 'findings');
       assert.equal(findings.some((finding) => finding.cveId === cached.cveId), true);
     });
-    await t.test('historical inventory matches preserve dispatch cooldowns until expiry', async () => {
+    await t.test('historical inventory matches always dispatch regardless of cooldown state', async () => {
       await reset();
       await save('settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: false });
       await save('watchlist', 'asset', asset());
@@ -112,20 +112,22 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         id: 'cooldown-recipient', email: 'cooldown@example.invalid', name: 'SOC', enabled: true,
         deliveryGroup: 'SECURITY_TEAM', subscriptionTier: 'ALL_SEVERITIES',
       });
+      // Circuit breaker state no longer holds findings — all findings dispatch.
       await save('systemState', 'circuit-breaker-state', {
         cooldowns: { overallUntil: new Date(Date.now() + 3600000).toISOString(), feeds: {} },
       });
       await run();
-      const [held] = await list<Finding>(pool, 'findings');
-      assert.ok(held, 'the historical match must remain visible');
-      assert.equal(held.dispatchDeferred, true);
-      assert.equal((await pool.query('SELECT id FROM outbox')).rowCount, 0);
+      const [dispatched] = await list<Finding>(pool, 'findings');
+      assert.ok(dispatched, 'the historical match must remain visible');
+      assert.equal(dispatched.dispatchDeferred, false);
+      assert.equal(dispatched.notificationStatus, 'QUEUED_FOR_DISPATCH');
+      assert.equal((await pool.query('SELECT id FROM outbox')).rowCount, 1, 'all findings dispatch even during cooldown');
       await save('systemState', 'circuit-breaker-state', {
         cooldowns: { overallUntil: new Date(Date.now() - 1000).toISOString(), feeds: {} },
       });
       await run();
       assert.equal((await list<Finding>(pool, 'findings'))[0].dispatchDeferred, false);
-      assert.equal((await pool.query('SELECT id FROM outbox')).rowCount, 1, 'expiry releases the retained match');
+      assert.equal((await pool.query('SELECT id FROM outbox')).rowCount, 2, 'cooldown expiry does not double-send due to dedupe');
     });
     await t.test('incremental checkpoints commit atomically, survive failures, and reset after source changes', async () => {
       await reset();

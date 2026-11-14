@@ -61,7 +61,7 @@ test('H-3: campaign (KEV) enrichment is persisted even when applicability is unc
   const save = (kind: string, id: string, value: unknown) => transaction(pool, (db) => put(db, kind, id, value));
   try {
     await migrate(pool);
-    await save('settings', 'main', { ...DEFAULT_SETTINGS, autoDispatchEnabled: false });
+    await save('settings', 'main', { ...DEFAULT_SETTINGS });
     await save('feeds', 'kev', {
       id: 'kev',
       name: 'KEV',
@@ -131,7 +131,7 @@ test('aborting a stuck pipeline releases its lock and prevents late response per
   let finishRequest!: (response: { status: number; body: string; headers: Record<string, string> }) => void;
   try {
     await migrate(pool);
-    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, autoDispatchEnabled: false, schedulerEnabled: false });
+    await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: false });
     await put(pool, 'feeds', 'stuck', {
       id: 'stuck', name: 'Stuck source', type: 'JSON_SEARCH_API',
       url: 'https://example.com/feed', enabled: true, authType: 'NONE', rateLimitPerMin: 60,
@@ -176,7 +176,7 @@ test('H-4: a lost worker lock requeues the run instead of wedging it in RUNNING'
   const save = (kind: string, id: string, value: unknown) => transaction(pool, (db) => put(db, kind, id, value));
   try {
     await migrate(pool);
-    await save('settings', 'main', { ...DEFAULT_SETTINGS, autoDispatchEnabled: false });
+    await save('settings', 'main', { ...DEFAULT_SETTINGS });
     await save('feeds', 'lock-loss', {
       id: 'lock-loss',
       name: 'Lock loss',
