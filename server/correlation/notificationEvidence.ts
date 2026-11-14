@@ -18,7 +18,7 @@ interface EvidenceMatch {
   assetId: string;
   vendor: string;
   product: string;
-  confidence: 'HIGH' | 'MEDIUM';
+  confidence: 'HIGH' | 'MEDIUM' | 'LOW';
   reason: string;
   assetRevision: string | null;
   currentRevision: string | null;
@@ -37,7 +37,14 @@ export async function readNativeEvidence(db: Db, advisoryId: string) {
   );
   // Matches derived before the stored match rows have evidence committed (or
   // whose asset changed since) carry no fresh evidence and are not reported.
-  const freshMatches = matches.rows.filter((match) => match.assetRevision && match.assetRevision === match.currentRevision);
+  const freshMatches = matches.rows
+    .filter((match) => match.assetRevision && match.assetRevision === match.currentRevision)
+    // LOW-confidence matches are review evidence only: negated advisories
+    // ("not affected", "false positive") and bare vendor/product co-occurrence
+    // with no version bound. They must never be delivered as alerts, whatever
+    // the low-confidence switch says. Keeping them here would demote a real
+    // advisory to MEDIUM and assert exposure the source denies.
+    .filter((match) => match.confidence !== 'LOW');
   if (!article.rows[0] || matches.rows.length > 1000) return null;
   // No attributed asset means no alert. The review buffer holds exactly the
   // evidence that could not be tied to an installed asset — including advisories

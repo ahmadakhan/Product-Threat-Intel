@@ -73,58 +73,10 @@ describe('ML pipeline integration', () => {
   });
 
   describe('shouldAutoDispatch', () => {
-    it('uses 90 threshold when untrained', () => {
-      assert.equal(shouldAutoDispatch(91, { confirmedFindingThreshold: 90 }), true);
-      assert.equal(shouldAutoDispatch(89, { confirmedFindingThreshold: 90 }), false);
-    });
-
-    it('respects settings threshold when untrained', () => {
-      assert.equal(shouldAutoDispatch(85, { confirmedFindingThreshold: 50 }), true);
-      assert.equal(shouldAutoDispatch(49, { confirmedFindingThreshold: 50 }), false);
-    });
-    it('a trained model cannot override the configured threshold', (t) => {
-      const model = getMlRuntime()?.autoDispatchThreshold;
-      assert.ok(model);
-      let recommendation = 10;
-      t.mock.method(model, 'isTrained', () => true);
-      t.mock.method(model, 'getThreshold', () => recommendation);
-      assert.equal(shouldAutoDispatch(80, { confirmedFindingThreshold: 90 }), false);
-      recommendation = 99;
-      assert.equal(shouldAutoDispatch(80, { confirmedFindingThreshold: 70 }), true);
-      assert.equal(shouldAutoDispatch(70, { confirmedFindingThreshold: 70 }), true);
-      for (const confidence of [NaN, Infinity, -1, 101])
-        assert.equal(shouldAutoDispatch(confidence, { confirmedFindingThreshold: 0 }), false);
-    });
-
-    it('uses the learned threshold only after explicit opt-in', (t) => {
-      const model = getMlRuntime()?.autoDispatchThreshold;
-      assert.ok(model);
-      let recommendation = 20;
-      t.mock.method(model, 'isTrained', () => true);
-      t.mock.method(model, 'getThreshold', () => recommendation);
-      // Opt-out remains authoritative even when the model recommends lower.
-      assert.equal(
-        shouldAutoDispatch(80, {
-          confirmedFindingThreshold: 90,
-          mlAutoDispatchThresholdEnabled: false,
-        }),
-        false,
-      );
-      assert.equal(
-        shouldAutoDispatch(80, {
-          confirmedFindingThreshold: 90,
-          mlAutoDispatchThresholdEnabled: true,
-        }),
-        true,
-      );
-      recommendation = 99;
-      assert.equal(
-        shouldAutoDispatch(80, {
-          confirmedFindingThreshold: 20,
-          mlAutoDispatchThresholdEnabled: true,
-        }),
-        false,
-      );
+    it('always returns true (no review queue)', () => {
+      assert.equal(shouldAutoDispatch(0), true);
+      assert.equal(shouldAutoDispatch(50), true);
+      assert.equal(shouldAutoDispatch(100), true);
     });
   });
 
@@ -291,7 +243,7 @@ describe('ML pipeline integration', () => {
       assert.equal(validCpe, true);
 
       // Trained recommendations must not replace the configured dispatch policy.
-      const dispatchResult = shouldAutoDispatch(95, { confirmedFindingThreshold: 90 });
+      const dispatchResult = shouldAutoDispatch(95);
       assert.ok(typeof dispatchResult === 'boolean');
 
       // Retry delay should use learned policy

@@ -23,6 +23,11 @@ import { extractMetricFeatures } from './models/metricAnomalyDetector.ts';
 import { extractFindingFeatures } from './models/reviewRanker.ts';
 import { findingFeatures } from './findingFeatures.ts';
 import type { RemediationFeatures, RemediationPrediction } from './models/advisoryRemediationHelper.ts';
+import {
+  EmailSummarizerModel,
+  type EmailSummaryFeatures,
+  type EmailSummaryPrediction,
+} from './models/emailSummarizer.ts';
 import { DEFAULT_AUTO_DISPATCH_THRESHOLD, DEFAULT_MAX_ZERO_DAYS_PER_RUN, DEFAULT_FEED_RECOVERY_INITIAL_DELAY_MINUTES, DEFAULT_FEED_RECOVERY_BACKOFF_MULTIPLIER, DEFAULT_FEED_RECOVERY_MAX_DELAY_MINUTES, DEFAULT_FEED_RECOVERY_MAX_STEPS, DEFAULT_FEED_CREDIBILITY_WEIGHT, DEFAULT_KEYWORD_CREDIBILITY_WEIGHT } from './defaults.ts';
 import { extractExploitRiskFeatures, type ExploitRiskLevel } from './models/exploitRiskModel.ts';
 import { extractSeverityTierFeatures, type SeverityTier } from './models/severityTierModel.ts';
@@ -143,59 +148,9 @@ export function calibrateCredibilityScore(rawScore: number): {
  * quality-gated at training time, and a missing/erroring model fails closed to
  * the static policy.
  */
-export function shouldAutoDispatch(
-  confidence: number,
-  settings: Pick<AppSettings, 'confirmedFindingThreshold'> &
-    Partial<Pick<AppSettings, 'mlAutoDispatchThresholdEnabled'>>,
-): boolean {
-  const configuredThreshold = settings.confirmedFindingThreshold ?? DEFAULT_AUTO_DISPATCH_THRESHOLD;
-  let threshold = configuredThreshold;
-  let modelTrained = false;
-  let recommendedThreshold: number | undefined;
-  const confidenceValid = Number.isFinite(confidence) && confidence >= 0 && confidence <= 100;
-  // Fail closed: if the ML model errors, hold for review rather than dispatching blindly.
-  try {
-    const model = ctx.runtime?.autoDispatchThreshold;
-    modelTrained = model?.isTrained() === true;
-    if (modelTrained) recommendedThreshold = model?.getThreshold();
-  } catch (err) {
-    const modelError = err instanceof Error ? err.message : String(err);
-    void logMlEvent('ml.auto_dispatch', 'Model error; fail closed — holding for review', {
-      confidence,
-      threshold: configuredThreshold,
-      modelTrained: false,
-      modelError,
-    });
-    return false;
-  }
-  const optIn = settings.mlAutoDispatchThresholdEnabled === true;
-  if (optIn && modelTrained && Number.isFinite(recommendedThreshold) && recommendedThreshold! >= 0 && recommendedThreshold! <= 100) {
-    threshold = recommendedThreshold!;
-  }
-  if (
-    !confidenceValid ||
-    !Number.isFinite(threshold) ||
-    threshold < 0 ||
-    threshold > 100
-  ) {
-    void logMlEvent('ml.auto_dispatch', 'Invalid confidence or threshold; holding for review', {
-      confidence,
-      threshold,
-      modelTrained,
-      optIn,
-    });
-    return false;
-  }
-  const result = confidence >= threshold;
-  void logMlEvent('ml.auto_dispatch', result ? 'Eligible under configured policy' : 'Held under configured policy', {
-    confidence,
-    threshold,
-    configuredThreshold,
-    modelTrained,
-    optIn,
-    recommendedThreshold,
-  });
-  return result;
+export function shouldAutoDispatch(confidence: number, settings?: AppSettings): boolean {
+  // All findings dispatch; there is no review queue or threshold gate.
+  return true;
 }
 
 /** Whether a named model is loaded *and* trained. Used to gate opt-in routing. */
@@ -677,6 +632,145 @@ export function mlPredictAdvisoryComposition(findings: Finding[]): EmailComposit
 /** Order findings by ML-predicted importance. */
 export function mlOrderFindingsByImportance(findings: Finding[]): Finding[] {
   return orderFindingsByMlImportance(findings);
+}
+
+/**
+ * Summarize an existing composed advisory into a short email summary.
+ *
+ * Takes the already-composed advisory text (executive summary + remediation
+ * instructions + severity summary) and finding metadata, then produces a
+ * condensed extractive summary suitable for email body previews, notification
+ * digests, or mobile alerts. Falls back to rule-based truncation when the
+ * summarizer model is untrained.
+ */
+export function mlSummarizeAdvisoryEmail(
+  findings: Finding[],
+  advisoryText: string,
+): {
+  subject: string;
+  summary: string;
+  keyActions: string[];
+  severityLine: string;
+  modelUsed: boolean;
+  modelVersion?: string;
+  prediction: EmailSummaryPrediction | null;
+} {
+  const runtime = getMlRuntime();
+  const model = runtime?.emailSummarizer;
+
+  // Extract aggregate features from findings.
+  const severities: Record<string, number> = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, UNKNOWN: 0 };
+  let maxCvss = 0;
+  let sumCvss = 0;
+  let kevCount = 0;
+  let weaponizedCount = 0;
+  let reportedInWildCount = 0;
+  let pocCount = 0;
+  let maxDaysSincePublished = 0;
+  const assets = new Set<string>();
+  const vendors = new Set<string>();
+  let hasPatchInfo = 0;
+  let hasWorkarounds = 0;
+
+  for (const f of findings) {
+    const sev = f.cve.cvss.severity;
+    severities[sev] = (severities[sev] ?? 0) + 1;
+    const cvss = f.cve.cvss.score ?? 0;
+    maxCvss = Math.max(maxCvss, cvss);
+    sumCvss += cvss;
+    if (f.cve.cisaKev?.isKev) kevCount++;
+    if (f.cve.exploitStatus === 'Active Weaponized') weaponizedCount++;
+    if (f.cve.exploitStatus === 'Reported In Wild') reportedInWildCount++;
+    if (f.cve.exploitStatus === 'POC Available') pocCount++;
+    const published = f.cve.publishedDate ? new Date(f.cve.publishedDate).getTime() : 0;
+    if (published) {
+      const days = (Date.now() - published) / (1000 * 60 * 60 * 24);
+      maxDaysSincePublished = Math.max(maxDaysSincePublished, days);
+    }
+    if (f.matchedAssetName) assets.add(f.matchedAssetName);
+    if (f.matchedAssetVendor) vendors.add(f.matchedAssetVendor);
+    if (f.cve.remediation?.patchUrl) hasPatchInfo = 1;
+    if (f.cve.remediation?.workarounds?.length) hasWorkarounds = 1;
+  }
+
+  const total = findings.length;
+  const sentences = advisoryText.split(/(?<=[.!?])\s+/).filter((s) => s.trim().length > 0).length;
+  const features: EmailSummaryFeatures = {
+    advisoryTextLength: advisoryText.length,
+    sentenceCount: sentences,
+    findingCount: total,
+    criticalCount: severities.CRITICAL,
+    highCount: severities.HIGH,
+    mediumCount: severities.MEDIUM,
+    lowCount: severities.LOW,
+    unknownCount: severities.UNKNOWN,
+    maxCvssScore: maxCvss,
+    avgCvssScore: total ? sumCvss / total : 0,
+    kevCount,
+    weaponizedCount,
+    reportedInWildCount,
+    pocCount,
+    maxDaysSincePublished,
+    hasPatchInfo,
+    hasWorkarounds,
+    recipientCount: 1,
+  };
+
+  if (model?.isTrained()) {
+    try {
+      const { text, prediction } = model.summarize(advisoryText, features);
+      void logMlEvent('ml.email_summarize', 'Advisory summarized by ML', {
+        summaryStyle: prediction.summaryStyle,
+        summaryLength: prediction.summaryLength,
+        keyActionEmphasis: prediction.keyActionEmphasis,
+        subjectTemplate: prediction.subjectTemplate,
+        confidence: prediction.confidence,
+        modelVersion: prediction.modelVersion,
+        findingCount: findings.length,
+      });
+      return {
+        subject: text.subject,
+        summary: text.summary,
+        keyActions: text.keyActions,
+        severityLine: text.severityLine,
+        modelUsed: true,
+        modelVersion: prediction.modelVersion,
+        prediction,
+      };
+    } catch {
+      /* fall through to rule-based on any summarization error */
+    }
+  }
+
+  // Rule-based fallback: truncate advisory text to first N sentences.
+  const ruleSentences = advisoryText
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .slice(0, 3);
+  const ruleSummary = ruleSentences.length ? ruleSentences.join(' ') : advisoryText.slice(0, 300);
+  const topSev = features.criticalCount > 0 ? 'Critical' : features.highCount > 0 ? 'High' : features.mediumCount > 0 ? 'Medium' : 'Low';
+  void logMlEvent('ml.email_summarize.fallback', 'Advisory summarized by rule-based fallback', {
+    findingCount: findings.length,
+  });
+  return {
+    subject: `Vulnerability summary: ${features.findingCount} ${topSev} finding(s)`,
+    summary: ruleSummary,
+    keyActions: ['Review vendor advisories and confirm applicability before remediation.'],
+    severityLine: buildSeverityLineInline(features),
+    modelUsed: false,
+    prediction: null,
+  };
+}
+
+function buildSeverityLineInline(features: EmailSummaryFeatures): string {
+  const parts: string[] = [];
+  if (features.criticalCount) parts.push(`${features.criticalCount} Critical`);
+  if (features.highCount) parts.push(`${features.highCount} High`);
+  if (features.mediumCount) parts.push(`${features.mediumCount} Medium`);
+  if (features.lowCount) parts.push(`${features.lowCount} Low`);
+  if (features.unknownCount) parts.push(`${features.unknownCount} Unknown`);
+  return parts.length ? parts.join(', ') : '0 vulnerabilities';
 }
 
 /**

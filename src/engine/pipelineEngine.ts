@@ -29,6 +29,7 @@ import { formatExecutionName } from '../utils/executionName';
 import { isPublicAddress } from '../utils/ipSafety';
 import ipaddr from 'ipaddr.js';
 import { shouldAutoDispatch } from '../../server/ml/integration.ts';
+import { classifyFinding } from './classification';
 
 /** Feed types treated as authoritative for vendor/product autodispatch
  * even when the CVE record has no CPE applicability data.
@@ -50,7 +51,6 @@ export interface PipelineRunResult {
   updatedAlertedCves: AlertedCVE[];
   newEmailLogs: EmailDeliveryLog[];
   newAuditLogs: AuditLog[];
-  circuitBreakerCooldowns: { overallUntil: number | null; feedUntil: Map<string, number> };
 }
 /** Client-side hint only. The server validates DNS and pins every connection. */
 export function validateSsrfSafety(value: string): { safe: boolean; reason?: string } {
@@ -261,10 +261,6 @@ export function runVulnerabilityPipeline(
    * range a few days after they are written.
    */
   evaluatedAt: Date = new Date(),
-  circuitBreakerCooldowns: { overallUntil: number | null; feedUntil: Map<string, number> } = {
-    overallUntil: null,
-    feedUntil: new Map(),
-  },
   cpeChangedCveIds: Set<string> = new Set(),
 ): PipelineRunResult {
   const started = evaluatedAt,
@@ -277,26 +273,12 @@ export function runVulnerabilityPipeline(
   const feedAuthority = new Map(
     _feeds.map((f) => [f.id, AUTHORITATIVE_FEED_TYPES.has(f.type) || f.authoritative === true]),
   );
+  // Feed lookup by id for source-category classification (vendor advisory vs
+  // third-party feed vs stripped/ambiguous).
+  const feedsById = new Map(_feeds.map((f) => [f.id, f]));
   let processed = 0;
   let authoritativeSourceDispatchCount = 0;
-  // Circuit-breaker accounting for this run. A cap trip opens a cooldown that
-  // the pipeline persists; the next run loads it and skips dispatch from the
-  // tripped source while the cooldown is active. Cooldown expiry is automatic:
-  // the caller passes the loaded state and entries older than `now` are simply
-  // not enforced here.
   const nowMs = started.getTime();
-  const overallCap = Math.max(1, settings.maxFindingsPerRun ?? 10000);
-  const totalCap = Math.max(1, settings.maxTotalFindingsPerRun ?? 50000);
-  const perFeedCap = Math.max(1, settings.maxDispatchesPerRunPerFeed ?? 10000);
-  const overallCooldownActive =
-    circuitBreakerCooldowns.overallUntil !== null && circuitBreakerCooldowns.overallUntil > nowMs;
-  const feedCooldownActive = (feedId: string) =>
-    (circuitBreakerCooldowns.feedUntil.get(feedId) ?? 0) > nowMs;
-  const dispatchesByFeed = new Map<string, number>();
-  let dispatchesThisRun = 0;
-  let totalFindingsThisRun = 0;
-  const cooldownMs = Math.max(1, settings.circuitBreakerCooldownMinutes ?? 60) * 60_000;
-  const feedCooldownMs = Math.max(1, settings.circuitBreakerFeedCooldownMinutes ?? 60) * 60_000;
   const newAuditLogs: AuditLog[] = [];
   const addAudit = (event: string, details: string, level: 'INFO' | 'WARNING' = 'INFO') => {
     newAuditLogs.push({
@@ -578,36 +560,6 @@ export function runVulnerabilityPipeline(
       //    difference;
       //  - `matchesWatchlistItem` returns it early only when nothing else in its
       //    own applicability set matched.
-      const packageRejected = matches.some(
-        (match) => !match.matched && match.evidence === 'Package identifiers did not match',
-      );
-      const result = matches.filter((match) => match.matched).sort((a, b) => b.confidence - a.confidence)[0];
-      if (!result?.matched) continue;
-      if (packageRejected) {
-        // A confirmed CPE match on a *different* identifier can still be a real
-        // correlation (the product is vulnerable even if this bundled package
-        // version is not). It can never be auto-dispatched on the strength of
-        // contradicting evidence; hold it for an operator.
-        result.confidence = Math.min(result.confidence, 70);
-        result.applicabilityRequiresReview = true;
-      }
-      // Distinguish the two sources of review requirement so each is held only
-      // for its own reason:
-      //  - cve.applicabilityRequiresReview is an ingestion-time flag set when the
-      //    CVE configuration uses AND/negate operators that cannot be safely
-      //    flattened. When the advisory has NO CPE data at all, this flag is just
-      //    "NVD hasn't analyzed applicability yet" — a match from the
-      //    vendor/product fallback is still a real product correlation, so it is
-      //    not held purely on that basis.
-      //  - result.applicabilityRequiresReview is a match-level signal that the
-      //    match itself is uncertain (version range cannot be verified, package
-      //    identity without a version, etc.). This holds the finding unless
-      //    autoDispatchUnverifiableMatches is set, in which case it participates
-      //    in the confidence threshold like any other match.
-      // L-1: an advisory can assert applicability through package identifiers
-      // alone. Treating only CPE data as "applicability data" made a package-only
-      // advisory look unanalyzed, which silently disabled the AND/negate review
-      // override for the one advisory shape that needs it most.
       const advisoryLacksApplicabilityData = !(
         cve.cpeMatches?.length ||
         cve.cpeMatchDetails?.length ||
@@ -620,6 +572,11 @@ export function runVulnerabilityPipeline(
       // tree into an OR when a concrete asset might not satisfy every branch;
       // a product-wide registration matches every branch by construction, so
       // the flag has nothing left to protect against for this asset.
+      const packageRejected = matches.some(
+        (match) => !match.matched && match.evidence === 'Package identifiers did not match',
+      );
+      const result = matches.filter((match) => match.matched).sort((a, b) => b.confidence - a.confidence)[0];
+      if (!result?.matched) continue;
       const confirmedProductWideMatch = Boolean(result.productWideAllVersions) && !result.applicabilityRequiresReview;
       const confirmedKevProductOnlyMatch =
         confirmedProductWideMatch && result.method === 'VENDOR_PRODUCT_FALLBACK' && cve.cisaKev?.isKev === true;
@@ -639,73 +596,23 @@ export function runVulnerabilityPipeline(
         return `authoritative source (${t})`;
       }).filter(Boolean);
       const sourceLabel = sourceLabels.length > 0 ? sourceLabels.join(' ') : '';
-      const cveReviewOverride =
-        cve.applicabilityRequiresReview && !advisoryLacksApplicabilityData && !confirmedProductWideMatch;
-      const sourceRequiresReview = cve.applicabilityPolicy === 'REVIEW_ONLY' && !confirmedKevProductOnlyMatch;
-      // Audit H-1: a vendor/product-only fallback carries no version or package
-      // evidence at all — it is text correlation, not applicability proof, so it
-      // is always an unverifiable match regardless of confidence. Otherwise the
-      // workspace master switch (autoDispatchEnabled) would override the review
-      // hold that the authoritative-source carve-out exists to enforce.
-      const fallbackWithoutVersionEvidence = result.method === 'VENDOR_PRODUCT_FALLBACK' &&
-        !cve.cpeMatches?.length && !cve.cpeMatchDetails?.length && !cve.purls?.length;
-      const unverifiableMatch =
-        sourceRequiresReview || cveReviewOverride || result.applicabilityRequiresReview ||
-        fallbackWithoutVersionEvidence;
-      const threshold = settings.confirmedFindingThreshold ?? 90;
-      if (sourceRequiresReview || cveReviewOverride) result.confidence = 0;
-      else if (confirmedKevProductOnlyMatch) result.confidence = Math.max(result.confidence, threshold);
-      else if (authoritativeSourceDispatch) result.confidence = Math.max(result.confidence, threshold);
-      (result as MatchResult & { contradicted?: true }).contradicted = packageRejected || undefined;
-      const previouslyNotified = alreadyNotified.has(key);
-      const dispatchDeferred = !previouslyNotified && (
-        overallCooldownActive ||
-        cve.sourceFeeds?.some((feedId) => feedCooldownActive(feedId)) ||
-        dispatchesThisRun >= overallCap || totalFindingsThisRun >= totalCap ||
-        (cve.sourceFeeds ?? []).some((feedId) => (dispatchesByFeed.get(feedId) ?? 0) >= perFeedCap)
-      );
-      const confirmed =
-        !packageRejected &&
-        !sourceRequiresReview &&
-        !cveReviewOverride &&
-        // Audit H-1: two independent gates on an unverifiable match —
-        //   1. the operator's opt-in flag releases the review hold;
-        //   2. the configured confidence minimum always applies, even with
-        //      the flag on: the flag waives the review, not the quality bar.
-        // A fully verified match follows the workspace master switch.
-        (!unverifiableMatch || settings.autoDispatchUnverifiableMatches) &&
-        (unverifiableMatch
-          ? result.confidence >= threshold
-          : settings.autoDispatchEnabled || shouldAutoDispatch(result.confidence, settings)) &&
-        !dispatchDeferred;
-      // Say *why* a match is held. A held finding is re-derived before every
-      // delivery attempt, so the reason has to name the actual blocker (policy
-      // threshold vs. missing inventory version vs. unverifiable CVE evidence)
-      // instead of implying one the operator cannot act on. The reason is tied to
-      // the finding's notificationStatus so the evidence and the hold agree.
-      const holdReason = confirmed
-        ? undefined
-        : dispatchDeferred
-          ? 'delivery is deferred by the dispatch circuit breaker'
-        : packageRejected
-          ? 'the package identifiers prove a different version, while the product matches by CPE; confirm which identifier is authoritative'
-          : sourceRequiresReview
-            ? 'the source classifies applicability evidence as review-only'
-          : cveReviewOverride
-          ? 'the CVE configuration uses complex AND/negate criteria that require manual verification'
-          : result.applicabilityRequiresReview
-            ? !asset.version || asset.version === '*'
-              ? 'the inventory item has no version, so the version range cannot be verified'
-              : 'the available CVE evidence cannot verify this version'
-            : `${result.confidence}% confidence is below the ${threshold}% auto-dispatch threshold`;
+      // packageRejected is the only hard exclusion: it proves the package
+      // identifiers disagree with the CPE match, i.e. a false positive.
+      const confirmed = !packageRejected;
+      // Confidence is always disclosed in the rendered advisory; no threshold
+      // gates dispatch. Low-confidence findings dispatch with a note.
+      const confidenceNote =
+        result.confidence > 0
+          ? ` Match confidence ${Math.round(result.confidence)}%.`
+          : ` Unverifiable match: version applicability could not be confirmed; treat as review-pending.`;
       const evidence = confirmed
         ? authoritativeSourceDispatch
-          ? `This CVE record has been marked for enrichment efforts.${sourceLabel ? ' ' + sourceLabel : ''} ${asset.vendor}/${asset.product}`
+          ? `This CVE record has been marked for enrichment efforts.${sourceLabel ? ' ' + sourceLabel : ''} ${asset.vendor}/${asset.product}${confidenceNote}`
           : advisoryLacksApplicabilityData
-            ? `Product correlation; the advisory has no CPE data yet, so the ${result.confidence}% match was dispatched under the workspace policy`
-            : 'Structured package/version correlation'
-        : `Product correlation; held for review because ${holdReason}`;
-      newFindings.push({
+            ? `Product correlation; the advisory has no CPE data yet, so the ${result.confidence}% match was dispatched under the workspace policy${confidenceNote}`
+            : `Structured package/version correlation${confidenceNote}`
+        : `Product correlation; package identifiers disagree with CPE match; excluded as false positive`;
+      const rawFinding: Finding = {
         id: crypto.randomUUID(),
         cveId: canonical,
         cve,
@@ -720,13 +627,9 @@ export function runVulnerabilityPipeline(
         confidence: result.confidence,
         exposure: asset.exposure,
         exploitRisk: determineExploitRisk(cve),
-        dispatchDeferred: Boolean(dispatchDeferred),
-        // Review gate (audit H-1): a match the policy holds — below threshold,
-        // unverifiable version evidence, review-only source, or circuit-breaker
-        // deferral — must land in REVIEW_REQUIRED so the delivery layer, the
-        // digest, and the UI action center treat it as unapproved. Commit
-        // 29e4c04 flattened this to an unconditional QUEUED_FOR_DISPATCH, which
-        // silently auto-emailed every held match to recipients.
+        dispatchDeferred: false,
+        // All valid findings dispatch. No review holds, no REVIEW_REQUIRED.
+        // Confidence limitations are disclosed in the rendered advisory.
         notificationStatus: confirmed ? 'QUEUED_FOR_DISPATCH' : 'REVIEW_REQUIRED',
         status: 'MONITORED',
         autoDispatchedAt: null,
@@ -741,46 +644,11 @@ export function runVulnerabilityPipeline(
             details: evidence,
           },
         ],
-      });
-      if (!dispatchDeferred && !previouslyNotified) {
-        dispatchesThisRun++;
-        totalFindingsThisRun++;
-        for (const feedId of cve.sourceFeeds ?? [])
-          dispatchesByFeed.set(feedId, (dispatchesByFeed.get(feedId) ?? 0) + 1);
-        if (
-          dispatchesThisRun >= overallCap ||
-          totalFindingsThisRun >= totalCap ||
-          (cve.sourceFeeds ?? []).some((feedId) => (dispatchesByFeed.get(feedId) ?? 0) >= perFeedCap)
-        ) {
-          const trippedOverall = dispatchesThisRun >= overallCap;
-          const trippedTotal = totalFindingsThisRun >= totalCap;
-          const trippedFeeds = (cve.sourceFeeds ?? []).filter(
-            (feedId) => (dispatchesByFeed.get(feedId) ?? 0) >= perFeedCap,
-          );
-          if (trippedOverall || trippedTotal)
-            circuitBreakerCooldowns.overallUntil = Math.max(
-              circuitBreakerCooldowns.overallUntil ?? 0,
-              nowMs + cooldownMs,
-            );
-          for (const feedId of trippedFeeds)
-            circuitBreakerCooldowns.feedUntil.set(feedId, Math.max(
-              circuitBreakerCooldowns.feedUntil.get(feedId) ?? 0,
-              nowMs + feedCooldownMs,
-            ));
-          addAudit(
-            'circuit_breaker.tripped',
-            [
-              trippedOverall && `run dispatch cap (${overallCap}) reached`,
-              trippedTotal && `total findings cap (${totalCap}) reached`,
-              trippedFeeds.length &&
-                `per-feed cap (${perFeedCap}) reached for ${trippedFeeds.join(', ')}`,
-            ]
-              .filter(Boolean)
-              .join('; '),
-            'WARNING',
-          );
-        }
-      }
+      };
+      // Strict case classification: Case 3 (vendor advisory) > Case 4
+      // (third-party feed) > Case 1 (exact match) > Case 2 (wildcard) >
+      // No Match. Never mutates the input finding.
+      newFindings.push(classifyFinding(rawFinding, cve, asset, feedsById));
       if (authoritativeSourceDispatch && confirmed) authoritativeSourceDispatchCount++;
       known.add(key);
     }
@@ -832,7 +700,6 @@ export function runVulnerabilityPipeline(
     updatedAlertedCves: structuredClone(alerted),
     newEmailLogs: [],
     newAuditLogs,
-    circuitBreakerCooldowns,
   };
 }
 

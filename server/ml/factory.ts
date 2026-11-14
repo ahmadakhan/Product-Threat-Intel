@@ -38,6 +38,7 @@ import { SeverityTierModel } from './models/severityTierModel.ts';
 import { FeedRecoveryBackoffOptimizer } from './models/feedRecoveryBackoffOptimizer.ts';
 import { AliasConfidenceModel } from './models/aliasConfidenceModel.ts';
 import { AdvisoryComposerModel } from './models/advisoryComposer.ts';
+import { EmailSummarizerModel } from './models/emailSummarizer.ts';
 import type { ModelStorageOptions } from './types.ts';
 
 export interface MlRuntime {
@@ -60,6 +61,7 @@ export interface MlRuntime {
   feedRecoveryBackoff: FeedRecoveryBackoffOptimizer;
   aliasConfidence: AliasConfidenceModel;
   advisoryComposer: AdvisoryComposerModel;
+  emailSummarizer: EmailSummarizerModel;
 }
 
 export async function createMlRuntime(options: ModelStorageOptions): Promise<MlRuntime> {
@@ -84,6 +86,7 @@ export async function createMlRuntime(options: ModelStorageOptions): Promise<MlR
   const feedRecoveryBackoff = new FeedRecoveryBackoffOptimizer();
   const aliasConfidence = new AliasConfidenceModel();
   const advisoryComposer = new AdvisoryComposerModel();
+  const emailSummarizer = new EmailSummarizerModel();
 
    // autoDispatchThreshold uses a 1-D optimizer (not a TrainableModel), so it is
    // loaded via saveArtifact/loadArtifact rather than the standard TrainableModel path.
@@ -106,6 +109,7 @@ export async function createMlRuntime(options: ModelStorageOptions): Promise<MlR
   await registry.loadArtifact(feedRecoveryBackoff, 'feed-recovery-backoff-optimizer');
   await registry.load(aliasConfidence, 'alias-confidence-model');
   await registry.load(advisoryComposer, 'advisory-composer');
+  await registry.load(emailSummarizer, 'email-summarizer');
   
   /**
    * ML quality gate validation for feed recovery optimization.
@@ -167,5 +171,6 @@ export async function createMlRuntime(options: ModelStorageOptions): Promise<MlR
     feedRecoveryBackoff,
     aliasConfidence,
     advisoryComposer,
+    emailSummarizer,
   };
 }

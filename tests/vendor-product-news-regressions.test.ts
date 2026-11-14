@@ -38,7 +38,7 @@ function article(title: string): IntelligenceArticle {
 function findings(record: NormalizedCVE, changed = new Set<string>()) {
   return runVulnerabilityPipeline(
     [], [record], [asset()], [], [], { ...DEFAULT_SETTINGS, scopeHours: 24 },
-    'regression', true, {}, {}, undefined, [], now, undefined, changed,
+    'regression', true, {}, {}, undefined, [], now, changed,
   ).newFindings;
 }
 

@@ -587,6 +587,7 @@ export const DEFAULT_VENDOR_ALIASES: Record<string, string[]> = {
   sentinelone: ['sentinelone_inc', 'sentinel_one'],
   adobe: ['adobe_systems'],
   canonical: ['ubuntu'],
+  trellix: ['fireeye', 'fireeye_inc'],
   // N-able spun out of SolarWinds in 2021. The NVD CPE dictionary still carries
   // the legacy `solarwinds` vendor entries for N-central (not flagged as
   // deprecated), so the alias bridges the old and current vendor spellings and
@@ -608,6 +609,7 @@ export const DEFAULT_PRODUCT_ALIASES: Record<string, string[]> = {
   big_ip: ['bigip', 'big-ip_access_policy_manager'],
   log4j_core: ['log4j', 'log4j-core'],
   express: ['expressjs'],
+  microsoft_entra_id: ['azure_ad', 'azure_active_directory', 'azure_ad_premium'],
 };
 
 /**

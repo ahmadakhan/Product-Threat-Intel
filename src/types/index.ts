@@ -28,6 +28,37 @@ export type FindingStatus =
   'MONITORED' | 'REMEDIATION_AVAILABLE' | 'PATCH_APPLIED' | 'RESOLVED' | 'FALSE_POSITIVE';
 
 /**
+ * Strict case classification assigned at correlation time using the priority
+ * order: Case 3 (vendor advisory) > Case 4 (third-party feed match) >
+ * Case 1 (exact vendor+product match) > Case 2 (wildcard match) > No Match.
+ */
+export type CaseClassification =
+  | 'CASE_1_VENDOR_EXACT_PRODUCT'
+  | 'CASE_2_VENDOR_WILDCARD_PRODUCT'
+  | 'CASE_3_VENDOR_ADVISORY'
+  | 'CASE_4_VENDOR_PRODUCT_GENERAL_FEED'
+  | 'NO_MATCH';
+
+/**
+ * Provenance of the source record. Drives Case 3 vs Case 4 vs Case 1/2 routing.
+ */
+export type SourceCategory = 'VENDOR_ADVISORY' | 'THIRD_PARTY_FEED' | 'STRIPPED_AMBIGUOUS';
+
+/**
+ * Whether the inventory asset matched exactly or through a wildcard (`*`)
+ * product registration. Drives Case 1 vs Case 2 routing.
+ */
+export type MatchPrecision = 'EXACT' | 'WILDCARD';
+
+/**
+ * Outcome of root-subject analysis for unstructured text: whether the matched
+ * vendor/product is the root subject of the vulnerability (the vulnerable
+ * software itself) or merely mentioned as a prerequisite, unaffected integration,
+ * or attacker infrastructure.
+ */
+export type RootSubjectVerdict = 'ROOT_SUBJECT' | 'PREREQUISITE_OR_INTEGRATION' | 'UNKNOWN';
+
+/**
  * Feed types the server can actually ingest. The runtime adapter set and this
  * list must stay identical: a feed that is not in this list cannot be polled.
  */
@@ -263,6 +294,8 @@ export interface NormalizedCVE {
   versionRange?: NvdVersionRange; // NVD Version Interval
   applicabilityRequiresReview?: boolean;
   applicabilityPolicy?: 'REVIEW_ONLY';
+  /** CNA (CVE Numbering Authority) identifier; used to detect vendor advisories. */
+  assignerShortName?: string;
   /** Internal provider-specific evidence used to reconcile independent revision clocks. */
   sourceApplicability?: Record<string, SourceApplicabilityEvidence>;
   cpeMatchDetails?: { criteria: string; range?: NvdVersionRange }[];
@@ -357,6 +390,21 @@ export interface Finding {
     system: string;
     details: string;
   }[];
+  /**
+   * Strict case classification assigned at correlation time using the priority
+   * order: Case 3 (vendor advisory) > Case 4 (third-party feed match) >
+   * Case 1 (exact vendor+product match) > Case 2 (wildcard match) > No Match.
+   * Never set to a case when the match is rejected; use 'NO_MATCH' only when
+   * no vulnerable vendor/product from the inventory is present.
+   */
+  caseClassification?: CaseClassification;
+  /** The provenance of the source record: official vendor advisory / PSIRT,
+   *  third-party news or feed, or stripped/ambiguous metadata. Drives Case 3 vs
+   *  Case 4 vs Case 1/2 routing. */
+  sourceCategory?: SourceCategory;
+  /** Whether the inventory asset matched exactly or through a wildcard (`*`)
+   *  product registration. Drives Case 1 vs Case 2 routing. */
+  matchPrecision?: MatchPrecision;
 }
 
 export interface ThreatFeed {
@@ -1144,62 +1192,6 @@ export interface AppSettings {
   schedulerIntervalMinutes: number;
   schedulerEnabled: boolean;
   advisoryPrefix: string;
-  autoDispatchEnabled: boolean;
-  /**
-   * Opt-in: when a trained auto-dispatch threshold model is available, use its
-   * recommended threshold instead of the static operator minimum. The model is
-   * quality-gated before deployment, and the operator can turn this off at any
-   * time; the static minimum remains authoritative when this is false.
-   */
-  mlAutoDispatchThresholdEnabled?: boolean;
-  /**
-   * Opt-in: allow trained match/alias confidence models to promote a finding
-   * that was held *only* by the confidence policy threshold into the dispatch
-   * queue. Applicability holds, VEX suppression, source review-only holds and
-   * circuit-breaker deferrals are never overridden.
-   */
-  mlReviewRoutingEnabled?: boolean;
-  /**
-   * Confidence (0–100) at or above which a finding is considered confirmed.
-   *
-   * There is no operator review queue: a finding below this threshold is still
-   * dispatched, and the rendered advisory states the limitation and the reason
-   * on the finding itself. The threshold selects whether the finding is
-   * presented as confirmed (`QUEUED_FOR_DISPATCH`) or flagged as requiring the
-   * recipient's own verification (`REVIEW_REQUIRED`); it does not withhold the
-   * alert. The default (90) matches the previous hardcoded threshold.
-   */
-  confirmedFindingThreshold: number;
-  /**
-   * When true, unverifiable matches (whose version range cannot be confirmed)
-   * participate in the confidence threshold like any other match. When false
-   * (the default) they are always presented as review-required, regardless of
-   * score. Neither setting withholds the alert — every finding is dispatched
-   * and the advisory states the limitation on the finding itself.
-   */
-  autoDispatchUnverifiableMatches: boolean;
-  /**
-   * Circuit breaker: maximum number of auto-dispatched findings per run.
-   * When exceeded, remaining matches are held for review instead of dispatching,
-   * and a WARNING log entry is written. Prevents a bad feed or a broad wildcard
-   * registration from flooding the delivery queue. Default 10000.
-   */
-  maxFindingsPerRun: number;
-  /**
-   * Per-feed dispatch quota: maximum number of auto-dispatched findings per
-   * run that may originate from any single feed ID. When a feed exceeds its
-   * quota, further matches from that feed are held for review. Prevents a
-   * single misbehaving feed from dominating the delivery queue. Default 10000.
-   */
-  maxDispatchesPerRunPerFeed: number;
-  /**
-   * Circuit breaker: maximum total number of findings (all dispatch paths
-   * combined: authoritative, KEV, STRICT_CPE, text fallback) per run. When
-   * exceeded, remaining matches are held for review instead of dispatching.
-   * Prevents a bad feed, broad wildcard registration, or cascading CVE
-   * publication from flooding the delivery queue. Default 50000.
-   */
-  maxTotalFindingsPerRun: number;
   /**
    * Optional template for the enrichment evidence message shown on findings
    * auto-dispatched via an authoritative source with no CPE data. Use
@@ -1208,44 +1200,18 @@ export interface AppSettings {
    */
   enrichmentMessageTemplate?: string;
   /**
-   * Circuit breaker cooldown: after a feed or the overall run trips a circuit
-   * breaker, additional dispatches from that source are held for this many
-   * minutes before the breaker auto-resets. Prevents a chronically misbehaving
-   * feed from tripping every run indefinitely. Default 60 minutes.
-   */
-  circuitBreakerCooldownMinutes: number;
-  /**
-   * Circuit breaker feed cooldown: per-feed cooldown in minutes. When a feed
-   * trips its per-feed quota, further dispatches from that feed are held for
-   * this duration before the feed-level breaker auto-resets. Default 60 minutes.
-   */
-  circuitBreakerFeedCooldownMinutes: number;
-  /**
-   * Retained for settings compatibility.
-   *
-   * News evidence (IntelligenceMatch records) matching the monitored inventory
-   * is now always consolidated and sent to the Security team — one email per
-   * run, with articles already delivered to a recipient removed. There is no
-   * review-only holding of news.
-   */
-  autoDispatchNewsToSecurityTeam: boolean;
-  /**
-   * Retained for settings compatibility.
-   *
-   * Findings whose version range or applicability cannot be confirmed were
-   * previously sent as a separate "for Review - Unverifiable matches" bulletin.
-   * All findings are now dispatched in one consolidated email and each limited -
-   * confidence finding states its confidence and the reason on the finding
-   * itself. This flag no longer gates delivery.
-   */
-  reviewUnverifiableMatches: boolean;
-  /**
    * When true, advisory emails are first delivered to the Security team group.
    * The same email is queued for the Everyone group only after a Security-team
    * delivery is confirmed ACCEPTED by the transport. Opt-in so existing
    * deployments keep their default simultaneous distribution.
    */
   deferEveryoneUntilSecurityDelivered: boolean;
+  /**
+   * When true, news evidence matching the monitored inventory is consolidated
+   * and sent to the Security team — one email per run. Does not gate individual
+   * vulnerability findings.
+   */
+  autoDispatchNewsToSecurityTeam: boolean;
   digestBatchingEnabled: boolean;
   digestWindowMinutes: number;
   /**

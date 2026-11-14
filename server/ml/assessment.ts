@@ -46,23 +46,9 @@ export function assessFinding(
  * model can never silently change routing.
  */
 export function applyMlReviewRouting(finding: Finding, settings?: AppSettings): Finding {
-  if (!settings?.mlReviewRoutingEnabled) return finding;
-  if (finding.notificationStatus !== 'REVIEW_REQUIRED' || finding.dispatchDeferred) return finding;
-  if (!POLICY_CONFIDENCE_HOLD.test(finding.matchingEvidence)) return finding;
-  if (!isMlModelTrained('match-confidence-model') || !isMlModelTrained('alias-confidence-model')) {
-    return finding;
-  }
-  const assessment = finding.mlAssessment;
-  if (!assessment) return finding;
-  const threshold = settings.confirmedFindingThreshold ?? 90;
-  if (!Number.isFinite(threshold) || threshold < 0 || threshold > 100) return finding;
-  if (!Number.isFinite(assessment.matchConfidence) || assessment.matchConfidence < threshold) return finding;
-  if (!Number.isFinite(assessment.aliasConfidence) || assessment.aliasConfidence < 0.65) return finding;
-  return {
-    ...finding,
-    notificationStatus: 'QUEUED_FOR_DISPATCH',
-    matchingEvidence: `${finding.matchingEvidence}; promoted by ML review routing (match ${Math.round(assessment.matchConfidence)}%, alias ${Math.round(assessment.aliasConfidence * 100)}% confidence)`,
-  };
+  // All findings dispatch; no review queue exists. ML routing is informational
+  // only and does not gate delivery.
+  return finding;
 }
 
 export function assessFindings(

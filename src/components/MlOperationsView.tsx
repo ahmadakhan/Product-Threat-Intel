@@ -365,13 +365,7 @@ export const MlOperationsView: React.FC = () => {
           </div>
           <div className="mt-4 rounded-xl border border-zinc-800/80 bg-zinc-950/50 p-3 text-[11px] leading-relaxed text-zinc-500">
             <Sparkles className="mr-1.5 inline h-3.5 w-3.5 text-blue-400" />
-            Auto-dispatch threshold recommendations are{' '}
-            <strong className="text-zinc-300">
-              {settings.mlAutoDispatchThresholdEnabled ? 'enabled' : 'disabled'}
-            </strong>
-            . Review-routing recommendations are{' '}
-            <strong className="text-zinc-300">{settings.mlReviewRoutingEnabled ? 'enabled' : 'disabled'}</strong>.
-            Change both in Settings → Finding dispatch.
+            Auto-dispatch and ML review routing have been removed. All findings dispatch in the consolidated email with confidence noted on each finding.
           </div>
         </div>
       </section>

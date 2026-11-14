@@ -1895,39 +1895,6 @@ export function createApp(
       feedbackWindowDays,
     });
   }));
-  app.get('/api/ml/review-queue', requireRole('ADMIN', 'OPERATOR', 'VIEWER'), asyncRoute(async (req, res) => {
-    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 25));
-    const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
-    const threshold = settings.confirmedFindingThreshold ?? 90;
-    const rows = await pool.query<{ data: Finding; total: number }>(
-      `SELECT data, count(*) OVER()::int AS total
-       FROM records
-       WHERE kind='findings'
-         AND data->>'status' NOT IN ('FALSE_POSITIVE','PATCH_APPLIED','RESOLVED')
-         AND (
-           data->>'notificationStatus' = 'REVIEW_REQUIRED'
-           OR COALESCE(
-                safe_numeric(data->'mlAssessment'->>'matchConfidence'),
-                safe_numeric(data->>'confidence'),
-                0
-              ) < $1
-         )
-       ORDER BY COALESCE(
-                  safe_numeric(data->'mlAssessment'->>'matchConfidence'),
-                  safe_numeric(data->>'confidence'),
-                  0
-                ) ASC,
-                updated_at DESC
-       LIMIT $2`,
-      [threshold, limit],
-    );
-    res.json({
-      items: rows.rows.map((row) => row.data),
-      total: rows.rows[0]?.total ?? 0,
-      threshold,
-      limit,
-    });
-  }));
   app.post('/api/ml/feedback', requireRole('ADMIN', 'OPERATOR'), asyncRoute(async (req, res) => {
     const feedback = mlFeedbackSchema.parse(req.body);
     await transaction(pool, async (db) => {

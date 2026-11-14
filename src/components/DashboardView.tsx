@@ -386,8 +386,7 @@ export const DashboardView: React.FC = () => {
             </h2>
           </div>
           <span className="text-[11px] font-mono text-zinc-400 dark:text-zinc-400 light:text-zinc-500">
-            Interval: {settings.schedulerIntervalMinutes}m • Auto-Dispatch:{' '}
-            {settings.autoDispatchEnabled ? 'Enabled' : 'Disabled'}
+            Interval: {settings.schedulerIntervalMinutes}m
           </span>
         </div>
 

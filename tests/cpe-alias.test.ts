@@ -336,7 +336,7 @@ test('a CVE with the legacy solarwinds:n-central CPE matches an n-able:n-central
   assert.ok(finding, 'a legacy solarwinds CPE must correlate with the current n-able vendor asset');
   assert.equal(finding.matchingMethod, 'VENDOR_PRODUCT_ALIAS');
   // The inventory declares no version ('*') while the advisory pins 2020.1, so
-  // the alias correlation cannot prove version applicability: review, not
-  // dispatch.
-  assert.equal(finding.notificationStatus, 'REVIEW_REQUIRED');
+  // the alias correlation cannot prove version applicability: dispatches with
+  // low-confidence note in email.
+  assert.equal(finding.notificationStatus, 'QUEUED_FOR_DISPATCH');
 });

@@ -783,17 +783,7 @@ export const INITIAL_SETTINGS: AppSettings = {
   schedulerEnabled: true,
   advisoryPrefix: 'ADV-2026-',
   emailEnabled: true,
-   autoDispatchEnabled: true,
-  confirmedFindingThreshold: 0,
-  autoDispatchUnverifiableMatches: true,
-  maxFindingsPerRun: 10000,
-  maxDispatchesPerRunPerFeed: 10000,
-  maxTotalFindingsPerRun: 50000,
-  circuitBreakerCooldownMinutes: 60,
-  circuitBreakerFeedCooldownMinutes: 60,
   autoDispatchNewsToSecurityTeam: false,
-  // Matches the schema default (server/validation.ts).
-  reviewUnverifiableMatches: false,
   // Seed fixtures use standard alert flow: EVERYONE recipients receive the email
   // at the same time as the Security team for immediate distribution.
   deferEveryoneUntilSecurityDelivered: false,

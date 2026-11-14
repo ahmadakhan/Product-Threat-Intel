@@ -195,6 +195,12 @@ export function normalizeNvd(item: any, feedId: string): NormalizedCVE | null {
     cpeMatchDetails: validDetails,
     applicabilityRequiresReview,
     sourceFeeds: [feedId],
+    // NVD sourceIdentifier is the CNA handle (often an email such as
+    // products@cisco.com or cve@mitre.org). Normalize to a short vendor name so
+    // the classification layer can detect vendor advisories by CNA.
+    assignerShortName: typeof cve.sourceIdentifier === 'string'
+      ? cve.sourceIdentifier.split('@')[0]?.toLowerCase() || ''
+      : '',
     epss: { score: 0, percentile: 0 },
     cisaKev: { isKev: false },
     exploitStatus: 'None',
@@ -1100,6 +1106,10 @@ function normalizeNvdItem(item: any, feedId: string): NormalizedCVE | null {
       cpeMatchDetails: validDetails,
       applicabilityRequiresReview: ['Received', 'Awaiting Analysis', 'Undergoing Analysis'].includes(cve.vulnStatus),
       sourceFeeds: [feedId],
+      // CNA handle normalised to a short vendor name for vendor-advisory detection.
+      assignerShortName: typeof cve.sourceIdentifier === 'string'
+        ? cve.sourceIdentifier.split('@')[0]?.toLowerCase() || ''
+        : '',
       epss: { score: 0, percentile: 0 },
       cisaKev: { isKev: false },
       exploitStatus: 'None',

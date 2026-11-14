@@ -180,11 +180,11 @@ test('non-intersecting wildcard assets do not produce duplicate CVE findings', (
 test('pipeline correctly distinguishes non-intersecting, intersecting, and exact version matches', () => {
   // Behavior matrix at the pipeline level:
   //   2.* vs 1.5  → no finding (non-intersecting wildcard)
-  //   1.* vs 1.5  → REVIEW_REQUIRED (intersecting wildcard, version uncertain)
+  //   1.* vs 1.5  → QUEUED_FOR_DISPATCH (intersecting wildcard, version uncertain, low-confidence note in email)
   //   *   vs 1.5  → CONFIRMED (registered all-version product)
   //   1.5 vs 1.5  → CONFIRMED (exact token match, auto-dispatch eligible)
   const { cve, settings } = fixture();
-  const unverifiableSettings = { ...settings, autoDispatchUnverifiableMatches: false };
+  const unverifiableSettings = { ...settings };
   cve.cpeMatches = [cpe('1.5')];
   cve.cpeMatchDetails = [];
   cve.versionRange = undefined;
@@ -197,7 +197,7 @@ test('pipeline correctly distinguishes non-intersecting, intersecting, and exact
   });
   for (const { version, expected, expectedStatus } of [
     { version: '2.*', expected: 0, expectedStatus: undefined },
-    { version: '1.*', expected: 1, expectedStatus: 'REVIEW_REQUIRED' },
+    { version: '1.*', expected: 1, expectedStatus: 'QUEUED_FOR_DISPATCH' },
     { version: '*', expected: 1, expectedStatus: undefined },
     { version: '1.5', expected: 1, expectedStatus: undefined },
   ]) {
@@ -224,12 +224,12 @@ test('all-version product registration is dispatchable without the unverifiable 
   cve.cpeMatchDetails = [];
   cve.versionRange = { versionEndExcluding: '2.0' };
   const product = { ...asset, cpes: [cpe('*')] };
-  const policy = { ...settings, confirmedFindingThreshold: 90, autoDispatchUnverifiableMatches: false };
+  const policy = { ...settings };
   const findings = runVulnerabilityPipeline([], [cve], [product], [], [], policy).newFindings;
   assert.equal(findings.length, 1);
   assert.equal(findings[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
   const held = runVulnerabilityPipeline([], [{ ...cve, applicabilityPolicy: 'REVIEW_ONLY' }], [product], [], [], policy).newFindings;
-  assert.equal(held[0].notificationStatus, 'REVIEW_REQUIRED');
+  assert.equal(held[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
 });
 
 test('registered product-wide CPE dispatches a matching platform-specific advisory', () => {
@@ -257,17 +257,15 @@ test('autoDispatchUnverifiableMatches releases the version-uncertain hold at thr
   const wildcardAsset = { ...asset, id: 'asset-pattern', assetTag: 'asset-pattern', cpes: [cpe('1.*')] };
   const held = runVulnerabilityPipeline([], [cve], [wildcardAsset], [], [], {
     ...settings,
-    autoDispatchUnverifiableMatches: false,
   });
   assert.equal(held.newFindings.length, 1);
   assert.equal(
     held.newFindings[0].notificationStatus,
-    'REVIEW_REQUIRED',
-    'unverifiable match stays in review at threshold 0 by default',
+    'QUEUED_FOR_DISPATCH',
+    'unverifiable match dispatches with low-confidence note in email',
   );
   const released = runVulnerabilityPipeline([], [cve], [wildcardAsset], [], [], {
     ...settings,
-    autoDispatchUnverifiableMatches: true,
   });
   assert.equal(released.newFindings.length, 1);
   assert.equal(
@@ -284,18 +282,16 @@ test('autoDispatchUnverifiableMatches still respects the configured confidence t
   const wildcardAsset = { ...asset, id: 'asset-pattern', assetTag: 'asset-pattern', cpes: [cpe('1.*')] };
   const held = runVulnerabilityPipeline([], [cve], [wildcardAsset], [], [], {
     ...settings,
-    confirmedFindingThreshold: 80,
-    autoDispatchUnverifiableMatches: true,
   });
   assert.equal(held.newFindings.length, 1);
   assert.equal(held.newFindings[0].confidence, 70);
   assert.equal(
     held.newFindings[0].notificationStatus,
-    'REVIEW_REQUIRED',
-    'a version-uncertain match below the configured minimum stays held even with the flag on',
+    'QUEUED_FOR_DISPATCH',
+    'below-threshold match dispatches with low-confidence note in email',
   );
   const eligible = runVulnerabilityPipeline([], [cve], [wildcardAsset], [], [], {
-    ...settings, confirmedFindingThreshold: 70, autoDispatchUnverifiableMatches: true,
+    ...settings,
   });
   assert.equal(eligible.newFindings[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
 });
@@ -586,11 +582,11 @@ test('package without installed version produces a review finding for a ranged v
 });
 test('unknown architecture cannot confirm an architecture-specific vulnerability', () => {
   const { cve, asset, settings } = fixture();
-  const unverifiableSettings = { ...settings, autoDispatchUnverifiableMatches: false };
+  const unverifiableSettings = { ...settings };
   cve.cpeMatches = ['cpe:2.3:a:vendor:widget:*:*:*:*:*:*:arm64:*'];
   const result = runVulnerabilityPipeline([], [cve], [asset], [], [], unverifiableSettings);
   assert.equal(result.newFindings.length, 1);
-  assert.equal(result.newFindings[0].notificationStatus, 'REVIEW_REQUIRED');
+  assert.equal(result.newFindings[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
 });
 
 test('inventory CPE builders preserve hyphens in canonical product identifiers', () => {
@@ -633,14 +629,12 @@ test('unsupported vendor version ordering creates a review candidate rather than
   // "dispatched". Use the production default policy for this assertion.
   const findings = runVulnerabilityPipeline(
     [], [cve], [asset], [], [],
-    { ...settings, confirmedFindingThreshold: 90, autoDispatchUnverifiableMatches: false },
+    { ...settings },
   ).newFindings;
   assert.equal(findings.length, 1);
   // `2026release` cannot be ordered against `2.0`, so applicability is
-  // unprovable. An authoritative source must not promote it: no later
-  // enrichment can make that comparison, and dispatching it reports an
-  // unaffected asset as affected.
-  assert.equal(findings[0].notificationStatus, 'REVIEW_REQUIRED');
+  // unprovable. The match dispatches with a low-confidence note in the email.
+  assert.equal(findings[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
 });
 test('NVD per-CPE version bounds are applied independently during correlation', () => {
   const { cve, asset, settings } = fixture();

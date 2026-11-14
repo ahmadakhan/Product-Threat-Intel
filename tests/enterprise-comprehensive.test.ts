@@ -243,7 +243,6 @@ function runPipeline(
     undefined,
     [],
     NOW,
-    circuitBreakerCooldowns,
   );
 }
 

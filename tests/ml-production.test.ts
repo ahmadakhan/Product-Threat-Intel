@@ -173,9 +173,8 @@ test('trained finding models produce recommendations without changing authoritat
     assert.equal(
       assessFindings([heldByPolicy], undefined, {
         ...DEFAULT_SETTINGS,
-        mlReviewRoutingEnabled: true,
       })[0].notificationStatus,
-      'QUEUED_FOR_DISPATCH',
+      'REVIEW_REQUIRED',
     );
     const applicabilityHold = {
       ...heldByPolicy,
@@ -185,7 +184,6 @@ test('trained finding models produce recommendations without changing authoritat
     assert.equal(
       assessFindings([applicabilityHold], undefined, {
         ...DEFAULT_SETTINGS,
-        mlReviewRoutingEnabled: true,
       })[0].notificationStatus,
       'REVIEW_REQUIRED',
     );

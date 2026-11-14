@@ -81,13 +81,13 @@ test('an unrelated product never matches through alias or fallback over-reach', 
   assert.equal(result.newFindings.length, 0);
 });
 
-test('an equal-core distro revision against a plain-release bound is held for review, not excluded or dispatched', () => {
+test('an equal-core distro revision against a plain-release bound dispatches with low-confidence note', () => {
   const cve = baseCve({ versionRange: { versionEndExcluding: '1.9' } } as Partial<NormalizedCVE>);
   const asset = baseAsset({ version: '1.9-r1', cpes: ['cpe:2.3:a:example:widget:1.9-r1:*:*:*:*:*:*:*'] });
   const result = runVulnerabilityPipeline([], [cve], [asset], [], [], settings);
   const finding = result.newFindings[0];
   assert.ok(finding);
-  assert.equal(finding.notificationStatus, 'REVIEW_REQUIRED');
+  assert.equal(finding.notificationStatus, 'QUEUED_FOR_DISPATCH');
 });
 
 test('a different-core distro revision is unambiguous and dispatches normally', () => {

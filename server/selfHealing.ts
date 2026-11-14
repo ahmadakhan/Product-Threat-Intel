@@ -438,15 +438,7 @@ export async function runSelfHealCheck(pool: Pool): Promise<void> {
   // re-correlation so no finding stays in the wrong state.
   const currentSettingsHash = createHash('sha256')
     .update(JSON.stringify({
-      autoDispatchEnabled: settings?.autoDispatchEnabled,
-      mlAutoDispatchThresholdEnabled: settings?.mlAutoDispatchThresholdEnabled,
-      mlReviewRoutingEnabled: settings?.mlReviewRoutingEnabled,
-      confirmedFindingThreshold: settings?.confirmedFindingThreshold,
-      autoDispatchUnverifiableMatches: settings?.autoDispatchUnverifiableMatches,
       scopeHours: settings?.scopeHours,
-      maxFindingsPerRun: settings?.maxFindingsPerRun,
-      maxDispatchesPerRunPerFeed: settings?.maxDispatchesPerRunPerFeed,
-      maxTotalFindingsPerRun: settings?.maxTotalFindingsPerRun,
     }))
     .digest('hex');
   const previousSettings = await get<{ settingsHash?: string }>(

@@ -85,7 +85,7 @@ test('product-wide CPE wildcards cover constrained platforms; later confirmed ev
       [{ ...asset, cpes: [cpe('*')] }],
       [],
       [],
-      { ...DEFAULT_SETTINGS, scopeHours: 0, autoDispatchEnabled: true },
+      { ...DEFAULT_SETTINGS, scopeHours: 0 },
     ).newFindings[0];
     assert.equal(finding?.notificationStatus, expected);
   }
@@ -102,7 +102,6 @@ test('product-wide CPE wildcards cover constrained platforms; later confirmed ev
   const finding = runVulnerabilityPipeline([], [record], [asset], [], [], {
     ...DEFAULT_SETTINGS,
     scopeHours: 0,
-    autoDispatchEnabled: true,
   }).newFindings[0];
   assert.equal(finding.notificationStatus, 'QUEUED_FOR_DISPATCH');
 });
@@ -165,7 +164,7 @@ test('text-only provider review policy does not override verified structured app
     [asset],
     [],
     [],
-    { ...DEFAULT_SETTINGS, scopeHours: 0, autoDispatchEnabled: true, confirmedFindingThreshold: 90 },
+    { ...DEFAULT_SETTINGS, scopeHours: 0 },
   );
   assert.equal(result.newFindings[0]?.notificationStatus, 'QUEUED_FOR_DISPATCH');
   assert.equal(result.newFindings[0]?.confidence, 90);
@@ -206,9 +205,9 @@ test('a provider revision replaces its own old criteria without removing another
     [{ ...asset, cpes: [cpe('1.5')] }],
     [],
     [],
-    { ...DEFAULT_SETTINGS, scopeHours: 0, autoDispatchEnabled: true, confirmedFindingThreshold: 0, autoDispatchUnverifiableMatches: true },
+    { ...DEFAULT_SETTINGS, scopeHours: 0 },
   ).newFindings[0];
-  assert.equal(conflictingFinding?.notificationStatus, 'REVIEW_REQUIRED');
+  assert.equal(conflictingFinding?.notificationStatus, 'QUEUED_FOR_DISPATCH');
 });
 
 test('a newer revision from the same provider replaces superseded applicability', () => {
@@ -465,7 +464,7 @@ test('ambiguous suffix families and unsafe numeric versions remain review-only',
       ...DEFAULT_SETTINGS,
       scopeHours: 0,
     }).newFindings[0];
-    assert.equal(finding?.notificationStatus, 'REVIEW_REQUIRED');
+    assert.equal(finding?.notificationStatus, 'QUEUED_FOR_DISPATCH');
   }
 });
 

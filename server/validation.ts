@@ -456,38 +456,13 @@ export const settingsSchema = z
     schedulerIntervalMinutes: z.number().int().min(5).max(10080),
     schedulerEnabled: z.boolean(),
     advisoryPrefix: z.string().regex(/^[A-Za-z0-9_-]{1,30}$/),
-    autoDispatchEnabled: z.boolean(),
-    // ML recommendations are opt-in. Both default off so existing deployments
-    // keep the static operator threshold and review routing unchanged.
-    mlAutoDispatchThresholdEnabled: z.boolean().default(false),
-    mlReviewRoutingEnabled: z.boolean().default(false),
     emailEnabled: z.boolean().default(true),
-    confirmedFindingThreshold: z.number().int().min(0).max(100).default(90),
-    // Must match DEFAULT_SETTINGS (shared/state.ts) and the UI coercion
-    // (SettingsView). There is no review queue, so this governs labelling,
-    // not delivery.
-    autoDispatchUnverifiableMatches: z.boolean().default(true),
-    // Circuit breaker: cap authoritative-source auto-dispatches per run so a bad
-    // feed cannot flood the delivery queue. Default 10000.
-    maxFindingsPerRun: z.number().int().min(1).max(100000).default(10000),
-    // Per-feed dispatch quota: max auto-dispatched findings per run from any
-    // single feed ID. Default 10000.
-    maxDispatchesPerRunPerFeed: z.number().int().min(1).max(100000).default(10000),
-    // Circuit breaker: max total findings (all dispatch paths) per run.
-    // Default 50000.
-    maxTotalFindingsPerRun: z.number().int().min(1).max(500000).default(50000),
-    // Circuit breaker cooldown: after a breaker trips, additional dispatches
-    // are held for this many minutes before auto-reset. Default 60 minutes.
-    circuitBreakerCooldownMinutes: z.number().int().min(1).max(10080).default(60),
-    // Circuit breaker feed cooldown: per-feed cooldown in minutes. Default 60.
-    circuitBreakerFeedCooldownMinutes: z.number().int().min(1).max(10080).default(60),
     // Optional template for enrichment evidence messages. Placeholders:
     // {cveId}, {sourceLabel}, {vendor}, {product}, {confidence}, {method}.
     enrichmentMessageTemplate: z.string().max(2000).optional(),
     // News evidence auto-dispatch is opt-in so existing deployments keep their
     // review-only behavior for intelligence matches.
     autoDispatchNewsToSecurityTeam: z.boolean().default(false),
-    reviewUnverifiableMatches: z.boolean().default(false),
     // Everyone-group recipients are held for operator review until a Security-team
     // delivery is confirmed accepted, then queued with the same payload for live
     // editing and approval. Opt-in: existing deployments keep simultaneous dispatch.

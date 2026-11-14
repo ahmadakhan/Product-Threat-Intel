@@ -103,6 +103,21 @@ export {
   SUBJECT_TEMPLATES,
   ADVISORY_COMPOSER_FEATURE_NAMES,
 } from './models/advisoryComposer.ts';
+export {
+  EmailSummarizerModel,
+  type EmailSummaryFeatures,
+  type EmailSummaryPrediction,
+  type EmailSummaryText,
+  type SummaryStyle as EmailSummaryStyle,
+  type SummaryLength,
+  type KeyActionEmphasis,
+  type SubjectTemplate as EmailSubjectTemplate,
+  SUMMARY_STYLES as EMAIL_SUMMARY_STYLES,
+  SUMMARY_LENGTHS,
+  KEY_ACTION_EMPHASES,
+  SUBJECT_TEMPLATES as EMAIL_SUBJECT_TEMPLATES,
+  EMAIL_SUMMARIZER_FEATURE_NAMES,
+} from './models/emailSummarizer.ts';
 export { ModelRegistry } from './runtime.ts';
 export { createMlRuntime, type MlRuntime } from './factory.ts';
 
@@ -130,6 +145,7 @@ export {
   mlComposeAdvisoryEmail,
   mlPredictAdvisoryComposition,
   mlOrderFindingsByImportance,
+  mlSummarizeAdvisoryEmail,
 } from './integration.ts';
 export {
   DEFAULT_AUTO_DISPATCH_THRESHOLD,
@@ -147,6 +163,10 @@ export {
   DEFAULT_KEYWORD_CREDIBILITY_WEIGHT,
   DEFAULT_DIGEST_FINDINGS_PER_SEVERITY,
   DEFAULT_ALIAS_CONFIRMED_THRESHOLD,
+  DEFAULT_EMAIL_SUMMARY_MAX_SENTENCES_SHORT,
+  DEFAULT_EMAIL_SUMMARY_MAX_SENTENCES_MEDIUM,
+  DEFAULT_EMAIL_SUMMARY_MAX_SENTENCES_LONG,
+  DEFAULT_EMAIL_SUMMARY_MIN_TRAINING_SAMPLES,
 } from './defaults.ts';
 export { TrainingOrchestrator, type TrainingDataSources, type TrainingResult, type TrainingSummary } from './train/orchestrator.ts';
 export { QUALITY_GATES, type QualityGate, type QualityGateResult } from './train/qualityGates.ts';

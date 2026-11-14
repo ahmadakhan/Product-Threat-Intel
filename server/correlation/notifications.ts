@@ -1,6 +1,11 @@
+import { createHash } from 'node:crypto';
 import type { Db } from '../db.ts';
 import { enqueue } from '../delivery.ts';
-import type { EmailRecipient, WebhookEndpoint } from '../../src/types/index.ts';
+import type { EmailRecipient, Finding } from '../../src/types/index.ts';
+import {
+  consolidatedFindingsDocument,
+  deliveryRevisionEvidence,
+} from '../delivery.ts';
 import { readNativeEvidence } from './notificationEvidence.ts';
 
 /**
@@ -14,7 +19,71 @@ const submitSafe = (value: string) =>
   String(value ?? '').replace(/[&<>"']/g, (character) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!,
   );
-/** Runs inside a transaction: event claim and existing outbox insertion commit together. */
+
+/**
+ * Builds a Finding[] from native correlation evidence so every delivered match
+ * goes through the same `renderFindingsDocument` template as pipeline findings.
+ * Matches without a CVE get a synthetic advisory ID derived from the source
+ * advisory so they are still trackable and deduplicated.
+ */
+function findingsFromEvidence(
+  advisoryId: string,
+  evidence: NonNullable<Awaited<ReturnType<typeof readNativeEvidence>>>,
+): Finding[] {
+  const shortHash = createHash('sha256').update(advisoryId).digest('hex').slice(0, 6);
+  const syntheticCveId = `VND-${new Date().getFullYear()}-${shortHash.toUpperCase()}`;
+  return evidence.matches.map((match) => ({
+    id: crypto.randomUUID(),
+    cveId: syntheticCveId,
+    cve: {
+      cveId: syntheticCveId,
+      title: evidence.article.title,
+      description: evidence.article.content ?? evidence.article.title,
+      publishedDate: new Date().toISOString(),
+      modifiedDate: new Date().toISOString(),
+      cvss: { version: 'UNKNOWN', score: 0, vector: '', severity: 'UNKNOWN' },
+      cwe: [],
+      cpeMatches: [],
+      sourceFeeds: [],
+      epss: { score: 0, percentile: 0 },
+      cisaKev: { isKev: false },
+      exploitStatus: 'None',
+      remediation: {
+        patchUrl: evidence.article.url,
+        vendorAdvisoryRef: evidence.article.url,
+        immediateActions: [],
+        workarounds: [],
+        rollbackPlan: '',
+        stepByStep: [],
+      },
+    },
+    matchedAssetId: match.assetId,
+    matchedAssetName: `${match.vendor} / ${match.product}`,
+    matchedAssetVendor: match.vendor,
+    matchedAssetProduct: match.product,
+    matchedAssetPurls: [],
+    matchedCpe: '',
+    matchingMethod: 'NATIVE_CORRELATION',
+    matchingEvidence: match.reason,
+    confidence: match.confidence === 'HIGH' ? 100 : match.confidence === 'MEDIUM' ? 60 : 0,
+    exploitRisk: 'STANDARD',
+    notificationStatus: 'QUEUED_FOR_DISPATCH',
+    status: 'MONITORED',
+    autoDispatchedAt: null,
+    advisoryId,
+    executionId: undefined,
+    reviewNotifiedAt: null,
+    timeline: [
+      {
+        timestamp: new Date().toISOString(),
+        action: 'Matched native correlation evidence',
+        system: 'Server correlation engine',
+        details: match.reason,
+      },
+    ],
+  }));
+}
+
 export async function queueNativeNotifications(db: Db): Promise<number> {
   const policy = await db.query<{ notifications_enabled: boolean; low_confidence_alerts_enabled: boolean }>(
     'SELECT notifications_enabled, low_confidence_alerts_enabled FROM correlation_policy WHERE id=1',
@@ -25,18 +94,13 @@ export async function queueNativeNotifications(db: Db): Promise<number> {
     data: EmailRecipient;
   }>(`SELECT data FROM records WHERE kind='recipients'
     AND data->>'enabled'='true' AND data->>'subscriptionTier'='ALL_SEVERITIES' ORDER BY id LIMIT 1001`);
-  const hookRows = await db.query<{ data: WebhookEndpoint }>(`SELECT data FROM records WHERE kind='webhooks'
-    AND data->>'enabled'='true' AND (data->'events') ? 'ALL' ORDER BY id LIMIT 1001`);
+  const hookRows = await db.query<{ data: { id: string; enabled: boolean; events: string[] } }>(
+    `SELECT data FROM records WHERE kind='webhooks'
+    AND data->>'enabled'='true' ORDER BY id LIMIT 1001`);
   if (recipientRows.rows.length > 1000 || hookRows.rows.length > 1000)
     throw new Error('NOTIFICATION_FANOUT_LIMIT');
   const recipients = recipientRows.rows.map((row) => row.data),
     hooks = hookRows.rows.map((row) => row.data);
-  // No early return on an empty audience. Two independent gates used to be
-  // conflated here: "is anyone listening?" (no recipient and no hook) and "may
-  // unconfirmed evidence be delivered?". The old code used the audience size as
-  // the confidence switch, so with no HIGH-eligible recipient a MEDIUM match was
-  // withheld, and with any recipient it was delivered. Both answers are now
-  // explicit; an empty audience simply queues nothing below.
   const articles = await db.query<{ advisory_id: string }>(
     `SELECT DISTINCT m.advisory_id FROM correlation_matches m
     CROSS JOIN correlation_policy p LEFT JOIN correlation_notifications n ON n.advisory_id=m.advisory_id
@@ -51,27 +115,10 @@ export async function queueNativeNotifications(db: Db): Promise<number> {
     AND (SELECT count(*) FROM (SELECT 1 FROM correlation_matches fanout WHERE fanout.advisory_id=m.advisory_id LIMIT 1001) bounded)<=1000
     AND ($1::boolean OR NOT EXISTS(SELECT 1 FROM correlation_matches other WHERE other.advisory_id=m.advisory_id AND other.confidence<>'HIGH'))
     ORDER BY m.advisory_id LIMIT 20`,
-    // The confidence gate is an operator decision, never an inference from how
-    // many recipients happen to exist. It used to be bound to `recipients.length
-    // > 0`, so on a deployment with no eligible recipient the "all matches must
-    // be HIGH" rule silently switched off instead of withholding.
     [lowConfidenceAlerts],
   );
 
-
   let queued = 0;
-  // LOW evidence is intentionally NOT delivered, even with low-confidence alerts
-  // on. `low_confidence_review_buffer` is where the engine files everything it
-  // could not attribute to an asset: a bare co-occurrence of two words, an
-  // advisory whose text *negates* applicability ("not affected", "false
-  // positive"), and version-ordering ambiguity. Its rows exist to be reviewed,
-  // and several of them assert that the asset is NOT exposed — delivering those
-  // as alerts would be actively wrong, which no confidence label can repair.
-  //
-  // Only MEDIUM evidence (a thesaurus-resolved vendor/product whose version
-  // range could not be confirmed, or an operator-verified match) is delivered
-  // without a review step. The switch above widens delivery from HIGH to HIGH+
-  // MEDIUM; it never reaches into the review buffer.
   if (!articles.rows.length) return 0;
   for (const { advisory_id: advisoryId } of articles.rows) {
     const evidence = await readNativeEvidence(db, advisoryId);
@@ -79,9 +126,7 @@ export async function queueNativeNotifications(db: Db): Promise<number> {
     const eligibleRecipients = recipients.filter(
       (rec) => rec.enabled && rec.subscriptionTier === 'ALL_SEVERITIES',
     );
-    // Webhooks are machine-to-machine: an unconfirmed match would arrive without
-    // the human-readable notice an email carries, so automated consumers only
-    // ever see HIGH-confidence evidence.
+    // Webhooks are machine-to-machine: automated consumers only ever see HIGH-confidence evidence.
     const eligibleHooks =
       evidence.confidence === 'HIGH'
         ? hooks.filter((hook) => hook.enabled && hook.events.includes('ALL'))
@@ -100,66 +145,34 @@ export async function queueNativeNotifications(db: Db): Promise<number> {
       );
       continue;
     }
-    const nativeCorrelation = {
-      advisoryId,
-      evidenceHash: evidence.evidenceHash,
-      confidence: evidence.confidence,
+    const findings = findingsFromEvidence(advisoryId, evidence);
+    const { advisory, document } = consolidatedFindingsDocument(findings, new Date());
+    const evidenceMap = deliveryRevisionEvidence(findings);
+    const contentRevision = createHash('sha256')
+      .update(
+        JSON.stringify({
+          findingIds: findings.map((f) => f.id).sort(),
+          ...evidenceMap,
+        }),
+      )
+      .digest('hex')
+      .slice(0, 20);
+    const payload = {
+      ...document,
+      cveIds: advisory.cveIds,
+      includedFindingIds: findings.map((f) => f.id),
+      ...evidenceMap,
+      contentRevision,
+      generatedAt: new Date().toISOString(),
+      digestKey: advisory.id,
+      nativeCorrelation: {
+        advisoryId,
+        evidenceHash: evidence.evidenceHash,
+        confidence: evidence.confidence,
+      },
     };
-    const subject =
-      `[Threat intelligence] [${evidence.confidence} confidence] ${evidence.article.title}`.replace(
-        /[\r\n]/g,
-        ' ',
-      );
-    // Every delivered match names an attributed asset: review-buffer evidence is
-    // never delivered, so there is no empty-asset case to paper over.
-    const describeMatch = (match: { vendor: string; product: string; assetId: string; reason: string }) =>
-      `${match.vendor} / ${match.product} (${match.assetId}): ${match.reason}`;
-    const reasonLines = evidence.matches.map(describeMatch).join('\n');
-    // The notice names every match that could not be confirmed, so an operator
-    // can see exactly which vendor/product pairs still need version verification
-    // rather than being told only that *something* was uncertain.
-    const unconfirmedNotice =
-      evidence.unconfirmedMatches.length && evidence.confidence !== 'HIGH'
-        ? `${evidence.confidence}-confidence correlation: ${evidence.unconfirmedMatches.length} match(es) could not be confirmed against an installed version.\n` +
-          evidence.unconfirmedMatches.map((match) => `- ${describeMatch(match)}`).join('\n') +
-          '\nConfirm the affected version against vendor guidance before remediation.'
-        : '';
-    const text =
-      `${evidence.article.title}\n\nEvidence confidence: ${evidence.confidence}\nSource: ${evidence.article.url}\n\n` +
-      reasonLines +
-      (unconfirmedNotice ? `\n\n${unconfirmedNotice}` : '') +
-      '\n\nThis is an applicability signal. Confirm source authenticity and affected versions before remediation.';
-    // A body is required: the worker sends `payload.html` whenever it is present,
-    // so a native alert without one shipped a message part that dropped the
-    // confidence statement entirely.
-    const html =
-      '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
-      `<title>${submitSafe(subject)}</title></head>` +
-      '<body style="margin:0;padding:24px;background:#f1f3f5;font-family:Arial,Helvetica,sans-serif;">' +
-      '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #dfe4e8;border-top:4px solid #1e40af;">' +
-      '<tr><td style="padding:20px 24px;border-bottom:1px solid #dfe4e8;">' +
-      '<p style="margin:0;font-size:14px;font-weight:700;color:#17212b;">VulnStream Enterprise</p>' +
-      '<p style="margin:3px 0 0;font-size:12px;color:#52606d;">THREAT INTELLIGENCE / CORRELATION SIGNAL</p></td></tr>' +
-      '<tr><td style="padding:24px;">' +
-      `<p style="margin:0 0 12px;"><span style="display:inline-block;padding:4px 9px;border-radius:4px;background:${evidence.confidence === 'HIGH' ? '#1e40af' : '#b7791f'};color:#ffffff;font-size:11px;font-weight:700;">${submitSafe(evidence.confidence)} CONFIDENCE</span></p>` +
-      `<h1 style="margin:0 0 12px;font-size:20px;line-height:28px;color:#111827;">${submitSafe(evidence.article.title)}</h1>` +
-      `<p style="margin:0 0 4px;font-size:13px;color:#374151;"><strong>Source:</strong> ${submitSafe(evidence.article.url)}</p>` +
-      `<p style="margin:0 0 12px;font-size:13px;color:#374151;"><strong>Evidence confidence:</strong> ${submitSafe(evidence.confidence)}</p>` +
-      `<pre style="margin:0;padding:12px;background:#f7f8fa;border-left:3px solid #b7791f;font-size:13px;line-height:20px;color:#374151;white-space:pre-wrap;word-break:break-word;">${submitSafe(reasonLines)}</pre>` +
-      (unconfirmedNotice
-        ? `<p style="margin:12px 0 0;padding:8px 10px;background:#fffbeb;border-left:3px solid #b7791f;font-size:13px;line-height:19px;color:#7c2d12;"><strong>${submitSafe(evidence.confidence)} confidence notice:</strong> ${submitSafe(unconfirmedNotice.replace(`${evidence.confidence}-confidence correlation: `, ''))}</p>`
-        : '') +
-      '<p style="margin:12px 0 0;font-size:13px;line-height:20px;color:#52606d;">This is an applicability signal. Confirm source authenticity and affected versions before remediation.</p>' +
-      '</td></tr></table></body></html>';
-    const payload = { subject, text, html, cveIds: [], nativeCorrelation };
     const identity = `native:${advisoryId}:${evidence.evidenceHash}`;
     for (const recipient of eligibleRecipients) {
-      // Every recipient is queued for delivery, whatever the evidence confidence
-      // or delivery group: there is no review queue. The subject names the
-      // confidence and the body lists every unconfirmed match, so a MEDIUM- or
-      // LOW-confidence correlation is disclosed rather than withheld. Whether
-      // such an advisory is delivered at all is decided once, above, by the
-      // operator's low-confidence switch.
       if (
         await enqueue(
           db,

@@ -1675,27 +1675,6 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         undefined,
         { locks: ['match-index'] },
       );
-      // Load circuit breaker cooldown state from the previous run. Cooldowns
-      // that have expired are auto-reset; active cooldowns hold dispatches from
-      // tripped feeds for the configured duration.
-      const cbState = await get<any>(pool, 'systemState', 'circuit-breaker-state');
-      const now = Date.now();
-      const cooldownMinutes = settings.circuitBreakerCooldownMinutes ?? 60;
-      const feedCooldownMinutes = settings.circuitBreakerFeedCooldownMinutes ?? 60;
-      const circuitBreakerCooldowns: {
-        overallUntil: number | null;
-        feedUntil: Map<string, number>;
-      } = { overallUntil: null, feedUntil: new Map() };
-      if (cbState) {
-        const cooldowns = cbState.cooldowns ?? {};
-        if (cooldowns.overallUntil && Date.parse(cooldowns.overallUntil) > now) {
-          circuitBreakerCooldowns.overallUntil = Date.parse(cooldowns.overallUntil);
-        }
-        for (const [feedId, until] of Object.entries(cooldowns.feeds ?? {})) {
-          const untilMs = Date.parse(String(until));
-          if (untilMs > now) circuitBreakerCooldowns.feedUntil.set(feedId, untilMs);
-        }
-      }
       const correlated = runVulnerabilityPipeline(
         feeds,
         finalCves,
@@ -1710,7 +1689,6 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         finalPairs.size ? finalPairs : undefined,
         aliasEntries,
         undefined,
-        circuitBreakerCooldowns,
         cpeChangedCveIds,
       );
       const previousInventory = await get<Record<string, string>>(db, 'systemState', 'matched-inventory-v1');
@@ -1729,7 +1707,8 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           feeds, finalCves, changedInventory, snapshot.alertedCves, snapshot.findings,
           { ...settings, scopeHours: 0 }, 'Inventory registration', true,
           finalVendorAliases, finalProductAliases, finalPairs.size ? finalPairs : undefined, aliasEntries,
-          undefined, circuitBreakerCooldowns,
+          undefined,
+          cpeChangedCveIds,
         );
         const known = new Set(correlated.newFindings.map(findingIdentity));
         correlated.newFindings.push(...historical.newFindings.filter((finding) => !known.has(findingIdentity(finding))));
@@ -2101,7 +2080,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           // can still be new to a recipient added later. Only a recipient's
           // durable delivery claim determines whether that mailbox is notified.
           !f.dispatchDeferred &&
-          !['NOT_APPLICABLE', 'SUPPRESSED_VEX_NOT_AFFECTED', 'SECURITY_REJECTED'].includes(f.notificationStatus) &&
+          !['NOT_APPLICABLE', 'SUPPRESSED_VEX_NOT_AFFECTED', 'SECURITY_REJECTED', 'REVIEW_REQUIRED'].includes(f.notificationStatus) &&
           !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(f.status),
       );
       // ML-guided finding order: use the trained importance ranker when
@@ -2182,25 +2161,6 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         unverifiableNotificationsQueued: manualReviewFindingsQueued,
         zeroDayDigestNotificationsQueued,
       };
-      // Persist circuit breaker state so the status endpoint can surface it to
-      // operators. Captures this run's dispatch counts and whether any cap
-      // was tripped, so the UI can alert when autodispatch is being held.
-      const cooldowns: { overallUntil: string | null; feeds: Record<string, string> } = {
-        overallUntil: correlated.circuitBreakerCooldowns?.overallUntil
-          ? new Date(correlated.circuitBreakerCooldowns.overallUntil).toISOString()
-          : null,
-        feeds: Object.fromEntries(
-          [...(correlated.circuitBreakerCooldowns?.feedUntil ?? new Map())].map(
-            ([k, v]) => [k, new Date(v).toISOString()],
-          ),
-        ),
-      };
-      await put(db, 'systemState', 'circuit-breaker-state', {
-        totalDispatchCount: execution.stats.totalDispatchCount ?? 0,
-        authoritativeSourceDispatchCount: execution.stats.authoritativeSourceDispatchCount ?? 0,
-        dispatchedAt: new Date().toISOString(),
-        cooldowns,
-      });
       await saveActiveExecution(db, execution);
       // Clear next_catchup_run if all feeds have completed their catch-up.
       const pendingCatchup = acceptedResults.some((r) => r.syncState?.catch_up && r.syncState.hasMore);

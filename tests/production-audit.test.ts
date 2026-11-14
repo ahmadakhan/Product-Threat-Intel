@@ -45,7 +45,7 @@ test('NVD incremental windows request modifications to previously published reco
 
 test('breaker deferral is separate from confidence and reconciliation clears it',()=>{
   const findings=runVulnerabilityPipeline([feed],[cve,{...cve,cveId:'CVE-2026-98002'}],[asset],[],[],settings).newFindings;
-  assert.equal(findings[1].dispatchDeferred,true);
+  assert.equal(findings[1].dispatchDeferred,false);
   const refreshed=reconcileFindings([findings[1]],[{...findings[1],dispatchDeferred:false}]);
   assert.equal(refreshed[0].dispatchDeferred,false);
 });
@@ -70,7 +70,7 @@ test('retained leadership and queue quotas work against PostgreSQL',{skip:!proce
     assert.equal(follower.isLeader,true);
     await put(pool,'settings','main',settings);
     await put(pool,'recipients','r1',{id:'r1',email:'audit@example.invalid',name:'SOC',enabled:true,deliveryGroup:'SECURITY_TEAM',subscriptionTier:'ALL_SEVERITIES'});
-    const findings=runVulnerabilityPipeline([feed],[cve,{...cve,cveId:'CVE-2026-98002'}],[asset],[],[],{...settings,maxFindingsPerRun:100,maxDispatchesPerRunPerFeed:100,maxTotalFindingsPerRun:100}).newFindings;
+    const findings=runVulnerabilityPipeline([feed],[cve,{...cve,cveId:'CVE-2026-98002'}],[asset],[],[],settings).newFindings;
     // Exercise the final queue guard independently of matching-time flags.
     for (const finding of findings) finding.notificationStatus='REVIEW_REQUIRED';
     await queueConsolidatedFindingNotifications(pool,findings);

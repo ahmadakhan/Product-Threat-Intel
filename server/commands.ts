@@ -106,11 +106,6 @@ export interface CommandResult {
     totalDispatchCount: number;
     authoritativeSourceDispatchCount: number;
     dispatchedAt: string | null;
-    maxTotalFindingsPerRun: number;
-    maxFindingsPerRun: number;
-    maxDispatchesPerRunPerFeed: number;
-    totalCapTripped: boolean;
-    authoritativeCapTripped: boolean;
   };
 }
 
@@ -893,11 +888,6 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
           totalDispatchCount,
           authoritativeSourceDispatchCount: authoritativeDispatchCount,
           dispatchedAt,
-          maxTotalFindingsPerRun: effectiveSettings.maxTotalFindingsPerRun,
-          maxFindingsPerRun: effectiveSettings.maxFindingsPerRun,
-          maxDispatchesPerRunPerFeed: effectiveSettings.maxDispatchesPerRunPerFeed,
-          totalCapTripped: totalDispatchCount > effectiveSettings.maxTotalFindingsPerRun,
-          authoritativeCapTripped: authoritativeDispatchCount > effectiveSettings.maxFindingsPerRun,
         },
       };
   } else if (/^(feed|asset|recipient|webhook)\.(delete|toggle)$/.test(action)) {

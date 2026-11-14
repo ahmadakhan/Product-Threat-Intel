@@ -50,3 +50,15 @@ export const DEFAULT_DIGEST_FINDINGS_PER_SEVERITY = 25;
 
 /** Default alias confirmation threshold — used as fallback for isConfirmedFinding. */
 export const DEFAULT_ALIAS_CONFIRMED_THRESHOLD = 0.5;
+
+/** Default maximum sentences for a short email summary. */
+export const DEFAULT_EMAIL_SUMMARY_MAX_SENTENCES_SHORT = 2;
+
+/** Default maximum sentences for a medium email summary. */
+export const DEFAULT_EMAIL_SUMMARY_MAX_SENTENCES_MEDIUM = 3;
+
+/** Default maximum sentences for a long email summary. */
+export const DEFAULT_EMAIL_SUMMARY_MAX_SENTENCES_LONG = 4;
+
+/** Default minimum training samples required before the email summarizer trains. */
+export const DEFAULT_EMAIL_SUMMARY_MIN_TRAINING_SAMPLES = 20;
