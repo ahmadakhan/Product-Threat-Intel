@@ -6,11 +6,15 @@ import { findDuplicateFeedSource } from './feedIdentity.ts';
 
 const RETIRED_DUPLICATE_FEEDS = [{ duplicateId: 'feed-darkreading-full', canonicalId: 'feed-darkreading' }];
 
-export async function reconcileRecommendedFeeds(db: PoolClient, bootstrap = false): Promise<void> {
+/**
+ * Inserts any catalog feed that is not already present. Called only by the
+ * manual seed script (`npm run seed`) — never at server startup — so a fresh
+ * database stays empty until an operator explicitly seeds it.
+ */
+export async function seedRecommendedFeeds(db: PoolClient): Promise<void> {
   const existing = await list<ThreatFeed>(db, 'feeds');
   const ids = new Set(existing.map((feed) => feed.id));
-  // Catalog insertion is opt-in; repairs below still preserve existing feeds.
-  if (bootstrap) for (const feed of RECOMMENDED_FEEDS) {
+  for (const feed of RECOMMENDED_FEEDS) {
     if (ids.has(feed.id) || findDuplicateFeedSource(feed, existing)) continue;
     await put(db, 'feeds', feed.id, {
       ...feed,
@@ -21,6 +25,14 @@ export async function reconcileRecommendedFeeds(db: PoolClient, bootstrap = fals
       ssrfValidated: false,
     });
   }
+}
+
+/**
+ * Repairs existing feeds only (URLs, retired sources, missing credentials).
+ * Never inserts catalog rows: seeding is a manual operator action.
+ */
+export async function reconcileRecommendedFeeds(db: PoolClient): Promise<void> {
+  const existing = await list<ThreatFeed>(db, 'feeds');
   for (const feed of existing) {
     const url = RECOMMENDED_FEED_URLS.get(feed.id);
     if (!url || !feed.url || feed.url === url) continue;

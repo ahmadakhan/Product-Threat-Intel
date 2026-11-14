@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { loadConfig } from '../server/config.ts';
 import { createPool, get, transaction } from '../server/db.ts';
 import { applyCommand } from '../server/commands.ts';
+import { seedRecommendedFeeds } from '../server/feedBootstrap.ts';
 import { RECOMMENDED_FEEDS } from '../server/recommendedFeeds.ts';
 import { INITIAL_WATCHLIST } from '../tests/fixtures/seedData.ts';
 
@@ -29,11 +30,10 @@ if (existsSync(envPath)) {
 const config = loadConfig();
 const pool = createPool(config.DATABASE_URL);
 
-// Seeding is two-gated: an operator must BOTH set BOOTSTRAP_RECOMMENDED_FEEDS=true
-// in the environment AND invoke the command (`npm run seed`). Neither alone
-// seeds external feeds, so the server never opens egress to threat sources
-// automatically in dev or prod.
-const shouldSeed = config.BOOTSTRAP_RECOMMENDED_FEEDS === 'true';
+// Seeding is manual only: the server never inserts seed data at startup. This
+// script is the single entry point and always applies the fixtures when
+// invoked (`npm run seed`); pass --dry-run to only report current contents.
+const shouldSeed = !process.argv.includes('--dry-run');
 
 /* Contract-verified primary feeds plus legacy rows that must be disabled.
  * NVD and the canonical CVE sources now come from RECOMMENDED_FEEDS (spread
@@ -83,14 +83,11 @@ const feedPayload = [
 ];
 
 if (!shouldSeed) {
-  // No BOOTSTRAP_RECOMMENDED_FEEDS=true — report current database contents and exit.
-  // Seeding only happens when explicitly requested:
-  //   BOOTSTRAP_RECOMMENDED_FEEDS=true npm run seed
-  const feeds = await get<any[]>(pool, 'feeds', '*');
+  // --dry-run — report current database contents and exit without writing.
   const feedRows = (await pool.query('SELECT id FROM records WHERE kind=$1', ['feeds'])).rows;
   const watchlistRows = (await pool.query('SELECT id FROM records WHERE kind=$1', ['watchlist'])).rows;
   console.log(`Database has ${feedRows.length} feeds and ${watchlistRows.length} monitored products.`);
-  console.log('Set BOOTSTRAP_RECOMMENDED_FEEDS=true and re-run `npm run seed` to apply seed fixtures.');
+  console.log('Re-run `npm run seed` without --dry-run to apply seed fixtures.');
   await pool.end();
   process.exit(0);
 }
@@ -105,6 +102,9 @@ try {
       if (legacy?.enabled)
         await applyCommand(db, config, { action: 'feed.toggle', id, actor: 'seed-script' });
     }
+    // Register any recommended catalog feed that is missing. This is the only
+    // place catalog rows are inserted; server startup never does it.
+    await seedRecommendedFeeds(db);
     // Feeds go through the same validated command path the API uses, so a
     // misconfigured feed fails loudly here instead of landing in the database.
     await applyCommand(db, config, {

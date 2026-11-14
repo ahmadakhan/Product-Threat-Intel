@@ -45,7 +45,6 @@ import { runSelfHealCheck } from './selfHealing';
 import { runRetention } from './retention';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
 import type { AppSettings } from '../src/types/index.ts';
-import { reconcileRecommendedFeeds } from './feedBootstrap.ts';
 
 const config = loadConfig(),
   pool = createPool(config.DATABASE_URL);
@@ -82,17 +81,9 @@ await transaction(
   undefined,
   { locks: ['native-inventory-bootstrap'] },
 );
-await transaction(
-  pool,
-  async (db) => {
-    await reconcileRecommendedFeeds(db, config.BOOTSTRAP_RECOMMENDED_FEEDS === 'true');
-  },
-  undefined,
-  { locks: ['native-inventory-bootstrap'] },
-);
-// triggered explicitly via `npm run seed` with BOOTSTRAP_RECOMMENDED_FEEDS=true
-// (see .env.example), so the server never opens egress to external feeds in
-// dev or prod without an operator's deliberate action.
+// Seed data (recommended feeds and monitored products) is never applied at
+// startup. It is imported only by the manual `npm run seed` command, so a
+// fresh database stays empty until an operator deliberately seeds it.
 await writeEvent(pool, {
   category: 'SYSTEM',
   code: 'system.started',

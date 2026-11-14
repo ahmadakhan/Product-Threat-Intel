@@ -184,11 +184,7 @@ const schema = z.object({
   // ingests nothing and delivers nothing. Replicas that must not run
   // background work set WORKER_ENABLED=false explicitly.
   WORKER_ENABLED: z.enum(['true', 'false']).default('true'),
-  // Seed the recommended-threat-feed catalog on first bootstrap. Off by default:
-  // enabling imports default feeds (CISA, CERT/CC, MITRE CVE, etc.) that fetch
-  // over the egress allow-list, which fails in locked-down dev/prod environments
-  // until an operator explicitly opts in. Does not run in production until set.
-  BOOTSTRAP_RECOMMENDED_FEEDS: z.enum(['true', 'false']).default('false'),
+
   MAILJET_SANDBOX_MODE: z.enum(['true', 'false']).default('false'),
   // Control-plane fault simulation. Disabled unless an operator opts in, and
   // refused outright in production. It previously keyed off NODE_ENV alone,

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { createPool, migrate, transaction, put, list, get, remove } from '../server/db.ts';
-import { reconcileRecommendedFeeds } from '../server/feedBootstrap.ts';
+import { reconcileRecommendedFeeds, seedRecommendedFeeds } from '../server/feedBootstrap.ts';
 import { RECOMMENDED_FEEDS } from '../server/recommendedFeeds.ts';
 import type { ThreatFeed } from '../src/types/index.ts';
 
@@ -17,7 +17,8 @@ test('feed bootstrap is opt-in and URL repair preserves operator intent without 
     await migrate(pool);
     await transaction(pool, (db) => reconcileRecommendedFeeds(db));
     assert.equal((await list(pool, 'feeds')).length, 0);
-    await transaction(pool, (db) => reconcileRecommendedFeeds(db, true));
+    await transaction(pool, (db) => seedRecommendedFeeds(db));
+    await transaction(pool, (db) => reconcileRecommendedFeeds(db));
     assert.equal((await list(pool, 'feeds')).length, RECOMMENDED_FEEDS.length);
     const twitter = await get<ThreatFeed>(pool, 'feeds', 'feed-twitter-security');
     assert.ok(twitter);
@@ -27,7 +28,7 @@ test('feed bootstrap is opt-in and URL repair preserves operator intent without 
     await put(pool, 'feeds', twitter.id, {
       ...twitter, enabled: true, errorLog: 'Destination hostname is not in EGRESS_ALLOWED_HOSTS',
     });
-    await transaction(pool, (db) => reconcileRecommendedFeeds(db, true));
+    await transaction(pool, (db) => reconcileRecommendedFeeds(db));
     assert.equal((await list(pool, 'feeds')).length, RECOMMENDED_FEEDS.length);
     const repairedTwitter = await get<ThreatFeed>(pool, 'feeds', twitter.id);
     assert.equal(repairedTwitter?.enabled, false);
@@ -36,7 +37,7 @@ test('feed bootstrap is opt-in and URL repair preserves operator intent without 
     await put(pool, 'feeds', catalog.id, { ...catalog, enabled: false, authSecretKey: 'preserved-ciphertext',
       url: 'https://legacy.example/source', etag: 'obsolete-validator', healthStatus: 'DOWN',
       consecutiveFailures: 5, circuitOpenUntil: '2030-01-01T00:00:00Z' });
-    await transaction(pool, (db) => reconcileRecommendedFeeds(db, false));
+    await transaction(pool, (db) => reconcileRecommendedFeeds(db));
     const repaired = await get<ThreatFeed>(pool, 'feeds', catalog.id);
     assert.equal(repaired?.url, catalog.url);
     assert.equal(repaired?.enabled, false);
@@ -54,13 +55,15 @@ test('feed bootstrap is opt-in and URL repair preserves operator intent without 
       id: 'feed-darkreading-full',
       enabled: true,
     });
-    await transaction(pool, (db) => reconcileRecommendedFeeds(db, false));
+    await transaction(pool, (db) => reconcileRecommendedFeeds(db));
     assert.equal(await get<ThreatFeed>(pool, 'feeds', 'feed-darkreading-full'), undefined);
     assert.equal((await get<ThreatFeed>(pool, 'feeds', darkReading.id))?.enabled, true);
 
     await remove(pool, 'feeds', darkReading.id);
     await put(pool, 'feeds', 'operator-darkreading', { ...darkReading, id: 'operator-darkreading', enabled: false });
-    await transaction(pool, (db) => reconcileRecommendedFeeds(db, true));
+    // Re-running the seed command must not duplicate or resurrect feeds.
+    await transaction(pool, (db) => seedRecommendedFeeds(db));
+    await transaction(pool, (db) => reconcileRecommendedFeeds(db));
     assert.equal(await get<ThreatFeed>(pool, 'feeds', darkReading.id), undefined);
     assert.equal((await get<ThreatFeed>(pool, 'feeds', 'operator-darkreading'))?.enabled, false);
     assert.equal((await list(pool, 'feeds')).length, RECOMMENDED_FEEDS.length);
