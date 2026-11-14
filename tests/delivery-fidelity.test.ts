@@ -219,3 +219,57 @@ test('the HTML attachment has its own ceiling, independent of the PDF layout lim
   assert.equal(htmlAttachmentIsAttachable(''), false);
   assert.equal(htmlAttachmentIsAttachable(undefined), false);
 });
+/**
+ * The body is the document. These assertions exist because a restored copy of
+ * the provider module (a stale .backup) encoded attachments under keys that were
+ * inconsistent with the payload, and nothing noticed: the attachment is the one
+ * part of a delivery a recipient can open offline, so a silent schema drift is
+ * a silent data loss.
+ */
+test('the attachment is byte-identical to the body in every provider encoding', async () => {
+  const UNICODE_HTML =
+    '<!doctype html><html><head><meta charset="utf-8"></head>' +
+    '<body style="background:#123456"><h1>Fonctionnalités — 日本語 findings</h1>' +
+    '<p>Café &amp; crème</p></body></html>';
+  // Every provider encoding the module supports: the generic custom-HTTP API
+  // transport (which is also how Mailgun-style endpoints are reached), SendGrid,
+  // Postmark and Mailjet.
+  const providers = ['API', 'SENDGRID', 'POSTMARK', 'MAILJET_API'] as const;
+  const bodies: Record<string, any> = {
+    200: JSON.stringify({ Messages: [{ Status: 'success', To: [{ Email: 'soc@example.com', MessageID: 'm' }] }] }),
+    202: '',
+  };
+  for (const provider of providers) {
+    const { sent, request } = capture({
+      status: provider === 'SENDGRID' ? 202 : 200,
+      headers: { 'x-message-id': 'id' },
+      // Postmark reports success in the body, not the status line.
+      body:
+        provider === 'POSTMARK'
+          ? JSON.stringify({ ErrorCode: 0, MessageID: 'pm' })
+          : bodies[provider === 'SENDGRID' ? 202 : 200],
+    });
+    await sendProviderEmail(
+      { ...DEFAULT_EMAIL_CONFIG, provider, fromEmail: 'alerts@example.com', apiKey: 'k',
+        apiEndpoint: 'https://api.example.com/mail' } as EmailConfiguration,
+      'k',
+      providerJob(UNICODE_HTML),
+      request,
+      false,
+      [{ ...attachment, content: Buffer.from(UNICODE_HTML, 'utf8') }],
+    );
+    const payload = sent[0].body;
+    // The encoded file decodes to exactly the document, in every schema.
+    const encoded =
+      payload.Messages?.[0]?.Attachments?.[0]?.Base64Content ??
+      payload.attachments?.[0]?.content ??
+      payload.Attachments?.[0]?.Content;
+    assert.equal(Buffer.from(encoded, 'base64').toString('utf8'), UNICODE_HTML, provider);
+    // ...and so does the body part, so the two parts can never describe
+    // different documents (numeric entities would break this).
+    const bodyPart =
+      payload.html ?? payload.content?.find((part: any) => part.type === 'text/html')?.value ??
+      payload.HtmlBody ?? payload.Messages?.[0]?.HTMLPart;
+    assert.equal(bodyPart, UNICODE_HTML, provider);
+  }
+});

@@ -43,6 +43,16 @@ export interface CorrelationSnapshot {
 }
 export interface CorrelationPolicy {
   notificationsEnabled: boolean;
+  /**
+   * Deliver MEDIUM/LOW vendor+product correlations that a confidence gate would
+   * otherwise withhold.
+   *
+   * On by default: this is an autonomous system with no operator watching a
+   * review queue, so evidence a human would have reviewed must still reach the
+   * security team, tagged with its confidence and every unconfirmed match. The
+   * switch remains as an explicit opt-out for high-confidence-only delivery.
+   */
+  lowConfidenceAlertsEnabled: boolean;
   retentionEnabled: boolean;
   retentionHours: number;
   /** Days a pre-CVE vulnerability cluster stays open for corroboration. */

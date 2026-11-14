@@ -94,7 +94,7 @@ export const Sidebar: React.FC = () => {
     },
     {
       title: 'System & Audit',
-      items: [{ id: 'logs' }, { id: 'health' }, { id: 'settings' }],
+      items: [{ id: 'ml-operations' }, { id: 'logs' }, { id: 'health' }, { id: 'settings' }],
     },
   ];
 

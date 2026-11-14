@@ -1,8 +1,10 @@
 import { z } from 'zod';
 import type { TrainingDataSources } from './train/orchestrator.ts';
+import type { Finding } from '../../src/types/index.ts';
 import { EXPLOIT_RISK_LEVELS } from './models/exploitRiskModel.ts';
 import { SEVERITY_TIERS } from './models/severityTierModel.ts';
 import { SUBJECT_TEMPLATES } from './models/advisoryComposer.ts';
+import { findingFeatures } from './findingFeatures.ts';
 
 const nonnegative = z.number().finite().nonnegative();
 const score = z.number().min(0).max(100);
@@ -91,6 +93,76 @@ export const mlFeedbackSchema = z.discriminatedUnion('source', [
   'Provide one measured outcome paired with each zero-day credibility score') }).strict(),
   z.object({ source: z.literal('emailCompositionSamples'), sample: compositionSample }).strict(),
 ]).refine((value) => JSON.stringify(value).length <= 28000, 'Feedback exceeds the event storage limit');
+
+/**
+ * High-level analyst label for a finding. This is intentionally separate from
+ * the model-specific feedback schema: analysts label an outcome, and the server
+ * derives only the samples justified by fields persisted on that finding.
+ */
+export const mlFindingFeedbackSchema = z
+  .object({
+    disposition: z.enum(['TRUE_POSITIVE', 'FALSE_POSITIVE']),
+    correctedExploitRisk: z.enum(EXPLOIT_RISK_LEVELS).optional(),
+    correctedSeverityTier: z.enum(SEVERITY_TIERS).optional(),
+    notes: z.string().max(1000).optional(),
+  })
+  .strict();
+
+export type MlFindingFeedbackInput = z.infer<typeof mlFindingFeedbackSchema>;
+
+/**
+ * Derive validated training feedback from an explicit analyst disposition.
+ * Never infer a label from delivery, silence, or the model's own prediction.
+ */
+export function deriveFindingFeedbackSamples(
+  finding: Finding,
+  input: MlFindingFeedbackInput,
+): Array<z.infer<typeof mlFeedbackSchema>> {
+  const features = findingFeatures(finding);
+  const confidence = finding.mlAssessment?.matchConfidence ?? finding.confidence ?? 0;
+  const boundedConfidence = Math.max(0, Math.min(100, Math.round(Number.isFinite(confidence) ? confidence : 0)));
+  const raw: Array<{ source: string; sample: unknown }> = [
+    {
+      source: 'calibrationPairs',
+      sample: { credibilityScore: boundedConfidence, isActionable: input.disposition === 'TRUE_POSITIVE' },
+    },
+  ];
+  const cve = finding.cve;
+  if (input.correctedExploitRisk && cve) {
+    raw.push({
+      source: 'exploitRiskSamples',
+      sample: {
+        features: {
+          cvssScore: features.cvssScore,
+          epssScore: features.epssScore,
+          cisaKev: features.cisaKev,
+          exploitStatus: cve.exploitStatus,
+          daysSincePublished: features.daysSincePublished,
+          exploitationSourcesCount: cve.exploitationSources?.length ?? 0,
+        },
+        riskLevel: input.correctedExploitRisk,
+      },
+    });
+  }
+  if (input.correctedSeverityTier && cve) {
+    raw.push({
+      source: 'severityTierSamples',
+      sample: {
+        features: {
+          cvssScore: features.cvssScore,
+          epssScore: features.epssScore,
+          cisaKev: features.cisaKev,
+          exploitStatus: cve.exploitStatus,
+          cweRiskLevel: features.cweRiskLevel,
+          daysSincePublished: features.daysSincePublished,
+          sourceFeedWeight: features.sourceFeedWeight,
+        },
+        tier: input.correctedSeverityTier,
+      },
+    });
+  }
+  return raw.map((entry) => mlFeedbackSchema.parse(entry));
+}
 
 export function appendMlFeedback(data: TrainingDataSources, input: unknown): void {
   const parsed = mlFeedbackSchema.safeParse(input);

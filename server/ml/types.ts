@@ -54,6 +54,8 @@ export interface ModelArtifact {
 }
 
 export interface TrainableModel {
+  /** Present on BaseModel-derived models; optional for lightweight test doubles. */
+  isTrained?(): boolean;
   train(samples: TrainingSample[]): void;
   predict(features: Record<string, number>): PredictionResult;
   predictBatch(features: Record<string, number>[]): PredictionResult[];

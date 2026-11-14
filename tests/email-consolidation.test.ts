@@ -382,6 +382,77 @@ test('the attachment is byte-identical to the edited HTML, including inline CSS 
   assert.match(attachment.content.toString('utf8'), /Confirm vendor guidance/);
 });
 
+const attachmentOptions = (html: string) => ({
+  subject: 'Critical: Acme widget remote code execution (CVE-2026-10001)',
+  html,
+});
+
+const job = (advisoryId: string, html: string, edits?: Job['edits']): Job =>
+  ({
+    id: 'job-x',
+    advisory_id: advisoryId,
+    target_id: 'r1',
+    channel: 'email',
+    dedupe_key: `dedupe:${advisoryId}`,
+    attempts: 0,
+    payload: attachmentOptions(html),
+    edits,
+  }) as Job;
+
+const HTML_DOC = '<!doctype html><html><head><title>t</title></head><body><p>findings</p></body></html>';
+
+test('every finding email carries the HTML copy, including the consolidated FINDINGS bundle', () => {
+  // The consolidated queue is the main path for finding emails. It was skipped
+  // because `isFindingDelivery` excludes synthetic bundle ids, so the attachment
+  // never shipped.
+  assert.ok(findingHtmlAttachment(job('FINDINGS:batch-1', HTML_DOC)));
+  assert.ok(findingHtmlAttachment(job('ADV-2026-0001', HTML_DOC)));
+});
+
+test('non-finding deliveries never receive the HTML copy', () => {
+  for (const id of ['NEWS:a1', 'ZERODAY:2026-11-03', 'UNVERIFIABLE:a,b', 'SELFHEAL:disk', 'DAILY_20261103', 'TEST', ''])
+    assert.equal(findingHtmlAttachment(job(id, HTML_DOC)), undefined, id);
+});
+
+test('the attachment is on by default and can be suppressed explicitly', () => {
+  assert.ok(findingHtmlAttachment(job('FINDINGS:b', HTML_DOC)));
+  assert.ok(findingHtmlAttachment(job('FINDINGS:b', HTML_DOC, { reviewerComment: 'note' })));
+  assert.equal(findingHtmlAttachment(job('FINDINGS:b', HTML_DOC, { attachHtml: false })), undefined);
+});
+
+test('the attached file is named after the email subject, sanitised for a filesystem', () => {
+  const named = findingHtmlAttachment(job('FINDINGS:b', HTML_DOC));
+  assert.equal(named?.filename, 'Critical Acme widget remote code execution (CVE-2026-10001).html');
+  const unsafe = findingHtmlAttachment({
+    ...job('FINDINGS:b', HTML_DOC),
+    payload: { ...attachmentOptions(HTML_DOC), subject: 'a/b\\c:d*e?f"g<h>i|j\n\tend...' },
+  } as Job);
+  assert.equal(unsafe?.filename, 'a b c d e f g h i j end.html');
+  // No subject at all still yields a usable, identifiable name.
+  const fallback = findingHtmlAttachment({
+    ...job('FINDINGS:b', HTML_DOC),
+    payload: { html: HTML_DOC },
+  } as Job);
+  assert.match(fallback!.filename, /^FINDINGS-[0-9A-F]{12}\.html$/);
+});
+
+test('the attached document declares UTF-8 without changing the body', () => {
+  const held = finding({ id: 'f1', cveId: 'CVE-2026-1' });
+  const doc = renderFindingsDocument({ advisory: deliveryAdvisoryView(advisory, [held]), findings: [held] });
+  const attachment = findingHtmlAttachment(job('FINDINGS:b', doc.html));
+  assert.ok(attachment);
+  const file = attachment.content.toString('utf8');
+  assert.match(file, /<meta charset="utf-8">/i);
+  assert.equal(file.replace('<meta charset="utf-8">', ''), doc.html, 'only the charset declaration is added');
+});
+
+test('an oversized findings body fails loudly instead of silently dropping the attachment', () => {
+  assert.throws(
+    () => findingHtmlAttachment(job('FINDINGS:b', 'x'.repeat(4_000_001))),
+    /exceeds the attachment limit/,
+  );
+});
+
 test('two recipient records for the same mailbox cannot create two jobs in one pass', () => {
   const broad = { id: 'broad', email: 'SOC@example.com', enabled: true, subscriptionTier: 'ALL_SEVERITIES', deliveryGroup: 'SECURITY_TEAM' } as EmailRecipient;
   const narrow = { ...broad, id: 'narrow', email: 'soc@example.com', subscriptionTier: 'CRITICAL_HIGH_ONLY' as const };

@@ -439,6 +439,8 @@ export async function runSelfHealCheck(pool: Pool): Promise<void> {
   const currentSettingsHash = createHash('sha256')
     .update(JSON.stringify({
       autoDispatchEnabled: settings?.autoDispatchEnabled,
+      mlAutoDispatchThresholdEnabled: settings?.mlAutoDispatchThresholdEnabled,
+      mlReviewRoutingEnabled: settings?.mlReviewRoutingEnabled,
       confirmedFindingThreshold: settings?.confirmedFindingThreshold,
       autoDispatchUnverifiableMatches: settings?.autoDispatchUnverifiableMatches,
       scopeHours: settings?.scopeHours,

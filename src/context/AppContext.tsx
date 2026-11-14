@@ -32,6 +32,10 @@ import type {
   ReviewEdits,
   VulnerabilitySearchParams,
   VulnerabilitySearchResponse,
+  MlStatusResponse,
+  MlReviewQueueResponse,
+  MlFindingFeedbackInput,
+  MlFindingFeedbackResponse,
 } from '../types';
 import {
   compileCustomizedTemplate,
@@ -452,6 +456,17 @@ function useApplication() {
         `/events?${query}`,
       ),
     health: () => safely(() => request<SystemHealth>('/health')),
+    mlStatus: () => request<MlStatusResponse>('/ml/status'),
+    mlReviewQueue: (limit = 25) => request<MlReviewQueueResponse>(`/ml/review-queue?limit=${limit}`),
+    recordMlFindingFeedback: (findingId: string, feedback: MlFindingFeedbackInput) =>
+      safely(async () => {
+        const result = await request<MlFindingFeedbackResponse>(
+          `/ml/findings/${encodeURIComponent(findingId)}/feedback`,
+          feedback,
+        );
+        await refreshAfterMutation();
+        return result;
+      }),
     ntpSyncStatus: { synchronized: false, driftMs: 0, lastChecked: '' },
     toggleFeedEnabled: async (id: string) => {
       const result = await command('feed.toggle', undefined, id);

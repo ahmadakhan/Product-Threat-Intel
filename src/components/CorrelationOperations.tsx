@@ -308,6 +308,20 @@ export function CorrelationOperations() {
               />
               Enable native notifications
             </label>
+            <label
+              className="ui-check-row"
+              title="On by default: deliver MEDIUM and LOW vendor+product correlations that cannot be confirmed against an installed version. Each such alert names its confidence and lists every unconfirmed match. Uncheck to receive high-confidence evidence only."
+            >
+              <input
+                type="checkbox"
+                disabled={!admin || busy || !policy.notificationsEnabled}
+                checked={policy.lowConfidenceAlertsEnabled}
+                onChange={(event) =>
+                  setPolicy({ ...policy, lowConfidenceAlertsEnabled: event.target.checked })
+                }
+              />
+              Deliver low-confidence (MEDIUM/LOW) correlation alerts (on by default)
+            </label>
             <label className="ui-check-row">
               <input
                 type="checkbox"

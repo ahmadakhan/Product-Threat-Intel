@@ -24,6 +24,27 @@ export interface CollectionQuery {
 const FINDINGS_RECENT_ACTIVITY =
   "GREATEST(COALESCE(safe_timestamptz(data->'cve'->>'publishedDate'), '-infinity'::timestamptz), COALESCE(safe_timestamptz(data->'cve'->>'modifiedDate'), '-infinity'::timestamptz))";
 
+/**
+ * ML prioritisation is an operator-chosen sort, never an automatic ordering.
+ * Severity tier dominates, exploit risk breaks ties, and match confidence makes
+ * uncertain findings visible within the same tier. Findings without an
+ * assessment still get a stable, conservative score from stored confidence.
+ */
+const FINDINGS_ML_PRIORITY = `(
+  CASE data->'mlAssessment'->>'severityTier'
+    WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4 WHEN 'MEDIUM' THEN 3
+    WHEN 'LOW' THEN 2 WHEN 'INFORMATIONAL' THEN 1 ELSE 0 END * 1000
+  + CASE data->'mlAssessment'->>'exploitRisk'
+      WHEN 'CISA_KEV_EXPLOITED' THEN 6 WHEN 'REPORTED_IN_WILD_EXPLOIT' THEN 5
+      WHEN 'WEAPONIZED_EXPLOIT' THEN 4 WHEN 'HIGH_EPSS_PROBABILITY' THEN 3
+      WHEN 'ELEVATED' THEN 2 ELSE 0 END * 100
+  + COALESCE(
+      safe_numeric(data->'mlAssessment'->>'matchConfidence'),
+      safe_numeric(data->>'confidence'),
+      0
+    )
+)`;
+
 const SORTS: Partial<Record<CollectionKind, Record<string, string>>> = {
   cveData: {
     score: "safe_numeric(data->'cvss'->>'score')",
@@ -36,6 +57,7 @@ const SORTS: Partial<Record<CollectionKind, Record<string, string>>> = {
     published: "safe_timestamptz(data->'cve'->>'publishedDate')",
     modified: "safe_timestamptz(data->'cve'->>'modifiedDate')",
     updated: 'updated_at',
+    mlPriority: FINDINGS_ML_PRIORITY,
   },
   advisories: { created: "safe_timestamptz(data->>'createdDate')", updated: 'updated_at' },
   alertedCves: { alerted: "safe_timestamptz(data->>'lastAlertedAt')" },

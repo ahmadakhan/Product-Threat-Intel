@@ -108,12 +108,9 @@ export function correlationMetrics(
   // deploy/monitoring/vulnstream-alerts.yml.
   const runtime = getMlRuntime();
   if (runtime) {
-    for (const name of ML_METRIC_NAMES) {
-      const entry = mlMetrics.get(name);
-      if (entry) {
-        lines.push(`# TYPE ${name} ${entry.type}`, `${name} ${entry.value}`);
-      }
-    }
+    // Render every label set, not just the last sample stored for the name.
+    const rendered = mlMetrics.renderNames(ML_METRIC_NAMES).trim();
+    if (rendered) lines.push(rendered);
   }
 
   return lines.join('\n') + '\n';

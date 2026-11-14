@@ -25,7 +25,8 @@ import {
   correlationWorkflows,
 } from '../server/correlation/operations.ts';
 import { queueNativeNotifications } from '../server/correlation/notifications.ts';
-import { deliverNext } from '../server/delivery.ts';
+import { validateNativeDelivery } from '../server/correlation/notificationEvidence.ts';
+import { deliverNext, type Job } from '../server/delivery.ts';
 import type { WatchListItem } from '../src/types/index.ts';
 const database = process.env.TEST_DATABASE_URL;
 const key = randomBytes(32).toString('base64');
@@ -63,6 +64,17 @@ test(
       pool.on('error', () => {});
       await migrate(pool);
       const db = pool;
+      // Asserted before anything writes the policy: an autonomous deployment must
+      // not depend on a human flipping this switch.
+      assert.equal(
+        (
+          await db.query<{ low: boolean }>(
+            'SELECT low_confidence_alerts_enabled AS low FROM correlation_policy WHERE id=1',
+          )
+        ).rows[0].low,
+        true,
+        'low-confidence alerts are enabled out of the box',
+      );
       const telemetry = new CorrelationTelemetry(
         new Writable({
           write(_c, _e, cb) {
@@ -306,10 +318,12 @@ test(
             subscriptionTier: 'CRITICAL_HIGH_ONLY',
             enabled: true,
           });
+          // High-confidence-only delivery: low-confidence alerts are off, which is
+          // now an explicit opt-out rather than the default.
           await transaction(db, (tx) =>
             updateCorrelationPolicy(
               tx,
-              { notificationsEnabled: true, retentionEnabled: true, retentionHours: 24 },
+              { notificationsEnabled: true, lowConfidenceAlertsEnabled: false, retentionEnabled: true, retentionHours: 24 },
               'admin',
             ),
           );
@@ -331,24 +345,28 @@ test(
             true,
           );
           assert.equal(sends, 1);
+          // An article with no version bound correlates MEDIUM. Low-confidence
+          // alerts are off here, so a MEDIUM advisory alone is withheld.
           await ingestor.processIncomingAdvisory(article('notify-medium'), db);
-          assert.equal(await transaction(db, (tx) => queueNativeNotifications(tx)), 1);
-          const review = (
-            await db.query(
-              "SELECT id,status FROM outbox WHERE advisory_id=(SELECT 'NATIVE:'||id::text FROM unstructured_advisories WHERE url='https://example.org/operations/notify-medium')",
-            )
-          ).rows[0];
-          // A MEDIUM-confidence native correlation is delivered like any other:
-          // there is no review queue, and the subject states the confidence.
-          assert.equal(review.status, 'QUEUED');
+          assert.equal(await transaction(db, (tx) => queueNativeNotifications(tx)), 0);
+          assert.equal(
+            (
+              await db.query(
+                "SELECT * FROM outbox WHERE advisory_id=(SELECT 'NATIVE:'||id::text FROM unstructured_advisories WHERE url='https://example.org/operations/notify-medium')",
+              )
+            ).rowCount,
+            0,
+          );
           assert.equal(
             await deliverNext(db, config, request, async () => {
               sends++;
               return 'mock';
             }),
-            true,
+            false,
           );
-          assert.equal(sends, 2);
+          assert.equal(sends, 1);
+          // The asset is already correlated HIGH, so the same *stored* match is
+          // re-used and only the stale-asset rule below stops the send.
           await ingestor.processIncomingAdvisory(
             article('notify-stale', { purls: ['pkg:generic/k8s@1.28.0'] }),
             db,
@@ -359,7 +377,9 @@ test(
             sends++;
             return 'must-not-send';
           });
-          assert.equal(sends, 2);
+          // The job was claimed but revalidation (asset deactivated) rejected it
+          // before any transport call, so nothing further was sent.
+          assert.equal(sends, 1);
           assert.equal(
             (
               await db.query(
@@ -371,6 +391,139 @@ test(
           await transaction(db, (tx) => syncCorrelationAsset(tx, asset));
         },
       );
+      await t.test('low-confidence vendor+product alerts default to on and state their limitation', async () => {
+        const setLow = (enabled: boolean) =>
+          transaction(db, (tx) =>
+            updateCorrelationPolicy(
+              tx,
+              { notificationsEnabled: true, lowConfidenceAlertsEnabled: enabled, retentionEnabled: true, retentionHours: 24 },
+              'admin',
+            ),
+          );
+        const request = async () => ({ status: 200, headers: {}, body: '' });
+        const queuedFor = async (suffix: string) =>
+          (
+            await db.query(
+              "SELECT advisory_id,payload,status FROM outbox WHERE advisory_id=(SELECT 'NATIVE:'||id::text FROM unstructured_advisories WHERE url=$1)",
+              [`https://example.org/operations/${suffix}`],
+            )
+          ).rows[0];
+        const queuedCount = async () =>
+          (await db.query("SELECT count(*)::int AS c FROM outbox WHERE advisory_id LIKE 'NATIVE:%'")).rows[0].c as number;
+
+        // Turned off deliberately: a vendor+product advisory with no confirmable
+        // version is withheld.
+        await setLow(false);
+        const offBaseline = await queuedCount();
+        await ingestor.processIncomingAdvisory(article('low-off'), db);
+        assert.equal(await transaction(db, (tx) => queueNativeNotifications(tx)), 0);
+        assert.equal(await queuedCount(), offBaseline, 'a withheld advisory queues nothing at all');
+        assert.equal(await queuedFor('low-off'), undefined);
+
+        // On: a vendor+product advisory with no confirmable version is delivered...
+        await setLow(true);
+        // Seed a genuine MEDIUM correlation through the engine (a named entity
+        // with no bound that can be tied to it, with a security signal), which is
+        // the tier low-confidence alerts exist for. The engine's own tiering is
+        // covered in correlation-medium-confidence.test.ts.
+        const advisoryId = randomUUID();
+        await db.query(
+          `INSERT INTO unstructured_advisories(id,title,content,url,fingerprint,processed_at)
+           VALUES($1,'Kubernetes advisory','kubernetes is affected','https://example.org/operations/low-on-medium',$2,now())`,
+          [advisoryId, 'fp-' + advisoryId],
+        );
+        await db.query(
+          `INSERT INTO correlation_matches(advisory_id,asset_id,vendor,product,confidence,reason)
+           VALUES($1,$2,'kubernetes','kubernetes','MEDIUM','Exact canonical vendor/product; affected versions unspecified')`,
+          [advisoryId, nativeId],
+        );
+        await db.query(
+          'INSERT INTO correlation_match_evidence(advisory_id,asset_id,asset_revision) SELECT $1,$2::uuid,revision FROM correlation_asset_inventory WHERE id=$2::uuid',
+          [advisoryId, nativeId],
+        );
+        const before = await queuedCount();
+        // This advisory plus earlier MEDIUM advisories now in the window, so
+        // assert on growth and on this advisory specifically.
+        assert.equal((await transaction(db, (tx) => queueNativeNotifications(tx))) > 0, true);
+        assert.equal((await queuedCount()) > before, true);
+        const delivered = await queuedFor('low-on-medium');
+        assert.equal(delivered.status, 'QUEUED');
+        // ...labelled with its confidence in the subject and body...
+        assert.equal(delivered.payload.nativeCorrelation.confidence, 'MEDIUM');
+        assert.match(delivered.payload.subject, /\[MEDIUM confidence\]/);
+        assert.match(delivered.payload.text, /MEDIUM-confidence correlation: 1 match\(es\) could not be confirmed/);
+        assert.match(delivered.payload.text, /kubernetes \/ kubernetes/);
+        // ...and rendered as HTML, because the worker sends payload.html when present.
+        assert.match(delivered.payload.html, /MEDIUM CONFIDENCE/);
+        assert.match(delivered.payload.html, /MEDIUM confidence notice:/);
+        // With alerts off, another MEDIUM advisory of the same shape is withheld:
+        // the switch is what changed, not the evidence.
+        await setLow(false);
+        const secondAdvisory = randomUUID();
+        await db.query(
+          `INSERT INTO unstructured_advisories(id,title,content,url,fingerprint,processed_at)
+           VALUES($1,'Kubernetes advisory 2','kubernetes is affected','https://example.org/operations/low-off-medium',$2,now())`,
+          [secondAdvisory, 'fp-' + secondAdvisory],
+        );
+        await db.query(
+          `INSERT INTO correlation_matches(advisory_id,asset_id,vendor,product,confidence,reason)
+           VALUES($1,$2::uuid,'kubernetes','kubernetes','MEDIUM','Exact canonical vendor/product; affected versions unspecified')`,
+          [secondAdvisory, nativeId],
+        );
+        await db.query(
+          'INSERT INTO correlation_match_evidence(advisory_id,asset_id,asset_revision) SELECT $1::uuid,$2::uuid,revision FROM correlation_asset_inventory WHERE id=$2::uuid',
+          [secondAdvisory, nativeId],
+        );
+        const offBefore = await queuedCount();
+        assert.equal(await transaction(db, (tx) => queueNativeNotifications(tx)), 0);
+        assert.equal(await queuedCount(), offBefore, 'a MEDIUM advisory is withheld while the switch is off');
+        assert.equal(await queuedFor('low-off-medium'), undefined);
+        await setLow(true);
+        // The evidence is revalidated at send time; a MEDIUM advisory must still
+        // pass that check rather than being rejected as stale at delivery.
+        assert.equal((await validateNativeDelivery(db, delivered as Job)).confidence, 'MEDIUM');
+
+        // Review-buffer evidence is never delivered, even with the switch on.
+        // It is where the engine files what it could not attribute — including
+        // advisories that NEGATE applicability — so delivering it would assert
+        // the opposite of what the source says.
+        const reviewOnly = randomUUID();
+        await db.query(
+          `INSERT INTO unstructured_advisories(id,title,content,url,fingerprint,processed_at)
+           VALUES($1,'Not affected','microsoft exchange_server is not affected','https://example.org/operations/review-only',$2,now())`,
+          [reviewOnly, 'fp-' + reviewOnly],
+        );
+        await db.query(
+          `INSERT INTO low_confidence_review_buffer(advisory_id,asset_id,reason)
+           VALUES($1,$2::uuid,'Applicability negation or conflicting evidence requires review')`,
+          [reviewOnly, nativeId],
+        );
+        // Other advisories in the window may also become eligible on this pass, so
+        // the assertion is about THIS advisory: evidence with no attributed asset
+        // must not produce a delivery, whatever else the pass queues.
+        await transaction(db, (tx) => queueNativeNotifications(tx));
+        assert.equal(
+          await queuedFor('review-only'),
+          undefined,
+          'review-only evidence is never delivered',
+        );
+
+        // Webhooks are machine-to-machine and never receive unconfirmed evidence.
+        assert.equal(
+          (await db.query("SELECT count(*)::int AS c FROM outbox WHERE channel='webhook' AND advisory_id LIKE 'NATIVE:%'")).rows[0].c,
+          0,
+        );
+
+
+
+        // Disabling stops further low-confidence delivery and is recorded.
+        const policy = await setLow(false);
+        assert.equal(policy.lowConfidenceAlertsEnabled, false);
+        const disabledBaseline = await queuedCount();
+        await ingestor.processIncomingAdvisory(article('low-off-again'), db);
+        assert.equal(await transaction(db, (tx) => queueNativeNotifications(tx)), 0);
+        assert.equal(await queuedCount(), disabledBaseline);
+      });
       await t.test('retention preserves open work and protected article/inventory rows', async () => {
         const before = (await db.query('SELECT count(*)::int AS count FROM unstructured_advisories')).rows[0]
           .count;

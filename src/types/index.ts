@@ -1146,6 +1146,20 @@ export interface AppSettings {
   advisoryPrefix: string;
   autoDispatchEnabled: boolean;
   /**
+   * Opt-in: when a trained auto-dispatch threshold model is available, use its
+   * recommended threshold instead of the static operator minimum. The model is
+   * quality-gated before deployment, and the operator can turn this off at any
+   * time; the static minimum remains authoritative when this is false.
+   */
+  mlAutoDispatchThresholdEnabled?: boolean;
+  /**
+   * Opt-in: allow trained match/alias confidence models to promote a finding
+   * that was held *only* by the confidence policy threshold into the dispatch
+   * queue. Applicability holds, VEX suppression, source review-only holds and
+   * circuit-breaker deferrals are never overridden.
+   */
+  mlReviewRoutingEnabled?: boolean;
+  /**
    * Confidence (0–100) at or above which a finding is considered confirmed.
    *
    * There is no operator review queue: a finding below this threshold is still
@@ -1312,6 +1326,58 @@ export interface AppSettings {
     /** Include a server health-check snapshot in the daily report. */
     includeHealthReport: boolean;
   };
+}
+
+/** ML operations status returned by `GET /api/ml/status`. */
+export interface MlModelStatus {
+  id: string;
+  status: 'ACTIVE' | 'STANDBY_ROLLBACK' | 'DEGRADED' | 'UNTRAINED';
+  trained: boolean;
+  version: string | null;
+  trainedAt: string | null;
+  minimumSamples: number;
+  description?: string;
+  featureCount?: number;
+  performance?: Record<string, number>;
+  latestMetrics?: Record<string, number>;
+  lastTraining?: {
+    status: string;
+    samplesCollected: number;
+    validationPassed: boolean | null;
+    failureReason?: string;
+    saved: boolean;
+  } | null;
+}
+
+export interface MlStatusResponse {
+  initialized: boolean;
+  models: MlModelStatus[];
+  trainedModels: number;
+  totalModels: number;
+  latestTraining: Record<string, unknown> | null;
+  feedbackCounts: Record<string, number>;
+  feedbackWindowDays: number;
+}
+
+/** A finding awaiting an analyst relevance label. */
+export interface MlReviewQueueResponse {
+  items: Finding[];
+  total: number;
+  threshold: number;
+  limit: number;
+}
+
+export interface MlFindingFeedbackInput {
+  disposition: 'TRUE_POSITIVE' | 'FALSE_POSITIVE';
+  correctedExploitRisk?: ExploitRiskLevel;
+  correctedSeverityTier?: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFORMATIONAL';
+  notes?: string;
+}
+
+export interface MlFindingFeedbackResponse {
+  recorded: number;
+  sources: string[];
+  effect: 'next_training_run';
 }
 
 export interface SystemHealth {

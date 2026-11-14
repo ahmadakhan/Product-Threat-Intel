@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mlFeedbackSchema, appendMlFeedback } from '../server/ml/feedback.ts';
+import { mlFeedbackSchema, appendMlFeedback, deriveFindingFeedbackSamples } from '../server/ml/feedback.ts';
 import { assessFinding, assessFindings } from '../server/ml/assessment.ts';
 import { findingFeatures } from '../server/ml/findingFeatures.ts';
 import { initMlRuntime } from '../server/ml/integration.ts';
@@ -11,6 +11,7 @@ import { ZeroDayRateLimitOptimizer } from '../server/ml/models/zeroDayRateLimitO
 import { TrainingOrchestrator, type TrainingDataSources } from '../server/ml/train/orchestrator.ts';
 import { CronDataProvider } from '../server/ml/train/dataProvider.ts';
 import type { Db } from '../server/db.ts';
+import { DEFAULT_SETTINGS } from '../shared/state.ts';
 import { INITIAL_FINDINGS } from './fixtures/seedData.ts';
 
 const db = { query: async () => ({ rows: [] }) } as unknown as Db;
@@ -52,6 +53,31 @@ test('all formerly missing analyst label sources accept validated feedback and r
     zeroDayCount: 2, credibilityScores: [90], outcomes: ['DELIVERED'],
   } }));
   assert.throws(() => mlFeedbackSchema.parse({ source: 'severityTierSamples', sample: { features: risk, tier: 'MADE_UP' } }));
+});
+
+test('finding feedback derives only explicit, validated training samples', () => {
+  const finding = structuredClone(INITIAL_FINDINGS[0]);
+  finding.confidence = 73;
+  finding.mlAssessment = undefined;
+  const derived = deriveFindingFeedbackSamples(finding, {
+    disposition: 'FALSE_POSITIVE',
+    correctedExploitRisk: 'STANDARD',
+    correctedSeverityTier: 'LOW',
+    notes: 'Asset version was not affected',
+  });
+  assert.deepEqual(derived.map((sample) => sample.source), [
+    'calibrationPairs',
+    'exploitRiskSamples',
+    'severityTierSamples',
+  ]);
+  const calibration = derived[0] as {
+    source: 'calibrationPairs';
+    sample: { credibilityScore: number; isActionable: boolean };
+  };
+  assert.deepEqual(calibration.sample, { credibilityScore: 73, isActionable: false });
+  // Every generated sample must satisfy the same strict schema the direct
+  // feedback endpoint enforces.
+  for (const sample of derived) assert.doesNotThrow(() => mlFeedbackSchema.parse(sample));
 });
 
 test('zero-day feedback accepts every modeled outcome and skips legacy unpaired labels', () => {
@@ -135,6 +161,34 @@ test('trained finding models produce recommendations without changing authoritat
     t.mock.method(runtime.reviewRanker, 'isTrained', () => true);
     const rank = t.mock.method(runtime.reviewRanker, 'predictBatch', () => [{ score: 0.8, probability: 0.8 }]);
     assessFindings([original]);
+    const heldByPolicy = {
+      ...original,
+      matchingEvidence:
+        'Product correlation; held for review because 80% confidence is below the 90% auto-dispatch threshold',
+    };
+    assert.equal(
+      assessFindings([heldByPolicy], undefined, DEFAULT_SETTINGS)[0].notificationStatus,
+      'REVIEW_REQUIRED',
+    );
+    assert.equal(
+      assessFindings([heldByPolicy], undefined, {
+        ...DEFAULT_SETTINGS,
+        mlReviewRoutingEnabled: true,
+      })[0].notificationStatus,
+      'QUEUED_FOR_DISPATCH',
+    );
+    const applicabilityHold = {
+      ...heldByPolicy,
+      matchingEvidence:
+        'Product correlation; held for review because the available CVE evidence cannot verify this version',
+    };
+    assert.equal(
+      assessFindings([applicabilityHold], undefined, {
+        ...DEFAULT_SETTINGS,
+        mlReviewRoutingEnabled: true,
+      })[0].notificationStatus,
+      'REVIEW_REQUIRED',
+    );
     const features = findingFeatures(original);
     const aliasFeatures = alias.mock.calls[0]?.arguments[0];
     const rankFeatures = rank.mock.calls[0]?.arguments[0]?.[0];

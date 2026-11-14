@@ -90,11 +90,15 @@ export function cpePreFilter(cpe: string): boolean {
   const model = ctx.runtime?.cpeValidityGate;
   if (!model?.isTrained()) return true;
   const result = model.shouldParse(cpe);
-  void logMlEvent('ml.cpe_pre_filter', 'CPE validity gate evaluated', {
-    cpe,
-    result,
-    modelVersion: model.getMetadata().version,
-  });
+  // Only log actual skips. This function is called on every ingested CPE, and
+  // logging each successful evaluation would flood the operational event table.
+  if (!result) {
+    void logMlEvent('ml.cpe_pre_filter', 'CPE validity gate skipped malformed input', {
+      cpe,
+      result,
+      modelVersion: model.getMetadata().version,
+    });
+  }
   return result;
 }
 
@@ -134,45 +138,77 @@ export function calibrateCredibilityScore(rawScore: number): {
 /**
  * 3. Auto-Dispatch Threshold — replaces the hardcoded 90% gate.
  *
- * The configured threshold is authoritative; trained models only recommend.
+ * The operator's static threshold is authoritative unless the operator
+ * explicitly opts in to ML threshold recommendations. The model is still
+ * quality-gated at training time, and a missing/erroring model fails closed to
+ * the static policy.
  */
-export function shouldAutoDispatch(confidence: number, settings: Pick<AppSettings, 'confirmedFindingThreshold'>): boolean {
-  const threshold = settings.confirmedFindingThreshold ?? DEFAULT_AUTO_DISPATCH_THRESHOLD;
+export function shouldAutoDispatch(
+  confidence: number,
+  settings: Pick<AppSettings, 'confirmedFindingThreshold'> &
+    Partial<Pick<AppSettings, 'mlAutoDispatchThresholdEnabled'>>,
+): boolean {
+  const configuredThreshold = settings.confirmedFindingThreshold ?? DEFAULT_AUTO_DISPATCH_THRESHOLD;
+  let threshold = configuredThreshold;
   let modelTrained = false;
-  let modelError: string | undefined;
+  let recommendedThreshold: number | undefined;
+  const confidenceValid = Number.isFinite(confidence) && confidence >= 0 && confidence <= 100;
   // Fail closed: if the ML model errors, hold for review rather than dispatching blindly.
   try {
     const model = ctx.runtime?.autoDispatchThreshold;
     modelTrained = model?.isTrained() === true;
-    if (!modelTrained) {
-      // Model untrained: use the static threshold only; do not trust ML recommendation.
-      void logMlEvent('ml.auto_dispatch', 'Model untrained; using static threshold only', {
-        confidence,
-        threshold,
-        modelTrained: false,
-      });
-      return Number.isFinite(confidence) && confidence >= 0 && confidence <= 100 &&
-        Number.isFinite(threshold) && threshold >= 0 && threshold <= 100 && confidence >= threshold;
-    }
+    if (modelTrained) recommendedThreshold = model?.getThreshold();
   } catch (err) {
-    modelError = err instanceof Error ? err.message : String(err);
+    const modelError = err instanceof Error ? err.message : String(err);
     void logMlEvent('ml.auto_dispatch', 'Model error; fail closed — holding for review', {
       confidence,
-      threshold,
+      threshold: configuredThreshold,
       modelTrained: false,
       modelError,
     });
     return false;
   }
-  const result = Number.isFinite(confidence) && confidence >= 0 && confidence <= 100 &&
-    Number.isFinite(threshold) && threshold >= 0 && threshold <= 100 && confidence >= threshold;
+  const optIn = settings.mlAutoDispatchThresholdEnabled === true;
+  if (optIn && modelTrained && Number.isFinite(recommendedThreshold) && recommendedThreshold! >= 0 && recommendedThreshold! <= 100) {
+    threshold = recommendedThreshold!;
+  }
+  if (
+    !confidenceValid ||
+    !Number.isFinite(threshold) ||
+    threshold < 0 ||
+    threshold > 100
+  ) {
+    void logMlEvent('ml.auto_dispatch', 'Invalid confidence or threshold; holding for review', {
+      confidence,
+      threshold,
+      modelTrained,
+      optIn,
+    });
+    return false;
+  }
+  const result = confidence >= threshold;
   void logMlEvent('ml.auto_dispatch', result ? 'Eligible under configured policy' : 'Held under configured policy', {
     confidence,
     threshold,
+    configuredThreshold,
     modelTrained,
-    recommendedThreshold: modelTrained ? ctx.runtime?.autoDispatchThreshold?.getThreshold() : undefined,
+    optIn,
+    recommendedThreshold,
   });
   return result;
+}
+
+/** Whether a named model is loaded *and* trained. Used to gate opt-in routing. */
+export function isMlModelTrained(modelId: string): boolean {
+  const registered = ctx.runtime?.registry.get(modelId);
+  if (registered) return registered.model.isTrained?.() === true;
+  // An untrained model is not registered because there is no artifact to load,
+  // but tests and late-bound callers can still expose the runtime instance.
+  const runtimeModels: Record<string, TrainableModel | undefined> = {
+    'match-confidence-model': ctx.runtime?.matchConfidence,
+    'alias-confidence-model': ctx.runtime?.aliasConfidence,
+  };
+  return runtimeModels[modelId]?.isTrained?.() === true;
 }
 
 /**

@@ -157,7 +157,9 @@ export const ActionCenter: React.FC = () => {
   const [editBusy, setEditBusy] = useState(false);
   const [htmlContent, setHtmlContent] = useState<string>('');
   const [htmlMode, setHtmlMode] = useState<'visual' | 'source'>('visual');
-  const [attachHtml, setAttachHtml] = useState(false);
+  // Finding emails carry an exact .html copy of the body by default; this lets
+  // an operator suppress it for one send.
+  const [attachHtml, setAttachHtml] = useState(true);
   const [isFullScreen, setIsFullScreen] = useState(false);
   const editDialogRef = useDialogFocus(() => {
     if (!editBusy) setEditing(null);
@@ -492,7 +494,7 @@ export const ActionCenter: React.FC = () => {
       setPreviewTab('email');
       setHtmlMode('visual');
       setHtmlContent('');
-      setAttachHtml(false);
+      setAttachHtml(true);
       setIsFullScreen(false);
       setPreviewLoading(true);
       void previewEmailReview(log.id).then((preview) => {
@@ -1645,8 +1647,9 @@ export const ActionCenter: React.FC = () => {
                       )}
                     </div>
                     <p className="mt-2 text-[11px] text-zinc-500">
-                      The rendered preview is exactly what recipients receive. Enable "Attach HTML file" to
-                      send the same body as a downloadable .html attachment alongside the message.
+                      The rendered preview is exactly what recipients receive. "Attach HTML file" sends the
+                      same body as a downloadable .html attachment named after the subject, so the message
+                      and its file are identical.
                     </p>
                   </div>
                 </div>
@@ -1661,7 +1664,7 @@ export const ActionCenter: React.FC = () => {
                       onChange={(e) => setAttachHtml(e.target.checked)}
                       className="w-4 h-4 rounded border-zinc-600 text-sky-500 focus:ring-sky-500"
                     />
-                    <span>Attach HTML file to email</span>
+                    <span>Attach HTML file to email (on by default)</span>
                   </label>
                   <span className="w-px h-4 bg-zinc-700 light:bg-zinc-300" />
                   <p className="mr-auto text-[11px] text-zinc-500" aria-live="polite">

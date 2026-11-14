@@ -112,6 +112,7 @@ export {
   cpePreFilter,
   calibrateCredibilityScore,
   shouldAutoDispatch,
+  isMlModelTrained,
   rankReviewFindings,
   isTelemetryAnomaly,
   computeRetryDelay,

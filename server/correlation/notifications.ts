@@ -11,13 +11,16 @@ import { readNativeEvidence } from './notificationEvidence.ts';
  * inject markup into a delivered email.
  */
 const submitSafe = (value: string) =>
-  value.replace(/[&<>"']/g, (character) =>
+  String(value ?? '').replace(/[&<>"']/g, (character) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!,
   );
 /** Runs inside a transaction: event claim and existing outbox insertion commit together. */
 export async function queueNativeNotifications(db: Db): Promise<number> {
-  const policy = await db.query<{ notifications_enabled: boolean }>('SELECT notifications_enabled FROM correlation_policy WHERE id=1');
+  const policy = await db.query<{ notifications_enabled: boolean; low_confidence_alerts_enabled: boolean }>(
+    'SELECT notifications_enabled, low_confidence_alerts_enabled FROM correlation_policy WHERE id=1',
+  );
   if (!policy.rows[0]?.notifications_enabled) return 0;
+  const lowConfidenceAlerts = policy.rows[0].low_confidence_alerts_enabled === true;
   const recipientRows = await db.query<{
     data: EmailRecipient;
   }>(`SELECT data FROM records WHERE kind='recipients'
@@ -28,7 +31,12 @@ export async function queueNativeNotifications(db: Db): Promise<number> {
     throw new Error('NOTIFICATION_FANOUT_LIMIT');
   const recipients = recipientRows.rows.map((row) => row.data),
     hooks = hookRows.rows.map((row) => row.data);
-  if (!recipients.length && !hooks.length) return 0;
+  // No early return on an empty audience. Two independent gates used to be
+  // conflated here: "is anyone listening?" (no recipient and no hook) and "may
+  // unconfirmed evidence be delivered?". The old code used the audience size as
+  // the confidence switch, so with no HIGH-eligible recipient a MEDIUM match was
+  // withheld, and with any recipient it was delivered. Both answers are now
+  // explicit; an empty audience simply queues nothing below.
   const articles = await db.query<{ advisory_id: string }>(
     `SELECT DISTINCT m.advisory_id FROM correlation_matches m
     CROSS JOIN correlation_policy p LEFT JOIN correlation_notifications n ON n.advisory_id=m.advisory_id
@@ -43,16 +51,37 @@ export async function queueNativeNotifications(db: Db): Promise<number> {
     AND (SELECT count(*) FROM (SELECT 1 FROM correlation_matches fanout WHERE fanout.advisory_id=m.advisory_id LIMIT 1001) bounded)<=1000
     AND ($1::boolean OR NOT EXISTS(SELECT 1 FROM correlation_matches other WHERE other.advisory_id=m.advisory_id AND other.confidence<>'HIGH'))
     ORDER BY m.advisory_id LIMIT 20`,
-    [recipients.length > 0],
+    // The confidence gate is an operator decision, never an inference from how
+    // many recipients happen to exist. It used to be bound to `recipients.length
+    // > 0`, so on a deployment with no eligible recipient the "all matches must
+    // be HIGH" rule silently switched off instead of withholding.
+    [lowConfidenceAlerts],
   );
-  if (!articles.rowCount) return 0;
+
+
   let queued = 0;
+  // LOW evidence is intentionally NOT delivered, even with low-confidence alerts
+  // on. `low_confidence_review_buffer` is where the engine files everything it
+  // could not attribute to an asset: a bare co-occurrence of two words, an
+  // advisory whose text *negates* applicability ("not affected", "false
+  // positive"), and version-ordering ambiguity. Its rows exist to be reviewed,
+  // and several of them assert that the asset is NOT exposed — delivering those
+  // as alerts would be actively wrong, which no confidence label can repair.
+  //
+  // Only MEDIUM evidence (a thesaurus-resolved vendor/product whose version
+  // range could not be confirmed, or an operator-verified match) is delivered
+  // without a review step. The switch above widens delivery from HIGH to HIGH+
+  // MEDIUM; it never reaches into the review buffer.
+  if (!articles.rows.length) return 0;
   for (const { advisory_id: advisoryId } of articles.rows) {
     const evidence = await readNativeEvidence(db, advisoryId);
     if (!evidence) continue;
     const eligibleRecipients = recipients.filter(
       (rec) => rec.enabled && rec.subscriptionTier === 'ALL_SEVERITIES',
     );
+    // Webhooks are machine-to-machine: an unconfirmed match would arrive without
+    // the human-readable notice an email carries, so automated consumers only
+    // ever see HIGH-confidence evidence.
     const eligibleHooks =
       evidence.confidence === 'HIGH'
         ? hooks.filter((hook) => hook.enabled && hook.events.includes('ALL'))
@@ -81,16 +110,24 @@ export async function queueNativeNotifications(db: Db): Promise<number> {
         /[\r\n]/g,
         ' ',
       );
-    const reasonLines = evidence.matches
-      .map((match) => `${match.vendor} / ${match.product} (${match.assetId}): ${match.reason}`)
-      .join('\n');
-    const lowConfidenceNotice =
-      'Low confidence notice: at least one correlation is a MEDIUM-confidence match. ' +
-      'Confirm the affected version against vendor guidance before remediation.';
+    // Every delivered match names an attributed asset: review-buffer evidence is
+    // never delivered, so there is no empty-asset case to paper over.
+    const describeMatch = (match: { vendor: string; product: string; assetId: string; reason: string }) =>
+      `${match.vendor} / ${match.product} (${match.assetId}): ${match.reason}`;
+    const reasonLines = evidence.matches.map(describeMatch).join('\n');
+    // The notice names every match that could not be confirmed, so an operator
+    // can see exactly which vendor/product pairs still need version verification
+    // rather than being told only that *something* was uncertain.
+    const unconfirmedNotice =
+      evidence.unconfirmedMatches.length && evidence.confidence !== 'HIGH'
+        ? `${evidence.confidence}-confidence correlation: ${evidence.unconfirmedMatches.length} match(es) could not be confirmed against an installed version.\n` +
+          evidence.unconfirmedMatches.map((match) => `- ${describeMatch(match)}`).join('\n') +
+          '\nConfirm the affected version against vendor guidance before remediation.'
+        : '';
     const text =
       `${evidence.article.title}\n\nEvidence confidence: ${evidence.confidence}\nSource: ${evidence.article.url}\n\n` +
       reasonLines +
-      (evidence.confidence === 'MEDIUM' ? `\n\n${lowConfidenceNotice}` : '') +
+      (unconfirmedNotice ? `\n\n${unconfirmedNotice}` : '') +
       '\n\nThis is an applicability signal. Confirm source authenticity and affected versions before remediation.';
     // A body is required: the worker sends `payload.html` whenever it is present,
     // so a native alert without one shipped a message part that dropped the
@@ -109,8 +146,8 @@ export async function queueNativeNotifications(db: Db): Promise<number> {
       `<p style="margin:0 0 4px;font-size:13px;color:#374151;"><strong>Source:</strong> ${submitSafe(evidence.article.url)}</p>` +
       `<p style="margin:0 0 12px;font-size:13px;color:#374151;"><strong>Evidence confidence:</strong> ${submitSafe(evidence.confidence)}</p>` +
       `<pre style="margin:0;padding:12px;background:#f7f8fa;border-left:3px solid #b7791f;font-size:13px;line-height:20px;color:#374151;white-space:pre-wrap;word-break:break-word;">${submitSafe(reasonLines)}</pre>` +
-      (evidence.confidence === 'MEDIUM'
-        ? `<p style="margin:12px 0 0;padding:8px 10px;background:#fffbeb;border-left:3px solid #b7791f;font-size:13px;line-height:19px;color:#7c2d12;"><strong>Low confidence notice:</strong> ${submitSafe(lowConfidenceNotice.replace('Low confidence notice: ', ''))}</p>`
+      (unconfirmedNotice
+        ? `<p style="margin:12px 0 0;padding:8px 10px;background:#fffbeb;border-left:3px solid #b7791f;font-size:13px;line-height:19px;color:#7c2d12;"><strong>${submitSafe(evidence.confidence)} confidence notice:</strong> ${submitSafe(unconfirmedNotice.replace(`${evidence.confidence}-confidence correlation: `, ''))}</p>`
         : '') +
       '<p style="margin:12px 0 0;font-size:13px;line-height:20px;color:#52606d;">This is an applicability signal. Confirm source authenticity and affected versions before remediation.</p>' +
       '</td></tr></table></body></html>';
@@ -119,8 +156,10 @@ export async function queueNativeNotifications(db: Db): Promise<number> {
     for (const recipient of eligibleRecipients) {
       // Every recipient is queued for delivery, whatever the evidence confidence
       // or delivery group: there is no review queue. The subject names the
-      // confidence and the body states that the signal needs confirmation, so a
-      // MEDIUM-confidence correlation is disclosed rather than withheld.
+      // confidence and the body lists every unconfirmed match, so a MEDIUM- or
+      // LOW-confidence correlation is disclosed rather than withheld. Whether
+      // such an advisory is delivered at all is decided once, above, by the
+      // operator's low-confidence switch.
       if (
         await enqueue(
           db,

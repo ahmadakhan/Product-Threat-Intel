@@ -96,7 +96,15 @@ describe('CronDataProvider', () => {
         ],
       },
     });
-    assert.deepEqual(await new CronDataProvider().collectCpeStrings(db), [cpe]);
+    // Valid production rows also contribute deterministic malformed negatives
+    // so the validity gate has a negative class to train against.
+    assert.deepEqual(await new CronDataProvider().collectCpeStrings(db), [
+      cpe,
+      '2.3:a:example:widget:1.0:*:*:*:*:*:*:*',
+      `${cpe}:extra-token`,
+      'widget',
+      'invalid',
+    ]);
   });
   it('uses adjudicated finding outcomes, never email acceptance as a relevance label', async () => {
     const db = createMockDb({

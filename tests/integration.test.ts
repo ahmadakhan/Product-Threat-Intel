@@ -274,6 +274,12 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       assert.equal(status.status, 200);
       assert.equal(status.body.totalModels, 18);
       assert.equal(status.body.models.length, 18);
+      assert.equal(typeof status.body.feedbackCounts, 'object');
+      const queue = await viewer.get('/api/ml/review-queue?limit=5');
+      assert.equal(queue.status, 200);
+      assert.ok(Array.isArray(queue.body.items));
+      assert.equal(typeof queue.body.total, 'number');
+      assert.equal(typeof queue.body.threshold, 'number');
       const feedback = { source: 'calibrationPairs', sample: { credibilityScore: 75, isActionable: true } };
       assert.equal((await viewer.post('/api/ml/feedback').set('Origin', config.APP_ORIGIN)
         .set('x-csrf-token', viewCsrf).send(feedback)).status, 403);
@@ -289,6 +295,21 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       const saved = await pool.query("SELECT id,context FROM operational_events WHERE code='ml.training.feedback' ORDER BY id DESC LIMIT 1");
       assert.deepEqual(saved.rows[0].context, feedback);
       await pool.query('DELETE FROM operational_events WHERE id=$1', [saved.rows[0].id]);
+      const derived = { disposition: 'TRUE_POSITIVE', correctedSeverityTier: 'HIGH' };
+      assert.equal(
+        (await viewer.post('/api/ml/findings/not-a-real-finding/feedback')
+          .set('Origin', config.APP_ORIGIN)
+          .set('x-csrf-token', viewCsrf)
+          .send(derived)).status,
+        403,
+      );
+      assert.equal((await post('/api/ml/findings/not-a-real-finding/feedback', derived)).status, 404);
+      assert.equal(
+        (await post('/api/ml/findings/not-a-real-finding/feedback', {
+          disposition: 'MADE_UP',
+        })).status,
+        400,
+      );
     });
     await t.test('unauthenticated reads, CSRF and foreign origins are rejected', async () => {
       assert.equal((await supertest(app).get('/api/state')).status, 401);

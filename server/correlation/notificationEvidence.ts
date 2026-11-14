@@ -6,6 +6,10 @@ export const nativeDeliverySchema = z
   .object({
     advisoryId: z.uuid(),
     evidenceHash: z.string().regex(/^[a-f0-9]{64}$/),
+    /**
+     * The advisory-level verdict. Only HIGH and MEDIUM are deliverable: LOW
+     * evidence is never attributed to an asset and stays in review.
+     */
     confidence: z.enum(['HIGH', 'MEDIUM']),
   })
   .strict();
@@ -31,20 +35,27 @@ export async function readNativeEvidence(db: Db, advisoryId: string) {
      LEFT JOIN correlation_asset_inventory i ON i.id=m.asset_id WHERE m.advisory_id=$1 ORDER BY m.asset_id LIMIT 1001`,
     [advisoryId],
   );
+  // Matches derived before the stored match rows have evidence committed (or
+  // whose asset changed since) carry no fresh evidence and are not reported.
   const freshMatches = matches.rows.filter((match) => match.assetRevision && match.assetRevision === match.currentRevision);
-  if (
-    !article.rows[0] ||
-    !freshMatches.length ||
-    matches.rows.length > 1000
-  )
-    return null;
-  const confidence: 'HIGH' | 'MEDIUM' = freshMatches.every((match) => match.confidence === 'HIGH')
-    ? 'HIGH'
-    : 'MEDIUM';
+  if (!article.rows[0] || matches.rows.length > 1000) return null;
+  // No attributed asset means no alert. The review buffer holds exactly the
+  // evidence that could not be tied to an installed asset — including advisories
+  // whose text negates applicability — so it is never a delivery source.
+  if (!freshMatches.length) return null;
+  const unconfirmedMatches = freshMatches.filter((match) => match.confidence !== 'HIGH');
+  const confidence: 'HIGH' | 'MEDIUM' = unconfirmedMatches.length ? 'MEDIUM' : 'HIGH';
   const evidenceHash = createHash('sha256')
     .update(JSON.stringify([article.rows[0], freshMatches]))
     .digest('hex');
-  return { article: article.rows[0], matches: freshMatches, confidence, evidenceHash };
+  return {
+    article: article.rows[0],
+    matches: freshMatches,
+    /** Matches that could not be confirmed and therefore need operator review. */
+    unconfirmedMatches,
+    confidence,
+    evidenceHash,
+  };
 }
 export async function validateNativeDelivery(db: Db, job: Job): Promise<NativeDelivery> {
   const input = nativeDeliverySchema.parse(job.payload.nativeCorrelation);

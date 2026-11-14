@@ -14,6 +14,8 @@ const noteSchema = z.string().trim().min(5).max(1000);
 export const correlationPolicySchema = z
   .object({
     notificationsEnabled: z.boolean(),
+    // Optional so an older client cannot silently reset a deliberate choice.
+    lowConfidenceAlertsEnabled: z.boolean().optional(),
     retentionEnabled: z.boolean(),
     retentionHours: z.number().int().min(24).max(87600),
     // Bounded to match the CHECK constraint in migration 021; omitted values
@@ -28,6 +30,7 @@ export const correlationPolicySchema = z
   .strict();
 export async function getCorrelationPolicy(db: Db): Promise<CorrelationPolicy> {
   const result = await db.query<CorrelationPolicy>(`SELECT notifications_enabled AS "notificationsEnabled",
+    low_confidence_alerts_enabled AS "lowConfidenceAlertsEnabled",
     retention_enabled AS "retentionEnabled",retention_hours AS "retentionHours",
     pre_cve_cluster_window_days AS "preCveClusterWindowDays" FROM correlation_policy WHERE id=1`);
   if (!result.rows[0]) throw new Error('CORRELATION_POLICY_MISSING');
@@ -40,18 +43,29 @@ export async function updateCorrelationPolicy(
 ): Promise<CorrelationPolicy> {
   const input = correlationPolicySchema.parse(raw);
   // Enabling starts a fresh window. Historical matches never create an alert storm.
+  // Turning low-confidence alerts on starts its own window for the same reason:
+  // a backlog of MEDIUM matches must not arrive as one burst of "new" alerts.
   await db.query(
     `UPDATE correlation_policy SET notifications_since=CASE WHEN NOT notifications_enabled AND $1
     THEN now() ELSE notifications_since END,notifications_enabled=$1,retention_enabled=$2,retention_hours=$3,
-    pre_cve_cluster_window_days=COALESCE($4,pre_cve_cluster_window_days),updated_at=now() WHERE id=1`,
+    pre_cve_cluster_window_days=COALESCE($4,pre_cve_cluster_window_days),
+    low_confidence_alerts_enabled=COALESCE($5,low_confidence_alerts_enabled),updated_at=now() WHERE id=1`,
     [
       input.notificationsEnabled,
       input.retentionEnabled,
       input.retentionHours,
       input.preCveClusterWindowDays ?? null,
+      input.lowConfidenceAlertsEnabled ?? null,
     ],
   );
-  await appendAudit(db, 'Correlation policy updated', 'Notification and retention policy changed', actor);
+  await appendAudit(
+    db,
+    'Correlation policy updated',
+    input.lowConfidenceAlertsEnabled === undefined
+      ? 'Notification and retention policy changed'
+      : `Notification and retention policy changed; low-confidence alerts ${input.lowConfidenceAlertsEnabled ? 'enabled' : 'disabled'}`,
+    actor,
+  );
   return getCorrelationPolicy(db);
 }
 

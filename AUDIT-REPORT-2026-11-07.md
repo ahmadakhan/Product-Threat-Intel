@@ -296,22 +296,22 @@ Per CODEBASE-AUDIT-PROMPT.md, this audit covers all 14 dimensions:
 
 ---
 
-### 12. MEDIUM — HTML Attachment Conditional on Edit Flag
+### 12. MEDIUM — HTML Attachment Conditional on Edit Flag (REGRESSED — reverted)
 
-**File:** `server/delivery.ts:651`  
+**File:** `server/delivery.ts`  
 **Severity:** MEDIUM  
 **Category:** Reliability  
 
-**Description:** `findingHtmlAttachment` is now only called when `job.edits?.attachHtml` is true. Previously it was called unconditionally for every email job, which could throw on jobs without HTML or exceed attachment limits for non-finding deliveries.
+**Description:** This finding recommended gating `findingHtmlAttachment` behind `job.edits?.attachHtml`. That guidance was wrong and has been reverted: nothing on the server ever read `attachHtml`, so automatic deliveries (which carry no `edits` at all) never received the attachment, and the Action Center checkbox silently did nothing.
 
-**Impact:** Prevents unnecessary attachment failures for non-finding email jobs (webhooks, news, zero-day digests) and ensures attachments are only generated when the operator explicitly requests HTML attachment.
+**Impact:** Finding emails were delivered without their HTML copy, contradicting the operator-facing promise that the attachment is the email.
 
-**Fix:** Guarded `findingHtmlAttachment` call behind `job.edits?.attachHtml` check.
+**Fix (current):** The attachment is produced for **every** finding email, including the consolidated `FINDINGS:<batch>` bundle that `isFindingDelivery` excludes from follow-up actions. Non-finding deliveries (news, zero-day digest, unverifiable bundle, self-healing alerts, `TEST`) are still excluded. An explicit `attachHtml: false` remains the only way to suppress it. The pre-existing "could throw on non-finding deliveries" concern is handled by the scope predicate rather than by editing state.
 
 **Effort:** S
 
 **Code Reference:**
-- `server/delivery.ts:651` — Conditional HTML attachment
+- `server/delivery.ts` — `isFindingsEmail`, `findingHtmlAttachment`
 
 ---
 

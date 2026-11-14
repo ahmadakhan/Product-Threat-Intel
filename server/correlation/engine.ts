@@ -79,6 +79,49 @@ export function identityTokens(text: string): string[] {
     .filter(Boolean);
 }
 
+interface AdjacencyToken {
+  value: string;
+  /** The preceding token ended a phrase/sentence rather than merely being spaced apart. */
+  boundaryBefore: boolean;
+}
+
+/**
+ * Identity tokens that remember whether a sentence boundary or punctuation sits
+ * between them. Tier 2b compares whole phrases, so "microsoft exchange_server"
+ * is evidence but "microsoft. exchange_server" is two separate statements and
+ * must not be joined back into one phrase.
+ *
+ * Plain spaces preserve adjacency; any punctuation, comma, colon, line break or
+ * other separator starts a new phrase. A trailing period belongs to the token
+ * (the normalizer keeps it), so it is stripped from the value but deliberately
+ * does not break adjacency: "microsoft. exchange_server" is the same phrase the
+ * tokenizer sees, and requiring raw-string adjacency would miss real prose for
+ * no safety gain. A comma, colon or newline still ends the phrase.
+ */
+function adjacencyTokens(text: string): AdjacencyToken[] {
+  const tokens: AdjacencyToken[] = [];
+  let boundary = true;
+  for (const part of text.toLowerCase().split(/([^a-z0-9_.+-]+)/)) {
+    if (!part) continue;
+    if (/^[^a-z0-9_.+-]+$/.test(part)) {
+      // Horizontal whitespace keeps a phrase intact; punctuation, commas,
+      // newlines and tabs end it.
+      if (!/^ +$/.test(part)) boundary = true;
+      continue;
+    }
+    const value = part.replace(/^\.+|\.+$/g, '');
+    if (!value) {
+      boundary = true;
+      continue;
+    }
+    tokens.push({ value, boundaryBefore: boundary || part.startsWith('.') });
+    // A trailing period is sentence punctuation the tokenizer intentionally
+    // tolerates; a separator character was already handled above.
+    boundary = false;
+  }
+  return tokens;
+}
+
 /** Canonical form of an alias or phrase for comparison with extractor output. */
 const normalized = (value: string) => value.toLowerCase().replace(/[^a-z0-9_.+-]+/g, ' ').trim();
 
@@ -205,6 +248,23 @@ export class TextCorrelationEngine {
       }
     }
 
+    // Contiguous vendor+product phrases the inventory could be named by. Sentence
+    // punctuation is a hard boundary: "microsoft. exchange_server" must not be
+    // rejoined into the single phrase "microsoft exchange_server".
+    const namedPhrases = new Set<string>();
+    const adjacency = adjacencyTokens(extracted.text).slice(0, MAX_TOKENS);
+    for (let start = 0; start < adjacency.length; start++) {
+      if (STOPWORDS.has(adjacency[start].value)) continue;
+      let phrase = adjacency[start].value;
+      namedPhrases.add(phrase);
+      for (let length = 1; length < 3 && start + length < adjacency.length; length++) {
+        const next = adjacency[start + length];
+        if (next.boundaryBefore || STOPWORDS.has(next.value)) break;
+        phrase += ` ${next.value}`;
+        namedPhrases.add(phrase);
+      }
+    }
+
     // Position index of every prose token, so a bound can be tied to the alias
     // it belongs to instead of to whichever clause happens to be first.
     const proseTokens = extracted.text
@@ -271,18 +331,46 @@ export class TextCorrelationEngine {
     // directly. This is deliberately the weakest tier and produces review
     // evidence only — an advisory naming a product is not evidence that an
     // installed version is exposed.
+    //
+    // The vendor and product must be NAMED TOGETHER, as one phrase in the order
+    // the inventory spells them. Matching them as two independent set members
+    // over every token in the document matched any article that merely mentioned
+    // both words anywhere: "Microsoft announced quarterly results … exchange
+    // server popularity grew" matched the Exchange inventory although the article
+    // never claimed that product was affected. Low-confidence results are now
+    // delivered without a human review step, so bare co-occurrence is not
+    // evidence and must not become an alert.
+    //
+    // A bare product name is also deliberately NOT accepted here. It is the
+    // ambiguous case: prose about a vendor's roadmap, licensing or pricing names
+    // its products constantly without describing a vulnerability, and Tier 2b
+    // has, by definition, no version bound tying the mention to an exposure.
+    // A product genuinely affected without a resolved alias still reaches review
+    // through Tier 2 (an alias) or Tier 1 (structured identity); the cost of
+    // missing this weakest signal is a possible review row, while the cost of
+    // accepting it is a delivered false alert.
     if (!entityByKey.size && extracted.securitySignal) {
       const names = await query<Asset>(
-        `SELECT id,vendor,product,version,revision FROM correlation_asset_inventory
-         WHERE lower(vendor) IN (SELECT jsonb_array_elements_text($1::jsonb))
-           AND lower(product) IN (SELECT jsonb_array_elements_text($1::jsonb))
+        `SELECT id,vendor,product,version,revision FROM correlation_asset_inventory i
+         WHERE EXISTS (
+           SELECT 1 FROM unnest($1::text[]) AS phrase
+           WHERE lower(phrase) = lower(i.vendor) || ' ' || lower(i.product)
+         )
          ORDER BY id
          LIMIT ${MAX_MATCH_FANOUT + 1}`,
-        [JSON.stringify(tokens.slice(0, 2000))],
+        // A JS array is bound as a native PostgreSQL array. Serialising it to a
+        // JSON string bound a single scalar, and `unnest` over a non-array raised
+        // "cannot cast type json to text[]" — swallowed by the region wrapper, so
+        // the whole Tier 2b lookup silently returned nothing.
+        [[...namedPhrases]],
       );
       if (names.rows.length > MAX_MATCH_FANOUT) throw new Error('MATCH_FANOUT_LIMIT');
       for (const asset of names.rows)
-        add(asset, 'LOW', 'Vendor/product tokens present; contextual applicability requires review');
+        add(
+          asset,
+          'LOW',
+          'Vendor/product named together in the prose; contextual applicability requires review',
+        );
     }
 
     // Deterministic keyset walk of each entity's inventory. A bare LIMIT over

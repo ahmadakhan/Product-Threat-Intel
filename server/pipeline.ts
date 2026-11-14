@@ -1734,7 +1734,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         const known = new Set(correlated.newFindings.map(findingIdentity));
         correlated.newFindings.push(...historical.newFindings.filter((finding) => !known.has(findingIdentity(finding))));
       }
-      correlated.newFindings = assessFindings(correlated.newFindings, feedTypesById);
+      correlated.newFindings = assessFindings(correlated.newFindings, feedTypesById, settings);
       await put(db, 'systemState', 'matched-inventory-v1', inventoryFingerprints);
       // `correlated.newFindings` is every current match because the server asks
       // for existing candidates so it can refresh applicability. The execution

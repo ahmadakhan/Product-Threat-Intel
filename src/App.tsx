@@ -24,6 +24,7 @@ const AdvisoryTemplateView = lazy(() => import('./components/AdvisoryTemplateVie
 const DailyDigestView = lazy(() => import('./components/DailyDigestView').then((m) => ({ default: m.DailyDigestView })));
 const EmailHistoryView = lazy(() => import('./components/EmailHistoryView').then((m) => ({ default: m.EmailHistoryView })));
 const EmailQueueView = lazy(() => import('./components/EmailQueueView').then((m) => ({ default: m.EmailQueueView })));
+const MlOperationsView = lazy(() => import('./components/MlOperationsView').then((m) => ({ default: m.MlOperationsView })));
 const OperationalLogsView = lazy(() => import('./components/OperationalLogsView').then((m) => ({ default: m.OperationalLogsView })));
 const SystemHealthView = lazy(() => import('./components/SystemHealthView').then((m) => ({ default: m.SystemHealthView })));
 const ActionCenter = lazy(() => import('./components/ActionCenter').then((m) => ({ default: m.ActionCenter })));
@@ -66,6 +67,7 @@ export const MainContent: React.FC = () => {
         {activeTab === 'daily-digest' && <DailyDigestView />}
         {activeTab === 'emails' && <EmailHistoryView />}
         {activeTab === 'email-queue' && <EmailQueueView />}
+        {activeTab === 'ml-operations' && <MlOperationsView />}
         {activeTab === 'logs' && <OperationalLogsView />}
         {activeTab === 'health' && <SystemHealthView />}
         {activeTab === 'settings' && <SettingsView />}

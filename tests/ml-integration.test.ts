@@ -95,6 +95,37 @@ describe('ML pipeline integration', () => {
       for (const confidence of [NaN, Infinity, -1, 101])
         assert.equal(shouldAutoDispatch(confidence, { confirmedFindingThreshold: 0 }), false);
     });
+
+    it('uses the learned threshold only after explicit opt-in', (t) => {
+      const model = getMlRuntime()?.autoDispatchThreshold;
+      assert.ok(model);
+      let recommendation = 20;
+      t.mock.method(model, 'isTrained', () => true);
+      t.mock.method(model, 'getThreshold', () => recommendation);
+      // Opt-out remains authoritative even when the model recommends lower.
+      assert.equal(
+        shouldAutoDispatch(80, {
+          confirmedFindingThreshold: 90,
+          mlAutoDispatchThresholdEnabled: false,
+        }),
+        false,
+      );
+      assert.equal(
+        shouldAutoDispatch(80, {
+          confirmedFindingThreshold: 90,
+          mlAutoDispatchThresholdEnabled: true,
+        }),
+        true,
+      );
+      recommendation = 99;
+      assert.equal(
+        shouldAutoDispatch(80, {
+          confirmedFindingThreshold: 20,
+          mlAutoDispatchThresholdEnabled: true,
+        }),
+        false,
+      );
+    });
   });
 
   describe('rankReviewFindings', () => {

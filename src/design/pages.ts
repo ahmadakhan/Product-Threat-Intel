@@ -22,6 +22,7 @@ import {
    BarChart3,
    ScanLine,
    CalendarDays,
+   BrainCircuit,
 
 } from 'lucide-react';
 
@@ -47,6 +48,7 @@ export const pages = {
    'email-queue': { section: 'Autonomous pipeline', title: 'Email queue', icon: Inbox },
    'action-center': { section: 'Autonomous pipeline', title: 'Email delivery action center', icon: Activity },
    archive: { section: 'Archive & retention', title: 'Archives & retention', icon: Archive },
+  'ml-operations': { section: 'System & audit', title: 'ML operations', icon: BrainCircuit },
   logs: { section: 'System & audit', title: 'Audit logs', icon: FileCode2 },
   health: { section: 'System & audit', title: 'System health', icon: Cpu },
   aliases: { section: 'System & audit', title: 'Alias thesaurus', icon: Tags },

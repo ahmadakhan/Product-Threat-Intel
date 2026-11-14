@@ -10,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { normalizeCveId, sourceCveContentHash, stableJson } from '../src/utils/deduplicator';
 import { parseCPE23 } from '../src/utils/cpeMatcher.ts';
+import { cpePreFilter } from './ml/integration.ts';
 import { paceConcurrent } from './concurrency';
 import { cvssSeverity, normalizeCvssVersion, sanitizeCvssVector } from './cvss.ts';
 import { OTX_MAX_PAGES, OTX_PAGE_SIZE, OTX_SUBSCRIBED_PULSES_URL, parseOtxPulsePage, validateOtxNextUrl } from './otx.ts';
@@ -164,7 +165,7 @@ export function normalizeNvd(item: any, feedId: string): NormalizedCVE | null {
     for (const child of node.nodes || node.children || []) walk(child);
   };
    for (const config of cve.configurations || []) walk(config);
-  const validDetails = details.filter((d) => parseCPE23(d.criteria).isValid);
+  const validDetails = details.filter((d) => cpePreFilter(d.criteria) && parseCPE23(d.criteria).isValid);
   const description = cve.descriptions?.find((d: any) => d.lang === 'en')?.value || cve.id;
   const score = metric?.baseScore ?? 0;
   try {
@@ -1069,7 +1070,7 @@ function normalizeNvdItem(item: any, feedId: string): NormalizedCVE | null {
   };
 
   for (const config of cve.configurations || []) walk(config);
-  const validDetails = details.filter((d) => parseCPE23(d.criteria).isValid);
+  const validDetails = details.filter((d) => cpePreFilter(d.criteria) && parseCPE23(d.criteria).isValid);
 
   const description =
     cve.descriptions?.find((d: any) => d.lang === 'en')?.value || cve.id || '';

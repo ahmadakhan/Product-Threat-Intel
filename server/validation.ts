@@ -457,6 +457,10 @@ export const settingsSchema = z
     schedulerEnabled: z.boolean(),
     advisoryPrefix: z.string().regex(/^[A-Za-z0-9_-]{1,30}$/),
     autoDispatchEnabled: z.boolean(),
+    // ML recommendations are opt-in. Both default off so existing deployments
+    // keep the static operator threshold and review routing unchanged.
+    mlAutoDispatchThresholdEnabled: z.boolean().default(false),
+    mlReviewRoutingEnabled: z.boolean().default(false),
     emailEnabled: z.boolean().default(true),
     confirmedFindingThreshold: z.number().int().min(0).max(100).default(90),
     // Must match DEFAULT_SETTINGS (shared/state.ts) and the UI coercion

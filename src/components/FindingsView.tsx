@@ -192,6 +192,7 @@ export const FindingsView: React.FC = () => {
               <option value="latest">Latest</option>
               <option value="published">Published</option>
               <option value="modified">Last Modified</option>
+              <option value="mlPriority">ML priority</option>
             </select>
           </div>
 
@@ -387,6 +388,15 @@ export const FindingsView: React.FC = () => {
                             >
                               {finding.exploitRisk.replace(/_/g, ' ')}
                             </span>
+                            {finding.mlAssessment && (
+                              <div
+                                className="mt-1 text-[10px] font-mono text-zinc-500 dark:text-zinc-500 light:text-zinc-600"
+                                title={`ML decision support: ${finding.mlAssessment.severityTier} tier, ${Math.round(finding.mlAssessment.matchConfidence)}% match confidence. It does not override applicability or operator policy.`}
+                              >
+                                ML {finding.mlAssessment.severityTier} ·{' '}
+                                {Math.round(finding.mlAssessment.matchConfidence)}%
+                              </div>
+                            )}
                           </td>
 
                           {/* Auto-Notification */}
@@ -537,6 +547,54 @@ export const FindingsView: React.FC = () => {
                 </div>
               )}
             </div>
+
+            {/* ML decision support */}
+            {selectedFinding.mlAssessment ? (
+              <div className="bg-zinc-950/60 dark:bg-zinc-950/60 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-xl p-3 text-xs space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-zinc-500 dark:text-zinc-500 light:text-zinc-600 font-mono text-[10px] uppercase">
+                    ML assessment · decision support only
+                  </span>
+                  <span className="font-mono text-[10px] text-zinc-400">
+                    {fmtDateTime(selectedFinding.mlAssessment.assessedAt, settings.timezone)}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 font-mono text-[11px] text-zinc-300 dark:text-zinc-300 light:text-zinc-700">
+                  <div>
+                    Match confidence:{' '}
+                    <span className="font-semibold">{Math.round(selectedFinding.mlAssessment.matchConfidence)}%</span>
+                  </div>
+                  <div>
+                    Alias confidence:{' '}
+                    <span className="font-semibold">{Math.round(selectedFinding.mlAssessment.aliasConfidence * 100)}%</span>
+                  </div>
+                  <div>
+                    Exploit risk:{' '}
+                    <span className="font-semibold">{selectedFinding.mlAssessment.exploitRisk.replace(/_/g, ' ')}</span>
+                  </div>
+                  <div>
+                    Severity tier: <span className="font-semibold">{selectedFinding.mlAssessment.severityTier}</span>
+                  </div>
+                  <div>
+                    Remediation: <span className="font-semibold">{selectedFinding.mlAssessment.remediationCompleteness}</span>
+                  </div>
+                  <div>
+                    CPE parse:{' '}
+                    <span className="font-semibold">
+                      {selectedFinding.mlAssessment.cpeParseRecommended ? 'recommended' : 'skip malformed input'}
+                    </span>
+                  </div>
+                </div>
+                <div className="text-[10px] leading-relaxed text-zinc-500">
+                  These values help prioritise review. They never override applicability, VEX suppression, or
+                  operator dispatch policy. Record an observed outcome in ML operations to improve the next model.
+                </div>
+              </div>
+            ) : (
+              <div className="text-[10px] text-zinc-500">
+                No ML assessment recorded for this finding. Rule-based policy remains authoritative.
+              </div>
+            )}
 
             {/* Vendor Advisory link */}
             <div className="flex items-center justify-between text-xs bg-zinc-950/60 dark:bg-zinc-950/60 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 p-3 rounded-xl">

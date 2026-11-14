@@ -47,6 +47,8 @@ const withProcessingDefaults = (value: AppSettings): AppSettings => ({
 
 const findingDispatchSettings = (value: AppSettings) => ({
   autoDispatchEnabled: value.autoDispatchEnabled,
+  mlAutoDispatchThresholdEnabled: value.mlAutoDispatchThresholdEnabled ?? false,
+  mlReviewRoutingEnabled: value.mlReviewRoutingEnabled ?? false,
   confirmedFindingThreshold: value.confirmedFindingThreshold ?? 90,
   autoDispatchUnverifiableMatches: value.autoDispatchUnverifiableMatches ?? false,
   reviewUnverifiableMatches: value.reviewUnverifiableMatches ?? false,
@@ -1285,6 +1287,35 @@ export function SettingsView() {
                           Subscription tiers and approval requirements determine who receives each
                           notification.
                         </p>
+                      </div>
+                    </div>
+                    <div className="processing-policy-group">
+                      <div className="processing-subheading">
+                        <h4>ML-assisted decisions (opt-in)</h4>
+                        <p>
+                          Trained models are quality-gated before use. These switches are disabled by
+                          default, and rule-based policy remains in force whenever a model is absent.
+                        </p>
+                      </div>
+                      <div className="processing-choice-grid">
+                        <ProcessingToggle
+                          id="processing-ml-threshold"
+                          title="Use the learned dispatch threshold"
+                          description="When automatic dispatch is off and the threshold model is trained, use its recommended confidence minimum instead of the static value above. Turn this off to return immediately to the operator minimum."
+                          checked={findingForm.mlAutoDispatchThresholdEnabled ?? false}
+                          onChange={(checked) =>
+                            setFindingForm({ ...findingForm, mlAutoDispatchThresholdEnabled: checked })
+                          }
+                        />
+                        <ProcessingToggle
+                          id="processing-ml-review-routing"
+                          title="Use ML confidence for review routing"
+                          description="Allow trained match and alias confidence models to promote a finding held only by the confidence threshold. Applicability, VEX, review-only source and circuit-breaker holds are never overridden."
+                          checked={findingForm.mlReviewRoutingEnabled ?? false}
+                          onChange={(checked) =>
+                            setFindingForm({ ...findingForm, mlReviewRoutingEnabled: checked })
+                          }
+                        />
                       </div>
                     </div>
                     <div className="processing-policy-group">

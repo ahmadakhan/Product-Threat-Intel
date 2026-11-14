@@ -56,11 +56,29 @@ export class CronDataProvider {
     const values = result.rows.flatMap(({ kind, data }) =>
       kind === 'findings' ? [data.matchedCpe] : Array.isArray(data.cpes) ? data.cpes : [],
     );
-    return [
-      ...new Set(
-        values.filter((value): value is string => typeof value === 'string' && parseCPE23(value).isValid),
-      ),
-    ];
+    // The validity gate is a binary classifier, so its training set needs a
+    // negative class. Production rows are validated before storage, which meant
+    // the old collector only ever supplied label=1 samples and the gate could
+    // pass its quality check without learning what malformed input looks like.
+    // Include every stored string (legacy rows may be invalid) and derive a
+    // small, deterministic set of malformed variants from each valid CPE.
+    const strings = new Set<string>();
+    const add = (value: string) => {
+      if (strings.size >= 10_000) return;
+      const trimmed = value.trim();
+      if (trimmed) strings.add(trimmed);
+    };
+    for (const value of values) {
+      if (typeof value !== 'string') continue;
+      add(value);
+      if (!parseCPE23(value).isValid) continue;
+      // Two clearly-invalid variants: missing the versioned CPE prefix and an
+      // extra trailing segment. Keeping the negative class deliberately sparse
+      // avoids drowning the valid samples during logistic training.
+      add(value.replace(/^cpe:/i, ''));
+      add(`${value}:extra-token`);
+    }
+    return [...strings];
   }
 
   async collectDispatchOutcomes(db: Db): Promise<CronTrainingData['dispatchOutcomes']> {

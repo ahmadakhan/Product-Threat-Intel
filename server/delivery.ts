@@ -236,9 +236,58 @@ export interface EmailAttachment {
 }
 
 /**
- * Builds the HTML attachment for a findings delivery from the exact body being
- * sent. Findings bundles carry their rendered document as a file so the
- * recipient keeps the evidence even when the mail body is truncated.
+ * True for deliveries that carry a finding advisory document, which is exactly
+ * the set that gets an HTML copy of the email attached.
+ *
+ * The consolidated findings queue (id `FINDINGS:<batch>`) is the primary path
+ * for finding emails, but `isFindingDelivery` excludes it because the Action
+ * Center only offers follow-up actions on real advisory rows. Treating that
+ * exclusion as "not a finding email" is what silently prevented the main
+ * findings email from ever carrying its attachment, so the synthetic bundle
+ * prefixes are added explicitly here.
+ *
+ * News and zero-day digest bundles describe articles rather than findings, and
+ * self-healing alerts are infrastructure messages; none of them is attached.
+ */
+const isFindingsEmail = (advisoryId: string | null | undefined): boolean => {
+  if (!advisoryId) return false;
+  // Bundle prefixes are classified before the generic predicate so a synthetic
+  // id is never admitted by accident and a real advisory id is never excluded.
+  if (advisoryId.startsWith('FINDINGS:')) return true;
+  if (/^(NEWS|ZERODAY|UNVERIFIABLE|SELFHEAL):/i.test(advisoryId)) return false;
+  return isFindingDelivery(advisoryId);
+};
+
+export { isFindingsEmail };
+
+/**
+ * Filesystem-safe, human-readable attachment name derived from the email
+ * subject, so the file a recipient saves carries the same title as the message
+ * they received. Falls back to the delivery identity when there is no subject.
+ */
+export function emailAttachmentFilename(subject: string | undefined, fallbackStem: string): string {
+  const stem =
+    (subject || '')
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .replace(/[<>:"/\\|?*]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .replace(/^[.\s]+|[.\s]+$/g, '')
+      .slice(0, 120)
+      .trim() || fallbackStem;
+  return `${stem}.html`;
+}
+
+/**
+ * Builds the HTML attachment for a findings email from the exact body being
+ * sent — the same string the transport receives as `html`, with only a UTF-8
+ * charset declaration added — so the recipient keeps a faithful copy of what
+ * was delivered and can open it without a mail client.
+ *
+ * Every finding email carries it on every automatic delivery. It is not tied to
+ * an operator edit flag: the Action Center checkbox used to persist
+ * `edits.attachHtml` and nothing on the server ever read it, so the attachment
+ * silently disappeared for exactly the messages that were supposed to have it.
+ * An explicit `attachHtml: false` is still honoured so the control is truthful.
  *
  * The HTML ceiling is deliberately separate from the PDF renderer's limit: an
  * HTML file is just the body bytes, so a large digest can still be attached
@@ -246,8 +295,8 @@ export interface EmailAttachment {
  * provider call, instead of failing the send after the body has been prepared.
  */
 export function findingHtmlAttachment(job: Job): EmailAttachment | undefined {
-  const advisoryId = job.advisory_id || '';
-  if (!(isFindingDelivery(advisoryId) || advisoryId.startsWith('FINDINGS:'))) return undefined;
+  if (!isFindingsEmail(job.advisory_id)) return undefined;
+  if (job.edits?.attachHtml === false) return undefined;
   const html = job.payload.html;
   if (!html) return undefined;
   if (!htmlAttachmentIsAttachable(html))
@@ -255,10 +304,24 @@ export function findingHtmlAttachment(job: Job): EmailAttachment | undefined {
       `Findings HTML attachment exceeds the attachment limit of ${HTML_ATTACHMENT_MAX_BYTES} bytes`,
     );
   return {
-    filename: `${deliveryAttachmentStem(job)}.html`,
-    content: Buffer.from(html, 'utf8'),
+    filename: emailAttachmentFilename(job.payload.subject, deliveryAttachmentStem(job)),
+    content: Buffer.from(withUtf8Charset(html), 'utf8'),
     contentType: 'text/html; charset=utf-8',
   };
+}
+
+/**
+ * Declares UTF-8 in the attached document so a browser opening the saved file
+ * decodes it exactly as a mail client decodes the message. The emailed body
+ * itself is unchanged — only the file copy gains the declaration, and only when
+ * the document does not already declare a charset.
+ */
+export function withUtf8Charset(html: string): string {
+  if (/<meta[^>]+charset/i.test(html)) return html;
+  const meta = '<meta charset="utf-8">';
+  if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (tag) => `${tag}${meta}`);
+  if (/<html[^>]*>/i.test(html)) return html.replace(/<html[^>]*>/i, (tag) => `${tag}<head>${meta}</head>`);
+  return `${meta}${html}`;
 }
 export interface EmailRetryPolicy {
   /** When false, a transient failure becomes terminal after the first attempt. */
@@ -696,7 +759,8 @@ export function createMailSender(
     // body being sent, so the PDF is byte-identical to the email.
     const content = applyJobEdits(job);
     const pdfAttachment = await buildPdfAttachment(content, config, db);
-    // The HTML file contains precisely the HTML sent as the email body.
+    // The HTML file contains precisely the HTML sent as the email body, named
+    // after the subject, and is attached to every finding email automatically.
     const htmlAttachment = findingHtmlAttachment(content);
     const attachments = [htmlAttachment, pdfAttachment].filter(
       (item): item is EmailAttachment => Boolean(item),
@@ -1746,6 +1810,10 @@ export async function deliverNext(
   // generated or sent. Provider configuration is left intact; only transport
   // is blocked. Fail closed so a disabled setting can never leak an email.
   let permanent = false;
+  // ML classification is kept separate from `permanent` because the training
+  // label for `ml.delivery.error` must remain the authoritative rule-based
+  // outcome, not the model's own recommendation fed back into its training set.
+  let mlPermanent = false;
   let providerId = '',
     statusCode = 0,
     signature = '',
@@ -1804,8 +1872,11 @@ export async function deliverNext(
         throw new Error('Native evidence or notification policy is no longer applicable');
       }
       // Native evidence is delivered regardless of confidence. The rendered
-      // advisory states the limitation on each affected finding, so suppressing
-      // the email only hid real exposure from the security team.
+      // alert names its confidence and lists every unconfirmed match, so
+      // suppressing it only hid real exposure from the security team. Whether
+      // a MEDIUM/LOW advisory is queued at all is the operator's
+      // `low_confidence_alerts_enabled` decision, applied in
+      // queueNativeNotifications before anything reaches this point.
     }
     let advisory = await get<Advisory>(pool, 'advisories', job.advisory_id);
     if (!advisory && typeof job.advisory_id === 'string' && job.advisory_id.startsWith('FINDINGS:')) {
@@ -2186,13 +2257,38 @@ export async function deliverNext(
       unconfirmedError = 'Delivery accepted by the transport but receipt bookkeeping did not complete';
     }
   }
+  // Conservative ML use: only upgrade to permanent when the rule-based path did
+  // not already decide, the transport *provably rejected* the attempt, and the
+  // provider did not supply an HTTP status we can classify directly. Timeouts
+  // and socket resets keep the existing retry policy.
+  if (!permanent && error && job.channel === 'email' && transportRejected) {
+    const model = getMlRuntime()?.deliveryErrorClassifier;
+    const observedStatus = Number(/HTTP\s+(\d{3})\b/i.exec(error)?.[1] ?? statusCode);
+    if (model?.isTrained() && (!Number.isFinite(observedStatus) || observedStatus === 0)) {
+      try {
+        const classification = classifyDeliveryError({
+          provider: emailProvider ?? 'unknown',
+          statusCode: Number.isFinite(observedStatus) ? observedStatus : 0,
+          errorMessage: error,
+          attemptNumber: job.attempts,
+          hourOfDay: new Date().getUTCHours(),
+        });
+        if (classification.isPermanent) {
+          mlPermanent = true;
+          errorInfo = { ...errorInfo, mlPermanentRecommendation: true, mlReason: classification.reason };
+        }
+      } catch {
+        // A model failure never changes retry behavior; the rule-based path stays authoritative.
+      }
+    }
+  }
   let finalized = false;
   try {
   await transaction(pool, async (db) => {
     const current = await db.query('SELECT status,lock_token FROM outbox WHERE id=$1 FOR UPDATE', [job.id]);
     if (current.rows[0]?.lock_token !== job.lock_token) return;
     const failed =
-        !!error && (permanent || !retryPolicy.enabled || job.attempts >= retryPolicy.maxAttempts),
+        !!error && (permanent || mlPermanent || !retryPolicy.enabled || job.attempts >= retryPolicy.maxAttempts),
       mlDelayMs = getMlRuntime()?.deliveryOptimizer.isTrained() ? computeRetryDelay(job.attempts) : undefined,
       retryDelay = emailRetryDelayPlan(job.attempts, retryPolicy, mlDelayMs);
     const retryDelayBaseAt = Date.now();
@@ -2484,7 +2580,12 @@ export async function deliverNext(
       });
       if (error) await writeEvent(db, {
         category: 'ML', code: 'ml.delivery.classification', message: 'Delivery classification recommendation',
-        context: { ...classification, jobId: job.id, authoritativePermanent: permanent },
+        context: {
+          ...classification,
+          jobId: job.id,
+          authoritativePermanent: permanent,
+          mlPermanentApplied: mlPermanent,
+        },
       });
       if (error) await writeEvent(db, {
         category: 'ML', code: 'ml.delivery.error', message: 'Observed transport error classification',

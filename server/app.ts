@@ -52,7 +52,12 @@ import { queueRun, stopRun, renderAdvisory } from './pipeline';
 import { formatAdvisoryId } from '../src/utils/executionName';
 import { recoveryAt, isPermanentFeedFailure } from './feedRecovery';
 import { computeFeedRecoveryDelay, getMlRuntime } from './ml/integration.ts';
-import { mlFeedbackSchema } from './ml/feedback.ts';
+import {
+  deriveFindingFeedbackSamples,
+  mlFeedbackSchema,
+  mlFindingFeedbackSchema,
+} from './ml/feedback.ts';
+import { mlMetrics } from './ml/metrics.ts';
 import { QUALITY_GATES } from './ml/train/qualityGates.ts';
 import {
   advisoryRevision,
@@ -1816,21 +1821,111 @@ export function createApp(
   );
   app.get('/api/ml/status', requireRole('ADMIN', 'OPERATOR', 'VIEWER'), asyncRoute(async (_req, res) => {
     const runtime = getMlRuntime() ?? options.mlRuntime;
-    const models = Object.entries(QUALITY_GATES).map(([id, gate]) => {
-      const loaded = runtime?.registry.get(id);
-      return {
-        id, status: loaded?.status ?? 'UNTRAINED', trained: Boolean(loaded),
-        version: loaded?.metadata.version ?? null, trainedAt: loaded?.metadata.trainedAt ?? null,
-        minimumSamples: gate.minimumSamples,
-      };
-    });
-    const training = await pool.query(
+    const training = await pool.query<{
+      occurred_at: string;
+      level: string;
+      context: Record<string, unknown> | null;
+    }>(
       "SELECT occurred_at,level,context FROM operational_events WHERE code='ml.training.completed' ORDER BY id DESC LIMIT 1",
     );
+    const latestRow = training.rows[0];
+    const latestContext = latestRow?.context && typeof latestRow.context === 'object' ? latestRow.context : {};
+    const latestResults = Array.isArray(latestContext.results)
+      ? latestContext.results.filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object')
+      : [];
+    const resultById = new Map(
+      latestResults
+        .filter((row) => typeof row.modelId === 'string')
+        .map((row) => [row.modelId as string, row]),
+    );
+    const models = Object.entries(QUALITY_GATES).map(([id, gate]) => {
+      const loaded = runtime?.registry.get(id);
+      const metadata = loaded?.metadata;
+      const latest = resultById.get(id);
+      return {
+        id,
+        status: loaded?.status ?? 'UNTRAINED',
+        trained: loaded?.model.isTrained?.() === true,
+        version: metadata?.version ?? null,
+        trainedAt: metadata?.trainedAt ?? null,
+        minimumSamples: gate.minimumSamples,
+        description: metadata?.description,
+        featureCount: metadata?.featureSchema.length ?? 0,
+        performance: metadata?.performance ?? null,
+        latestMetrics: mlMetrics.valuesForModel(id),
+        lastTraining: latest
+          ? {
+              status: String(latest.status ?? 'unknown'),
+              samplesCollected: Number(latest.samplesCollected ?? 0),
+              validationPassed:
+                typeof latest.validationPassed === 'boolean' ? latest.validationPassed : null,
+              failureReason:
+                typeof latest.failureReason === 'string' ? latest.failureReason : undefined,
+              saved: latest.saved === true,
+            }
+          : null,
+      };
+    });
+    const feedbackWindowDays = 30;
+    const feedbackRows = await pool.query<{ source: string; count: number }>(
+      `SELECT COALESCE(context->>'source','unknown') AS source, count(*)::int AS count
+       FROM operational_events
+       WHERE code='ml.training.feedback' AND occurred_at >= now() - ($1 * interval '1 day')
+       GROUP BY 1 ORDER BY 1`,
+      [feedbackWindowDays],
+    );
+    const feedbackCounts: Record<string, number> = {
+      calibrationPairs: 0,
+      exploitRiskSamples: 0,
+      severityTierSamples: 0,
+      digestSelectionSamples: 0,
+      zeroDayRateLimitSamples: 0,
+      emailCompositionSamples: 0,
+    };
+    for (const row of feedbackRows.rows) feedbackCounts[row.source] = Number(row.count);
     res.json({
-      initialized: Boolean(runtime), models,
+      initialized: Boolean(runtime),
+      models,
       trainedModels: models.filter((model) => model.trained).length,
-      totalModels: models.length, latestTraining: training.rows[0] ?? null,
+      totalModels: models.length,
+      latestTraining: latestRow
+        ? { occurredAt: latestRow.occurred_at, level: latestRow.level, ...latestContext }
+        : null,
+      feedbackCounts,
+      feedbackWindowDays,
+    });
+  }));
+  app.get('/api/ml/review-queue', requireRole('ADMIN', 'OPERATOR', 'VIEWER'), asyncRoute(async (req, res) => {
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 25));
+    const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
+    const threshold = settings.confirmedFindingThreshold ?? 90;
+    const rows = await pool.query<{ data: Finding; total: number }>(
+      `SELECT data, count(*) OVER()::int AS total
+       FROM records
+       WHERE kind='findings'
+         AND data->>'status' NOT IN ('FALSE_POSITIVE','PATCH_APPLIED','RESOLVED')
+         AND (
+           data->>'notificationStatus' = 'REVIEW_REQUIRED'
+           OR COALESCE(
+                safe_numeric(data->'mlAssessment'->>'matchConfidence'),
+                safe_numeric(data->>'confidence'),
+                0
+              ) < $1
+         )
+       ORDER BY COALESCE(
+                  safe_numeric(data->'mlAssessment'->>'matchConfidence'),
+                  safe_numeric(data->>'confidence'),
+                  0
+                ) ASC,
+                updated_at DESC
+       LIMIT $2`,
+      [threshold, limit],
+    );
+    res.json({
+      items: rows.rows.map((row) => row.data),
+      total: rows.rows[0]?.total ?? 0,
+      threshold,
+      limit,
     });
   }));
   app.post('/api/ml/feedback', requireRole('ADMIN', 'OPERATOR'), asyncRoute(async (req, res) => {
@@ -1843,6 +1938,48 @@ export function createApp(
       await appendAudit(db, 'ML training feedback recorded', feedback.source, req.operator!.username, 'PIPELINE');
     });
     res.status(201).json({ recorded: true, source: feedback.source, effect: 'next_training_run' });
+  }));
+  app.post('/api/ml/findings/:id/feedback', requireRole('ADMIN', 'OPERATOR'), asyncRoute(async (req, res) => {
+    const input = mlFindingFeedbackSchema.parse(req.body);
+    const findingId = req.params.id;
+    const result = await transaction(pool, async (db) => {
+      const finding = await getForUpdate<Finding>(db, 'findings', findingId);
+      if (!finding) throw new HttpError(404, 'Finding not found');
+      const samples = deriveFindingFeedbackSamples(finding, input);
+      for (const sample of samples) {
+        await writeEvent(db, {
+          category: 'ML',
+          code: 'ml.training.feedback',
+          message: 'Analyst-verified ML training feedback recorded',
+          context: sample,
+        });
+      }
+      // Keep the analyst's disposition and any notes separate from the model
+      // samples so the sample event remains a strict, reusable data shape.
+      await writeEvent(db, {
+        category: 'ML',
+        code: 'ml.feedback.review',
+        message: 'Finding review label recorded for active learning',
+        context: {
+          findingId: finding.id,
+          cveId: finding.cveId,
+          disposition: input.disposition,
+          sources: samples.map((sample) => sample.source),
+          correctedExploitRisk: input.correctedExploitRisk,
+          correctedSeverityTier: input.correctedSeverityTier,
+          notes: input.notes,
+        },
+      });
+      await appendAudit(
+        db,
+        'ML finding feedback recorded',
+        `${finding.cveId}: ${input.disposition}; ${samples.map((sample) => sample.source).join(', ')}`,
+        req.operator!.username,
+        'PIPELINE',
+      );
+      return { findingId: finding.id, sources: samples.map((sample) => sample.source) };
+    });
+    res.status(201).json({ recorded: result.sources.length, ...result, effect: 'next_training_run' });
   }));
   app.get(
     '/api/health',

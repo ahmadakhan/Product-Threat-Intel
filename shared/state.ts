@@ -77,6 +77,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   // and the coercion in SettingsView — a divergence means fresh installs,
   // schema defaults and the UI disagree about the same setting.
   autoDispatchEnabled: true,
+  mlAutoDispatchThresholdEnabled: false,
+  mlReviewRoutingEnabled: false,
   confirmedFindingThreshold: 90,
   autoDispatchUnverifiableMatches: true,
   maxFindingsPerRun: 10000,

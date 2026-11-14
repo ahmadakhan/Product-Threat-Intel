@@ -9,6 +9,7 @@ import {
   parseCPE23,
   purlIdentity,
 } from '../src/utils/cpeMatcher.ts';
+import { cpePreFilter } from './ml/integration.ts';
 
 /**
  * Typed version ordinal used by the PostgreSQL candidate index.
@@ -78,6 +79,9 @@ const aliasKeys = (
 ];
 
 function cpeIdentities(cpe: string, options: MatchIndexOptions): string[] {
+  // The trained gate may skip full parsing for obviously malformed criteria;
+  // if it is uncertain or untrained it always defers to the authoritative parser.
+  if (!cpePreFilter(cpe)) return [];
   const parsed = parseCPE23(cpe);
   if (!parsed.isValid) return [];
   if (/[?*]/.test(parsed.vendor) || /[?*]/.test(parsed.product)) return [];
