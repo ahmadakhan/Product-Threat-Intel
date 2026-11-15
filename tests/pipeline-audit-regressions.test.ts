@@ -86,19 +86,16 @@ test(
       await migrate(pool);
       // There is no operator review queue: a finding the confidence policy
       // cannot confirm is still dispatched, and the rendered advisory states
-      // the limitation on the finding itself. The threshold therefore selects
-      // the finding's notificationStatus — the label and caveat the recipient
-      // sees — it does not withhold the alert. Asserting the label is what this
-      // case is really about; asserting an empty outbox encoded the removed
-      // review-queue contract.
-      await t.test('preliminary match reuse respects the configured confidence threshold', async () => {
+      // the limitation on the finding itself. The threshold therefore no longer
+      // selects notificationStatus; asserting an empty outbox encoded the
+      // removed review-queue contract.
+      await t.test('preliminary match reuse dispatches a limited-confidence finding', async () => {
         await reset(99);
         await run();
-        // Below the 99% threshold the finding is labelled review-required — and
-        // still queued: there is no review queue, so the alert is disclosed
-        // with a low-confidence note rather than withheld.
+        // The finding is queued with its confidence disclosed; nothing is
+        // withheld for operator review.
         const held = (await list<Finding>(pool, 'findings'))[0];
-        assert.equal(held.notificationStatus, 'REVIEW_REQUIRED');
+        assert.equal(held.notificationStatus, 'QUEUED_FOR_DISPATCH');
         const heldRow = (await pool.query("SELECT payload FROM outbox WHERE advisory_id IS NOT NULL OR true LIMIT 1")).rows[0];
         assert.ok(heldRow, 'a held finding is disclosed, not withheld');
         await save('settings', 'main', {

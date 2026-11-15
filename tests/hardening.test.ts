@@ -734,11 +734,19 @@ test('enterprise hardening invariants', { skip: !database }, async (t) => {
       ]);
       let pairs = await buildCandidatePairs(pool);
 
+      // The version index is a conservative superset: a package asset whose
+      // declared vendor/product match the CVE is a candidate even though its
+      // CPE list is empty. Exact version filtering happens in matching.
       assert.deepEqual([...(pairs.get('CVE-2026-71001') ?? [])].sort(), [
         'asset-in',
+        'asset-pkg',
         'asset-rc',
       ]);
-      assert.deepEqual([...(pairs.get('CVE-2026-71002') ?? [])].sort(), ['asset-in', 'asset-rc']);
+      assert.deepEqual([...(pairs.get('CVE-2026-71002') ?? [])].sort(), [
+        'asset-in',
+        'asset-pkg',
+        'asset-rc',
+      ]);
       assert.deepEqual([...(pairs.get('CVE-2026-71003') ?? [])], ['asset-pkg']);
       assert.equal(
         pairs.has('CVE-2026-71004'),

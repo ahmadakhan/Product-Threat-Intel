@@ -72,11 +72,13 @@ test('retained leadership and queue quotas work against PostgreSQL',{skip:!proce
     await put(pool,'recipients','r1',{id:'r1',email:'audit@example.invalid',name:'SOC',enabled:true,deliveryGroup:'SECURITY_TEAM',subscriptionTier:'ALL_SEVERITIES'});
     const findings=runVulnerabilityPipeline([feed],[cve,{...cve,cveId:'CVE-2026-98002'}],[asset],[],[],settings).newFindings;
     // Exercise the final queue guard independently of matching-time flags.
+    // REVIEW_REQUIRED is a false-positive label now, not a dispatch gate, so
+    // both findings must still be consolidated into one batch.
     for (const finding of findings) finding.notificationStatus='REVIEW_REQUIRED';
     await queueConsolidatedFindingNotifications(pool,findings);
     const jobs=(await pool.query('SELECT payload FROM outbox')).rows;
     assert.equal(jobs.length,1);
-    assert.equal(jobs[0].payload.includedFindingIds.length,1);
+    assert.equal(jobs[0].payload.includedFindingIds.length,2);
   }finally{
     await Promise.all([a.close(),b.close()]);
     await pool.end();

@@ -47,7 +47,10 @@ test(
         "INSERT INTO correlation_matches(advisory_id,asset_id,vendor,product,confidence,reason) VALUES(gen_random_uuid(),gen_random_uuid(),'example','widget','HIGH','fixture')",
       );
       const populated = await provider.collectAll(pool);
-      assert.deepEqual(populated.cpeStrings, [cpe]);
+      // The CPE validity gate needs a negative class, so the collector adds two
+      // deterministic malformed variants for every valid CPE it sees.
+      const expectedCpeStrings = [cpe, cpe.replace(/^cpe:/i, ''), `${cpe}:extra-token`];
+      assert.deepEqual(populated.cpeStrings, expectedCpeStrings);
       assert.equal(populated.dispatchOutcomes?.length, 1);
       assert.equal(populated.dispatchOutcomes?.[0].foundTruePositive, true);
       assert.equal(populated.matchConfidenceSamples?.length, 1);
@@ -70,7 +73,7 @@ test(
       await pool.query(
         "UPDATE records SET updated_at=now()-interval '60 days' WHERE kind='findings' AND id='old'",
       );
-      assert.deepEqual(await provider.collectCpeStrings(pool), [cpe]);
+      assert.deepEqual(await provider.collectCpeStrings(pool), expectedCpeStrings);
       const result = await runScheduledTraining(pool, { directory });
       // One training result per model in the registry (18).
       assert.equal(result.summary.total, 18);

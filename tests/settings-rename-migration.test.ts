@@ -12,7 +12,9 @@ test(
     // row is written the way a pre-upgrade deployment would have left it, and
     // migration 042 is then the change under test.
     await migrate(pool);
-    await pool.query(`DELETE FROM schema_migrations WHERE version = 42`);
+    // Both the rename (042) and the later strip of removed keys (045) are under
+    // test, so both are rolled back in the ledger before the second migrate().
+    await pool.query(`DELETE FROM schema_migrations WHERE version IN (42, 45)`);
     await pool.query(
       `INSERT INTO records(kind,id,data) VALUES('settings','main',$1::jsonb)
        ON CONFLICT (kind,id) DO UPDATE SET data = EXCLUDED.data`,

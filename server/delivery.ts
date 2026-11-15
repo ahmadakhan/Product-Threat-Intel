@@ -977,6 +977,12 @@ export async function queueAdvisory(
   const payload = {
     ...advisoryEmail(advisory, html, undefined, { findings }),
     cveIds: advisory.cveIds,
+    // Record the exact findings this job carries. The delivery-time recheck,
+    // acceptance bookkeeping and `reviewNotifiedAt` all use this field; without
+    // it a manually queued advisory fell back to the advisory's whole finding
+    // list for validation but never stamped the notified findings, so the same
+    // finding could be re-selected for every recipient.
+    includedFindingIds: findings.map((finding) => finding.id),
     ...deliveryRevisionEvidence(findings),
     contentRevision,
   };
@@ -1396,7 +1402,14 @@ export async function queueConsolidatedFindingNotifications(
       return true;
     };
 
-    const isPoolDb = typeof (db as any).connect === 'function';
+    // Only wrap in a transaction when `db` is a real Pool. A PoolClient also
+    // exposes `.connect()`, so the previous feature test called connect() on an
+    // already-connected client and threw "Client has already been connected":
+    // the pipeline runs this inside its own locked transaction, so every queued
+    // delivery failed AFTER the findings had been persisted, the outer
+    // transaction rolled back, and the run's findings were silently discarded.
+    // A client is already inside a transaction; use it directly.
+    const isPoolDb = typeof (db as any).connect === 'function' && typeof (db as any).release !== 'function';
     const didQueue = isPoolDb
       ? await transaction(db as pg.Pool, enqueueForRecipient)
       : await enqueueForRecipient(db);
@@ -1771,6 +1784,20 @@ export async function deliverNext(
          WHERE ((status='QUEUED' AND next_attempt<=now()) OR
            (status='SENDING' AND locked_at<now()-interval '2 minutes'))
            AND (channel<>'email' OR $2::boolean)
+           -- Only the newest queued revision of a bundle may be claimed. A
+           -- rebuild gives the replacement a new dedupe key, so the stale row
+           -- has an earlier next_attempt and would otherwise win the queue
+           -- ordering, be sent, and only then be marked SUPERSEDED. Retiring
+           -- it here, before selection, guarantees the transport never sees a
+           -- stale body and no duplicate POST reaches a webhook.
+           AND NOT EXISTS (
+             SELECT 1 FROM outbox newer
+             WHERE newer.channel=outbox.channel
+               AND newer.target_id=outbox.target_id
+               AND newer.advisory_id=outbox.advisory_id
+               AND newer.status='QUEUED'
+               AND (newer.created_at, newer.id) > (outbox.created_at, outbox.id)
+           )
          ORDER BY priority DESC, next_attempt ASC, created_at DESC
          FOR UPDATE SKIP LOCKED LIMIT 1
        ),
@@ -1883,6 +1910,16 @@ export async function deliverNext(
       const findingIds = (job.payload.includedFindingIds ?? []) as string[];
       const findingMap = await getMany<Finding>(pool, 'findings', findingIds);
       const findings = findingIds.map((id) => findingMap.get(id)).filter((f): f is Finding => !!f);
+      if (!findings.length) {
+        // Every finding the batch described has been removed (retention, a
+        // resolution, or an inventory deletion). There is no document to
+        // render, so retrying can never succeed. Treat it exactly like any
+        // other stale bundle: fail it and let the current-inventory rebuild
+        // queue a replacement for whatever still applies.
+        permanent = true;
+        staleAdvisory = true;
+        throw new Error('Advisory has no findings; rebuild from current inventory before delivery');
+      }
       const generatedAt = job.payload.generatedAt ? new Date(job.payload.generatedAt) : new Date();
       advisory = consolidatedFindingsDocument(findings, generatedAt).advisory;
     }
@@ -1914,6 +1951,28 @@ export async function deliverNext(
     // are validated against the whole advisory exactly as before.
     declaredCveIds = job.payload.cveIds ?? advisory?.cveIds ?? [];
     declaredFindingIds = job.payload.includedFindingIds ?? advisory?.findingIds ?? [];
+    // A webhook's event subscription is a property of the consumer, not of the
+    // findings' current applicability. Check it before revalidating inventory so
+    // a narrowed subscription reports the real reason instead of being masked by
+    // a stale-asset error, and so a FINDINGS: batch (which has no advisory row)
+    // is checked at all. The revalidation below may still drop findings that no
+    // longer apply; the transport branch re-checks the surviving set.
+    if (job.channel === 'webhook' && declaredFindingIds.length) {
+      const subscribedHook = await get<WebhookEndpoint>(pool, 'webhooks', job.target_id);
+      if (!subscribedHook?.enabled) {
+        permanent = true;
+        throw new Error('Webhook removed or disabled');
+      }
+      if (native && (native.confidence !== 'HIGH' || !subscribedHook.events.includes('ALL'))) {
+        permanent = true;
+        throw new Error('Webhook subscription does not permit native intelligence');
+      }
+      const declaredFindings = [...(await getMany<Finding>(pool, 'findings', declaredFindingIds)).values()];
+      if (declaredFindings.length && !declaredFindings.every((finding) => webhookAllows(subscribedHook, finding))) {
+        permanent = true;
+        throw new Error('Webhook event subscription no longer permits all advisory findings');
+      }
+    }
     if (advisory && declaredCveIds.some((id) => !job.payload.cveRevisions?.[id])) {
       // Jobs queued before content-revision evidence existed cannot be validated
       // against the advisory they describe. Rebuild the payload from the
@@ -2188,6 +2247,11 @@ export async function deliverNext(
       );
       const timestamp = Math.floor(Date.now() / 1000).toString();
       signature = 'sha256=' + createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
+      // From this point the request may have reached the endpoint. Failures
+      // before it (removed webhook, subscription no longer permitting the
+      // payload) are provably non-deliveries and are recorded as NOT_ATTEMPTED
+      // so the job can be safely re-opened by a rebuilt replacement.
+      transportAttempted = true;
       const response = await request(url, {
         method: 'POST',
         body,
@@ -2302,7 +2366,18 @@ export async function deliverNext(
     const scheduledRetryDelaySource = retryNotBefore > retryDelayBaseAt + retryDelay.delayMs
       ? 'PROVIDER_RETRY_AFTER'
       : retryDelay.source;
-    const outcome = !error ? 'ACCEPTED' : (failed && transportRejected) ? 'REJECTED' : 'UNKNOWN';
+    // A failure before the transport was contacted cannot have delivered the
+    // message. Recording it as NOT_ATTEMPTED (rather than UNKNOWN) is what lets
+    // a rebuilt replacement safely re-open the same dedupe key and is what
+    // distinguishes it from a timeout whose delivery outcome is genuinely
+    // unknown. Only a provable transport rejection is REJECTED.
+    const outcome = !error
+      ? 'ACCEPTED'
+      : !transportAttempted
+        ? 'NOT_ATTEMPTED'
+        : failed && transportRejected
+          ? 'REJECTED'
+          : 'UNKNOWN';
     await db.query(
       'UPDATE outbox SET status=$2,delivery_outcome=$3,next_attempt=$4,error=$5,provider_id=$6,locked_at=NULL,lock_token=NULL,updated_at=now() WHERE id=$1',
       [
@@ -2488,7 +2563,19 @@ export async function deliverNext(
         // so it was re-queued and re-sent on the next pipeline run. A
         // REVIEW_REQUIRED finding released by this acceptance has neither
         // field set yet, so it must be admitted explicitly.
-        if (f.advisoryId === advisory.id || (!f.advisoryId && f.autoDispatchedAt) || releasedByReview)
+        if (
+          f.advisoryId === advisory.id ||
+          (!f.advisoryId && f.autoDispatchedAt) ||
+          releasedByReview ||
+          // A digest or consolidated bundle records the exact findings it
+          // carried. Their acceptance is proof this finding was announced even
+          // though the finding itself has no manual advisory binding and was
+          // never auto-dispatched through the pipeline. Without this, every
+          // accepted digest left its findings QUEUED_FOR_DISPATCH, so the next
+          // digest re-selected and re-sent the same content (or a stale-bundle
+          // loop when the stored and current revisions disagreed).
+          deliveredIds?.has(findingId)
+        )
           await put(db, 'findings', findingId, {
             ...f,
             advisoryId: f.advisoryId ?? advisory.id,
@@ -2529,7 +2616,12 @@ export async function deliverNext(
           deliveredAt: now,
         });
       }
-      if (failed && transportRejected && notifiedIds.length) {
+      // A terminal failure that never reached the transport (stale bundle,
+      // withdrawn CVE, removed recipient, exhausted pre-send validation) owns no
+      // delivery claim: nothing was sent. Holding it would permanently block the
+      // rebuilt replacement, because claims are per recipient+finding and the
+      // failed job is never retried once its replacement is queued.
+      if (failed && (transportRejected || !transportAttempted) && notifiedIds.length) {
         await releaseClaims(db, claimsForJob(job.target_id, 'finding', notifiedIds), { jobId: job.id });
       }
     }
@@ -2547,7 +2639,7 @@ export async function deliverNext(
         await recordNewsDeliveries(db, job.target_id, job.advisory_id,
           job.payload.newsEvidence.articles, new Date().toISOString());
         await markClaimsDelivered(db, claimsForJob(job.target_id, 'article', articleIdentities), { jobId: job.id });
-      } else if (failed && transportRejected) {
+      } else if (failed && (transportRejected || !transportAttempted)) {
         await releaseClaims(db, claimsForJob(job.target_id, 'article', articleIdentities), { jobId: job.id });
       }
     }

@@ -127,7 +127,7 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       });
       await run();
       assert.equal((await list<Finding>(pool, 'findings'))[0].dispatchDeferred, false);
-      assert.equal((await pool.query('SELECT id FROM outbox')).rowCount, 2, 'cooldown expiry does not double-send due to dedupe');
+      assert.equal((await pool.query('SELECT id FROM outbox')).rowCount, 1, 'cooldown expiry does not double-send due to dedupe');
     });
     await t.test('incremental checkpoints commit atomically, survive failures, and reset after source changes', async () => {
       await reset();
@@ -512,14 +512,16 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       assert.equal((await list<Finding>(pool, 'findings')).length, 1);
       assert.equal((await list<Finding>(pool, 'findings'))[0].id, finding.id);
     });
-    await t.test('review findings promote after inventory correction and retain stable IDs', async () => {
+    await t.test('inventory corrections retain stable finding IDs without a review gate', async () => {
       await reset();
       const cve = vulnerability();
       await save('cveData', cve.cveId, cve);
       await save('watchlist', 'asset', asset('1.*'));
       await run();
       const first = (await list<Finding>(pool, 'findings'))[0];
-      assert.equal(first.notificationStatus, 'REVIEW_REQUIRED');
+      // Findings are always dispatched; a version-constrained registration is
+      // disclosed in the evidence rather than routed to an operator review queue.
+      assert.equal(first.notificationStatus, 'QUEUED_FOR_DISPATCH');
       await save('watchlist', 'asset', asset());
       await run();
       const next = (await list<Finding>(pool, 'findings'))[0];
@@ -559,7 +561,9 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       });
       await run();
       const finding = (await list<Finding>(pool, 'findings'))[0];
-      assert.equal(finding.notificationStatus, 'REVIEW_REQUIRED');
+      // A changed CVE that still matches is refreshed and dispatched; the
+      // applicability caveat travels in the rendered advisory.
+      assert.equal(finding.notificationStatus, 'QUEUED_FOR_DISPATCH');
       assert.equal(finding.cve.epss.score, 0.9);
     });
     await t.test('delivery honors the saved confidence policy for email and webhooks', async () => {
@@ -1909,18 +1913,18 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       assert.equal(transports, 1, String(job.error));
       assert.equal(job.status, 'ACCEPTED');
     });
-    await t.test('daily digest avoids the stale-bundle loop for review-held findings', async () => {
+    await t.test('daily digest avoids the stale-bundle loop for limited-confidence findings', async () => {
       await reset();
-      // The operator set a 100% confidence bar, so real matches are held for review
-      // (REVIEW_REQUIRED). Queueing is off for this run, so the held finding is
-      // captured on its own rather than consumed by the stale-bundle path.
+      // Queueing is off for this run, so the finding is captured on its own
+      // rather than consumed by the stale-bundle path. Confidence is disclosed
+      // in the finding's evidence; there is no review hold.
       await save('settings', 'main', {
         ...DEFAULT_SETTINGS,
         autoDispatchEnabled: false,
         confirmedFindingThreshold: 100,
       });
-      // A 90% correlation is held only by the 100% bar, so the hold is purely
-      // policy-driven and dropping the bar makes the same match deliverable.
+      // A 90% correlation is recorded with its confidence caveat and remains
+      // dispatchable regardless of the configured threshold.
       const plain = vulnerability() as Partial<NormalizedCVE>;
       delete plain.versionRange;
       const cve: NormalizedCVE = {
@@ -1932,17 +1936,15 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       } as NormalizedCVE;
       await save('watchlist', 'asset', asset());
       await save('cveData', cve.cveId, cve);
-      // Under the 100% bar the real match is held for review. It is captured before
-      // the operator lowers the bar, so it is held on purpose when the digest runs.
-      // Queueing is disabled for this run so the held finding is not consumed by
-      // the stale-bundle path; the digest must decide on its own.
+      // The finding is captured with its confidence evidence. Queueing is
+      // disabled for this run so it is not consumed by the stale-bundle path;
+      // the digest must decide on its own.
       await run();
       const [held] = await list<Finding>(pool, 'findings');
-      assert.equal(held.notificationStatus, 'REVIEW_REQUIRED', held.matchingEvidence);
-      assert.match(held.matchingEvidence, /confidence is below the 100% auto-dispatch threshold/);
-      // The operator lowers the bar after the run. The stored state of the held
-      // finding is therefore stale on purpose: re-running now would promote it,
-      // and the digest below must not depend on that having happened.
+      assert.equal(held.notificationStatus, 'QUEUED_FOR_DISPATCH', held.matchingEvidence);
+      assert.match(held.matchingEvidence, /Match confidence 90%/);
+      // The operator changes the policy after the run. The digest below must not
+      // depend on the stored finding having been re-evaluated first.
       await save('settings', 'main', {
         ...DEFAULT_SETTINGS,
         timezone: 'UTC',
@@ -2145,9 +2147,10 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         cpeMatchDetails: undefined,
         versionRange: undefined,
       };
-      // A policy above every match confidence holds the finding — and it is a
-      // runVulnerabilityPipeline alias correlation (85%), so the delivered
-      // document must state the confidence limitation on the finding.
+      // The finding is a runVulnerabilityPipeline alias correlation (85%), so
+      // the delivered document must state the confidence limitation on the
+      // finding. The confidence threshold labels the evidence; it does not
+      // withhold dispatch.
       await save('settings', 'main', { ...DEFAULT_SETTINGS, autoDispatchEnabled: false, confirmedFindingThreshold: 101 });
       await save('aliases', 'vendor-alias', {
         id: 'vendor-alias', scope: 'VENDOR', canonical: 'example', aliases: ['example_alias'],
@@ -2167,10 +2170,10 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       });
       await run();
       const [queued] = await list<Finding>(pool, 'findings');
-      assert.equal(queued.notificationStatus, 'REVIEW_REQUIRED', queued.matchingEvidence);
-      // The confidence policy no longer withholds a finding: a held finding is
-      // dispatched (with its limitation stated), and an operator approval only
-      // confirms the edits on an already-queued email.
+      assert.equal(queued.notificationStatus, 'QUEUED_FOR_DISPATCH', queued.matchingEvidence);
+      // The confidence policy no longer withholds a finding: a limited-confidence
+      // finding is dispatched with its limitation stated, and an operator
+      // approval only confirms the edits on an already-queued email.
       const advisory: Advisory = {
         id: 'ADV-approved',
         title: 'Approved notice',

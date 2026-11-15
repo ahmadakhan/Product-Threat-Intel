@@ -1895,6 +1895,44 @@ export function createApp(
       feedbackWindowDays,
     });
   }));
+  // Limited-confidence findings for analyst review. The finding gate was
+  // removed, so this is no longer an operator approval queue: it surfaces the
+  // matches whose correlation confidence is below the documented 90% review
+  // bar (plus any finding explicitly marked REVIEW_REQUIRED, e.g. a package /
+  // CPE contradiction) so analysts can inspect and correct them. The threshold
+  // is a constant because `confirmedFindingThreshold` is no longer a setting.
+  app.get('/api/ml/review-queue', requireRole('ADMIN', 'OPERATOR', 'VIEWER'), asyncRoute(async (req, res) => {
+    const threshold = 90;
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 25));
+    const rows = await pool.query<{ data: Finding; total: number }>(
+      `SELECT data, count(*) OVER()::int AS total
+       FROM records
+       WHERE kind='findings'
+         AND data->>'status' NOT IN ('FALSE_POSITIVE','PATCH_APPLIED','RESOLVED')
+         AND (
+           data->>'notificationStatus' = 'REVIEW_REQUIRED'
+           OR COALESCE(
+                safe_numeric(data->'mlAssessment'->>'matchConfidence'),
+                safe_numeric(data->>'confidence'),
+                0
+              ) < $1
+         )
+       ORDER BY COALESCE(
+                  safe_numeric(data->'mlAssessment'->>'matchConfidence'),
+                  safe_numeric(data->>'confidence'),
+                  0
+                ) ASC,
+                updated_at DESC
+       LIMIT $2`,
+      [threshold, limit],
+    );
+    res.json({
+      items: rows.rows.map((row) => row.data),
+      total: rows.rows[0]?.total ?? 0,
+      threshold,
+      limit,
+    });
+  }));
   app.post('/api/ml/feedback', requireRole('ADMIN', 'OPERATOR'), asyncRoute(async (req, res) => {
     const feedback = mlFeedbackSchema.parse(req.body);
     await transaction(pool, async (db) => {

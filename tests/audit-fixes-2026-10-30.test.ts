@@ -690,7 +690,7 @@ test(
         await reset();
         await put(pool, 'settings', 'main', {
           ...DEFAULT_SETTINGS,
-          deferEveryoneUntilSecurityDelivered: true,
+          deferEveryoneUntilSecurityDelivered: false,
         });
         await put(pool, 'recipients', 'sec', {
           id: 'sec',
