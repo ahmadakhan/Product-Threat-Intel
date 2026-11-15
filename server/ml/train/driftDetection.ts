@@ -56,7 +56,7 @@ export interface DriftReport {
 /**
  * Computes Population Stability Index (PSI) for a single feature.
  *
- * PSI = Σ (p_i - q_i) * ln(p_i / q_i)
+ * PSI = sum (p_i - q_i) * ln(p_i / q_i)
  * where p_i is the proportion in bin i for reference, q_i for comparison.
  *
  * Both distributions are binned into `nBins` equal-width bins based on the

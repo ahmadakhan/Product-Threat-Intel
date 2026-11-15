@@ -49,6 +49,7 @@ export const createPool = (url: string) => {
   const statementTimeout = process.env.POOL_STATEMENT_TIMEOUT_MS
     ? parseInt(process.env.POOL_STATEMENT_TIMEOUT_MS)
     : 15000;
+  const keepAliveDelayMs = Number(process.env.POOL_KEEPALIVE_DELAY_MS ?? 5000);
   const pool = new pg.Pool({
     connectionString: withLibpqOption(url, `-c statement_timeout=${statementTimeout}`),
     max: process.env.POOL_MAX_CONNECTIONS ? parseInt(process.env.POOL_MAX_CONNECTIONS) : 25,
@@ -60,9 +61,14 @@ export const createPool = (url: string) => {
     allowExitOnIdle: true,
     // Connection lifecycle management
     maxLifetime: process.env.POOL_MAX_LIFETIME_MS ? parseInt(process.env.POOL_MAX_LIFETIME_MS) : 600000,
-    // Connection health check configuration
+    // A pooled connection can sit idle inside one transaction, or between the
+    // client's and the server's view of a quiet period, long enough for a
+    // NAT/firewall or cloud LB to silently reap it. Without keepalive the next
+    // query on that socket fails with ECONNRESET instead of being detected. pg
+    // reads `keepAlive` and `keepAliveInitialDelayMillis`; the previous
+    // `keepAliveDelay` was never read by pg or pg-pool and so did nothing.
     keepAlive: true,
-    keepAliveDelay: process.env.POOL_KEEPALIVE_DELAY_MS ? parseInt(process.env.POOL_KEEPALIVE_DELAY_MS) : 5000,
+    keepAliveInitialDelayMillis: keepAliveDelayMs,
   } as any);
   
   // Monitor connection pool health
@@ -129,7 +135,7 @@ export const schemaLockKey = 'hashtext(COALESCE(current_schema(), current_databa
  * it matches the highest `NNN_*.sql` file, so a forgotten bump fails the suite
  * rather than shipping a build that boots against an un-migrated database.
  */
-export const REQUIRED_SCHEMA_VERSION = 45;
+export const REQUIRED_SCHEMA_VERSION = 46;
 
 /**
  * Migration files sorted by numeric prefix. Only plain `NNN_name.sql` entries

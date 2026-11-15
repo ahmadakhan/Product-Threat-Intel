@@ -431,8 +431,12 @@ export function createApp(
   app.use('/api', (req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
     const isMutation = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
-    const requestOrigin = `${req.protocol}://${req.get('host')}`;
-    if (isMutation && req.headers.origin !== config.APP_ORIGIN && req.headers.origin !== requestOrigin)
+    // A mutation must carry exactly the configured deployment origin. Accepting
+    // the request's own Host header as a second allowed origin would defeat this
+    // check: any client that can set both headers would pass it. The SPA always
+    // issues mutations from APP_ORIGIN, and a request with no Origin at all is
+    // refused rather than treated as same-origin.
+    if (isMutation && req.headers.origin !== config.APP_ORIGIN)
       return next(new HttpError(403, 'Origin not allowed'));
     if (isMutation && !req.is('application/json'))
       return next(new HttpError(415, 'JSON body required'));

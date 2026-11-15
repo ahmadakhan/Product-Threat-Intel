@@ -233,21 +233,28 @@ export function loginHandler(pool: pg.Pool, config: Config) {
       .parse(req.body);
     const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
     const { maxLoginAttempts, lockoutMins } = settings.securityPolicy;
-    const keys = ['ip:' + tokenHash(req.ip || ''), 'user:' + tokenHash(username)];
+    const ipKey = 'ip:' + tokenHash(req.ip || '');
+    const userKey = 'user:' + tokenHash(username);
+    const keys = [ipKey, userKey];
+    // A shared source (one NAT, one office egress) can sit behind many operators,
+    // so its bucket absorbs several accounts worth of failures. A single account
+    // does not: it stays at the configured limit however many sources it is tried
+    // from. Both checks run in the same transaction as the increment, so a denied
+    // attempt cannot slip between a count and its own increment.
+    const sourceThreshold = maxLoginAttempts * 5;
+    const accountThreshold = maxLoginAttempts;
     // Increment before doing expensive password work, atomically across workers.
     const allowed = await transaction(pool, async (db) => {
-      let okay = true;
       for (const key of keys) {
         const result = await db.query(
-          `INSERT INTO login_attempts(key,attempts,window_start) VALUES($1,1,now()) ON CONFLICT(key) DO UPDATE SET attempts=CASE WHEN login_attempts.window_start<now()-($2::int * interval '1 minute') THEN 1 ELSE login_attempts.attempts+1 END,window_start=CASE WHEN login_attempts.window_start<now()-($2::int * interval '1 minute') THEN now() ELSE login_attempts.window_start END RETURNING attempts`,
-          [key, lockoutMins],
+          `INSERT INTO login_attempts(key,attempts,window_start,attempt_scope) VALUES($1,1,now(),$4)
+           ON CONFLICT(key) DO UPDATE SET attempts=CASE WHEN login_attempts.window_start<now()-($2::int * interval '1 minute') THEN 1 ELSE login_attempts.attempts+1 END,window_start=CASE WHEN login_attempts.window_start<now()-($2::int * interval '1 minute') THEN now() ELSE login_attempts.window_start END,attempt_scope=$4 RETURNING attempts`,
+          [key, lockoutMins, userKey],
         );
-        // Per-account threshold uses the configured limit; the IP-scope threshold
-        // is scaled up to keep absorbing distributed credential-stuffing attacks.
-        const threshold = key.startsWith('ip:') ? maxLoginAttempts * 5 : maxLoginAttempts;
-        if (result.rows[0].attempts > threshold) okay = false;
+        const threshold = key === ipKey ? sourceThreshold : accountThreshold;
+        if (result.rows[0].attempts > threshold) return false;
       }
-      return okay;
+      return true;
     });
     if (!allowed) {
       res.setHeader('Retry-After', String(lockoutMins * 60));
@@ -274,7 +281,13 @@ export function loginHandler(pool: pg.Pool, config: Config) {
       csrf = randomToken(),
       expires = new Date(Date.now() + settings.securityPolicy.sessionTimeoutMins * 60000);
     await transaction(pool, async (db) => {
-      await db.query('DELETE FROM login_attempts WHERE key=$1', [keys[1]]);
+      // Clear both buckets on success: the account key and the source-IP key. Each
+      // increments before the password check, so resetting only the account key left
+      // the IP bucket to age out on its own. Behind a shared NAT, co-workers' typos
+      // then accumulated against the operator's address and locked the legitimate
+      // source out. A verified credential proves the source is not a brute-forcer,
+      // so both reset.
+      await db.query('DELETE FROM login_attempts WHERE key=ANY($1)', [keys]);
       await db.query(
         "INSERT INTO sessions(token_hash,user_id,csrf,expires_at,absolute_expires_at) VALUES($1,$2,$3,$4,now()+interval '12 hours')",
         [tokenHash(token), user.id, csrf, expires],
