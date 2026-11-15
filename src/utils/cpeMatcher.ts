@@ -4,6 +4,7 @@
  */
 
 import { NvdVersionRange, canCompareRange, evaluateVersionInRange } from './versionComparator.ts';
+import { textSupportsExposure } from './textEvidenceGuards.ts';
 
 export interface ParsedCPE {
   prefix: string; // cpe:2.3
@@ -1305,6 +1306,28 @@ export function matchesWatchlistItem(
     // explicitly excludes when every inventory version is comparable.
     if (rangeHasBounds && allVersionsProvablyOutside)
       return { matched: false, method: 'NONE', confidence: 0, evidence: 'Version outside advisory range' };
+    // Presence of both identities is necessary but not sufficient: the sentence
+    // must assert exposure. "X is not affected by …" names every identity an
+    // affected advisory would, and "a flaw in Y running on X" names X only as
+    // the substrate. Both are rejected here, per sentence, so a negation about
+    // one product cannot suppress a real claim about the same product elsewhere
+    // in the document.
+    const support = textSupportsExposure(
+      `${vulnTitle} ${vulnDescription}`,
+      normVendor,
+      normProduct,
+      Boolean(productOnlyKevFallback),
+    );
+    if (support === 'NEGATED' || support === 'PASSIVE_PLATFORM')
+      return {
+        matched: false,
+        method: 'NONE',
+        confidence: 0,
+        evidence:
+          support === 'NEGATED'
+            ? 'Advisory text negates applicability for this product'
+            : 'Advisory text names this product only as a passive platform',
+      };
     return {
       matched: true,
       method: 'VENDOR_PRODUCT_FALLBACK',

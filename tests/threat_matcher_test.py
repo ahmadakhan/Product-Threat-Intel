@@ -1,3 +1,21 @@
+"""
+SUPERSEDED -- this file does not test the application.
+
+It defines a self-contained matcher (its own VENDOR_ALIASES, CASE 1-4 taxonomy
+and READY_FOR_DELIVERY status) and asserts that it behaves as specified. Nothing
+imports it, and none of it exercises `runVulnerabilityPipeline`, which is the
+engine that actually ships. A green pytest run here is evidence about this file,
+not about the product.
+
+The two guards it specified ahead of the TypeScript engine -- negation and
+passive-platform mentions -- are now implemented in
+`src/utils/textEvidenceGuards.ts` and verified against the real pipeline in
+`tests/text-evidence-guards.test.ts`. That is where behaviour should be added.
+
+Kept only as a readable statement of intent; remove it once the CASE taxonomy
+has either been adopted in TypeScript or dropped.
+"""
+
 import re
 import fnmatch
 import hashlib
