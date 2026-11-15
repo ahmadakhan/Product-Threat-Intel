@@ -229,8 +229,8 @@ test('the HTML attachment has its own ceiling, independent of the PDF layout lim
 test('the attachment is byte-identical to the body in every provider encoding', async () => {
   const UNICODE_HTML =
     '<!doctype html><html><head><meta charset="utf-8"></head>' +
-    '<body style="background:#123456"><h1>Fonctionnalités — 日本語 findings</h1>' +
-    '<p>Café &amp; crème</p></body></html>';
+    '<body style="background:#123456"><h1>Fonctionnalit\u00e9s \u2014 Korean findings</h1>' +
+    '<p>Caf\u00e9 &amp; cr\u00e8me</p></body></html>';
   // Every provider encoding the module supports: the generic custom-HTTP API
   // transport (which is also how Mailgun-style endpoints are reached), SendGrid,
   // Postmark and Mailjet.

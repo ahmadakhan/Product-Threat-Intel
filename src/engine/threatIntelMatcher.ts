@@ -28,11 +28,9 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 import { evaluateVersionInRange, type NvdVersionRange } from '../utils/versionComparator.ts';
 import { evaluateVersion } from '../../server/correlation/version.ts';
-import {
-  isNegatedSentence,
-  isPassivePlatformMention,
-  textSupportsExposure,
-} from '../utils/textEvidenceGuards.ts';
+import { textSupportsExposure } from '../utils/textEvidenceGuards.ts';
+import { clauseRejectionReason, evidenceClauses } from '../utils/textEvidenceRefinements.ts';
+
 import {
   DEFAULT_PRODUCT_ALIASES,
   DEFAULT_VENDOR_ALIASES,
@@ -1882,14 +1880,33 @@ function isNonSubjectSentence(sentence: string): boolean {
   return NON_SUBJECT_PHRASES.some((phrase) => normalized.includes(phrase));
 }
 
-function isPassiveForProduct(sentence: string, inventory: NormalizedInventory): boolean {
-  const product = inventory.canonicalProduct === '*'
+/**
+ * The product identity the clause guards evaluate against: the concrete
+ * product for an exact registration, otherwise the vendor (a `Vendor | *`
+ * entry is about the vendor's whole surface).
+ */
+function guardProductToken(inventory: NormalizedInventory): string {
+  return inventory.canonicalProduct === '*'
     ? inventory.vendor
     : inventory.product.replace(/\*/g, '').trim() || inventory.product;
+}
+
+/**
+ * Why this clause is not evidence for `inventory`, or `undefined` if it is.
+ *
+ * Scoped to the clause, not the sentence: "Tomcat is affected; Windows Server
+ * 2022 is not" must not lose the Tomcat claim to the other clause's negation,
+ * and "a flaw in Tomcat running on Windows Server 2022" must not read the
+ * substrate as the vulnerable subject senses it.
+ */
+function clauseRejection(
+  clause: string,
+  inventory: NormalizedInventory,
+): 'NEGATED' | 'PASSIVE_PLATFORM' | undefined {
   try {
-    return isPassivePlatformMention(sentence, product);
+    return clauseRejectionReason(clause, guardProductToken(inventory));
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -1912,8 +1929,21 @@ function findTextSupport(
     if (!textMentions(sentence, vendorSpellings)) continue;
     const product = textProductMatch(sentence, inventory, customProductAliases);
     if (product === null) continue;
-    if (isNegatedSentence(sentence)) continue;
-    if (isPassiveForProduct(sentence, inventory)) continue;
+    // The guards are sentence-scoped. Evaluate the sentence clause by clause so a
+    // claim about this identity is not withheld by another clause's negation, and
+    // a host named after "running on" is not reported as the vulnerable subject.
+    const clauses = evidenceClauses(sentence);
+    let evidence = false;
+    let rejected = false;
+    for (const clause of clauses) {
+      if (!textMentions(clause, vendorSpellings)) continue;
+      const reason = clauseRejection(clause, inventory);
+      if (reason === undefined) evidence = true;
+      else rejected = true;
+    }
+    // Only a sentence with no positive clause is withheld: one clause that
+    // asserts exposure for this identity is enough.
+    if (rejected && !evidence) continue;
     if (isNonSubjectSentence(sentence)) continue;
     return { sentence, product };
   }
@@ -2523,10 +2553,10 @@ export function buildConsolidatedEmail(queued: readonly ThreatMatch[]): Consolid
   for (const group of groups) {
     body.push(`## ${group.title}`, '');
     for (const item of items.filter((candidate) => candidate.priority_group === group.id)) {
-      const severity = item.severity && item.severity !== 'UNKNOWN' ? ` · ${item.severity}` : '';
+      const severity = item.severity && item.severity !== 'UNKNOWN' ? ` - ${item.severity}` : '';
       const score = item.cvss_score !== null ? ` (CVSS ${item.cvss_score.toFixed(1)})` : '';
       body.push(
-        `- **${markdownSafe(item.finding_id)}** — ${markdownSafe(item.matched_vendor)} ${markdownSafe(item.matched_product)} · ${item.case_classification} · ${item.match_precision}${severity}${score}`,
+        `- **${markdownSafe(item.finding_id)}** - ${markdownSafe(item.matched_vendor)} ${markdownSafe(item.matched_product)} - ${item.case_classification} - ${item.match_precision}${severity}${score}`,
       );
       if (item.source_reference) body.push(`  - Source: ${markdownSafe(item.source_reference)}`);
     }

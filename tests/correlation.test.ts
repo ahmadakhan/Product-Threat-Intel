@@ -65,7 +65,7 @@ test('version ranges preserve release candidates and refuse vendor backport coer
   assert.equal(evaluateVersion('1.0.0-preview.2', '<1.0.0'), 'AFFECTED');
 });
 test('NDJSON framing survives arbitrary UTF-8 splits and bounds malformed giant frames', async () => {
-  const payload = Buffer.from(JSON.stringify(advisory({ title: 'Kubernetes 漏洞' })) + '\n');
+  const payload = Buffer.from(JSON.stringify(advisory({ title: 'Kubernetes \u0020\ucde8\uc57d\uc810' })) + '\n');
   const decoded: unknown[] = [];
   for await (const item of advisoryRecords(
     Readable.from(
@@ -74,7 +74,7 @@ test('NDJSON framing survives arbitrary UTF-8 splits and bounds malformed giant 
     ),
   ))
     decoded.push(item);
-  assert.equal((decoded[0] as { title: string }).title, 'Kubernetes 漏洞');
+  assert.equal((decoded[0] as { title: string }).title, 'Kubernetes \u0020\ucde8\uc57d\uc810');
   const frames = [];
   for await (const item of advisoryRecords(
     Readable.from([Buffer.from('x'.repeat(300000) + '\n' + JSON.stringify(advisory()))], {
@@ -416,7 +416,7 @@ test(
       // the title changed. The advisory() default text contains "versions" and
       // "vulnerable" together, which the translator now correctly refuses to
       // reduce to one interval, so no match was written for that URL and the
-      // row it inspected had never existed — the title assertion then passed on
+      // row it inspected had never existed -- the title assertion then passed on
       // the first insert, testing nothing. Use a URL whose text yields a
       // deterministic match and assert on BOTH columns.
       const mergeUrl = 'https://example.org/security/exact';

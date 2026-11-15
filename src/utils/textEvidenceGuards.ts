@@ -24,7 +24,7 @@
 /**
  * Negation phrases, matched as whole words.
  *
- * The obvious implementation — `text.includes(phrase)` — is wrong in a way that
+ * The obvious implementation -- `text.includes(phrase)` -- is wrong in a way that
  * matters: "no impact on" is a substring of nothing useful, but a one-word phrase
  * like "unaffected" would match inside "unaffectedly", and a future short phrase
  * could land inside an unrelated word. Anchoring on word boundaries costs nothing
@@ -117,7 +117,7 @@ function productPattern(product: string): string {
 }
 
 /**
- * True when the sentence mentions the product only in a passive role — as the
+ * True when the sentence mentions the product only in a passive role -- as the
  * operating system, host, or dependency of the thing actually being discussed.
  *
  * A sentence that names the product in a passive role but *also* carries an
@@ -197,7 +197,7 @@ export function textSupportsExposure(
 }
 
 /** Word-boundary mention test that supports identities containing `+`, `#`, `.`. */
-function sentenceMentions(sentence: string, identity: string): boolean {
+export function sentenceMentions(sentence: string, identity: string): boolean {
   const words = identity
     .normalize('NFKC')
     .toLowerCase()
