@@ -1,13 +1,20 @@
 # VULNSTREAM-ENTERPRISE — COMPLETE CODEBASE AUDIT REPORT
 
-**Generated:** 2026-11-10  
+**Generated:** 2026-11-15 (re-audited against the current tree)  
 **Repository:** vulnstream-enterprise  
 **Branch:** main  
-**Commit:** c1b097a  
-**Audit baseline:** 679c959 (claim-based deduplication implementation)  
-**Commits since baseline:** 9 (c5724a0..c1b097a)  
-**Uncommitted changes:** 22 files modified (500 insertions, 58 deletions)  
-**Total files in audit scope:** 9 files (314 insertions, 353 deletions at baseline), plus 22 uncommitted files
+**Commit:** 1cb578b  
+**Original baseline:** 679c959 (claim-based deduplication implementation)  
+**Commits since baseline:** 12, including two that changed delivery semantics: `6b6f129` ("dispatch all valid findings, remove review gates, unify notification template") and `292f887` (test suite updated to match)  
+**Uncommitted changes:** none (working tree clean as of this revision)  
+
+> **Re-audit note.** This revision replaces the stale figures above with a
+> verification of the *current* code. Two sections are new and matter more than
+> anything that follows: §R1 (the review-gate removal in `6b6f129`) and §R2 (the
+> false-positive surface that removal created). The prior report described a
+> codebase that no longer exists: `REVIEW_REQUIRED` is now unreachable from the
+> pipeline, the settings that drove it are gone, and 44 tests fail against the
+> committed tree (see §R3).
 
 ---
 
@@ -352,6 +359,143 @@ Per CODEBASE-AUDIT-PROMPT.md, this audit covers all 14 dimensions:
 - `server/config.ts:44` — `services.nvd.nist.gov` added to `DEFAULT_EGRESS_HOSTS`
 - `src/types/index.ts:40` — `NVD_API` added to `FEED_TYPES`
 - `src/types/index.ts:519-592` — VulnCheck client configuration interfaces
+
+---
+
+## R1. CRITICAL — Review gates removed; uncertainty is now silently dispatched
+
+**Commit:** `6b6f129`  
+**File:** `src/engine/pipelineEngine.ts`  
+**Severity:** CRITICAL (correctness)  
+
+**Description:** The finding gate was reduced to a single condition:
+
+```ts
+const confirmed = !packageRejected;
+```
+
+Every prior blocker is gone: the confidence threshold
+(`confirmedFindingThreshold`), `settings.autoDispatchEnabled`,
+`shouldAutoDispatch`, `sourceRequiresReview`, `cveReviewOverride`,
+`result.applicabilityRequiresReview`, and `fallbackWithoutVersionEvidence`. The
+surviving `packageRejected` only fires when PURL evidence proves a *different*
+version; architecture-specific CPEs, unsupported version-ordering forms, and
+review-only sources now dispatch as `QUEUED_FOR_DISPATCH`.
+
+**Consequence:** an advisory scoped to `cpe:…:arm64:*` is dispatched against an
+x86 asset; a `1.*` vs `1.5` wildcard (previously deliberately `REVIEW_REQUIRED`)
+ships as confirmed. In an unattended deployment the recipient is the only
+quality control, and they have no way to distinguish these from verified
+matches.
+
+**Evidence:** 44 tests fail against the committed tree, concentrated in
+exactly these behaviours (§R3). The removed tests were not wrong — they encoded
+the behaviour `audit.test.ts` was written to guarantee.
+
+**Fix:** re-introduce an explicit, *reported* disposition instead of a silent
+dispatch: keep `confirmed` for verified matches, and for unverifiable evidence
+keep dispatching but set a distinct `notificationStatus` (e.g.
+`DISPATCH_LIMITED_CONFIDENCE`) so the email, the Action Center, and the audit
+log all say *why*. The earlier refusal to gate on a human flag was correct;
+the fix is to stop masking the distinction, not to erase it.
+
+---
+
+## R2. CRITICAL — Tier 2b previously matched any co-occurrence of vendor and product
+
+**File:** `server/correlation/engine.ts`  
+**Severity:** CRITICAL (false alerts in an autonomous system)  
+
+**Description:** The weakest correlation tier matched the vendor and product as
+two independent set members across every token of the document:
+
+```sql
+WHERE lower(vendor) IN (SELECT jsonb_array_elements_text($1::jsonb))
+  AND lower(product) IN (SELECT jsonb_array_elements_text($1::jsonb))
+```
+
+An article reading "Microsoft announced quarterly results … exchange_server
+popularity grew" matched the Exchange inventory. Demonstrated with a probe
+against the real engine, not inferred.
+
+**Second defect found in the same statement:** the array was bound as
+`JSON.stringify([...])`, which PostgreSQL receives as a single JSON scalar, so
+`unnest($1::text[])` raised a cast error that the region wrapper swallowed. The
+whole Tier 2b lookup therefore returned nothing, always. Both are corrected in
+the working tree: adjacency is required, and the array is bound natively.
+
+---
+
+## R3. HIGH — Committed test suite does not pass
+
+**Severity:** HIGH (release gate)  
+
+`npm test` with `TEST_DATABASE_URL` set on a clean checkout of `1cb578b`:
+
+```
+ℹ tests 1309
+ℹ pass 1265
+ℹ fail 44
+```
+
+Without a database the suite reports 1143/1056 passing/87 skipped. The 44
+failures cluster in delivery and pipeline semantics — the same behaviours `R1`
+changed. They are not environmental: the same run against the pre-change tree
+through `bcca15a` is green.
+
+A representative sample of the failing names (all from
+`tests/pipeline-lifecycle.test.ts`, 25 of the 44):
+
+```
+all-version and exact SonicWall CPEs both queue email delivery
+delivery honors the saved confidence policy for email and webhooks
+SonicOS KEV text evidence queues email for a registered all-version product
+review findings promote after inventory correction and retain stable IDs
+queued delivery survives enrichment-only CVE updates without a rebuild
+daily digest avoids the stale-bundle loop for review-held findings
+```
+
+**Ownership note.** None of these tests was written by, or is controlled by, the
+correlation work in this audit. They assert the pre-`6b6f129` contract: that a
+finding's confidence policy, applicability review, and inventory state determine
+whether it is queued. Fixing them means choosing one of two intents:
+
+1. **Restore the gates** — the tests are correct and `pipelineEngine.ts` should
+   regain the conditions `6b6f129` deleted.
+2. **Accept the new behaviour** — the tests are obsolete and must be rewritten,
+   which would finalise the loss of the `REVIEW_REQUIRED` distinction.
+
+This audit does not make that choice. Either is defensible; doing neither leaves
+44 red tests, which is how a real regression would hide.
+
+---
+
+## R4. MEDIUM — Native alert confidence is carried as a synthetic finding score
+
+**File:** `server/correlation/notifications.ts`  
+**Severity:** MEDIUM (reporting fidelity)  
+
+Native correlation alerts are now rendered through the unified findings
+template. Confidence is mapped to a numeric score (`HIGH → 100`, `MEDIUM → 60`,
+`LOW → 0`) so the template's `confidence < 100` rule renders the limitation.
+The mapping is honest but lossy: a delivered alert reads `60% match confidence`,
+which describes a *match* score, not the correlation-tier judgement that
+produced it. The correlation payload retains the true tier in
+`nativeCorrelation.confidence`. Recommend a template field that states the tier
+verbatim ("MEDIUM-confidence correlation").
+
+---
+
+## R5. INFO — LOW evidence is not deliverable (by design, re-verified)
+
+`low_confidence_review_buffer` holds everything the engine could not attribute
+to an installed asset, including advisories whose text *negates* applicability
+("not affected", "false positive"). It is not a delivery source:
+`readNativeEvidence` returns `null` without a fresh attributed match, and
+`low_confidence_alerts_enabled` widens delivery only from HIGH to HIGH+MEDIUM.
+This was violated in an intermediate revision and is now guarded by
+`tests/correlation-operations.test.ts`, which asserts a negated advisory is never
+queued.
 
 ---
 

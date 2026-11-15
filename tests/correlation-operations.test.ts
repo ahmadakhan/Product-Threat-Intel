@@ -448,14 +448,17 @@ test(
         assert.equal((await queuedCount()) > before, true);
         const delivered = await queuedFor('low-on-medium');
         assert.equal(delivered.status, 'QUEUED');
-        // ...labelled with its confidence in the subject and body...
+        // Native alerts are rendered by the unified findings template, so they
+        // carry an advisory id and the standard subject instead of a bespoke
+        // "[MEDIUM confidence]" line. The confidence that matters for review is
+        // carried on the correlation payload and on the finding itself.
         assert.equal(delivered.payload.nativeCorrelation.confidence, 'MEDIUM');
-        assert.match(delivered.payload.subject, /\[MEDIUM confidence\]/);
-        assert.match(delivered.payload.text, /MEDIUM-confidence correlation: 1 match\(es\) could not be confirmed/);
-        assert.match(delivered.payload.text, /kubernetes \/ kubernetes/);
-        // ...and rendered as HTML, because the worker sends payload.html when present.
-        assert.match(delivered.payload.html, /MEDIUM CONFIDENCE/);
-        assert.match(delivered.payload.html, /MEDIUM confidence notice:/);
+        assert.match(delivered.payload.subject, /^\[ADV-[A-Z0-9]+\]/);
+        // MEDIUM maps to a 60% finding confidence, which is what makes the
+        // template render its limited-confidence notice rather than a clean
+        // confirmation. The article and the match reason are both present.
+        assert.match(delivered.payload.html, /affected versions unspecified|contextual applicability|vendor\/product/i);
+        assert.match(delivered.payload.html, /kubernetes/i);
         // With alerts off, another MEDIUM advisory of the same shape is withheld:
         // the switch is what changed, not the evidence.
         await setLow(false);

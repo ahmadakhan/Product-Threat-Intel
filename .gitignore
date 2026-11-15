@@ -18,3 +18,7 @@ backups/
 /data/
 # Browser cookie files
 cookies.txt
+
+# Python bytecode from the ML test helpers
+__pycache__/
+*.pyc

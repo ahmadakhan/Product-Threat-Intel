@@ -124,3 +124,71 @@ test('a product-only mention still matches at MEDIUM when a thesaurus alias reso
   assert.equal(matches[0].confidence, 'MEDIUM');
   assert.equal(matches[0].assetId, ASSET.id);
 });
+/**
+ * The unit tests above use a hand-written query stub. That stub previously hid a
+ * real defect: the phrase array was bound as `JSON.stringify([...])`, which
+ * PostgreSQL rejects as `malformed array literal`, and the enclosing region
+ * wrapper swallowed the error — so Tier 2b silently matched nothing in every
+ * deployment. A stub cannot catch that class of bug, so this test exercises the
+ * actual statement against a real server.
+ */
+test(
+  'Tier 2b phrase binding works against PostgreSQL, for both matching and non-matching prose',
+  { skip: !process.env.TEST_DATABASE_URL, timeout: 30000 },
+  async () => {
+    const { createPool, migrate, transaction } = await import('../server/db.ts');
+    const { randomBytes } = await import('node:crypto');
+    const control = createPool(process.env.TEST_DATABASE_URL!);
+    const schema = `tier2b_${randomBytes(6).toString('hex')}`;
+    await control.query(`CREATE SCHEMA ${schema}`);
+    const url = new URL(process.env.TEST_DATABASE_URL!);
+    url.searchParams.set('options', `-c search_path=${schema}`);
+    const pool = createPool(url.href);
+    try {
+      await migrate(pool);
+      const nativeId = '00000000-0000-0000-0000-0000000000b1';
+      await pool.query(
+        `INSERT INTO correlation_managed_assets(record_id,native_id,vendor,product,version,active)
+         VALUES('managed-1',$1::uuid,'microsoft','exchange_server','2019',true)`,
+        [nativeId],
+      );
+
+      const engine = new TextCorrelationEngine();
+      const run = (text: string) =>
+        transaction(pool, (db) =>
+          engine.correlate(
+            { title: 't', content: 'c', url: 'https://example.org/tier2b', cpes: [], purls: [], entities: [] } as never,
+            {
+              text,
+              cleanContent: text,
+              ranges: [],
+              cveIds: [],
+              zeroDay: false,
+              securitySignal: true,
+              negated: false,
+              zeroDayDensity: 0,
+            },
+            // A bound wrapper: the engine calls this as a function, while a
+            // pg client exposes `query` as a method that needs its receiver.
+            ((sql: string, values?: unknown[]) => db.query(sql, values)) as never,
+          ),
+        );
+
+      // Named together: the real query must find the inventory row.
+      const matched = await run(' an advisory affects microsoft exchange_server installations ');
+      assert.equal(matched.length, 1, 'the phrase array must reach unnest() as a real array');
+      assert.equal(matched[0].assetId, nativeId);
+      assert.equal(matched[0].confidence, 'LOW');
+
+      // Named separately: the same real query must find nothing.
+      const unrelated = await run(
+        ' microsoft announced quarterly results today exchange_server popularity grew ',
+      );
+      assert.deepEqual(unrelated, [], 'co-occurrence in unrelated sentences is not a match');
+    } finally {
+      await pool.end();
+      await control.query(`DROP SCHEMA ${schema} CASCADE`);
+      await control.end();
+    }
+  },
+);
