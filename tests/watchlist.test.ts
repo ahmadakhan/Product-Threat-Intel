@@ -345,3 +345,34 @@ test('a CPE-less bulk record keeps PURLs and rejects malformed PURL fields', () 
     assert.ok('error' in result && /purls must be an array of strings/.test(result.error));
   }
 });
+
+test('a bulk row with a CPE derives its identity when vendor or product is omitted', () => {
+  const cpe = 'cpe:2.3:a:acme:widget:1.0:*:*:*:*:*:*:*';
+  for (const record of [
+    { cpes: [cpe], assetTag: 'A-1' },
+    { vendor: 'acme', cpes: [cpe], assetTag: 'A-2' },
+    { product: 'widget', cpes: [cpe], assetTag: 'A-3' },
+  ]) {
+    const result = bulkRegistrationAssets(record, 'BULK-10');
+    assert.ok('rows' in result);
+    assert.equal(result.rows[0].vendor, 'acme');
+    assert.equal(result.rows[0].product, 'widget');
+    assert.deepEqual(result.rows[0].cpes, [cpe]);
+  }
+});
+
+test('a no-CPE row reports the vendor and product values it received', () => {
+  const missing = bulkRegistrationAssets({ cpes: [] }, 'BULK-11');
+  assert.ok(
+    'error' in missing &&
+      /Received vendor: missing, product: missing/.test(missing.error),
+  );
+  const wrongType = bulkRegistrationAssets(
+    { vendor: 42, product: null, cpes: 'NA' },
+    'BULK-12',
+  );
+  assert.ok(
+    'error' in wrongType &&
+      /Received vendor: number, product: null/.test(wrongType.error),
+  );
+});

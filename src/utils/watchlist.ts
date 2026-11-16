@@ -238,7 +238,6 @@ export function bulkRegistrationAssets(
 ): BulkRegistrationResult {
   const vendor = typeof record.vendor === 'string' ? record.vendor.trim() : '';
   const product = typeof record.product === 'string' ? record.product.trim() : '';
-  if (!vendor || !product) return { error: 'Missing required vendor or product name.' };
 
   // Accept both the documented `cpes` field and a singular `cpe` alias.
   const rawCpes = record.cpes === undefined ? record.cpe : record.cpes;
@@ -256,6 +255,24 @@ export function bulkRegistrationAssets(
       if (!parseCPE23(trimmed).isValid) return { error: `Invalid CPE 2.3 expression: ${trimmed}.` };
       cpes.push(trimmed);
     }
+  }
+
+  // A CPE row carries its identity in the identifier itself. Generated exports
+  // sometimes omit the redundant vendor/product fields on those rows, so only
+  // require the explicit names when there is no CPE to derive them from.
+  if (!cpes.length && (!vendor || !product)) {
+    const describe = (value: unknown) => {
+      if (value === undefined) return 'missing';
+      if (value === null) return 'null';
+      if (typeof value === 'string') return value.trim() ? `"${value.trim()}"` : 'empty string';
+      if (Array.isArray(value)) return 'array';
+      return typeof value;
+    };
+    return {
+      error:
+        'A record without a CPE needs both vendor and product names. ' +
+        `Received vendor: ${describe(record.vendor)}, product: ${describe(record.product)}.`,
+    };
   }
 
   const purls: string[] = [];

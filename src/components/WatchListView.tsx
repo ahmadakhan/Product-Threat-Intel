@@ -2268,9 +2268,10 @@ export const WatchListView: React.FC = () => {
             </h2>
             <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 mb-4">
               Import up to 1,000 product records with vendor, product, assetTag, and NVD CPE identifiers.
-              Every supplied CPE is verified before import. Records whose <code>cpes</code> field is
-              missing, empty, or <code>"NA"</code> (NVD publishes no CPE for some vendor/product pairs) are
-              imported disabled by default.
+              Every supplied CPE is verified before import; when a row has a CPE, vendor and product are
+              optional and derived from it. Records whose <code>cpes</code> field is missing, empty, or{' '}
+              <code>"NA"</code> (NVD publishes no CPE for some vendor/product pairs) are imported disabled by
+              default.
             </p>
 
             {bulkFeedback && (
