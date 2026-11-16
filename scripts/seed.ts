@@ -1,12 +1,11 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { z } from 'zod';
+import { ZodError } from 'zod';
 import { loadConfig } from '../server/config.ts';
-import { createPool, get, transaction } from '../server/db.ts';
+import { createPool, transaction } from '../server/db.ts';
 import { applyCommand } from '../server/commands.ts';
 import { seedRecommendedFeeds } from '../server/feedBootstrap.ts';
 import { RECOMMENDED_FEEDS } from '../server/recommendedFeeds.ts';
-import { INITIAL_WATCHLIST } from '../tests/fixtures/seedData.ts';
 
 // Load .env file if environment variables are not already set, so the seed
 // script works from a plain `npm run seed` invocation without manual export.
@@ -31,115 +30,57 @@ const config = loadConfig();
 const pool = createPool(config.DATABASE_URL);
 
 // Seeding is manual only: the server never inserts seed data at startup. This
-// script is the single entry point and always applies the fixtures when
-// invoked (`npm run seed`); pass --dry-run to only report current contents.
+// script is the single entry point and applies the feed catalog when invoked
+// (`npm run seed`); pass --dry-run to only report current contents. It never
+// writes product inventory: see SEEDED_WATCHLIST below.
 const shouldSeed = !process.argv.includes('--dry-run');
 
-/* Contract-verified primary feeds plus legacy rows that must be disabled.
- * NVD and the canonical CVE sources now come from RECOMMENDED_FEEDS (spread
- * below) so the threat-feed catalog has a single source of truth. */
-const feedPayload = [
-  {
-    id: 'feed-cisa-kev',
-    name: 'CISA Known Exploited Vulnerabilities Catalog',
-    type: 'CISA_KEV' as const,
-    url: 'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json',
-    authType: 'NONE' as const,
-    rateLimitPerMin: 120,
-    enabled: true,
-    vendorSeed: true,
-  },
-  {
-    id: 'feed-epss',
-    name: 'FIRST Exploit Prediction Scoring System',
-    type: 'EPSS_API' as const,
-    url: 'https://api.first.org/data/v1/epss',
-    authType: 'NONE' as const,
-    rateLimitPerMin: 240,
-    enabled: true,
-    vendorSeed: true,
-  },
-  {
-    id: 'feed-msrc',
-    name: 'Microsoft Security Response Center (MSRC)',
-    type: 'JSON_SEARCH_API' as const,
-    url: 'https://api.msrc.microsoft.com/cvrf/v2.0/updates',
-    authType: 'NONE' as const,
-    rateLimitPerMin: 120,
-    enabled: false,
-    vendorSeed: true,
-  },
-  {
-    id: 'feed-paloalto',
-    name: 'Palo Alto Networks Unit 42 Advisory Feed',
-    type: 'JSON_SEARCH_API' as const,
-    url: 'https://security.paloaltonetworks.com/api/v1/advisories',
-    authType: 'NONE' as const,
-    rateLimitPerMin: 100,
-    enabled: false,
-    vendorSeed: true,
-  },
-  ...RECOMMENDED_FEEDS,
-];
+// The seed registers no monitored products. Inventory is operator-owned, and a
+// seeded CPE pattern that names a product but no version would match every
+// advisory for that product the moment an operator enabled it, creating
+// findings nobody confirmed. Register products through the Monitored Products
+// page (or its bulk import).
+const SEEDED_WATCHLIST: [] = [];
 
 if (!shouldSeed) {
-  // --dry-run — report current database contents and exit without writing.
+  // --dry-run: report current database contents and exit without writing.
   const feedRows = (await pool.query('SELECT id FROM records WHERE kind=$1', ['feeds'])).rows;
   const watchlistRows = (await pool.query('SELECT id FROM records WHERE kind=$1', ['watchlist'])).rows;
   console.log(`Database has ${feedRows.length} feeds and ${watchlistRows.length} monitored products.`);
-  console.log('Re-run `npm run seed` without --dry-run to apply seed fixtures.');
-  await pool.end();
+  console.log('Re-run `npm run seed` without --dry-run to register the feed catalog (all disabled).');
+  console.log('Monitored products are operator-owned and are never seeded; manage them on the Monitored Products page.');
   process.exit(0);
 }
 
 try {
   await transaction(pool, async (db) => {
-    // These legacy seed URLs return vendor-specific advisory documents, not the
-    // normalized-CVE array required by JSON_SEARCH_API. Disable them until a
-    // source-specific, schema-validated adapter is configured.
-    for (const id of ['feed-msrc', 'feed-paloalto']) {
-      const legacy = await get<{ enabled: boolean }>(db, 'feeds', id);
-      if (legacy?.enabled)
-        await applyCommand(db, config, { action: 'feed.toggle', id, actor: 'seed-script' });
-    }
-    // Register any recommended catalog feed that is missing. This is the only
-    // place catalog rows are inserted; server startup never does it.
+    // Every catalog feed is registered disabled. The operator enables a source
+    // from the Threat Feeds page after its credentials (VulnCheck Bearer token,
+    // OTX API key) and its egress allowlist entry are configured, and after its
+    // connectivity test passes. A feed that started enabled would fail its
+    // first run here and report a configuration gap as a platform fault.
     await seedRecommendedFeeds(db);
-    // Feeds go through the same validated command path the API uses, so a
-    // misconfigured feed fails loudly here instead of landing in the database.
+    // Feeds go through the same validated command path as the API, so a
+    // misconfigured feed fails the seed loudly instead of landing in the DB.
+    // The payload re-applies the full catalog so the rows exist on a database
+    // that had removed some of them.
     await applyCommand(db, config, {
       action: 'feed.import',
-      data: feedPayload,
+      data: RECOMMENDED_FEEDS.map((feed) => ({ ...feed, enabled: false })),
       actor: 'seed-script',
     });
-
-    // The watchlist is upserted by its stable fixture id so that repeated
-    // seeding refreshes existing rows instead of failing with "not found"
-    // or orphaning the findings that reference those asset ids.
-    await applyCommand(db, config, {
-      action: 'watchlist.import',
-      data: INITIAL_WATCHLIST.map((item) => ({
-        id: item.id,
-        vendor: item.vendor,
-        product: item.product,
-        version: item.version,
-        cpes: item.cpes,
-        purls: item.purls,
-        targetHw: item.targetHw,
-        assetTag: item.assetTag,
-        ownerGroup: item.ownerGroup,
-        active: item.active,
-        notes: item.notes,
-        exposure: item.exposure,
-        createdAt: item.createdAt,
-      })),
-      actor: 'seed-script',
-    });
+    if (SEEDED_WATCHLIST.length) {
+      await applyCommand(db, config, {
+        action: 'watchlist.import',
+        data: SEEDED_WATCHLIST,
+        actor: 'seed-script',
+      });
+    }
   });
 
-  console.log('Seed data applied: Threat Feed Sources and Monitored Product Inventory only.');
+  console.log('Seed data applied: Threat Feed Sources (all disabled by default), no monitored products.');
 } catch (e) {
-  if (e instanceof z.ZodError) {
+  if (e instanceof ZodError) {
     console.error('Seed failed: feed configuration is invalid.');
     for (const issue of e.issues) console.error(`  - ${issue.path.join('.') || '(root)'}: ${issue.message}`);
     process.exitCode = 1;

@@ -448,14 +448,19 @@ const feedsRequiringManualReview = new Set([
   'feed-exploitdb',
 ]);
 
+// Enablement rule, applied per entry so a feed the operator enabled on an older
+// build stays enabled while a re-seed can never switch on a public, unattended
+// source on its own. Credentialed feeds, feeds under manual review, and feeds
+// measured DOWN all stay disabled.
+const isEnabledByDefault = (feed: (typeof recommendedFeedEntries)[number]): boolean =>
+  feed.authType === 'NONE' &&
+  feed.vendorSeed &&
+  !feedsRequiringManualReview.has(feed.id) &&
+  !('healthStatus' in feed && feed.healthStatus === 'DOWN');
+
 export const RECOMMENDED_FEEDS = recommendedFeedEntries.map((feed) => ({
   ...feed,
-  enabled:
-    feed.enabled ||
-    (feed.authType === 'NONE' &&
-      feed.vendorSeed &&
-      !feedsRequiringManualReview.has(feed.id) &&
-      !('healthStatus' in feed && feed.healthStatus === 'DOWN')),
+  enabled: feed.enabled || isEnabledByDefault(feed),
 }));
 
 /**
