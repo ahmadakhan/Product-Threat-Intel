@@ -1,7 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { searchNvdCpes, loadNvdApiKey, isNvdRateLimitError, nvdRetryAfterSeconds } from '../server/cpeSearch';
+import {
+  searchNvdCpes,
+  loadNvdApiKey,
+  loadNistApiKey,
+  isNvdRateLimitError,
+  nvdRetryAfterSeconds,
+} from '../server/cpeSearch';
 import type { RequestOptions, Requester } from '../server/network';
 import { loadConfig } from '../server/config';
 import { encrypt } from '../server/secrets';
@@ -459,4 +465,110 @@ test('a failed NIST fallback is an upstream error, not a missing identifier', as
     /HTTP 500/,
   );
   assert.equal(calls, 2);
+});
+
+test('loadNistApiKey decrypts the NVD_API feed key and ignores the VulnCheck token', async () => {
+  const nistSecret = encrypt(
+    'nist-real-key',
+    [config.ENCRYPTION_KEY],
+    'feed:feed-nvd-community',
+  );
+  const db = {
+    query: async () => ({
+      rows: [
+        {
+          data: {
+            id: 'feed-vulncheck',
+            type: 'VULNCHECK_NVD',
+            authType: 'BEARER',
+            enabled: true,
+            authSecretKey: encrypt('vulncheck-token', [config.ENCRYPTION_KEY], 'feed:feed-vulncheck'),
+          },
+        },
+        {
+          data: {
+            id: 'feed-nvd-community',
+            type: 'NVD_API',
+            authType: 'API_KEY',
+            enabled: true,
+            authSecretKey: nistSecret,
+          },
+        },
+      ],
+    }),
+  } as unknown as Parameters<typeof loadNistApiKey>[0];
+
+  assert.equal(await loadNistApiKey(db, config), 'nist-real-key');
+});
+
+test('loadNistApiKey still uses a configured key when NVD ingestion is disabled', async () => {
+  const db = {
+    query: async () => ({
+      rows: [
+        {
+          data: {
+            id: 'feed-nvd-community',
+            type: 'NVD_API',
+            authType: 'API_KEY',
+            enabled: false,
+            authSecretKey: encrypt(
+              'nist-real-key',
+              [config.ENCRYPTION_KEY],
+              'feed:feed-nvd-community',
+            ),
+          },
+        },
+      ],
+    }),
+  } as unknown as Parameters<typeof loadNistApiKey>[0];
+
+  assert.equal(await loadNistApiKey(db, config), 'nist-real-key');
+});
+
+test('the NVD API key is sent to NIST but never to the VulnCheck mirror', async () => {
+  const calls: { url: string; options: RequestOptions | undefined }[] = [];
+  const requester: Requester = async (url, options) => {
+    calls.push({ url, options });
+    return { status: 200, body: JSON.stringify({ totalResults: 0, products: [] }), headers: {} };
+  };
+
+  await searchNvdCpes(
+    requester,
+    'vulncheck-token',
+    '',
+    '',
+    50,
+    'cpe:2.3:a:acme:widget:1.0:*:*:*:*:*:*:*',
+    undefined,
+    'nist-key',
+  );
+
+  assert.equal(calls.length, 4);
+  for (const { url, options } of calls) {
+    const host = new URL(url).hostname;
+    if (host === 'api.vulncheck.com') {
+      assert.equal(options?.headers?.Authorization, 'Bearer vulncheck-token');
+      assert.equal(options?.headers?.apiKey, undefined);
+    } else {
+      assert.equal(host, 'services.nvd.nist.gov');
+      assert.equal(options?.headers?.apiKey, 'nist-key');
+      assert.equal(options?.headers?.Authorization, undefined);
+    }
+  }
+});
+
+test('keyword CPE searches use the NVD API key on the NIST dictionary', async () => {
+  const calls: { url: string; options: RequestOptions | undefined }[] = [];
+  const requester: Requester = async (url, options) => {
+    calls.push({ url, options });
+    return { status: 200, body: JSON.stringify({ totalResults: 0, products: [] }), headers: {} };
+  };
+
+  await searchNvdCpes(requester, '', 'cisco', 'ios', 20, undefined, undefined, 'nist-key');
+
+  assert.equal(calls.length, 2);
+  for (const { options } of calls) {
+    assert.equal(options?.headers?.apiKey, 'nist-key');
+    assert.equal(options?.headers?.Authorization, undefined);
+  }
 });

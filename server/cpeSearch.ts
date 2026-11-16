@@ -153,6 +153,60 @@ export async function loadNvdApiKey(db: Db, config: Config): Promise<string> {
 }
 
 /**
+ * Load the NIST NVD API key from the operator's NVD_API threat feed. NIST
+ * raises its rolling budget from 5 to 50 requests per 30 seconds when a key is
+ * present. The key is only ever attached to requests for services.nvd.nist.gov;
+ * the VulnCheck Bearer token is separately loaded by `loadNvdApiKey`.
+ */
+export async function loadNistApiKey(db: Db, config: Config): Promise<string> {
+  let feeds: ThreatFeed[];
+  try {
+    feeds = await list<ThreatFeed>(db, 'feeds');
+  } catch {
+    return '';
+  }
+  const configured = feeds.filter((feed) => feed.type === 'NVD_API' && feed.authType === 'API_KEY');
+  // Prefer the enabled feed, but a configured key still raises the CPE-search
+  // budget when ingestion itself is disabled in favour of VulnCheck NVD++.
+  const nist = configured.find((feed) => feed.enabled) ?? configured[0];
+  if (!nist?.authSecretKey) return '';
+  try {
+    return decrypt(nist.authSecretKey, encryptionKeys(config), `feed:${nist.id}`);
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        event: 'nist_api_key_decrypt_failed',
+        feedId: nist.id,
+        message: error instanceof Error ? error.message : 'unknown error',
+      }),
+    );
+    return '';
+  }
+}
+
+// NIST allows 50 keyed requests per rolling 30 seconds (5 unkeyed). Serialize
+// scheduled slots through one process-wide queue so a bulk CPE verification
+// cannot exhaust the budget before its last row is checked.
+let nistNextRequestAt = 0;
+let nistQueue: Promise<void> = Promise.resolve();
+
+async function paceNistRequest(intervalMs: number): Promise<void> {
+  let release!: () => void;
+  const slot = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const previous = nistQueue;
+  nistQueue = previous.then(() => slot);
+  await previous;
+  const now = Date.now();
+  const wait = nistNextRequestAt - now;
+  nistNextRequestAt = Math.max(now, nistNextRequestAt) + intervalMs;
+  if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+  release();
+}
+
+/**
  * Queries the NVD CPE dictionary for verified CPE 2.3 names matching the
  * supplied vendor and product keywords. Only well-formed CPE 2.3 entries are
  * returned; partial matches that the NVD keyword search surfaces are parsed and
@@ -160,6 +214,10 @@ export async function loadNvdApiKey(db: Db, config: Config): Promise<string> {
  *
  * The request is issued through the shared SSRF-protected requester, so the NVD
  * host must appear in EGRESS_ALLOWED_HOSTS (it is present by default).
+ *
+ * `nistApiKey` authenticates requests to the public NIST dictionary; it is
+ * never sent to the VulnCheck mirror. `paceNistRequests` keeps bulk callers
+ * inside NIST's rolling budget.
  */
 export async function searchNvdCpes(
   request: Requester,
@@ -169,6 +227,8 @@ export async function searchNvdCpes(
   limit: number,
   exactCpe?: string,
   cpeNameId?: string,
+  nistApiKey = '',
+  paceNistRequests = false,
 ): Promise<VulncheckCpeSearchResponse> {
   // NVD keywordSearch matches titles/reference text, not CPE component names.
   const keyword = `${vendor} ${product}`.replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
@@ -181,13 +241,18 @@ export async function searchNvdCpes(
     if (cpeNameId) url.searchParams.set('cpeNameId', cpeNameId);
     else url.searchParams.set('cpeMatchString', exactCpe);
   }
-  const fetchPage = (key: string, urlObj: URL = url) => {
+  const fetchPage = async (key: string, urlObj: URL = url) => {
     const target = new URL(urlObj);
     if (!key) target.hostname = 'services.nvd.nist.gov';
+    const targetHost = target.hostname;
+    if (paceNistRequests && targetHost === 'services.nvd.nist.gov') {
+      await paceNistRequest(nistApiKey ? 650 : 6100);
+    }
     return request(target.href, {
       headers: {
         Accept: 'application/json',
-        ...(key && target.hostname === 'api.vulncheck.com' ? { Authorization: `Bearer ${key}` } : {}),
+        ...(key && targetHost === 'api.vulncheck.com' ? { Authorization: `Bearer ${key}` } : {}),
+        ...(nistApiKey && targetHost === 'services.nvd.nist.gov' ? { apiKey: nistApiKey } : {}),
       },
       timeoutMs: 20000,
       socketTimeoutMs: 15000,

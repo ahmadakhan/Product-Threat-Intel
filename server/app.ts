@@ -95,7 +95,13 @@ import {
   INGEST_LIMIT_CAPACITY,
   INGEST_LIMIT_REFILL_PER_MS,
 } from './rateLimit';
-import { searchNvdCpes, loadNvdApiKey, isNvdRateLimitError, nvdRetryAfterSeconds } from './cpeSearch';
+import {
+  searchNvdCpes,
+  loadNvdApiKey,
+  loadNistApiKey,
+  isNvdRateLimitError,
+  nvdRetryAfterSeconds,
+} from './cpeSearch';
 import { searchThreatIntelligence, ThreatSearchRateLimitError, ThreatSearchUpstreamError } from './threatSearch';
 import {
   searchVulnerabilities,
@@ -1094,19 +1100,35 @@ export function createApp(
           'A CPE name is required when verifying a dictionary ID',
         )
         .parse(req.query);
-      const apiKey = await loadNvdApiKey(pool, config);
+      const [apiKey, nistApiKey] = await Promise.all([
+        loadNvdApiKey(pool, config),
+        loadNistApiKey(pool, config),
+      ]);
       // With a VulnCheck NVD++ credential, exact lookups use the authenticated
       // mirror; without one, searchNvdCpes serves the same request from the
       // public NIST dictionary. Never turn a missing credential into an empty
       // result: the registration gate would then report active dictionary
-      // identifiers as unpublished.
+      // identifiers as unpublished. The NIST key from the NVD threat feed
+      // raises the public dictionary budget for bulk CPE verification.
       try {
-        res.json(await searchNvdCpes(request, apiKey, vendor || '', product, limit, cpe, cpeNameId));
+        res.json(
+          await searchNvdCpes(
+            request,
+            apiKey,
+            vendor || '',
+            product,
+            limit,
+            cpe,
+            cpeNameId,
+            nistApiKey,
+            true,
+          ),
+        );
       } catch (error) {
         if (isNvdRateLimitError(error)) {
-          const retryAfter = nvdRetryAfterSeconds(error);
-          if (retryAfter) res.setHeader('Retry-After', String(retryAfter));
-          throw new HttpError(429, 'NVD rate limit reached; retry later');
+          const retryAfter = nvdRetryAfterSeconds(error) ?? 30;
+          res.setHeader('Retry-After', String(retryAfter));
+          throw new HttpError(429, `NVD rate limit reached; retry in ${retryAfter} seconds`);
         }
         throw new HttpError(502, 'CPE search upstream request failed');
       }
