@@ -6,8 +6,11 @@ import {
   orderWatchlist,
   registrationAssetsFromCpes,
   verifyRegistrationCpes,
+  verifyRegistrationAssets,
   dictionaryCpesForCandidate,
+  bulkRegistrationAssets,
 } from '../src/utils/watchlist.ts';
+import { watchlistImportSchema, assetImportSchema } from '../server/validation.ts';
 
 const item = (id: string, createdAt: string, product = 'widget'): WatchListItem => ({
   id,
@@ -186,4 +189,159 @@ test('registration still rejects a non-custom CPE missing from the NVD dictionar
     verifyRegistrationCpes([cpe], async () => ({ results: [] })),
     /not an active NVD/,
   );
+});
+
+test('bulk import accepts records without a published CPE and disables them by default', () => {
+  for (const absent of [undefined, null, '', 'NA', 'n/a', 'none', '-', [], ['NA'], ['', 'N/A'], [null, undefined]]) {
+    const result = bulkRegistrationAssets(
+      { vendor: ' Example ', product: ' Internal Agent ', cpes: absent },
+      'BULK-1',
+    );
+    assert.ok('rows' in result);
+    assert.equal(result.rows.length, 1);
+    assert.deepEqual(result.rows[0].cpes, []);
+    assert.equal(result.rows[0].vendor, 'Example');
+    assert.equal(result.rows[0].product, 'Internal Agent');
+    assert.equal(result.rows[0].version, '*');
+    assert.equal(result.rows[0].active, false);
+    assert.equal(result.rows[0].assetTag, 'BULK-1');
+    assert.equal(result.rows[0].ownerGroup, 'Imported-Inventory');
+  }
+});
+
+test('a CPE-less bulk record can be enabled explicitly when it has a PURL', () => {
+  const result = bulkRegistrationAssets(
+    {
+      vendor: 'acme',
+      product: 'agent',
+      cpes: 'NA',
+      purls: ['pkg:generic/agent@1.0.0'],
+      active: true,
+    },
+    'BULK-2',
+  );
+  assert.ok('rows' in result);
+  assert.equal(result.rows[0].active, true);
+});
+
+test('an active bulk record without any structured identifier is rejected', () => {
+  const result = bulkRegistrationAssets(
+    { vendor: 'acme', product: 'agent', cpes: 'NA', active: true },
+    'BULK-2B',
+  );
+  assert.ok('error' in result && /active product requires a CPE or PURL/.test(result.error));
+});
+
+test('bulk import verifies every supplied CPE and keeps singular cpe values', () => {
+  const cpe = 'cpe:2.3:a:acme:widget:1.0:*:*:*:*:*:*:*';
+  for (const input of [
+    { cpe },
+    { cpes: cpe },
+    { cpes: ['NA', cpe] },
+    { cpes: ['', cpe] },
+  ]) {
+    const result = bulkRegistrationAssets({ vendor: 'acme', product: 'widget', ...input }, 'BULK-3');
+    assert.ok('rows' in result);
+    assert.deepEqual(result.rows[0].cpes, [cpe]);
+    assert.equal(result.rows[0].active, true);
+  }
+});
+
+test('bulk import rejects malformed or non-string CPEs instead of dropping them', () => {
+  for (const cpes of [['NA', 'not-a-cpe'], ['cpe:2.3:a:acme'], [42], [{ cpe: 'cpe' }]]) {
+    const result = bulkRegistrationAssets({ vendor: 'acme', product: 'widget', cpes }, 'BULK-4');
+    assert.ok('error' in result);
+  }
+  const invalid = bulkRegistrationAssets(
+    { vendor: 'acme', product: 'widget', cpes: ['not-a-cpe'] },
+    'BULK-5',
+  );
+  assert.ok('error' in invalid && /Invalid CPE 2\.3/.test(invalid.error));
+});
+
+test('bulk import still requires vendor and product when no CPE is supplied', () => {
+  for (const record of [
+    { vendor: '', product: 'widget', cpes: 'NA' },
+    { vendor: 'acme', product: '   ', cpes: [] },
+    { vendor: 42, product: 'widget', cpes: 'NA' },
+  ]) {
+    assert.ok('error' in bulkRegistrationAssets(record, 'BULK-6'));
+  }
+});
+
+test('verification leaves CPE-less rows untouched without querying NVD', async () => {
+  let calls = 0;
+  const [verified] = await verifyRegistrationAssets(
+    [{ vendor: 'acme', product: 'agent', cpes: [], assetTag: 'A-1', ownerGroup: 'SOC', active: false }],
+    async () => {
+      calls++;
+      return { results: [] };
+    },
+  );
+  assert.equal(calls, 0);
+  assert.deepEqual(verified.cpes, []);
+  assert.equal(verified.active, false);
+  assert.equal(verified.assetTag, 'A-1');
+});
+
+test('the import contract accepts inventory rows without CPE identifiers', () => {
+  const parsed = watchlistImportSchema.element.parse({
+    id: 'no-cpe-row',
+    vendor: 'acme',
+    product: 'agent',
+    cpes: [],
+    assetTag: 'A-1',
+    ownerGroup: 'SOC',
+    active: false,
+  });
+  assert.deepEqual(parsed.cpes, []);
+  assert.equal(parsed.active, false);
+});
+
+test('the bulk import contract accepts inactive rows without identifiers only', () => {
+  const row = {
+    vendor: 'example_vendor',
+    product: 'internal_agent',
+    cpes: [],
+    assetTag: 'A-1',
+    ownerGroup: 'SOC',
+    active: false,
+  };
+  assert.deepEqual(assetImportSchema.parse(row).cpes, []);
+  assert.throws(
+    () => assetImportSchema.parse({ ...row, active: true }),
+    /active asset requires at least one CPE or PURL/,
+  );
+  assert.deepEqual(
+    assetImportSchema.parse({ ...row, active: true, cpes: ['cpe:2.3:a:acme:agent:1.0:*:*:*:*:*:*:*'] }).cpes,
+    ['cpe:2.3:a:acme:agent:1.0:*:*:*:*:*:*:*'],
+  );
+});
+
+test('bulk import reports a wildcard identity against its row instead of aborting the batch', () => {
+  const result = bulkRegistrationAssets(
+    {
+      vendor: 'acme',
+      product: 'widget',
+      cpes: ['cpe:2.3:a:*:widget:*:*:*:*:*:*:*:*'],
+    },
+    'BULK-7',
+  );
+  assert.ok('error' in result && /valid product CPE/.test(result.error));
+});
+
+test('a CPE-less bulk record keeps PURLs and rejects malformed PURL fields', () => {
+  const purl = 'pkg:npm/internal-agent@1.0.0';
+  const kept = bulkRegistrationAssets(
+    { vendor: 'acme', product: 'agent', cpes: [], purls: [' ', purl], active: false },
+    'BULK-8',
+  );
+  assert.ok('rows' in kept);
+  assert.deepEqual(kept.rows[0].purls, [purl]);
+  assert.equal(kept.rows[0].active, false);
+
+  for (const purls of ['pkg:npm/internal-agent@1.0.0', [42], [null]]) {
+    const result = bulkRegistrationAssets({ vendor: 'acme', product: 'agent', cpes: [], purls }, 'BULK-9');
+    assert.ok('error' in result && /purls must be an array of strings/.test(result.error));
+  }
 });

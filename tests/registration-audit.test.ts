@@ -154,6 +154,25 @@ test(
         await assert.rejects(write('asset.save', row('two')), /already monitored/);
         assert.equal((await list(pool, 'watchlist')).length, 1);
       });
+      await t.test('an inactive asset without a CPE imports and stays disabled', async () => {
+        await reset();
+        const noCpe = {
+          vendor: 'example_vendor',
+          product: 'internal_agent',
+          cpes: [],
+          assetTag: 'NO-CPE',
+          ownerGroup: 'SOC',
+          active: false,
+        };
+        assert.equal((await write('asset.import', [noCpe])).imported, 1);
+        const saved = (await list<WatchListItem>(pool, 'watchlist'))[0];
+        assert.deepEqual(saved.cpes, []);
+        assert.equal(saved.active, false);
+        await assert.rejects(
+          write('asset.import', [{ ...noCpe, active: true }]),
+          /active asset requires at least one CPE or PURL/,
+        );
+      });
       await t.test(
         'bulk upserts remain idempotent but reject new-tag duplicates before writing',
         async () => {

@@ -57,6 +57,7 @@ import {
   feedSchema,
   feedImportSchema,
   assetSchema,
+  assetImportSchema,
   watchlistImportSchema,
   recipientSchema,
   webhookSchema,
@@ -338,9 +339,9 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
     }
     
     try {
-      const input = z.array(assetSchema).min(1).max(1000).parse(data);
+      const input = z.array(assetImportSchema).min(1).max(1000).parse(data);
       input.forEach((item) => assertSpecificInventoryCpes(item.cpes));
-      const identity = (item: z.infer<typeof assetSchema>) =>
+      const identity = (item: z.infer<typeof assetImportSchema>) =>
         JSON.stringify([item.assetTag, watchlistIdentity(item)]);
       const inventory = await list<any>(db, 'watchlist');
       const existing = new Map(inventory.map((item) => [identity(item), item]));

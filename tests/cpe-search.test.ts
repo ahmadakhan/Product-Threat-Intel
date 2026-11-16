@@ -357,3 +357,106 @@ test('wildcard vendor search is skipped for exact CPE verification', async () =>
   assert.equal(url.searchParams.get('cpeMatchString'), 'cpe:2.3:a:example:widget:1.0:*:*:*:*:*:*:*');
   assert.equal(url.searchParams.has('keywordSearch'), false);
 });
+
+test('an authenticated exact lookup miss is re-checked against the public NVD dictionary', async () => {
+  const wildcard = 'cpe:2.3:o:sonicwall:sonicos:*:*:*:*:*:*:*:*';
+  const published = 'cpe:2.3:o:sonicwall:sonicos:6.2.2.0:*:*:*:*:*:*:*';
+  const calls: { hostname: string; auth: string | undefined }[] = [];
+  const requester: Requester = async (url, options) => {
+    const target = new URL(url);
+    calls.push({ hostname: target.hostname, auth: options?.headers?.Authorization });
+    if (target.hostname === 'api.vulncheck.com') {
+      // The mirror can answer 200 with an empty page even for an identifier
+      // that the authoritative NVD dictionary publishes.
+      return { status: 200, headers: {}, body: JSON.stringify({ totalResults: 0, products: [] }) };
+    }
+    return {
+      status: 200,
+      headers: {},
+      body: JSON.stringify({
+        totalResults: 1,
+        products: [{ cpe: { cpeName: published, deprecated: false } }],
+      }),
+    };
+  };
+
+  const result = await searchNvdCpes(requester, 'test-key', '', '', 200, wildcard);
+
+  assert.deepEqual(
+    calls.map((call) => call.hostname),
+    ['api.vulncheck.com', 'services.nvd.nist.gov'],
+  );
+  assert.equal(calls[0].auth, 'Bearer test-key');
+  assert.equal(calls[1].auth, undefined, 'the VulnCheck credential must never reach NIST');
+  assert.deepEqual(
+    result.results.map((entry) => entry.cpeName),
+    [published],
+  );
+});
+
+test('a wildcard lookup miss in the mirror is re-checked against the public dictionary', async () => {
+  const wildcard = 'cpe:2.3:o:sonicwall:sonicos:*:*:*:*:*:*:*:*';
+  const unrelated = 'cpe:2.3:o:other_vendor:sonicos:1.0:*:*:*:*:*:*:*';
+  const published = 'cpe:2.3:o:sonicwall:sonicos:7.5.0.12:*:*:*:*:*:*:*';
+  const hosts: string[] = [];
+  const requester: Requester = async (url) => {
+    const hostname = new URL(url).hostname;
+    hosts.push(hostname);
+    return hostname === 'api.vulncheck.com'
+      ? {
+          status: 200,
+          headers: {},
+          body: JSON.stringify({
+            totalResults: 1,
+            products: [{ cpe: { cpeName: unrelated, deprecated: false } }],
+          }),
+        }
+      : {
+          status: 200,
+          headers: {},
+          body: JSON.stringify({
+            totalResults: 1,
+            products: [{ cpe: { cpeName: published, deprecated: false } }],
+          }),
+        };
+  };
+
+  const result = await searchNvdCpes(requester, 'test-key', '', '', 200, wildcard);
+
+  assert.deepEqual(hosts, ['api.vulncheck.com', 'services.nvd.nist.gov']);
+  assert.deepEqual(
+    result.results.map((entry) => entry.cpeName),
+    [published],
+    'entries for another vendor must not satisfy the wildcard lookup',
+  );
+});
+
+test('a NIST fallback rate limit is surfaced instead of reporting a missing identifier', async () => {
+  let calls = 0;
+  const requester: Requester = async () => {
+    calls++;
+    if (calls === 1) return { status: 200, headers: {}, body: JSON.stringify({ totalResults: 0, products: [] }) };
+    return { status: 429, headers: { 'retry-after': '20' }, body: '' };
+  };
+
+  await assert.rejects(
+    searchNvdCpes(requester, 'test-key', '', '', 200, 'cpe:2.3:a:example:widget:1.0:*:*:*:*:*:*:*'),
+    (error: unknown) => isNvdRateLimitError(error) && nvdRetryAfterSeconds(error) === 20,
+  );
+  assert.equal(calls, 2);
+});
+
+test('a failed NIST fallback is an upstream error, not a missing identifier', async () => {
+  let calls = 0;
+  const requester: Requester = async () => {
+    calls++;
+    if (calls === 1) return { status: 200, headers: {}, body: JSON.stringify({ totalResults: 0, products: [] }) };
+    return { status: 500, headers: {}, body: '' };
+  };
+
+  await assert.rejects(
+    searchNvdCpes(requester, 'test-key', '', '', 200, 'cpe:2.3:a:example:widget:1.0:*:*:*:*:*:*:*'),
+    /HTTP 500/,
+  );
+  assert.equal(calls, 2);
+});

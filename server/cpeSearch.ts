@@ -185,39 +185,93 @@ export async function searchNvdCpes(
     const target = new URL(urlObj);
     if (!key) target.hostname = 'services.nvd.nist.gov';
     return request(target.href, {
-      headers: { Accept: 'application/json', ...(key && target.hostname === 'api.vulncheck.com' ? { Authorization: `Bearer ${key}` } : {}) },
+      headers: {
+        Accept: 'application/json',
+        ...(key && target.hostname === 'api.vulncheck.com' ? { Authorization: `Bearer ${key}` } : {}),
+      },
       timeoutMs: 20000,
       socketTimeoutMs: 15000,
       maxResponseBytes: 4 * 1024 * 1024,
       sameHostRedirects: true,
     });
   };
-  const response = await fetchPage(apiKey);
-
   const effectiveKey = apiKey;
 
-  if (response.status === 429) {
-    throw {
+  const rateLimitError = (response: { headers: Record<string, string | string[] | undefined> }) =>
+    ({
       __nvdRateLimit: true,
       retryAfter: response.headers['retry-after'],
       status: 429,
       message: 'NVD rate limit reached; retry later',
-    } as NvdRateLimitError;
-  }
+    }) as NvdRateLimitError;
 
-  if (response.status !== 200) throw new Error(`NVD CPE search returned HTTP ${response.status}`);
+  const requireOk = (response: {
+    status: number;
+    headers: Record<string, string | string[] | undefined>;
+  }) => {
+    if (response.status === 429) throw rateLimitError(response);
+    if (response.status !== 200) throw new Error(`NVD CPE search returned HTTP ${response.status}`);
+  };
 
   const seenCpes = new Set<string>();
   const productWildcard = Boolean(exactCpe && isProductWildcard(exactCpe));
-  const { results, totalResults } = parseNvdCpeProducts(
-    response.body,
-    productWildcard ? undefined : exactCpe,
-    seenCpes,
-  );
-  if (productWildcard) {
-    const matching = results.filter((entry) => dictionaryEntryMatchesWildcard(exactCpe!, entry.cpeName));
-    if (matching.length) return { results: matching, totalResults };
+  const readExactPage = (body: string) => {
+    const parsed = parseNvdCpeProducts(body, productWildcard ? undefined : exactCpe, seenCpes);
+    if (!productWildcard) return parsed;
+    return {
+      results: parsed.results.filter((entry) =>
+        dictionaryEntryMatchesWildcard(exactCpe as string, entry.cpeName),
+      ),
+      totalResults: parsed.totalResults,
+    };
+  };
+
+  const response = await fetchPage(apiKey);
+  requireOk(response);
+
+  if (exactCpe) {
+    let exactPage = readExactPage(response.body);
+
+    // A credential routes exact lookups to the VulnCheck NVD mirror. A
+    // successful but empty page there is not proof that the identifier is
+    // unpublished: the registration gate names the NVD dictionary, and the
+    // public NIST service is its authority. Re-check a miss there before
+    // reporting that the CPE does not exist.
+    if (exactPage.results.length === 0 && apiKey) {
+      const nistResponse = await fetchPage('');
+      requireOk(nistResponse);
+      exactPage = readExactPage(nistResponse.body);
+    }
+    if (exactPage.results.length) return exactPage;
+
+    // Still no exact match: retry with a wildcard-vendor matchString built
+    // from the CPE's product. This handles the common case where the
+    // operator's vendor label differs from the NVD-registered vendor (e.g.
+    // "notepad-plus-plus" vs. "don_ho").
+    const parsed = parseCPE23(exactCpe);
+    if (parsed.isValid && parsed.product && parsed.product !== '*') {
+      const escapedProduct = escapeCpeComponent(parsed.product);
+      const matchString = `cpe:2.3:*:*:${escapedProduct}:*:*:*:*:*:*:*:*`;
+      const wildcardUrl = buildCpeMatchStringUrl(matchString, pageSize);
+      const wildcardResponse = await fetchPage(effectiveKey, wildcardUrl);
+      requireOk(wildcardResponse);
+      let widenedPage = parseNvdCpeProducts(wildcardResponse.body, undefined, seenCpes, true);
+      if (widenedPage.results.length === 0 && apiKey) {
+        const nistResponse = await fetchPage('', wildcardUrl);
+        requireOk(nistResponse);
+        widenedPage = parseNvdCpeProducts(nistResponse.body, undefined, seenCpes, true);
+      }
+      return {
+        results: [...exactPage.results, ...widenedPage.results],
+        totalResults: exactPage.totalResults + widenedPage.totalResults,
+      };
+    }
+
+    return exactPage;
   }
+
+  const page = readExactPage(response.body);
+  const { results, totalResults } = page;
 
   // When no exact CPE lookup is requested and a product name is supplied,
   // also search with a cpeMatchString that uses a wildcard vendor (`*`).
@@ -231,20 +285,13 @@ export async function searchNvdCpes(
   // vendor didn't produce a hit (or wasn't supplied at all), and every
   // result returned here is still an exact, verified NVD dictionary CPE —
   // only the search path differs, never the accuracy of the entry itself.
-  if (!exactCpe && product.trim()) {
+  if (product.trim()) {
     const escapedProduct = escapeCpeComponent(product.trim());
     const matchString = `cpe:2.3:*:*:${escapedProduct}:*:*:*:*:*:*:*:*`;
     const wildcardUrl = buildCpeMatchStringUrl(matchString, pageSize);
     try {
       const wildcardResponse = await fetchPage(effectiveKey, wildcardUrl);
-      if (wildcardResponse.status === 429) {
-        throw {
-          __nvdRateLimit: true,
-          retryAfter: wildcardResponse.headers['retry-after'],
-          status: 429,
-          message: 'NVD rate limit reached; retry later',
-        } as NvdRateLimitError;
-      }
+      if (wildcardResponse.status === 429) throw rateLimitError(wildcardResponse);
       if (wildcardResponse.status === 200) {
         const wildcardParsed = parseNvdCpeProducts(wildcardResponse.body, undefined, seenCpes, true);
         return {
@@ -256,44 +303,9 @@ export async function searchNvdCpes(
       if (isNvdRateLimitError(error)) throw error;
       // Non-fatal: a failed wildcard search still returns the keyword results
     }
-    return { results, totalResults };
   }
 
-  // If an exact CPE was requested but no exact match was returned, retry
-  // with a wildcard-vendor matchString built from the CPE's product. This
-  // handles the common case where the operator's vendor label differs from
-  // the NVD-registered vendor (e.g. "notepad-plus-plus" vs. "don_ho").
-  if (exactCpe && results.length === 0) {
-    const parsed = parseCPE23(exactCpe);
-    if (parsed.isValid && parsed.product && parsed.product !== '*') {
-      const escapedProduct = escapeCpeComponent(parsed.product);
-      const matchString = `cpe:2.3:*:*:${escapedProduct}:*:*:*:*:*:*:*:*`;
-      const wildcardUrl = buildCpeMatchStringUrl(matchString, pageSize);
-      try {
-        const wildcardResponse = await fetchPage(effectiveKey, wildcardUrl);
-        if (wildcardResponse.status === 429) {
-          throw {
-            __nvdRateLimit: true,
-            retryAfter: wildcardResponse.headers['retry-after'],
-            status: 429,
-            message: 'NVD rate limit reached; retry later',
-          } as NvdRateLimitError;
-        }
-        if (wildcardResponse.status === 200) {
-          const wildcardParsed = parseNvdCpeProducts(wildcardResponse.body, undefined, seenCpes, true);
-          return {
-            results: [...results, ...wildcardParsed.results],
-            totalResults: totalResults + wildcardParsed.totalResults,
-          };
-        }
-      } catch (error) {
-        if (isNvdRateLimitError(error)) throw error;
-        // Non-fatal: fall through to return empty results
-      }
-    }
-  }
-
-  return { results, totalResults };
+  return page;
 }
 
 export interface NvdRateLimitError {

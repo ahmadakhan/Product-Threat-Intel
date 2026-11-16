@@ -40,6 +40,7 @@ import {
   verifyRegistrationCpes,
   verifyRegistrationAssets,
   dictionaryCpesForCandidate,
+  bulkRegistrationAssets,
 } from '../utils/watchlist';
 import { CveLink } from './CveLink';
 import { useDialogFocus } from '../hooks/useDialogFocus';
@@ -859,35 +860,16 @@ export const WatchListView: React.FC = () => {
       const validItems: Array<Omit<WatchListItem, 'id' | 'createdAt'>> = [];
       const errors: string[] = [];
 
-      items.forEach((item: any, i: number) => {
-        if (
-          !item ||
-          typeof item.vendor !== 'string' ||
-          !item.vendor.trim() ||
-          typeof item.product !== 'string' ||
-          !item.product.trim()
-        ) {
-          errors.push(`Row ${i + 1}: Missing required vendor or product name.`);
+      items.forEach((item: unknown, i: number) => {
+        const result = bulkRegistrationAssets(
+          item && typeof item === 'object' ? (item as Record<string, unknown>) : {},
+          `BULK-${i + 1}-${Date.now().toString(36).toUpperCase()}`,
+        );
+        if ('error' in result) {
+          errors.push(`Row ${i + 1}: ${result.error}`);
           return;
         }
-
-        if (
-          !Array.isArray(item.cpes) ||
-          !item.cpes.length ||
-          item.cpes.some((cpe: unknown) => typeof cpe !== 'string' || !parseCPE23(cpe).isValid)
-        ) {
-          errors.push(
-            `Row ${i + 1}: Provide valid NVD CPE identifiers; automatic CPE generation is disabled.`,
-          );
-          return;
-        }
-        const rows = registrationAssetsFromCpes(item.cpes, {
-          assetTag: item.assetTag?.trim() || `BULK-${i + 1}-${Date.now().toString(36).toUpperCase()}`,
-          ownerGroup: item.ownerGroup?.trim() || 'Imported-Inventory',
-          notes: item.notes || 'Bulk imported product asset',
-          purls: item.purls || [],
-        });
-        validItems.push(...rows.map((row) => ({ ...row, active: item.active !== false })));
+        validItems.push(...result.rows);
       });
 
       if (errors.length) {
@@ -2285,8 +2267,10 @@ export const WatchListView: React.FC = () => {
               Bulk Product Asset Import (JSON)
             </h2>
             <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 mb-4">
-              Import up to 1,000 product records with vendor, product, assetTag, and active NVD CPE
-              identifiers. All identifiers are verified before import.
+              Import up to 1,000 product records with vendor, product, assetTag, and NVD CPE identifiers.
+              Every supplied CPE is verified before import. Records whose <code>cpes</code> field is
+              missing, empty, or <code>"NA"</code> (NVD publishes no CPE for some vendor/product pairs) are
+              imported disabled by default.
             </p>
 
             {bulkFeedback && (
@@ -2321,7 +2305,7 @@ export const WatchListView: React.FC = () => {
                 setBulkJsonText(e.target.value);
                 setBulkFeedback(null);
               }}
-              placeholder={`[\n  {\n    "vendor": "microsoft",\n    "product": "windows_server_2022",\n    "assetTag": "DC-PDC01",\n    "ownerGroup": "Cyber",\n    "cpes": ["cpe:2.3:o:microsoft:windows_server_2022:20348:*:*:*:*:*:x64:*"]\n  }\n]`}
+              placeholder={`[\n  {\n    "vendor": "microsoft",\n    "product": "windows_server_2022",\n    "assetTag": "DC-PDC01",\n    "ownerGroup": "Cyber",\n    "cpes": ["cpe:2.3:o:microsoft:windows_server_2022:20348:*:*:*:*:*:x64:*"]\n  },\n  {\n    "vendor": "example_vendor",\n    "product": "internal_agent",\n    "assetTag": "APP-0042",\n    "ownerGroup": "Cyber",\n    "cpes": "NA"\n  }\n]`}
               className="w-full bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-xl p-3 font-mono text-xs text-zinc-100 dark:text-zinc-100 light:text-zinc-900 focus:border-zinc-600 focus:outline-none leading-relaxed"
             />
 

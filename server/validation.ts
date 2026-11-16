@@ -147,6 +147,16 @@ export const assetSchema = assetShape.refine(
   (a) => a.cpes.length > 0 || !!a.purls?.length,
   'At least one CPE or PURL is required',
 );
+/**
+ * Bulk import shape. NVD does not publish a CPE for every vendor/product, so
+ * an inactive row may be imported without identifiers for operator review.
+ * An active row still needs a CPE or PURL; otherwise it could never be matched
+ * by the structured tiers and would monitor an unidentifiable product.
+ */
+export const assetImportSchema = assetShape.refine(
+  (a) => a.cpes.length > 0 || !!a.purls?.length || a.active === false,
+  'An inactive asset may omit identifiers, but an active asset requires at least one CPE or PURL',
+);
 /** Bulk upsert shape for monitored inventory; keeps identifiers stable across reseeds. */
 export const watchlistImportSchema = z
   .array(

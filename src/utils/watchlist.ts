@@ -179,6 +179,13 @@ export async function verifyRegistrationAssets<T extends Omit<WatchListItem, 'id
   };
   const verifiedItems: T[] = [];
   for (const item of items) {
+    // An inventory row may legitimately have no CPE: NVD does not publish a
+    // dictionary identifier for every vendor/product. Such rows must reach the
+    // importer unchanged (and disabled) instead of failing the whole batch.
+    if (!item.cpes.length) {
+      verifiedItems.push(item);
+      continue;
+    }
     const cpes = await verifyRegistrationCpes(item.cpes, cachedLookup, customCpes);
     const primary = parseCPE23(cpes[0]);
     const versions = new Set(cpes.map((cpe) => parseCPE23(cpe).version));
@@ -193,4 +200,124 @@ export async function verifyRegistrationAssets<T extends Omit<WatchListItem, 'id
     });
   }
   return verifiedItems;
+}
+
+/** Value(s) that mean "NVD publishes no CPE for this vendor/product". */
+const ABSENT_CPE_MARKERS = new Set(['', 'na', 'n/a', 'none', 'null', '-']);
+
+export interface BulkRegistrationRecord {
+  vendor?: unknown;
+  product?: unknown;
+  version?: unknown;
+  targetHw?: unknown;
+  cpes?: unknown;
+  cpe?: unknown;
+  purls?: unknown;
+  assetTag?: unknown;
+  ownerGroup?: unknown;
+  notes?: unknown;
+  active?: unknown;
+}
+
+export type BulkRegistrationResult =
+  | { rows: Array<Omit<WatchListItem, 'id' | 'createdAt'>> }
+  | { error: string };
+
+/**
+ * Turn one bulk-import JSON record into inventory rows.
+ *
+ * Every supplied CPE is parsed here and verified later by
+ * `verifyRegistrationAssets`; a malformed non-absent value is an error rather
+ * than a silently dropped identifier. A record whose CPE field is missing,
+ * empty, `null`, or an N/A marker is accepted with no CPE and is imported
+ * disabled unless it carries a PURL and explicitly requests `active: true`.
+ */
+export function bulkRegistrationAssets(
+  record: BulkRegistrationRecord,
+  fallbackAssetTag: string,
+): BulkRegistrationResult {
+  const vendor = typeof record.vendor === 'string' ? record.vendor.trim() : '';
+  const product = typeof record.product === 'string' ? record.product.trim() : '';
+  if (!vendor || !product) return { error: 'Missing required vendor or product name.' };
+
+  // Accept both the documented `cpes` field and a singular `cpe` alias.
+  const rawCpes = record.cpes === undefined ? record.cpe : record.cpes;
+  const cpes: string[] = [];
+  if (rawCpes !== undefined && rawCpes !== null) {
+    const values = Array.isArray(rawCpes) ? rawCpes : [rawCpes];
+    for (const value of values) {
+      if (value === null || value === undefined) continue;
+      if (typeof value !== 'string')
+        return {
+          error: 'CPE identifiers must be a string or an array of strings; use "NA" or an empty value when NVD publishes none.',
+        };
+      const trimmed = value.trim();
+      if (ABSENT_CPE_MARKERS.has(trimmed.toLowerCase())) continue;
+      if (!parseCPE23(trimmed).isValid) return { error: `Invalid CPE 2.3 expression: ${trimmed}.` };
+      cpes.push(trimmed);
+    }
+  }
+
+  const purls: string[] = [];
+  if (record.purls !== undefined && record.purls !== null) {
+    if (!Array.isArray(record.purls) || record.purls.some((purl) => typeof purl !== 'string'))
+      return { error: 'purls must be an array of strings.' };
+    for (const purl of record.purls) {
+      const trimmed = purl.trim();
+      if (trimmed) purls.push(trimmed);
+    }
+  }
+  const details = {
+    assetTag:
+      typeof record.assetTag === 'string' && record.assetTag.trim()
+        ? record.assetTag.trim()
+        : fallbackAssetTag,
+    ownerGroup:
+      typeof record.ownerGroup === 'string' && record.ownerGroup.trim()
+        ? record.ownerGroup.trim()
+        : 'Imported-Inventory',
+    notes: typeof record.notes === 'string' && record.notes.trim() ? record.notes : 'Bulk imported product asset',
+    purls,
+  };
+
+  if (cpes.length) {
+    try {
+      return {
+        rows: registrationAssetsFromCpes(cpes, details).map((row) => ({
+          ...row,
+          active: record.active !== false,
+        })),
+      };
+    } catch (error) {
+      // A structurally valid CPE with a wildcard vendor or product still cannot
+      // become a monitored identity. Report it against this row instead of
+      // aborting the whole batch.
+      return { error: (error as Error).message };
+    }
+  }
+
+  // An explicit enable still needs a structured identifier. Without a CPE a
+  // PURL is the only thing the matcher can use, and the server enforces the
+  // same rule; catching it here keeps the error attached to the row.
+  if (record.active === true && !purls.length)
+    return {
+      error:
+        'An active product requires a CPE or PURL. Import it inactive, then enable it after adding a published identifier.',
+    };
+
+  return {
+    rows: [
+      {
+        vendor,
+        product,
+        version:
+          typeof record.version === 'string' && record.version.trim() ? record.version.trim() : '*',
+        cpes: [],
+        targetHw:
+          typeof record.targetHw === 'string' && record.targetHw.trim() ? record.targetHw.trim() : undefined,
+        ...details,
+        active: record.active === true,
+      },
+    ],
+  };
 }
