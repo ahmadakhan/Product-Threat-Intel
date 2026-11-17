@@ -42,6 +42,11 @@ import {
   dictionaryCpesForCandidate,
   bulkRegistrationAssets,
 } from '../utils/watchlist';
+import {
+  planBulkRegistrationRows,
+  type BulkRegistrationChange,
+  type BulkRegistrationPlan,
+} from '../utils/bulkRegistrationPlan';
 import { CveLink } from './CveLink';
 import { useDialogFocus } from '../hooks/useDialogFocus';
 import './product-registration.css';
@@ -77,6 +82,24 @@ function ProductRegistrationDialog({
     </div>
   );
 }
+
+const BULK_ACTION_LABEL: Record<BulkRegistrationChange['action'], string> = {
+  create: 'New',
+  update: 'Overwrite',
+  enable: 'Re-enable',
+  disable: 'Disable',
+  unchanged: 'Unchanged',
+  invalid: 'Rejected',
+};
+
+const BULK_ACTION_CLASS: Record<BulkRegistrationChange['action'], string> = {
+  create: 'border-emerald-800 bg-emerald-950 text-emerald-300',
+  update: 'border-amber-800 bg-amber-950 text-amber-300',
+  enable: 'border-sky-800 bg-sky-950 text-sky-300',
+  disable: 'border-zinc-700 bg-zinc-800 text-zinc-300',
+  unchanged: 'border-zinc-700 bg-zinc-800 text-zinc-400',
+  invalid: 'border-rose-800 bg-rose-950 text-rose-300',
+};
 
 export const WatchListView: React.FC = () => {
   const {
@@ -187,6 +210,7 @@ export const WatchListView: React.FC = () => {
 
   const [bulkJsonText, setBulkJsonText] = useState('');
   const [bulkFeedback, setBulkFeedback] = useState<{ imported: number; errors: string[] } | null>(null);
+  const [bulkPlan, setBulkPlan] = useState<BulkRegistrationPlan | null>(null);
 
   // -------------------------------------------------------------
   // Simulator State
@@ -825,13 +849,7 @@ export const WatchListView: React.FC = () => {
     setBulkImporting(true);
     setBulkFeedback(null);
     try {
-      const verifiedItems = await verifyRegistrationAssets(items, verifySelectedCpe);
-      const duplicates = checkDuplicates(verifiedItems);
-      if (duplicates.length) {
-        setBulkFeedback({ imported: 0, errors: duplicates });
-        return;
-      }
-      const result = await bulkImportWatchlist(verifiedItems);
+      const result = await bulkImportWatchlist(items);
       if (result.errors.length) {
         setBulkFeedback(result);
         return;
@@ -841,7 +859,7 @@ export const WatchListView: React.FC = () => {
     } catch (error) {
       setBulkFeedback({
         imported: 0,
-        errors: [error instanceof Error ? error.message : 'Could not verify and import products. Please retry.'],
+        errors: [error instanceof Error ? error.message : 'Could not import products. Please retry.'],
       });
     } finally {
       setBulkImporting(false);
@@ -852,6 +870,7 @@ export const WatchListView: React.FC = () => {
     if (bulkImporting || confirmingBulk) return;
     setBulkImporting(true);
     setBulkFeedback(null);
+    setBulkPlan(null);
     try {
       const parsed = JSON.parse(bulkJsonText);
       const items = Array.isArray(parsed) ? parsed : [parsed];
@@ -859,11 +878,12 @@ export const WatchListView: React.FC = () => {
         throw new Error('Provide between 1 and 1,000 product records.');
       const validItems: Array<Omit<WatchListItem, 'id' | 'createdAt'>> = [];
       const errors: string[] = [];
+      const stamp = Date.now().toString(36).toUpperCase();
 
       items.forEach((item: unknown, i: number) => {
         const result = bulkRegistrationAssets(
           item && typeof item === 'object' ? (item as Record<string, unknown>) : {},
-          `BULK-${i + 1}-${Date.now().toString(36).toUpperCase()}`,
+          `BULK-${i + 1}-${stamp}`,
         );
         if ('error' in result) {
           errors.push(`Row ${i + 1}: ${result.error}`);
@@ -877,7 +897,17 @@ export const WatchListView: React.FC = () => {
         return;
       }
       if (validItems.length > 0) {
-        pendingBulk.current = validItems;
+        // Verify before asking for confirmation so the plan describes the
+        // identifiers that will actually be written (verification can replace
+        // an alias with its NVD dictionary spelling).
+        const verifiedItems = await verifyRegistrationAssets(validItems, verifySelectedCpe);
+        const duplicates = checkDuplicates(verifiedItems);
+        if (duplicates.length) {
+          setBulkFeedback({ imported: 0, errors: duplicates });
+          return;
+        }
+        pendingBulk.current = verifiedItems;
+        setBulkPlan(planBulkRegistrationRows(verifiedItems, watchlist));
         setConfirmingBulk(true);
         return;
       }
@@ -954,6 +984,11 @@ export const WatchListView: React.FC = () => {
       setSimRunning(false);
     }
   };
+
+  const bulkSplitGroups = bulkPlan?.identities.filter((identity) => identity.splits).length ?? 0;
+  const bulkOverwriteRows =
+    bulkPlan?.changedRecords.filter((change) => change.action === 'update' || change.action === 'disable')
+      .length ?? 0;
 
   return (
     <div className="space-y-6">
@@ -1283,7 +1318,11 @@ export const WatchListView: React.FC = () => {
                 <span>Export JSON</span>
               </button>
               <button
-                onClick={() => setShowBulkModal(true)}
+                onClick={() => {
+                  setBulkFeedback(null);
+                  setBulkPlan(null);
+                  setShowBulkModal(true);
+                }}
                 className="text-xs px-3 py-1.5 rounded-xl bg-zinc-800 dark:bg-zinc-800 light:bg-zinc-200 hover:bg-zinc-700 dark:hover:bg-zinc-700 light:hover:bg-zinc-300 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 border border-zinc-700 dark:border-zinc-700 light:border-zinc-300 font-medium transition flex items-center space-x-1"
               >
                 <Upload className="w-3.5 h-3.5" />
@@ -2256,6 +2295,7 @@ export const WatchListView: React.FC = () => {
               onClick={() => {
                 setShowBulkModal(false);
                 setBulkFeedback(null);
+                setBulkPlan(null);
               }}
               className="absolute top-4 right-4 text-zinc-400 hover:text-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 light:text-zinc-600 light:hover:text-zinc-800"
             >
@@ -2305,6 +2345,7 @@ export const WatchListView: React.FC = () => {
               onChange={(e) => {
                 setBulkJsonText(e.target.value);
                 setBulkFeedback(null);
+                setBulkPlan(null);
               }}
               placeholder={`[\n  {\n    "vendor": "microsoft",\n    "product": "windows_server_2022",\n    "assetTag": "DC-PDC01",\n    "ownerGroup": "Cyber",\n    "cpes": ["cpe:2.3:o:microsoft:windows_server_2022:20348:*:*:*:*:*:x64:*"]\n  },\n  {\n    "vendor": "example_vendor",\n    "product": "internal_agent",\n    "assetTag": "APP-0042",\n    "ownerGroup": "Cyber",\n    "cpes": "NA"\n  }\n]`}
               className="w-full bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-xl p-3 font-mono text-xs text-zinc-100 dark:text-zinc-100 light:text-zinc-900 focus:border-zinc-600 focus:outline-none leading-relaxed"
@@ -2316,6 +2357,7 @@ export const WatchListView: React.FC = () => {
                 onClick={() => {
                   setShowBulkModal(false);
                   setBulkFeedback(null);
+                  setBulkPlan(null);
                 }}
                 className="px-3 py-1.5 rounded-xl bg-zinc-800 dark:bg-zinc-800 light:bg-zinc-200 hover:bg-zinc-700 text-zinc-300 dark:text-zinc-300 light:text-zinc-800"
               >
@@ -2477,15 +2519,128 @@ export const WatchListView: React.FC = () => {
             aria-modal="true"
             aria-labelledby="watchlist-bulk-confirm-title"
             tabIndex={-1}
-            className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative"
+            className="ui-panel bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 rounded-2xl max-w-lg w-full p-6 shadow-2xl relative"
           >
             <h3 id="watchlist-bulk-confirm-title" className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
               Confirm Bulk Import?
             </h3>
-            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-6">
-              This will verify and register {pendingBulk.current?.length || 0} product(s) into the monitored
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 leading-relaxed mb-3">
+              This will register {bulkPlan?.rows ?? pendingBulk.current?.length ?? 0} inventory row(s) across{' '}
+              {bulkPlan?.identities.length ?? pendingBulk.current?.length ?? 0} upsert key(s) in the monitored
               inventory.
             </p>
+
+            {bulkPlan && (
+              <div className="mb-4 rounded-xl border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 p-3">
+                <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-zinc-400 dark:text-zinc-400 light:text-zinc-600">
+                  <div className="flex justify-between gap-2">
+                    <dt>Active rows</dt>
+                    <dd className="font-semibold text-zinc-200 dark:text-zinc-200 light:text-zinc-800">
+                      {bulkPlan.activeRows}
+                    </dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt>Disabled rows</dt>
+                    <dd className="font-semibold text-zinc-200 dark:text-zinc-200 light:text-zinc-800">
+                      {bulkPlan.disabledRows}
+                    </dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt>New / re-enabled</dt>
+                    <dd className="font-semibold text-zinc-200 dark:text-zinc-200 light:text-zinc-800">
+                      {bulkPlan.enableRows}
+                    </dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt>Overwrites</dt>
+                    <dd className="font-semibold text-zinc-200 dark:text-zinc-200 light:text-zinc-800">
+                      {bulkOverwriteRows}
+                    </dd>
+                  </div>
+                  {bulkPlan.reactivatedRows > 0 && (
+                    <div className="flex justify-between gap-2">
+                      <dt>Re-enabled unchanged</dt>
+                      <dd className="font-semibold text-zinc-200 dark:text-zinc-200 light:text-zinc-800">
+                        {bulkPlan.reactivatedRows}
+                      </dd>
+                    </div>
+                  )}
+                  {bulkPlan.unchangedActiveRows > 0 && (
+                    <div className="flex justify-between gap-2">
+                      <dt>No-op (already current)</dt>
+                      <dd className="font-semibold text-zinc-200 dark:text-zinc-200 light:text-zinc-800">
+                        {bulkPlan.unchangedActiveRows}
+                      </dd>
+                    </div>
+                  )}
+                </dl>
+
+                {(bulkPlan.invalidRows > 0 || bulkSplitGroups > 0 || bulkPlan.overlappingRows > 0) && (
+                  <ul className="mt-2 space-y-1 border-t border-zinc-800 dark:border-zinc-800 light:border-zinc-200 pt-2 text-[11px] text-amber-300 dark:text-amber-300 light:text-amber-700">
+                    {bulkPlan.invalidRows > 0 && (
+                      <li>{bulkPlan.invalidRows} record(s) will be rejected by the command layer.</li>
+                    )}
+                    {bulkSplitGroups > 0 && (
+                      <li>
+                        {bulkSplitGroups} upsert key(s) appear more than once; only the last row for each key
+                        is written.
+                      </li>
+                    )}
+                    {bulkPlan.overlappingRows > 0 && (
+                      <li>
+                        {bulkPlan.overlappingRows} stored row(s) share an asset tag with this batch but are
+                        not updated.
+                      </li>
+                    )}
+                  </ul>
+                )}
+
+                {bulkPlan.changedRecords.length > 0 && (
+                  <ul className="mt-2 max-h-44 space-y-1.5 overflow-y-auto border-t border-zinc-800 dark:border-zinc-800 light:border-zinc-200 pt-2">
+                    {bulkPlan.changedRecords.slice(0, 20).map((change, index) => (
+                      <li
+                        key={`${change.action}:${change.assetTag}:${change.vendor}:${change.product}:${index}`}
+                        className="text-[11px] leading-snug"
+                      >
+                        <span
+                          className={`mr-1.5 inline-block rounded border px-1.5 py-0.5 text-[10px] font-semibold ${BULK_ACTION_CLASS[change.action]}`}
+                        >
+                          {BULK_ACTION_LABEL[change.action]}
+                        </span>
+                        <span className="font-medium text-zinc-200 dark:text-zinc-200 light:text-zinc-800">
+                          {change.assetTag || 'Generated tag'}
+                        </span>
+                        <span className="text-zinc-400 dark:text-zinc-400 light:text-zinc-600">
+                          {' '}
+                          {change.vendor} {change.product}
+                        </span>
+                        {change.overwriteReason && (
+                          <span className="block pl-1 text-zinc-500 dark:text-zinc-500 light:text-zinc-600">
+                            {change.overwriteReason}
+                          </span>
+                        )}
+                        {change.inertReason && change.action !== 'disable' && (
+                          <span className="block pl-1 text-amber-300 dark:text-amber-300 light:text-amber-700">
+                            {change.inertReason}
+                          </span>
+                        )}
+                        {change.invalidReason && (
+                          <span className="block pl-1 text-rose-300 dark:text-rose-300 light:text-rose-700">
+                            {change.invalidReason}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                    {bulkPlan.changedRecords.length > 20 && (
+                      <li className="text-[11px] text-zinc-500 dark:text-zinc-500 light:text-zinc-600">
+                        +{bulkPlan.changedRecords.length - 20} more row(s)
+                      </li>
+                    )}
+                  </ul>
+                )}
+              </div>
+            )}
+
             <div className="flex justify-end space-x-2">
               <button
                 type="button"

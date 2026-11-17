@@ -17,6 +17,26 @@ export function watchlistIdentity(item: WatchlistIdentityItem): string {
   ]);
 }
 
+/**
+ * The assetTag plus the exact identities `asset.import` writes (its upsert key is
+ * assetTag + `watchlistIdentity`), for matching an import plan against a fresh
+ * inventory snapshot. Returns `null` when the row lacks a field the command-layer
+ * schema requires, so it can never be reported as applied.
+ *
+ * Fields the bulk import path falls back to (ownerGroup, notes) are ignored here:
+ * two rows share a token exactly when both their assetTag and their product
+ * identity agree, so equality does not depend on any fallback.
+ */
+export function watchlistConfirmationToken(
+  item: WatchlistIdentityItem & { assetTag?: string },
+): string | null {
+  const assetTag = (item.assetTag || '').trim();
+  const vendor = (item.vendor || '').trim();
+  const product = (item.product || '').trim();
+  if (!assetTag || !vendor || !product) return null;
+  return JSON.stringify([assetTag, watchlistIdentity(item)]);
+}
+
 /** Compare the proposed final inventory, including duplicate rows in this batch. */
 export function watchlistDuplicateErrors(
   incoming: WatchlistIdentityItem[],
