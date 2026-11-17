@@ -1043,26 +1043,32 @@ export function matchesWatchlistItem(
         // operator intent: it covers every branch of the advisory's criteria
         // tree by construction, so the same release reasoning that clears the
         // context review clears the version hold too.
-        const requiresReview =
+        // Wildcards score 90% confidence but do not require applicability
+        // review on their own — wildcards are a confidence signal, not a
+        // review gate. Only range, generic identity, and unverified-version
+        // issues gate manual applicability review.
+        const applicabilityRequiresReview =
           !productWideAllVersions &&
-          Boolean(rangeNeedsReview || contextNeedsReview || genericIdentity || matchRes.unverifiedVersion);
+          Boolean(rangeNeedsReview || genericIdentity || matchRes.unverifiedVersion);
+
+        const confidence = contextNeedsReview ? 90 : applicabilityRequiresReview ? 70 : versionRange ? 100 : 90;
         retain({
           matched: true,
           method: versionRange ? 'STRICT_CPE_INTERVAL' : 'STRICT_CPE',
-          confidence: contextNeedsReview ? 90 : requiresReview ? 70 : versionRange ? 100 : 90,
+          confidence,
           matchedCpe: vulnCpe,
           evidence: genericIdentity
             ? 'Matched CPE product identity inferred from the inventory record; confirm the generic CPE is intended (70% confidence)'
             : versionRange
-              ? requiresReview
+              ? applicabilityRequiresReview
                 ? 'Matched strict CPE 2.3 product identifiers; version or architecture applicability requires review'
                 : `Matched strict CPE 2.3 component tokens + verified in version interval [< ${versionRange.versionEndExcluding || versionRange.versionEndIncluding}] (100% confidence)`
               : contextNeedsReview
-                ? 'Matched strict CPE 2.3 component tokens; review required (wildcard version or context) (90% confidence)'
-                : requiresReview
+                ? 'Matched strict CPE 2.3 component tokens (90% confidence)'
+                : applicabilityRequiresReview
                   ? 'Matched strict CPE 2.3 component tokens; review required (unverified version or context) (70% confidence)'
                   : 'Matched strict CPE 2.3 component tokens (90% confidence)',
-          applicabilityRequiresReview: requiresReview,
+          applicabilityRequiresReview,
           productWideAllVersions,
         });
       }

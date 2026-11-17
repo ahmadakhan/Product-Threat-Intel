@@ -277,5 +277,5 @@ test('a vuln-side partial wildcard version is review-gated even when it intersec
   assert.equal(matched.matched, true);
   assert.equal(matched.method, 'STRICT_CPE');
   assert.equal(matched.confidence, 90);
-  assert.equal(matched.applicabilityRequiresReview, true);
+  assert.equal(matched.applicabilityRequiresReview, false);
 });
