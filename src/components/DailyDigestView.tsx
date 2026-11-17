@@ -1121,7 +1121,7 @@ export const DailyDigestView: React.FC = () => {
                       key={previewKey}
                     srcDoc={showTokensInCanvas ? getTemplateSource() : getRenderedHtml()}
                       onLoad={syncIframeHeight}
-                      scrolling="no"
+                      scrolling="auto"
                       style={{
                         height: '500px',
                         width: '100%',
@@ -1130,7 +1130,6 @@ export const DailyDigestView: React.FC = () => {
                         backgroundColor: dailyDigestCustomization.canvasBg || '#09090b',
                       }}
                       className="transition-all duration-150"
-                      sandbox="allow-same-origin"
                       title="Template Editor Live Preview"
                     />
                   </div>
@@ -1195,7 +1194,7 @@ export const DailyDigestView: React.FC = () => {
                   title="Daily Digest Preview"
                 srcDoc={showTokensInCanvas ? getTemplateSource() : getRenderedHtml()}
                   onLoad={syncIframeHeight}
-                  scrolling={scrollMode === 'fit' ? 'no' : 'auto'}
+                  scrolling="auto"
                   style={{
                     height: scrollMode === 'fit' ? `${iframeHeight}px` : '640px',
                     width: '100%',
@@ -1204,7 +1203,6 @@ export const DailyDigestView: React.FC = () => {
                     backgroundColor: dailyDigestCustomization.canvasBg || '#09090b',
                   }}
                   className="w-full transition-all duration-150"
-                  sandbox="allow-same-origin"
                 />
 
                 {/* Floating Navigation Controls in Contained Viewport Mode */}
@@ -1283,7 +1281,7 @@ export const DailyDigestView: React.FC = () => {
               <iframe
                 title="Fullscreen Daily Digest Preview"
                 key={`${previewDevice}-${previewKey}`}
-                scrolling="no"
+                scrolling="auto"
                 onLoad={(event) => {
                   const frame = event.currentTarget;
                   const height = frame.contentDocument?.documentElement.scrollHeight;
@@ -1291,7 +1289,6 @@ export const DailyDigestView: React.FC = () => {
                 }}
                 srcDoc={getRenderedHtml()}
                 className="w-full min-h-[900px] border-none bg-zinc-950"
-                sandbox="allow-same-origin"
               />
             </div>
           </div>
