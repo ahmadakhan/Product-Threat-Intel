@@ -210,7 +210,8 @@ export const DailyDigestView: React.FC = () => {
       .replace(/{{critical_kpi}}/g, digestSeverityKpi('CRITICAL', criticalCount, dailyDigestCustomization))
       .replace(/{{high_kpi}}/g, digestSeverityKpi('HIGH', highCount, dailyDigestCustomization))
       .replace(/{{medium_kpi}}/g, digestSeverityKpi('MEDIUM', mediumCount, dailyDigestCustomization))
-      .replace(/{{low_kpi}}/g, digestSeverityKpi('LOW', lowCount, dailyDigestCustomization));
+      .replace(/{{low_kpi}}/g, digestSeverityKpi('LOW', lowCount, dailyDigestCustomization))
+      .replace(/{{held_for_review}}/g, '');
   };
 
   const getTemplateSource = (): string => {
