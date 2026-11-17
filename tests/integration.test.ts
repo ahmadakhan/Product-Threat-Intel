@@ -204,7 +204,10 @@ test('NVD uses bounded large-page requests and honors rate-limit retries', async
     },
   );
   assert.equal(retryCalls, 2);
-  assert.deepEqual(retryDelays, [6100]);
+  // The provider asked for 2s; the wait is floored at this feed's own spacing
+  // (10 requests/minute = 6s), not at NIST's 6.1s API-key floor — VulnCheck is
+  // paced by its own published budget.
+  assert.deepEqual(retryDelays, [6000]);
   const timeoutDelays: number[] = [];
   let timeoutCalls = 0;
   await ingestFeed(
@@ -222,7 +225,9 @@ test('NVD uses bounded large-page requests and honors rate-limit retries', async
     },
   );
   assert.equal(timeoutCalls, 2);
-  assert.deepEqual(timeoutDelays, [6100]);
+  // Same rule for a transport timeout: the retry is floored at this feed's own
+  // 10 requests/minute spacing (6s), not NIST's API-key floor.
+  assert.deepEqual(timeoutDelays, [6000]);
 });
 
 test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !database }, async (t) => {

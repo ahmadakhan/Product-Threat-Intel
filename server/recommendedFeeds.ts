@@ -458,10 +458,9 @@ const isEnabledByDefault = (feed: (typeof recommendedFeedEntries)[number]): bool
   !feedsRequiringManualReview.has(feed.id) &&
   !('healthStatus' in feed && feed.healthStatus === 'DOWN');
 
-export const RECOMMENDED_FEEDS = recommendedFeedEntries.map((feed) => ({
-  ...feed,
-  enabled: feed.enabled || isEnabledByDefault(feed),
-}));
+export const RECOMMENDED_FEEDS = recommendedFeedEntries.map(
+  (feed) => ({ ...feed, enabled: feed.enabled || isEnabledByDefault(feed) }) as typeof feed,
+);
 
 /**
  * The catalog keyed by feed id.

@@ -202,5 +202,15 @@ test('an explicit egress allowlist replaces defaults and extras only add declare
     EGRESS_ALLOWED_HOSTS_EXTRA: 'api.sendgrid.com,example.test',
   }).EGRESS_ALLOWED_HOSTS.split(',');
   assert.deepEqual(merged, ['api.sendgrid.com', 'smtp.gmail.com', 'example.test']);
-  assert.equal(loadConfig({ ...baseEnv, EGRESS_ALLOWED_HOSTS: '' }).EGRESS_ALLOWED_HOSTS, '');
+  // An empty value is treated as unset: Compose passes
+  // `${EGRESS_ALLOWED_HOSTS-}`, so an unset variable arrives as `""` and must
+  // not silently deny every feed. An explicit restricted list replaces the
+  // defaults; unset gets the bundled defaults plus the recommended-feed catalog.
+  assert.ok(
+    loadConfig({ ...baseEnv, EGRESS_ALLOWED_HOSTS: '' }).EGRESS_ALLOWED_HOSTS.split(',').includes('api.osv.dev'),
+  );
+  // Unset falls back to the bundled defaults plus the recommended-feed catalog.
+  const unset = loadConfig({ ...baseEnv }).EGRESS_ALLOWED_HOSTS.split(',');
+  assert.ok(unset.includes('api.vulncheck.com'), 'catalogued feed hosts are allowed when unset');
+  assert.ok(!unset.some((host) => host.startsWith('https://')), 'only hostnames are merged from feed URLs');
 });

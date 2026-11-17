@@ -266,10 +266,32 @@ export async function ingestFeed(
     }),
   });
   const headers: Record<string, string> = {};
-  // NVD's rolling budgets are 50 requests / 30s with a key and 5 / 30s
-  // without one. Keep a small scheduling margin while avoiding the extra
-  // throttling in the older 700ms / 6.5s defaults.
-  const nvdInterval = Math.max(60000 / feed.rateLimitPerMin, feed.authType === 'API_KEY' ? 610 : 6100);
+  // Minimum spacing between requests for this provider. `rateLimitPerMin` is the
+  // operator's declared budget and is honoured as-is; the floor only supplies a
+  // published limit when the configured rate is looser than the provider allows,
+  // and the one-minute ceiling keeps a misconfigured rate from stalling a run
+  // (longer cooldowns are Retry-After deferrals handled in `json`).
+  //
+  // The floor used to be chosen by `authType`, which silently paced VulnCheck
+  // NVD++ at NIST's 6.1s (unauthenticated) or 610ms (API-key) cadence even
+  // though it is configured for 1,000 requests/minute, and its continuation
+  // loop added a hard 1s floor on top. A multi-page run then took minutes
+  // instead of seconds and could not keep up with the change window. Each
+  // provider now states its own floor:
+  //   NIST NVD: 5 requests / 30s without a key, 50 / 30s with one.
+  //   VulnCheck: 1,000 requests / minute, authenticated with a bearer token.
+  const documentedFloorMs = (() => {
+    switch (feed.type) {
+      case 'NVD_API':
+        return feed.authType === 'API_KEY' ? 610 : 6100;
+      case 'VULNCHECK_NVD':
+      case 'VULNCHECK_KEV':
+        return 60;
+      default:
+        return feed.authType === 'API_KEY' ? 610 : 6100;
+    }
+  })();
+  const nvdInterval = Math.min(Math.max(60000 / Math.max(1, feed.rateLimitPerMin), documentedFloorMs), 60000);
   if (feed.authType !== 'NONE') {
     let secret: string;
     try { secret = decrypt(feed.authSecretKey || '', encryptionKeys(config), `feed:${feed.id}`); }
@@ -340,7 +362,9 @@ export async function ingestFeed(
     if (response.status !== 200)
       throw new Error(
         response.status === 429
-          ? 'Feed rate limit reached after retries; wait and run the pipeline again'
+          ? feed.type === 'VULNCHECK_NVD' || feed.type === 'VULNCHECK_KEV'
+            ? 'VulnCheck rate limit reached (HTTP 429, 1000 requests/minute) after retries; the run is deferred until the limit resets'
+            : 'Feed rate limit reached after retries; wait and run the pipeline again'
           : `Feed returned HTTP ${response.status}`,
       );
     const etag = typeof response.headers.etag === 'string' ? response.headers.etag : undefined;
@@ -915,8 +939,12 @@ export async function ingestFeed(
       cursor = processPage(page);
       if (pageNo === 98 && cursor) throw new Error('VulnCheck NVD++ pagination exceeded 100,000 records');
       // Every fetched continuation page is paced, whether or not another page
-      // follows: the request itself consumed provider quota.
-      await sleep(Math.max(1000, 60000 / feed.rateLimitPerMin));
+      // follows: the request itself consumed provider quota. The delay is the
+      // provider spacing computed at the top of this function; the hard-coded
+      // one-second floor here meant a 1,000 requests/minute budget was really
+      // spent at ~60 requests/minute, turning a large catch-up window into a
+      // multi-minute run that could overrun the feed deadline.
+      await sleep(nvdInterval);
       if (!cursor) break;
     }
     return {

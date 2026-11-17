@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import ipaddr from 'ipaddr.js';
 import { FEED_TYPES } from '../src/types/index.ts';
+import { RECOMMENDED_FEEDS } from './recommendedFeeds.ts';
 const databaseUrl = z
   .string()
   .min(1)
@@ -158,9 +159,13 @@ const schema = z.object({
     const keys = value.split(',').map((key) => key.trim()).filter(Boolean);
     return keys.length <= 16 && keys.every((key) => /^[A-Za-z0-9+/]{43}=$/.test(key) && Buffer.from(key, 'base64').length === 32);
   }, 'ENCRYPTION_KEYS must contain at most 16 comma-separated base64 32-byte keys'),
-  EGRESS_ALLOWED_HOSTS: z
-    .string()
-    .default(DEFAULT_EGRESS_HOSTS),
+  // Unset means "use the bundled defaults PLUS every host in the recommended-feed
+  // catalog". A non-empty value is an explicit restricted list and replaces the
+  // defaults, as OPERATIONS.md documents; on such a deployment the operator must
+  // list the feed hosts they actually use. Absent and empty both read as unset:
+  // Compose passes `${EGRESS_ALLOWED_HOSTS-}` so an unset variable arrives as
+  // `""`, and treating that as deny-all would silently block every feed.
+  EGRESS_ALLOWED_HOSTS: z.string().default(''),
   // Appended to the default allowlist instead of replacing it, so a deployment
   // can admit one extra redirect host without having to restate every default.
   EGRESS_ALLOWED_HOSTS_EXTRA: z.string().default(''),
@@ -227,12 +232,15 @@ export type Config = z.infer<typeof schema>;
 /**
  * Union the allowlist with operator additions, lowercased and de-duplicated.
  * Exported so the merge is testable without a full environment.
+ *
+ * `part` may be a comma-separated list or an array of entries (callers pass the
+ * recommended-feed catalog as an array), so both spellings use one definition.
  */
-export function mergeAllowedHosts(...parts: string[]): string {
+export function mergeAllowedHosts(...parts: (string | readonly string[])[]): string {
   return [
     ...new Set(
       parts
-        .flatMap((part) => part.split(','))
+        .flatMap((part) => (Array.isArray(part) ? part : String(part).split(',')))
         .map((h) => h.trim().toLowerCase())
         .filter(Boolean),
     ),
@@ -267,9 +275,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const config = {
     ...parsed,
     INSTANCE_ID: parsed.INSTANCE_ID || randomUUID(),
+    // Unset allowlist = bundled defaults + the whole recommended-feed catalog.
+    // Every host of every catalogued feed is therefore egress-allowed up front,
+    // so adding one from the UI never fails on a missing allowlist entry. Feed
+    // requests still pass the SSRF gauntlet (public IP, HTTPS 443, no
+    // credentials) on the first hop and on every redirect; this removes the
+    // manual hostname step, it does not open egress to arbitrary hosts. A
+    // non-empty EGRESS_ALLOWED_HOSTS is an explicit restricted list and replaces
+    // the defaults, so its entries are used exactly as given.
     EGRESS_ALLOWED_HOSTS: mergeAllowedHosts(
-      parsed.EGRESS_ALLOWED_HOSTS,
+      parsed.EGRESS_ALLOWED_HOSTS || DEFAULT_EGRESS_HOSTS,
       parsed.EGRESS_ALLOWED_HOSTS_EXTRA,
+      ...(parsed.EGRESS_ALLOWED_HOSTS
+        ? []
+        : [RECOMMENDED_FEEDS.map((feed) => new URL(feed.url).hostname)]),
     ),
     // Every entry must be a bare origin: a path or query could never match the
     // browser's `Origin` header and would only look like a permitted origin.
