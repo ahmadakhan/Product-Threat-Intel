@@ -467,9 +467,6 @@ export const settingsSchema = z
     schedulerEnabled: z.boolean(),
     advisoryPrefix: z.string().regex(/^[A-Za-z0-9_-]{1,30}$/),
     emailEnabled: z.boolean().default(true),
-    // Optional template for enrichment evidence messages. Placeholders:
-    // {cveId}, {sourceLabel}, {vendor}, {product}, {confidence}, {method}.
-    enrichmentMessageTemplate: z.string().max(2000).optional(),
     // News evidence auto-dispatch is opt-in so existing deployments keep their
     // review-only behavior for intelligence matches.
     autoDispatchNewsToSecurityTeam: z.boolean().default(false),
@@ -486,16 +483,10 @@ export const settingsSchema = z
     emailRetryMaxAttempts: z.number().int().min(1).max(20).default(6),
     emailRetryInitialDelayMinutes: z.number().int().min(1).max(1440).default(1),
     emailRetryMaxDelayMinutes: z.number().int().min(1).max(10080).default(60),
-    webhookSigningSecret: z.literal(''),
-    authorityPrecedence: z.array(z.enum(['VENDOR_PSIRT', 'CISA_KEV', 'FIRST_EPSS', 'NVD_BATCH'])).max(4),
-    ssrfProtection: z.object({
-      blockPrivateIps: z.literal(true),
-      blockLoopback: z.literal(true),
-      allowRedirects: z.boolean().default(true),
-    }),
+    // Egress policy is configuration, not a setting: redirect handling and IP
+    // blocking live in the network client so the UI cannot weaken them.
     securityPolicy: z.object({
       sessionTimeoutMins: z.number().int().min(5).max(60).default(30),
-      csrfProtection: z.literal(true),
       minPasswordLen: z.number().int().min(14).max(128).default(14),
       maxLoginAttempts: z.number().int().min(1).max(20).default(5),
       lockoutMins: z.number().int().min(1).max(60).default(15),
@@ -510,13 +501,6 @@ export const settingsSchema = z
         emailNotifications: z.boolean().default(true),
       })
       .default({ enabled: true, cooldownMinutes: 30, emailNotifications: true }),
-    ntpConfig: z
-      .object({
-        enabled: z.literal(false),
-        server: z.literal(''),
-        driftToleranceMs: z.number().min(0).max(1000),
-      })
-      .default({ enabled: false, server: '', driftToleranceMs: 50 }),
     // Defaults keep settings stored before retention was configurable valid.
     retentionConfig: z
       .object({

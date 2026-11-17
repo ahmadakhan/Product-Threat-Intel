@@ -1,5 +1,5 @@
 import { PageHeading } from './PageHeading';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Check,
   Mail,
@@ -27,6 +27,16 @@ import { useDialogFocus } from '../hooks/useDialogFocus';
 import { DEFAULT_TIMEZONE } from '../../shared/state';
 
 const field = 'ui-field';
+
+/** True when the editable fields of two security policies differ. */
+const securityDirtyFrom = (
+  next: AppSettings['securityPolicy'],
+  previous: AppSettings['securityPolicy'],
+): boolean =>
+  next.sessionTimeoutMins !== previous.sessionTimeoutMins ||
+  next.minPasswordLen !== previous.minPasswordLen ||
+  next.maxLoginAttempts !== previous.maxLoginAttempts ||
+  next.lockoutMins !== previous.lockoutMins;
 
 /** Older persisted settings may predate processing defaults. */
 const withProcessingDefaults = (value: AppSettings): AppSettings => ({
@@ -250,6 +260,18 @@ export function SettingsView() {
     cooldownMinutes: 30,
     emailNotifications: true,
   });
+  // These forms are seeded from the first `settings` render. Adopt later server
+  // values (a save returned by `updateSettings`, or another tab's change) unless
+  // the operator has unsaved edits, so a stale copy is never written back — that
+  // is what reset `autoAliasTtlDays` on the next Processing save.
+  const securityTouched = securityDirtyFrom(securityForm, settings.securityPolicy);
+  const lastSecurity = useRef(settings.securityPolicy);
+  useEffect(() => {
+    if (lastSecurity.current === settings.securityPolicy) return;
+    lastSecurity.current = settings.securityPolicy;
+    if (securityTouched) return;
+    setSecurityForm(settings.securityPolicy);
+  }, [settings.securityPolicy, securityTouched]);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [users, setUsers] = useState<any[]>([]);
@@ -300,11 +322,7 @@ export function SettingsView() {
     (form.dailyDigest?.time ?? '09:00') !== (settings.dailyDigest?.time ?? '09:00') ||
     (form.dailyDigest?.includeHealthReport ?? true) !== (settings.dailyDigest?.includeHealthReport ?? true) ||
     selfHealingForm.emailNotifications !== (settings.selfHealing?.emailNotifications ?? true);
-  const securityDirty =
-    securityForm.sessionTimeoutMins !== settings.securityPolicy.sessionTimeoutMins ||
-    securityForm.minPasswordLen !== settings.securityPolicy.minPasswordLen ||
-    securityForm.maxLoginAttempts !== settings.securityPolicy.maxLoginAttempts ||
-    securityForm.lockoutMins !== settings.securityPolicy.lockoutMins;
+  const securityDirty = securityDirtyFrom(securityForm, settings.securityPolicy);
   const sections = [
     ...(admin
       ? [
@@ -360,9 +378,28 @@ export function SettingsView() {
   const executeProcessingSave = async () => {
     if (!confirmProcessingSave) return;
     setProcessingSaveError(false);
+    // Send only the fields this form edits. It used to spread the whole form and
+    // pin `securityPolicy` to the copy the form was initialised with, so a value
+    // tuned in the Account security tab (for example `autoAliasTtlDays`) was
+    // silently written back to the shipped default on the next Processing save.
+    // The server merges a patch over the stored row, so an omitted field is kept.
     const saved = await updateSettings({
-      ...form,
-      securityPolicy: settings.securityPolicy,
+      scopeHours: form.scopeHours,
+      schedulerIntervalMinutes: form.schedulerIntervalMinutes,
+      schedulerEnabled: form.schedulerEnabled,
+      advisoryPrefix: form.advisoryPrefix,
+      logVerbosity: form.logVerbosity,
+      digestBatchingEnabled: form.digestBatchingEnabled,
+      digestWindowMinutes: form.digestWindowMinutes,
+      autoDispatchNewsToSecurityTeam: form.autoDispatchNewsToSecurityTeam,
+      deferEveryoneUntilSecurityDelivered: form.deferEveryoneUntilSecurityDelivered,
+      emailRetryEnabled: form.emailRetryEnabled,
+      emailRetryMaxAttempts: form.emailRetryMaxAttempts,
+      emailRetryInitialDelayMinutes: form.emailRetryInitialDelayMinutes,
+      emailRetryMaxDelayMinutes: form.emailRetryMaxDelayMinutes,
+      emailEnabled: form.emailEnabled,
+      timezone: form.timezone,
+      dailyDigest: form.dailyDigest,
       selfHealing: selfHealingForm,
     });
     setProcessingSaveError(!saved);
@@ -678,13 +715,13 @@ export function SettingsView() {
                   <ProcessingSection
                     number="02"
                     id="processing-recipients"
-                    title="Recipient review and handoff"
+                    title="Recipient handoff"
                     description="Control when an advisory becomes available to the Everyone group."
                   >
                       <ProcessingToggle
                         id="processing-defer-everyone"
                         title="Send to the Security team before Everyone"
-                        description="After the transport accepts a Security-team email, queue the advisory for Everyone-group preview and approval."
+                        description="After the transport accepts a Security-team email, queue the same advisory for Everyone-group recipients."
                         checked={form.deferEveryoneUntilSecurityDelivered ?? false}
                         disabled={processingConfirmPending}
                         onChange={(checked) =>
@@ -701,28 +738,28 @@ export function SettingsView() {
                           <span>1</span>
                           <div>
                             <strong>Security team</strong>
-                            <p>Transport accepts the email</p>
+                            <p>Advisory is queued and sent</p>
                           </div>
                         </li>
                         <li>
                           <span>2</span>
                           <div>
-                            <strong>Email queue</strong>
-                            <p>Operator previews and approves</p>
+                            <strong>Security accepted</strong>
+                            <p>Transport confirms the Security-team email</p>
                           </div>
                         </li>
                         <li>
                           <span>3</span>
                           <div>
                             <strong>Everyone</strong>
-                            <p>Approved broadcast is queued</p>
+                            <p>The same advisory is queued for the Everyone group</p>
                           </div>
                         </li>
                       </ol>
                     ) : (
                       <p className="processing-footnote">
                         <ShieldCheck size={14} aria-hidden="true" />
-                        Everyone-group emails require operator preview and approval in the email queue.
+                        Security-team and Everyone-group emails are queued together for immediate delivery.
                       </p>
                     )}
                   </ProcessingSection>

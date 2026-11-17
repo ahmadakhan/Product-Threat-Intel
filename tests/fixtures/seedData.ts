@@ -796,16 +796,8 @@ export const INITIAL_SETTINGS: AppSettings = {
   emailRetryMaxAttempts: 6,
   emailRetryInitialDelayMinutes: 1,
   emailRetryMaxDelayMinutes: 60,
-  webhookSigningSecret: 'whsec_enterprise_hmac_prod_99x8...',
-  authorityPrecedence: ['VENDOR_PSIRT', 'CISA_KEV', 'FIRST_EPSS', 'NVD_BATCH'],
-  ssrfProtection: {
-    blockPrivateIps: true,
-    blockLoopback: true,
-    allowRedirects: true,
-  },
   securityPolicy: {
     sessionTimeoutMins: 30,
-    csrfProtection: true,
     minPasswordLen: 12,
     maxLoginAttempts: 5,
     lockoutMins: 15,
@@ -815,11 +807,6 @@ export const INITIAL_SETTINGS: AppSettings = {
     enabled: true,
     cooldownMinutes: 30,
     emailNotifications: true,
-  },
-  ntpConfig: {
-    enabled: true,
-    server: 'time.cloudflare.com',
-    driftToleranceMs: 50,
   },
   retentionConfig: {
     enabled: false,

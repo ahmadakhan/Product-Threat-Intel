@@ -1193,13 +1193,6 @@ export interface AppSettings {
   schedulerEnabled: boolean;
   advisoryPrefix: string;
   /**
-   * Optional template for the enrichment evidence message shown on findings
-   * auto-dispatched via an authoritative source with no CPE data. Use
-   * placeholders: {cveId}, {sourceLabel}, {vendor}, {product}, {confidence},
-   * {method}. When empty, the built-in default message is used.
-   */
-  enrichmentMessageTemplate?: string;
-  /**
    * When true, advisory emails are first delivered to the Security team group.
    * The same email is queued for the Everyone group only after a Security-team
    * delivery is confirmed ACCEPTED by the transport. Opt-in so existing
@@ -1231,16 +1224,8 @@ export interface AppSettings {
    * worker. Provider configuration is left intact; only transport is blocked.
    */
   emailEnabled: boolean;
-  webhookSigningSecret: string;
-  authorityPrecedence: ('VENDOR_PSIRT' | 'CISA_KEV' | 'FIRST_EPSS' | 'NVD_BATCH')[];
-  ssrfProtection: {
-    blockPrivateIps: boolean;
-    blockLoopback: boolean;
-    allowRedirects: boolean;
-  };
   securityPolicy: {
     sessionTimeoutMins: number;
-    csrfProtection: boolean;
     minPasswordLen: number;
     maxLoginAttempts: number;
     lockoutMins: number;
@@ -1268,11 +1253,6 @@ export interface AppSettings {
     enabled: boolean;
     cooldownMinutes: number;
     emailNotifications: boolean;
-  };
-  ntpConfig: {
-    enabled: boolean;
-    server: string;
-    driftToleranceMs: number;
   };
   retentionConfig: RetentionConfig;
   /**

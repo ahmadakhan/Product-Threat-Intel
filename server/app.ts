@@ -157,10 +157,6 @@ function publicState(data: AppState): AppState {
       mailjetApiSecret: '',
       hasMailjetApiSecret: !!data.emailConfig.mailjetApiSecret,
     },
-    settings: {
-      ...data.settings,
-      webhookSigningSecret: '',
-    },
   };
 }
 const STATE_COLLECTION_LIMITS = {

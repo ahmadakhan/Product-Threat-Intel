@@ -78,12 +78,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   emailRetryInitialDelayMinutes: 1,
   emailRetryMaxDelayMinutes: 60,
   emailEnabled: true,
-  webhookSigningSecret: '',
-  authorityPrecedence: ['VENDOR_PSIRT', 'CISA_KEV', 'FIRST_EPSS', 'NVD_BATCH'],
-  ssrfProtection: { blockPrivateIps: true, blockLoopback: true, allowRedirects: true },
   securityPolicy: {
     sessionTimeoutMins: 30,
-    csrfProtection: true,
     minPasswordLen: 14,
     maxLoginAttempts: 5,
     lockoutMins: 15,
@@ -92,7 +88,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   // Standard keeps the event table small enough to stay fast during an
   // incident; verbose is an explicit forensic choice.
   logVerbosity: 'standard',
-  ntpConfig: { enabled: false, server: '', driftToleranceMs: 50 },
   retentionConfig: {
     enabled: false,
     retentionHours: 24,

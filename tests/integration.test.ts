@@ -552,7 +552,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       assert.equal((await command('asset.import', [null])).status, 400);
       assert.equal((await command('feed.save', { url: 'http://127.0.0.1' })).status, 400);
       const bad = await command('settings.save', {
-        ssrfProtection: { blockPrivateIps: false, blockLoopback: true, allowRedirects: false },
+        emailRetryMaxAttempts: 0,
       });
       assert.equal(bad.status, 400);
       const feed = await command('feed.save', {
