@@ -11,6 +11,7 @@ import {
   digestSeveritySummary,
   digestSeverityKpi,
   formatExecutiveSummary,
+  compileDailyDigestTemplate,
   type DigestFinding,
   type DigestHealth,
 } from '../utils/templateCompiler';
@@ -171,7 +172,9 @@ export const DailyDigestView: React.FC = () => {
   );
 
   const getRenderedHtml = useMemo(() => () => {
-    const source = isCustomTemplate && customTemplate ? customTemplate : dailyDigestTemplate;
+    const source = isCustomTemplate && customTemplate
+      ? customTemplate
+      : dailyDigestTemplate || compileDailyDigestTemplate(dailyDigestCustomization);
     const criticalCount = SAMPLE_FINDINGS.filter((f) => f.severity === 'CRITICAL').length;
     const highCount = SAMPLE_FINDINGS.filter((f) => f.severity === 'HIGH').length;
     const mediumCount = SAMPLE_FINDINGS.filter((f) => f.severity === 'MEDIUM').length;
@@ -219,7 +222,9 @@ export const DailyDigestView: React.FC = () => {
   ]);
 
   const getTemplateSource = (): string => {
-    return isCustomTemplate && customTemplate ? customTemplate : dailyDigestTemplate;
+    if (isCustomTemplate && customTemplate) return customTemplate;
+    if (dailyDigestTemplate) return dailyDigestTemplate;
+    return compileDailyDigestTemplate(dailyDigestCustomization);
   };
 
   // Dynamically sync iframe height to eliminate internal scrollbars and scroll trapping

@@ -9,6 +9,8 @@ import {
   htmlAttachmentIsAttachable,
   renderFindingsDocument,
   renderFindingsText,
+  resolveAdvisoryTemplate,
+  type SavedTemplateRecord,
 } from './deliveryDocument.ts';
 import type pg from 'pg';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine';
@@ -1240,6 +1242,7 @@ export function consolidatedFindingBatchId(findingIds: readonly string[]): strin
 export function consolidatedFindingsDocument(
   findings: Finding[],
   generatedAt: Date,
+  template?: string,
 ): { advisory: Advisory; document: { subject: string; text: string; html: string } } {
   const batchId = consolidatedFindingBatchId(findings.map((finding) => finding.id));
   const advisory: Advisory = {
@@ -1258,7 +1261,7 @@ export function consolidatedFindingsDocument(
     affectedSystems: uniqueSorted(findings.map((finding) => finding.matchedAssetName)),
     isDigestBatch: findings.length > 1,
   };
-  const document = renderFindingsDocument({ advisory, findings, generatedAt });
+  const document = renderFindingsDocument({ advisory, findings, generatedAt, template });
   return { advisory, document: { subject: document.subject, text: document.text, html: document.html } };
 }
 
@@ -1267,9 +1270,10 @@ function consolidatedPayloadFor(
   advisory: Advisory,
   findings: Finding[],
   cveIds: string[],
+  template?: string,
 ): Job['payload'] {
   const generatedAt = new Date();
-  const { document } = consolidatedFindingsDocument(findings, generatedAt);
+  const { document } = consolidatedFindingsDocument(findings, generatedAt, template);
   const evidence = deliveryRevisionEvidence(findings);
   return {
     ...document,
@@ -1283,6 +1287,17 @@ function consolidatedPayloadFor(
     generatedAt: generatedAt.toISOString(),
     digestKey: advisory.id,
   };
+}
+
+/**
+ * Resolves the advisory template the operator designed in the Email template
+ * studio, falling back to the built-in default when none is saved. Delivered
+ * finding emails must render from exactly this template so the preview matches
+ * what recipients receive.
+ */
+async function operatorTemplate(db: Db): Promise<string | undefined> {
+  const record = await get<SavedTemplateRecord>(db, 'template', 'main');
+  return record ? resolveAdvisoryTemplate(record) : undefined;
 }
 
 /**
@@ -1362,7 +1377,8 @@ export async function queueConsolidatedFindingNotifications(
       const bucket = consolidatedFindingBatchId(findingIds);
       let built = documentCache.get(bucket);
       if (!built) {
-        const { advisory, document } = consolidatedFindingsDocument(ownedFindings, generatedAt);
+        const template = await operatorTemplate(tx);
+        const { advisory, document } = consolidatedFindingsDocument(ownedFindings, generatedAt, template);
         const evidence = deliveryRevisionEvidence(ownedFindings);
         built = {
           payload: {
@@ -1423,7 +1439,8 @@ export async function queueConsolidatedFindingNotifications(
     const bucket = consolidatedFindingBatchId(findingIds);
     let built = documentCache.get(bucket);
     if (!built) {
-      const { advisory, document } = consolidatedFindingsDocument(permitted, generatedAt);
+      const template = await operatorTemplate(db);
+      const { advisory, document } = consolidatedFindingsDocument(permitted, generatedAt, template);
       const evidence = deliveryRevisionEvidence(permitted);
       built = {
         payload: {
@@ -1579,9 +1596,10 @@ function digestDocument(
   findings: Finding[],
   render: DigestRender | undefined,
   generatedAt: Date,
+  template?: string,
 ): { subject: string; text: string; html?: string; generatedAt: string } {
   const ordered = digestOrdered(view, findings);
-  const base = renderFindingsDocument({ advisory: view, findings: ordered, generatedAt });
+  const base = renderFindingsDocument({ advisory: view, findings: ordered, generatedAt, template });
   const override = render?.(view, ordered);
   const html = override ?? base.html;
   return {
@@ -1689,7 +1707,8 @@ export async function queueDigestAdvisory(
     const claim = await claimItems(db, claimRequests);
     if (!claim.granted.length) continue;
     const view = digestView(union, batch);
-    const document = digestDocument(view, batch, render, generatedAt);
+    const template = await operatorTemplate(db);
+    const document = digestDocument(view, batch, render, generatedAt, template);
     const payload = {
       ...document,
       cveIds: view.cveIds,
@@ -1720,8 +1739,9 @@ export async function queueDigestAdvisory(
 
   for (const [hookId, batch] of webhookBatches) {
     const view = digestView(union, batch);
+    const template = await operatorTemplate(db);
     const payload = {
-      ...digestDocument(view, batch, render, generatedAt),
+      ...digestDocument(view, batch, render, generatedAt, template),
       cveIds: view.cveIds,
       includedFindingIds: batch.map((finding) => finding.id),
       ...deliveryRevisionEvidence(batch),
@@ -1921,7 +1941,8 @@ export async function deliverNext(
         throw new Error('Advisory has no findings; rebuild from current inventory before delivery');
       }
       const generatedAt = job.payload.generatedAt ? new Date(job.payload.generatedAt) : new Date();
-      advisory = consolidatedFindingsDocument(findings, generatedAt).advisory;
+      const recoveryTemplate = await operatorTemplate(pool);
+      advisory = consolidatedFindingsDocument(findings, generatedAt, recoveryTemplate).advisory;
     }
     const currentFindings: Finding[] = [];
     // Zero-day digest jobs are standalone summaries: their findings were
@@ -2136,9 +2157,10 @@ export async function deliverNext(
           // Every shape is rebuilt with the canonical document builder so the
           // attachment stays the email. A digest keeps its batch key so the
           // advisory accounting still recognises the delivery.
+          const rebuildTemplate = await operatorTemplate(pool);
           job.payload = {
             ...job.payload,
-            ...consolidatedPayloadFor(advisory, surviving, declaredCveIds),
+            ...consolidatedPayloadFor(advisory, surviving, declaredCveIds, rebuildTemplate),
           };
         } else if (!surviving.length) {
           // Nothing in this bundle can still be delivered.

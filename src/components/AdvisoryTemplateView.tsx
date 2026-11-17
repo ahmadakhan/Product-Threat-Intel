@@ -310,16 +310,62 @@ const handleInsertToken = (token: string) => {
       `<div style="font-size:16px;line-height:22px;font-weight:600;color:${headerText};margin-bottom:8px;">`
     );
 
-    // Only prepend a header banner when the source has no header section at all.
-    return (!hasExistingHeader ? headerBanner + html : html)
+    // Preview values used to resolve {{#if}} branches and the mock tokens
+    // substituted below. Kept in step with the replace() chain so the live
+    // preview (and the test email built from it) never leaks unrendered
+    // {{else}}/{{/if}} tags or bare {{token}} placeholders.
+    const previewValues: Record<string, string> = {
+      advisory_title: 'Example advisory — template preview only',
+      remediation_link: 'https://example.com',
+      severity: 'HIGH',
+    };
+    const isPreviewTruthy = (key: string) =>
+      previewValues[key] !== undefined &&
+      previewValues[key] !== null &&
+      previewValues[key] !== '';
+
+    // Severity badge colours mirror the server (server/advisoryRender.ts
+    // SEVERITY_COLORS) so severity badges are driven by criticality, never by
+    // the link colour setting.
+    const SEVERITY_COLORS: Record<string, string> = {
+      CRITICAL: '#ef4444',
+      HIGH: '#f59e0b',
+      MEDIUM: '#eab308',
+      LOW: '#10b981',
+      UNKNOWN: '#6b7280',
+    };
+    const previewSeverityColor = SEVERITY_COLORS[previewValues.severity] ?? SEVERITY_COLORS.UNKNOWN;
+
+    // All links render blue so every link colour is consistent regardless of
+    // the Link Color setting.
+    const LINK_COLOR = '#1d4ed8';
+
+    // Resolve {{#if key}}...{{else}}...{{/if}} then {{#if key}}...{{/if}}
+    // blocks before simple token replacement. This strips {{else}}/{{/if}}
+    // tags from the output while still letting nested {{key}} tokens be
+    // substituted by the replace() chain that follows.
+    let processed = (!hasExistingHeader ? headerBanner + html : html);
+    processed = processed.replace(
+      /\{\{#if\s+([a-z_]+)\}\}([\s\S]*?)\{\{else\}\}([\s\S]*?)\{\{\/if\}\}/g,
+      (_: string, key: string, ifBranch: string, elseBranch: string) =>
+        isPreviewTruthy(key) ? ifBranch : elseBranch,
+    );
+    processed = processed.replace(
+      /\{\{#if\s+([a-z_]+)\}\}([\s\S]*?)\{\{\/if\}\}/g,
+      (_: string, key: string, content: string) =>
+        isPreviewTruthy(key) ? content : '',
+    );
+
+    return processed
       .replace(/{{severity}}/g, 'HIGH')
+      .replace(/{{severity_text}}/g, 'High')
       .replace(
         /{{severity_header_badge}}/g,
-        `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:${accentColor};color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">HIGH SEVERITY</span>`,
+        `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:${previewSeverityColor};color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">HIGH SEVERITY</span>`,
       )
       .replace(
         /{{severity_badge}}/g,
-        `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:${accentColor};color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">HIGH</span>`,
+        `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:${previewSeverityColor};color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">HIGH</span>`,
       )
       .replace(/{{advisory_id}}/g, previewId)
       .replace(/{{advisory_title}}/g, 'Example advisory — template preview only')
@@ -330,7 +376,7 @@ const handleInsertToken = (token: string) => {
       )
       .replace(
         /{{cve_id_links}}/g,
-        `<a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="display:inline-block;margin:0 8px 4px 0;color:${accentColor};text-decoration:underline;">CVE-2026-0001</a><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0002" style="display:inline-block;margin:0 8px 4px 0;color:${accentColor};text-decoration:underline;">CVE-2026-0002</a>`,
+        `<a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="display:inline-block;margin:0 8px 4px 0;color:${LINK_COLOR};text-decoration:underline;">CVE-2026-0001</a>, <a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0002" style="display:inline-block;margin:0 8px 4px 0;color:${LINK_COLOR};text-decoration:underline;">CVE-2026-0002</a>`,
       )
       .replace(
         /{{affected_systems_html}}/g,
@@ -342,11 +388,11 @@ const handleInsertToken = (token: string) => {
       )
       .replace(
         /{{cve_details}}/g,
-        `<div style="margin:0 0 16px;padding:16px;border:1px solid #e2e8f0;border-radius:4px;background:${cardBg};"><div style="font-size:14px;font-weight:bold;line-height:20px;"><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="color:${accentColor};text-decoration:underline;">CVE-2026-0001</a></div><p style="margin:8px 0 0;font-size:12px;line-height:19px;color:${fontColor};">A remotely exploitable vulnerability affects the listed product versions.</p><div style="margin:8px 0 0;font-size:11px;line-height:17px;"><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="color:${accentColor};text-decoration:underline;">NVD</a> &nbsp;·&nbsp; <a href="https://example.com" style="color:${accentColor};text-decoration:underline;">Vendor advisory</a></div></div>`
+        `<div style="margin:0 0 16px;padding:16px;border:1px solid #e2e8f0;border-radius:4px;background:${cardBg};"><div style="font-size:14px;font-weight:bold;line-height:20px;"><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="color:${LINK_COLOR};text-decoration:underline;">CVE-2026-0001</a></div><p style="margin:8px 0 0;font-size:12px;line-height:19px;color:${fontColor};">A remotely exploitable vulnerability affects the listed product versions.</p><div style="margin:8px 0 0;font-size:11px;line-height:17px;"><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="color:${LINK_COLOR};text-decoration:underline;">NVD</a> &nbsp;·&nbsp; <a href="https://example.com" style="color:${LINK_COLOR};text-decoration:underline;">Vendor advisory</a></div></div>`
       )
       .replace(
         /{{remediation_steps}}/g,
-        `<p style="margin:0 0 10px;font-size:12px;line-height:19px;color:${fontColor};">Review vendor guidance and validate remediation through your change process.</p><div style="margin:0 0 12px;padding:12px 14px;border:1px solid #e2e8f0;border-radius:4px;background:${cardBg};"><strong><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="color:${accentColor};text-decoration:underline;">CVE-2026-0001</a></strong><ul style="margin:6px 0 0;padding-left:20px;font-size:12px;line-height:19px;color:${fontColor};"><li>Confirm affected versions with the vendor.</li><li>Apply a tested vendor-supported fix.</li><li>Rescan affected systems and record the outcome.</li></ul><p style="margin:8px 0 0;font-size:12px;"><a href="https://example.com/patch-guidance" style="color:${accentColor};text-decoration:underline;">Vendor patch</a></p></div><div style="margin:0 0 12px;padding:12px 14px;border:1px solid #e2e8f0;border-radius:4px;background:${cardBg};"><strong><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0002" style="color:${accentColor};text-decoration:underline;">CVE-2026-0002</a></strong><ul style="margin:6px 0 0;padding-left:20px;font-size:12px;line-height:19px;color:${fontColor};"><li>Disable the vulnerable feature until the vendor update is deployed.</li><li>Verify service health after remediation.</li></ul></div>`,
+        `<p style="margin:0 0 10px;font-size:12px;line-height:19px;color:${fontColor};">Review vendor guidance and validate remediation through your change process.</p><div style="margin:0 0 12px;padding:12px 14px;border:1px solid #e2e8f0;border-radius:4px;background:${cardBg};"><strong><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001" style="color:${LINK_COLOR};text-decoration:underline;">CVE-2026-0001</a></strong><ul style="margin:6px 0 0;padding-left:20px;font-size:12px;line-height:19px;color:${fontColor};"><li>Confirm affected versions with the vendor.</li><li>Apply a tested vendor-supported fix.</li><li>Rescan affected systems and record the outcome.</li></ul><p style="margin:8px 0 0;font-size:12px;"><a href="https://example.com/patch-guidance" style="color:${LINK_COLOR};text-decoration:underline;">Vendor patch</a></p></div><div style="margin:0 0 12px;padding:12px 14px;border:1px solid #e2e8f0;border-radius:4px;background:${cardBg};"><strong><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0002" style="color:${LINK_COLOR};text-decoration:underline;">CVE-2026-0002</a></strong><ul style="margin:6px 0 0;padding-left:20px;font-size:12px;line-height:19px;color:${fontColor};"><li>Disable the vulnerable feature until the vendor update is deployed.</li><li>Verify service health after remediation.</li></ul></div>`,
       )
       .replace(
         /{{mitigation_steps}}/g,
@@ -361,7 +407,7 @@ const handleInsertToken = (token: string) => {
       .replace(/{{remediation_link}}/g, 'https://example.com/patch-guidance')
       .replace(
         /{{references_html}}/g,
-        `<div><a href="https://example.com/vendor-advisory" target="_blank" rel="noopener noreferrer" style="color:${accentColor};text-decoration:underline;">Vendor advisory for CVE-2026-0001</a></div>\n<div><a href="https://example.com/vendor-advisory-2" target="_blank" rel="noopener noreferrer" style="color:${accentColor};text-decoration:underline;">Vendor advisory for CVE-2026-0002</a></div>`,
+        `<div><a href="https://example.com/vendor-advisory" target="_blank" rel="noopener noreferrer" style="color:${LINK_COLOR};text-decoration:underline;">Vendor advisory for CVE-2026-0001</a></div>\n<div><a href="https://example.com/vendor-advisory-2" target="_blank" rel="noopener noreferrer" style="color:${LINK_COLOR};text-decoration:underline;">Vendor advisory for CVE-2026-0002</a></div>`,
       )
       .replace(/{{references_link}}/g, 'https://example.com/vendor-advisory');
   };
@@ -378,7 +424,7 @@ const handleInsertToken = (token: string) => {
     canvasBg: 'Canvas Background',
     cardBg: 'Card Background',
     headerBg: 'Header Banner Bg',
-    accentColor: 'Accent Color',
+    accentColor: 'Link Color',
     headingColor: 'Heading Color',
     fontColor: 'Font Color',
     badgeStampColor: 'Badge/Stamp Color',
@@ -716,7 +762,7 @@ const handleInsertToken = (token: string) => {
 
             <div>
               <label className="block text-zinc-400 dark:text-zinc-400 light:text-zinc-600 font-mono mb-1.5">
-                Accent &amp; Link Color
+                Link Color
               </label>
               <div className="flex items-center space-x-2">
                 <input
