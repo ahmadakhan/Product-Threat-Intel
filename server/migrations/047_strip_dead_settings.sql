@@ -28,7 +28,10 @@ UPDATE records
    AND id = 'main';
 
 -- Rebuild `securityPolicy` explicitly so the removed `csrfProtection` key cannot
--- survive, while every value the operator can still tune is preserved.
+-- survive, while every value the operator can still tune is preserved, and give a
+-- row that predates the object entirely (older installs store no securityPolicy
+-- at all) the shipped defaults. Leaving it undefined made the first login read
+-- `settings.securityPolicy.maxLoginAttempts` and throw a TypeError.
 UPDATE records
    SET data = jsonb_set(data, '{securityPolicy}', jsonb_build_object(
          'sessionTimeoutMins', COALESCE((data->'securityPolicy'->>'sessionTimeoutMins')::int, 30),
@@ -38,6 +41,6 @@ UPDATE records
          'autoAliasTtlDays', COALESCE((data->'securityPolicy'->>'autoAliasTtlDays')::int, 30)))
  WHERE kind = 'settings'
    AND id = 'main'
-   AND data ? 'securityPolicy';
+   AND data <> '{}'::jsonb;
 
 INSERT INTO schema_migrations(version) VALUES(47) ON CONFLICT DO NOTHING;

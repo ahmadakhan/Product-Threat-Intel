@@ -626,7 +626,7 @@ export const ThreatFeedsView: React.FC = () => {
                     id="feed-rate"
                     type="number"
                     min={1}
-                    max={600}
+                    max={5000}
                     value={formData.rateLimitPerMin}
                     onChange={(e) => setFormData({ ...formData, rateLimitPerMin: Number(e.target.value) })}
                     className="w-full bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-xl px-3 py-2 text-xs text-zinc-100 dark:text-zinc-100 light:text-zinc-900 font-mono focus:border-zinc-600 focus:outline-none"

@@ -40,7 +40,12 @@ export const feedSchema = z
     ),
     authType: z.enum(['NONE', 'API_KEY', 'BEARER', 'BASIC']),
     authSecretKey: z.string().max(4096).optional(),
-    rateLimitPerMin: z.number().int().min(1).max(1000),
+    // VulnCheck NVD++ allows 1,000 requests/minute and other commercial feeds
+    // publish higher budgets, so the ceiling admits a fast source without
+    // forcing an operator to under-declare it. Ingestion still floors the actual
+    // request spacing at the provider's documented rate (server/ingestion.ts),
+    // so a generous value cannot exceed what the provider permits.
+    rateLimitPerMin: z.number().int().min(1).max(5000),
     requestTimeoutSeconds: z.number().int().min(5).max(120).optional(),
     recoveryDelayMinutes: z.number().int().min(1).max(60).default(5),
     enabled: z.boolean(),

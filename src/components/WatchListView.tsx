@@ -170,6 +170,10 @@ export const WatchListView: React.FC = () => {
   // Pagination for inventory table
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+  // Inventory status filter: the table used to show disabled products mixed in
+  // with the actively matched ones, so an operator could not answer "what am I
+  // actually watching?" without scanning every row's switch.
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'ENABLED' | 'DISABLED'>('ALL');
 
   // Form State
   const [vendorInput, setVendorInput] = useState('');
@@ -382,9 +386,18 @@ export const WatchListView: React.FC = () => {
       item.ownerGroup.toLowerCase().includes(searchTerm.toLowerCase()) ||
       item.cpes.some((c) => c.toLowerCase().includes(searchTerm.toLowerCase())) ||
       (item.purls && item.purls.some((p) => p.toLowerCase().includes(searchTerm.toLowerCase())));
+    const matchesStatus =
+      statusFilter === 'ALL' || (statusFilter === 'ENABLED' ? item.active : !item.active);
 
-    return matchesSearch;
+    return matchesSearch && matchesStatus;
   });
+
+  /** Counts for the status filter, taken before the filter is applied. */
+  const inventoryStatusCounts = {
+    ALL: watchlist.length,
+    ENABLED: watchlist.filter((item) => item.active).length,
+    DISABLED: watchlist.filter((item) => !item.active).length,
+  };
 
   const paginatedAssets = filteredAssets.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
@@ -1293,18 +1306,53 @@ export const WatchListView: React.FC = () => {
           {/* Action and Search Toolbar */}
           <div className="ui-panel bg-zinc-900/50 dark:bg-zinc-900/50 light:bg-white border border-zinc-800/80 dark:border-zinc-800/80 light:border-zinc-200 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 shadow-sm transition-colors">
             {/* Search Input */}
-            <div className="relative w-full sm:w-80">
-              <Search className="w-4 h-4 text-zinc-400 dark:text-zinc-400 light:text-zinc-600 absolute left-3 top-2.5" />
-              <input
-                type="text"
-                placeholder="Search products by tag, vendor, product, or CPE..."
-                value={searchTerm}
-                onChange={(e) => {
-                  setSearchTerm(e.target.value);
-                  setCurrentPage(1);
-                }}
-                className="w-full bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-xl pl-9 pr-3 py-2 text-xs text-zinc-100 dark:text-zinc-100 light:text-zinc-900 dark:placeholder-zinc-500 light:placeholder-zinc-400 focus:outline-none focus:border-zinc-600 transition"
-              />
+            <div className="flex w-full flex-wrap items-center gap-3 sm:w-auto">
+              <div className="relative w-full sm:w-80">
+                <Search className="w-4 h-4 text-zinc-400 dark:text-zinc-400 light:text-zinc-600 absolute left-3 top-2.5" />
+                <input
+                  type="text"
+                  placeholder="Search products by tag, vendor, product, or CPE..."
+                  value={searchTerm}
+                  onChange={(e) => {
+                    setSearchTerm(e.target.value);
+                    setCurrentPage(1);
+                  }}
+                  className="w-full bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-xl pl-9 pr-3 py-2 text-xs text-zinc-100 dark:text-zinc-100 light:text-zinc-900 dark:placeholder-zinc-500 light:placeholder-zinc-400 focus:outline-none focus:border-zinc-600 transition"
+                />
+              </div>
+              {/* Status filter: All / Enabled / Disabled, each with its count so the
+                  totals stay visible while a filter hides rows. */}
+              <div
+                role="group"
+                aria-label="Filter monitored products by matching status"
+                className="inline-flex rounded-xl border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 overflow-hidden"
+              >
+                {(['ALL', 'ENABLED', 'DISABLED'] as const).map((status) => {
+                  const selected = statusFilter === status;
+                  const label = status === 'ALL' ? 'All' : status === 'ENABLED' ? 'Enabled' : 'Disabled';
+                  return (
+                    <button
+                      key={status}
+                      type="button"
+                      aria-pressed={selected}
+                      onClick={() => {
+                        setStatusFilter(status);
+                        setCurrentPage(1);
+                      }}
+                      className={`px-3 py-2 text-xs font-medium transition border-r border-zinc-800 dark:border-zinc-800 light:border-zinc-300 last:border-r-0 ${
+                        selected
+                          ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-100 dark:text-zinc-900 light:bg-zinc-900 light:text-zinc-50'
+                          : 'bg-zinc-950 text-zinc-300 hover:bg-zinc-800 dark:bg-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-800 light:bg-zinc-50 light:text-zinc-700 light:hover:bg-zinc-200'
+                      }`}
+                    >
+                      {label}
+                      <span className="ml-1.5 font-mono text-[10px] opacity-70">
+                        {inventoryStatusCounts[status]}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             {/* Buttons */}
@@ -1361,6 +1409,10 @@ export const WatchListView: React.FC = () => {
                         className="py-8 text-center text-zinc-500 dark:text-zinc-500 light:text-zinc-600 text-xs"
                       >
                         No matching monitored products found.
+                        {statusFilter !== 'ALL' &&
+                          (searchTerm
+                            ? ` No ${statusFilter === 'ENABLED' ? 'enabled' : 'disabled'} product matches "${searchTerm}".`
+                            : ` No ${statusFilter === 'ENABLED' ? 'enabled' : 'disabled'} products are configured.`)}
                       </td>
                     </tr>
                   ) : (

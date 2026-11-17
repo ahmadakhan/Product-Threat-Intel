@@ -10,6 +10,20 @@ import { DEFAULT_SETTINGS, type Role } from '../shared/state.ts';
 import type { AppSettings } from '../src/types/index.ts';
 import { HttpError } from './validation';
 /**
+ * Security policy with the shipped defaults filled in.
+ *
+ * A persisted settings row can be older than the `securityPolicy` object or hold
+ * a partial one (an upgrade, a hand-edited row, a migration that ran before the
+ * field existed). Callers index straight into `maxLoginAttempts` before any
+ * password work, so a missing object threw a TypeError on every login. Reading
+ * through this helper keeps an incomplete row a configuration gap, not an outage.
+ */
+export function effectiveSecurityPolicy(
+  settings: AppSettings,
+): AppSettings['securityPolicy'] {
+  return { ...DEFAULT_SETTINGS.securityPolicy, ...(settings.securityPolicy ?? {}) };
+}
+/**
  * The address a password-reset code is delivered to.
  *
  * Kept as a plain column rather than a username convention: the reset flow used
@@ -136,8 +150,8 @@ export async function createUser(
   z.enum(['ADMIN', 'OPERATOR', 'VIEWER']).parse(role);
   const address = email === null || email === '' ? null : accountEmail.parse(email);
   const policy = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
-  if (password.length < policy.securityPolicy.minPasswordLen)
-    throw new HttpError(400, 'Password does not meet configured minimum');
+  const { minPasswordLen } = effectiveSecurityPolicy(policy);
+  if (password.length < minPasswordLen) throw new HttpError(400, 'Password does not meet configured minimum');
   const hash = await passwordHash(password);
   await transaction(pool, async (db) => {
     const userId = randomUUID();
@@ -232,7 +246,7 @@ export function loginHandler(pool: pg.Pool, config: Config) {
       })
       .parse(req.body);
     const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
-    const { maxLoginAttempts, lockoutMins } = settings.securityPolicy;
+    const { maxLoginAttempts, lockoutMins } = effectiveSecurityPolicy(settings);
     const ipKey = 'ip:' + tokenHash(req.ip || '');
     const userKey = 'user:' + tokenHash(username);
     const keys = [ipKey, userKey];
@@ -279,7 +293,7 @@ export function loginHandler(pool: pg.Pool, config: Config) {
     if (!user || user.disabled || !valid) throw new HttpError(401, 'Invalid username or password');
     const token = randomToken(),
       csrf = randomToken(),
-      expires = new Date(Date.now() + settings.securityPolicy.sessionTimeoutMins * 60000);
+      expires = new Date(Date.now() + effectiveSecurityPolicy(settings).sessionTimeoutMins * 60000);
     await transaction(pool, async (db) => {
       // Clear both buckets on success: the account key and the source-IP key. Each
       // increments before the password check, so resetting only the account key left

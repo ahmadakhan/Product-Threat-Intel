@@ -94,3 +94,31 @@ test(
     await pool.end();
   },
 );
+
+test(
+  'migration 047 gives a settings row without securityPolicy the shipped defaults',
+  { skip: !database },
+  async () => {
+    const pool = createPool(database!);
+    await migrate(pool);
+    await pool.query(`DELETE FROM schema_migrations WHERE version IN (47)`);
+    // An older install stores no securityPolicy object at all. It must not survive
+    // as undefined: login reads maxLoginAttempts before any password check.
+    await pool.query(
+      `INSERT INTO records(kind,id,data) VALUES('settings','main',$1::jsonb)
+       ON CONFLICT (kind,id) DO UPDATE SET data = EXCLUDED.data`,
+      [JSON.stringify({ timezone: 'UTC', scopeHours: 12 })],
+    );
+    await migrate(pool);
+    const row = (await pool.query(`SELECT data FROM records WHERE kind='settings' AND id='main'`)).rows[0];
+    assert.deepEqual(row.data.securityPolicy, {
+      sessionTimeoutMins: 30,
+      minPasswordLen: 14,
+      maxLoginAttempts: 5,
+      lockoutMins: 15,
+      autoAliasTtlDays: 30,
+    });
+    assert.equal(row.data.scopeHours, 12, 'existing values are untouched');
+    await pool.end();
+  },
+);
