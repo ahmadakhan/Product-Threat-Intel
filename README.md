@@ -64,7 +64,7 @@ npm run operator:create -- admin ADMIN # reads password from standard input
 npm start
 ```
 
-Development mode applies migrations automatically. Production requires the migration job. `npm run dev:server` runs the API watcher; `npm run dev` runs Vite on loopback port 3000 (set APP_ORIGIN to the Vite origin for that workflow).
+Development mode applies migrations automatically. Production requires the migration job. `npm run dev:server` runs the API watcher; `npm run dev` runs Vite on loopback port 3000 (set APP_ORIGIN to the Vite origin for that workflow, or list it in APP_ORIGINS_EXTRA and keep APP_ORIGIN as the canonical deployment origin). Mutating `/api` requests are accepted only from `APP_ORIGIN` and any exact origins listed in `APP_ORIGINS_EXTRA`; a request with no `Origin` header is refused.
 
 ```sh
 npm test

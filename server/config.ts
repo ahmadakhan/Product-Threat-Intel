@@ -145,6 +145,13 @@ const schema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(8080),
   DATABASE_URL: databaseUrl,
   APP_ORIGIN: z.url(),
+  // Additional exact origins allowed to issue mutating /api requests, comma
+  // separated (for example a LAN or Tailscale spelling of the same deployment,
+  // or the Vite origin used by `npm run dev`). Each entry is normalised to its
+  // origin form and compared exactly; this is not a wildcard. APP_ORIGIN stays
+  // the canonical origin used for cookies, secure-cookie detection and the
+  // deployment verifier.
+  APP_ORIGINS_EXTRA: z.string().max(2048).default(''),
   ALLOW_INSECURE_HTTP: z.enum(['true', 'false']).default('false'),
   ENCRYPTION_KEY: z.string().regex(/^[A-Za-z0-9+/]{43}=$/, 'Must be a base64 encoded 32-byte key'),
   ENCRYPTION_KEYS: z.string().max(2048).default('').refine((value) => {
@@ -264,6 +271,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       parsed.EGRESS_ALLOWED_HOSTS,
       parsed.EGRESS_ALLOWED_HOSTS_EXTRA,
     ),
+    // Every entry must be a bare origin: a path or query could never match the
+    // browser's `Origin` header and would only look like a permitted origin.
+    APP_ORIGINS_EXTRA: [...new Set(parsed.APP_ORIGINS_EXTRA.split(',').map((entry) => entry.trim()).filter(Boolean))]
+      .map((entry) => {
+        let candidate: URL;
+        try {
+          candidate = new URL(entry);
+        } catch {
+          throw new Error(`APP_ORIGINS_EXTRA entry is not a valid URL: ${entry}`);
+        }
+        if (candidate.origin !== entry)
+          throw new Error(`APP_ORIGINS_EXTRA entry must be an origin without a path: ${entry}`);
+        return candidate.origin;
+      })
+      .join(','),
   };
   const origin = new URL(config.APP_ORIGIN);
   if (origin.origin !== config.APP_ORIGIN) throw new Error('APP_ORIGIN must be an origin without a path');

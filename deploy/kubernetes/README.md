@@ -10,6 +10,7 @@ Create the `vulnstream-runtime` Secret through your secret manager with these ke
 - `MIGRATION_DATABASE_URL`: the same database with migration-owner credentials. Used only by init containers.
 - `ENCRYPTION_KEY`: the existing base64 32-byte encryption key; identical across replicas.
 - `APP_ORIGIN`: exact external HTTPS origin.
+- `APP_ORIGINS_EXTRA` (optional): comma-separated exact origins that may also issue mutating requests, for example a Tailscale spelling of the same service. `APP_ORIGIN` remains the canonical origin for cookies and the deployment verifier.
 - `METRICS_TOKEN`: dedicated random token of at least 32 characters.
 
 Build and publish the repository image, then set both StatefulSet images to that immutable version/digest through your deployment tooling. The manifest's `vulnstream-enterprise:local-verified` name is the local build name and must resolve in the cluster before deployment. Apply in the intended namespace with `kubectl apply -f deploy/kubernetes/ha.yaml`. Both init containers use the existing serialized migration runner. The migration owner must be allowed to grant privileges to `vulnstream_app`.
