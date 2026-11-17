@@ -23,7 +23,8 @@ them.
 The configured local database initially exposed none of `assets`, `unstructured_advisories`,
 or `vendor_product_aliases` and was at schema version 4. It has now been upgraded to
 version 14. Both existing inventory records were projected, and a before/after digest
-verified that their stored data remained unchanged. See `correlation-deployment-report.json`.
+verified that their stored data remained unchanged. The report was produced by the local verification run
+and is not kept in the repository; re-run the checks above to regenerate equivalent evidence.
 All test and benchmark records used disposable schemas.
 
 ## Eight implementation layers
@@ -218,7 +219,7 @@ and idempotency decision metadata remain durable.
 - Strict TypeScript compilation and client/server production builds.
 - Full Node suite against PostgreSQL in isolated schemas: 261 tests passed with zero failures or skipped tests, including the restricted-runtime-role regression.
 - Native correlation coverage includes parallel duplicate races, transaction rollback/retry, exact identifiers, conservative versions/backports, explicit exclusion precedence, early intelligence review routing, encrypted dead letters, Unicode chunk framing, concurrent-stream admission, and preservation of existing inventory columns and rows.
-- Disposable browser fixture `tests/fixtures/correlationPreview.ts` supports visual verification without touching application data. It requires `TEST_DATABASE_URL`, creates a unique temporary schema, and removes it on SIGTERM/SIGINT. Its test-only login is `preview` / `Disposable-preview-password-2026!`.
+- Visual and browser checks were performed manually against a disposable database; no browser fixture or page-verification screenshot is shipped with the repository.
 
 
 ## Operational completion
@@ -249,13 +250,15 @@ and idempotency decision metadata remain durable.
 
 Run `npm run correlation:preflight` for a read-only protected-schema compatibility report. Run `npm run db:migrate` with migration-owner credentials for serialized migrations and inventory projection bootstrap. Run `npm run correlation:benchmark` for a disposable, streaming benchmark; optional `CORRELATION_BENCH_ITEMS`, `CORRELATION_BENCH_CONCURRENCY`, and `CORRELATION_BENCH_REPORT` control its bounded workload and report file.
 
-The recorded local 500-item run used four workers, processed 450 unique articles and rejected 50 duplicates with zero dead letters. It measured about 50.6 items/second, p95 item latency of 125.7 ms, p99 of 150.0 ms and peak RSS of 176.1 MiB while other tests were also running. These figures describe a short synthetic workload on this host, not sustained capacity, a full-body RSS corpus, or a production latency/accuracy SLA. `correlation-benchmark-report.json` contains the exact measurements and checks.
+The recorded local 500-item run used four workers, processed 450 unique articles and rejected 50 duplicates with zero dead letters. It measured about 50.6 items/second, p95 item latency of 125.7 ms, p99 of 150.0 ms and peak RSS of 176.1 MiB while other tests were also running. These figures describe a short synthetic workload on this host, not sustained capacity, a full-body RSS corpus, or a production latency/accuracy SLA. Re-run
+`npm run correlation:benchmark` (with `CORRELATION_BENCH_REPORT` to file the JSON) to reproduce the
+measurements and checks.
 
 `tests/correlation-operations.test.ts` terminates only its own PostgreSQL backend session and verifies transaction rollback and retry on a new socket. `tests/correlation-recovery.test.ts` uses an isolated TCP proxy to sever real database sockets, verifies paused admission and database-independent metrics, restores connectivity and confirms successful ingestion. Neither test restarts or disrupts the shared database server. Keyword/negation/version fixtures test conservative routing; real-world precision/recall still requires a labeled operational corpus.
 
 `deploy/kubernetes/ha.yaml` supplies two instances on distinct nodes, independent retained spool volumes, process probes, and a disruption budget. `deploy/monitoring` supplies authenticated Prometheus scraping and alert rules. The cluster, writable HA PostgreSQL endpoint, ingress, persistent storage and external alert/log destinations must be supplied by the deployment environment. No Kubernetes client/context or external HA endpoint was available here, so cross-node rollout and database-primary promotion have not been performed. See `deploy/kubernetes/README.md` for the exact secret and deployment contract.
 
-Final verification: strict compilation, client/server builds and 261 tests passed with no skipped cases. The production image was built locally as `vulnstream-enterprise:local-verified`. Browser checks verified an audited review approval, inventory selection and corrected dead-letter replay; `correlation-operations-verification.png` records the resulting UI. No external notifications were sent.
+Final verification: strict compilation, client/server builds and 261 tests passed with no skipped cases. The production image was built locally as `vulnstream-enterprise:local-verified`. Browser checks verified an audited review approval, inventory selection and corrected dead-letter replay. No external notifications were sent.
 
 ## Local deployment verification (October 25, 2026)
 
@@ -265,7 +268,8 @@ Migration 014 adds shared concurrency policy only to the application-owned polic
 
 The optional Compose `observability` profile runs Prometheus with authenticated discovery of both replicas. Its UI binds only to `127.0.0.1:9091` (override `PROMETHEUS_PORT`). The running deployment has its bearer credential mounted from `.runtime/metrics.token`; the parent directory is mode 0700. Fresh deployments must populate this file with the same `METRICS_TOKEN` configured for the app before starting the observability profile. Never commit either credential.
 
-`npm run deployment:verify` checks the configured HTTPS origin, both container health states and both monitored instances. Use the deployed HTTPS `APP_ORIGIN` when the developer environment instead uses an HTTP origin. The explicit `--exercise` option stops only the second verified app container, checks ten proxy requests and restores that replica in a finally block. Certificate validation uses system roots plus the deployment's local Caddy CA where present. Results are recorded in `correlation-proxy-failover-report.json`.
+`npm run deployment:verify` checks the configured HTTPS origin, both container health states and both monitored instances. Use the deployed HTTPS `APP_ORIGIN` when the developer environment instead uses an HTTP origin. The explicit `--exercise` option stops only the second verified app container, checks ten proxy requests and restores that replica in a finally block. Certificate validation uses system roots plus the deployment's local Caddy CA where present. Write the
+results to a local file with `CORRELATION_DEPLOYMENT_REPORT`; they are not kept in the repository.
 
 This verifies application-replica recovery on one host. The host, proxy and bundled PostgreSQL instance remain single points of failure. Cross-node availability and actual PostgreSQL primary promotion still require the external infrastructure described above.
 

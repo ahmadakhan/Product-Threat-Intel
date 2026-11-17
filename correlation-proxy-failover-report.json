@@ -1,9 +1,0 @@
-{
-  "proxyRequests": 11,
-  "proxyFailures": 0,
-  "maxProxyLatencyMs": 2305.692231,
-  "singleReplicaOutageExercised": true,
-  "replicaRestored": true,
-  "monitoringTargets": 2,
-  "healthyMonitoringTargets": 2
-}

@@ -74,7 +74,7 @@ npm audit
 
 Without `TEST_DATABASE_URL`, `npm test` explicitly skips the database suite; this is not full validation. The integration command requires the variable. Tests create and remove a uniquely named schema in the supplied test database. Use a dedicated test database with schema-creation privileges. External transports are mocked; tests do not send messages to real recipients.
 
-See [OPERATIONS.md](OPERATIONS.md) for backups, restore, monitoring and release procedures, and [AUDIT.md](AUDIT.md) for verification scope and limitations.
+See [OPERATIONS.md](OPERATIONS.md) for backups, restore, monitoring and release procedures. Verification scope and limitations are recorded as regression tests in `tests/` (for example `tests/production-audit.test.ts` and `tests/hardening.test.ts`).
 
 ## Testing
 

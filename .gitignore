@@ -11,6 +11,11 @@ server-dist/
 secrets/
 .env.production
 
+# Local test and lint capture
+lint-output.txt
+test-output.txt
+test-run*.log
+
 backups/
 
 .runtime/
@@ -19,6 +24,7 @@ backups/
 # Browser cookie files
 cookies.txt
 
-# Python bytecode from the ML test helpers
+# Python bytecode and pytest cache
 __pycache__/
 *.pyc
+.pytest_cache/

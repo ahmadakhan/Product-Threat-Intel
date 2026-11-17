@@ -5,15 +5,7 @@ node_modules
 dist
 server-dist
 coverage
-audit-verification.png
 *.log
 secrets
-
-production-verification.png
 backups
-
-watchlist-matching-verification.png
-
-pipeline-fix-verification.png
-
 .runtime/
