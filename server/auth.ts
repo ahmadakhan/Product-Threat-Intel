@@ -247,8 +247,8 @@ export function loginHandler(pool: pg.Pool, config: Config) {
     const allowed = await transaction(pool, async (db) => {
       for (const key of keys) {
         const result = await db.query(
-          `INSERT INTO login_attempts(key,attempts,window_start,attempt_scope) VALUES($1,1,now(),$4)
-           ON CONFLICT(key) DO UPDATE SET attempts=CASE WHEN login_attempts.window_start<now()-($2::int * interval '1 minute') THEN 1 ELSE login_attempts.attempts+1 END,window_start=CASE WHEN login_attempts.window_start<now()-($2::int * interval '1 minute') THEN now() ELSE login_attempts.window_start END,attempt_scope=$4 RETURNING attempts`,
+          `INSERT INTO login_attempts(key,attempts,window_start,attempt_scope) VALUES($1,1,now(),$3)
+           ON CONFLICT(key) DO UPDATE SET attempts=CASE WHEN login_attempts.window_start<now()-($2::int * interval '1 minute') THEN 1 ELSE login_attempts.attempts+1 END,window_start=CASE WHEN login_attempts.window_start<now()-($2::int * interval '1 minute') THEN now() ELSE login_attempts.window_start END,attempt_scope=$3 RETURNING attempts`,
           [key, lockoutMins, userKey],
         );
         const threshold = key === ipKey ? sourceThreshold : accountThreshold;
