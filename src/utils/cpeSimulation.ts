@@ -492,7 +492,7 @@ export function runCpeSimulation(
         vulnParsed.vendor === '*' ||
         vulnParsed.product === '*';
       if (hasWildcards) {
-        confidence = 70;
+        confidence = 90;
       } else {
         confidence = 90;
       }

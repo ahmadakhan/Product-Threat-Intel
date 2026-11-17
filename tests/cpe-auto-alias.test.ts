@@ -200,7 +200,7 @@ test('a partially resolved generic CPE stays review-gated', () => {
     '',
   );
   assert.equal(matched.matched, true);
-  assert.equal(matched.confidence, 70);
+  assert.equal(matched.confidence, 90);
   assert.equal(matched.applicabilityRequiresReview, true);
 });
 test('a CPE vendor/product mismatch falls through to the text fallback', () => {
@@ -276,6 +276,6 @@ test('a vuln-side partial wildcard version is review-gated even when it intersec
   );
   assert.equal(matched.matched, true);
   assert.equal(matched.method, 'STRICT_CPE');
-  assert.equal(matched.confidence, 70);
+  assert.equal(matched.confidence, 90);
   assert.equal(matched.applicabilityRequiresReview, true);
 });

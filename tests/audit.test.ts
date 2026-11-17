@@ -284,7 +284,7 @@ test('autoDispatchUnverifiableMatches still respects the configured confidence t
     ...settings,
   });
   assert.equal(held.newFindings.length, 1);
-  assert.equal(held.newFindings[0].confidence, 70);
+  assert.equal(held.newFindings[0].confidence, 90);
   assert.equal(
     held.newFindings[0].notificationStatus,
     'QUEUED_FOR_DISPATCH',

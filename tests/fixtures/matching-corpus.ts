@@ -253,7 +253,7 @@ export const MATCHING_CORPUS: MatchingCase[] = [
     expected: {
       matched: true,
       methods: ['STRICT_CPE'],
-      confidence: 70,
+      confidence: 90,
       requiresReview: true,
     },
   },
