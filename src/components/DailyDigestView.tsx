@@ -174,7 +174,7 @@ export const DailyDigestView: React.FC = () => {
   const getRenderedHtml = useMemo(() => () => {
     const source = isCustomTemplate && customTemplate
       ? customTemplate
-      : dailyDigestTemplate || compileDailyDigestTemplate(dailyDigestCustomization);
+      : compileDailyDigestTemplate(dailyDigestCustomization);
     const criticalCount = SAMPLE_FINDINGS.filter((f) => f.severity === 'CRITICAL').length;
     const highCount = SAMPLE_FINDINGS.filter((f) => f.severity === 'HIGH').length;
     const mediumCount = SAMPLE_FINDINGS.filter((f) => f.severity === 'MEDIUM').length;
@@ -223,7 +223,9 @@ export const DailyDigestView: React.FC = () => {
 
   const getTemplateSource = (): string => {
     if (isCustomTemplate && customTemplate) return customTemplate;
-    if (dailyDigestTemplate) return dailyDigestTemplate;
+    // Always compile from the live customization so the preview reflects
+    // the operator's current color/typography/stamp settings, not a stale
+    // snapshot-compiled template.
     return compileDailyDigestTemplate(dailyDigestCustomization);
   };
 
