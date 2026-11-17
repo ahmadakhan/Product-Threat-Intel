@@ -58,6 +58,7 @@ export const DailyDigestView: React.FC = () => {
   const [confirmSendTest, setConfirmSendTest] = useState<{ action: string; label: string } | null>(null);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [saveToast, setSaveToast] = useState(false);
+  const [previewKey, setPreviewKey] = useState(0);
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'mobile'>('desktop');
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
 
@@ -171,7 +172,7 @@ export const DailyDigestView: React.FC = () => {
     [dailyDigestCustomization, displayTimezone],
   );
 
-  const getRenderedHtml = useMemo(() => () => {
+  const getRenderedHtml = (): string => {
     const source = isCustomTemplate && customTemplate
       ? customTemplate
       : compileDailyDigestTemplate(dailyDigestCustomization);
@@ -210,16 +211,7 @@ export const DailyDigestView: React.FC = () => {
       .replace(/{{high_kpi}}/g, digestSeverityKpi('HIGH', highCount, dailyDigestCustomization))
       .replace(/{{medium_kpi}}/g, digestSeverityKpi('MEDIUM', mediumCount, dailyDigestCustomization))
       .replace(/{{low_kpi}}/g, digestSeverityKpi('LOW', lowCount, dailyDigestCustomization));
-  }, [
-    dailyDigestCustomization,
-    dailyDigestTemplate,
-    customTemplate,
-    isCustomTemplate,
-    findingsSummary,
-    healthReport,
-    previewDate,
-    previewTimestamp,
-  ]);
+  };
 
   const getTemplateSource = (): string => {
     if (isCustomTemplate && customTemplate) return customTemplate;
@@ -255,6 +247,13 @@ export const DailyDigestView: React.FC = () => {
     const timer = setTimeout(syncIframeHeight, 100);
     return () => clearTimeout(timer);
   }, [getRenderedHtml, previewDevice, syncIframeHeight]);
+
+  // Bump the preview key whenever the live customization changes so the
+  // iframe remounts and reloads with fresh HTML (srcDoc changes alone are
+  // not always enough for the browser to re-render).
+  useEffect(() => {
+    setPreviewKey((k) => k + 1);
+  }, [dailyDigestCustomization]);
 
   const scrollToIframeTop = () => {
     try {
@@ -1118,7 +1117,8 @@ export const DailyDigestView: React.FC = () => {
                 <div className="flex-1 overflow-auto bg-zinc-950/80">
                   <div className="w-[720px] max-w-full mx-auto py-4">
                     <iframe
-                  srcDoc={showTokensInCanvas ? getTemplateSource() : getRenderedHtml()}
+                      key={previewKey}
+                    srcDoc={showTokensInCanvas ? getTemplateSource() : getRenderedHtml()}
                       onLoad={syncIframeHeight}
                       scrolling="no"
                       style={{
@@ -1190,6 +1190,7 @@ export const DailyDigestView: React.FC = () => {
               >
                 <iframe
                   ref={iframeRef}
+                  key={previewKey}
                   title="Daily Digest Preview"
                 srcDoc={showTokensInCanvas ? getTemplateSource() : getRenderedHtml()}
                   onLoad={syncIframeHeight}
@@ -1280,7 +1281,7 @@ export const DailyDigestView: React.FC = () => {
             >
               <iframe
                 title="Fullscreen Daily Digest Preview"
-                key={previewDevice}
+                key={`${previewDevice}-${previewKey}`}
                 scrolling="no"
                 onLoad={(event) => {
                   const frame = event.currentTarget;
