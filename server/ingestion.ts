@@ -46,6 +46,17 @@ export interface IngestResult {
   notModified?: boolean;
   /** End of the fully fetched source window; persisted only after the whole pipeline commits. */
 }
+/**
+ * Continuation pages one run may fetch for a single NVD++ window.
+ *
+ * This bounds one run's memory and duration, not correctness: a window that
+ * needs more pages is committed at this limit and resumed from the stored
+ * `pageCursor` on the next run, so a busy window is ingested across several runs
+ * instead of failing outright. At the default 1,000-record page size this is
+ * 100,000 records per run.
+ */
+const NVD_PAGE_BUDGET = 100;
+
 export interface IngestContext extends IngestionState {
   /** Last fully committed source checkpoint for the same source configuration. */
   checkpoint?: string;
@@ -827,12 +838,18 @@ export async function ingestFeed(
       }
     };
     url.searchParams.set('start_cursor', '');
+    // A resumed window must not use the conditional handle. The first run already
+    // saw that ETag, so a 304 here is expected and would end the run without
+    // reading the pages it exists to read.
+    const resumingWindow = Boolean(context.pageCursor);
     // The NVD++ index changes only when records change, so the index-level ETag
     // is a valid conditional handle for the whole paginated window: a 304 means
     // no record in the window changed. The checkpoint must still advance, or a
     // quiet feed would re-request the same window forever.
-    const { data: firstOr304, etag } = await fetchInitialNvdPage();
-    if (firstOr304 === undefined)
+    const { data: firstOr304, etag } = resumingWindow
+      ? { data: undefined as any, etag: context.indexEtag }
+      : await fetchInitialNvdPage();
+    if (!resumingWindow && firstOr304 === undefined)
       return {
         cves: [],
         count: 0,
@@ -929,15 +946,24 @@ export async function ingestFeed(
     };
     // The first page was already fetched by the conditional probe; process it
     // before paging so no record is lost or fetched twice.
-    cursor = processPage(firstOr304);
-    for (let pageNo = 0; pageNo < 100 && cursor; pageNo++) {
+    //
+    // A run that stopped at the page budget stores the provider cursor to resume
+    // from (`context.pageCursor`), together with the exact window it belongs to.
+    // Resuming re-issues the same window and skips the conditional probe: the
+    // ETag check would legitimately answer 304 and lose the rest of the window.
+    if (resumingWindow) cursor = context.pageCursor;
+    else cursor = processPage(firstOr304);
+    for (let pageNo = 0; pageNo < NVD_PAGE_BUDGET && cursor; pageNo++) {
       const pageUrl = new URL(url);
       for (const key of ['cursor', 'start_cursor', 'page', 'startIndex', 'resultsPerPage']) pageUrl.searchParams.delete(key);
       pageUrl.searchParams.set('cursor', cursor);
       pageUrl.searchParams.set('limit', String(pageSize));
       const page = await fetchNvdPage(pageUrl.href);
       cursor = processPage(page);
-      if (pageNo === 98 && cursor) throw new Error('VulnCheck NVD++ pagination exceeded 100,000 records');
+      // Page budget reached with more to read: commit this run's records and keep
+      // the next cursor. Throwing here discarded everything already fetched, so a
+      // window that genuinely exceeded the budget could never be ingested at all.
+      const budgetExhausted = pageNo === NVD_PAGE_BUDGET - 1 && Boolean(cursor);
       // Every fetched continuation page is paced, whether or not another page
       // follows: the request itself consumed provider quota. The delay is the
       // provider spacing computed at the top of this function; the hard-coded
@@ -945,6 +971,23 @@ export async function ingestFeed(
       // spent at ~60 requests/minute, turning a large catch-up window into a
       // multi-minute run that could overrun the feed deadline.
       await sleep(nvdInterval);
+      if (budgetExhausted) {
+        return {
+          cves,
+          count: totalFetched,
+          withdrawals,
+          rejections,
+          // The window is not complete: keep the checkpoint at its start so the
+          // next run re-issues the same window, and carry the resume cursor.
+          syncState: {
+            cursor: context.cursor,
+            hasMore: true,
+            pageCursor: cursor,
+            revisions,
+            ...(context.indexEtag ? { indexEtag: context.indexEtag } : {}),
+          },
+        };
+      }
       if (!cursor) break;
     }
     return {
@@ -953,7 +996,16 @@ export async function ingestFeed(
       withdrawals,
       rejections,
       etag,
-      syncState: { cursor: end.toISOString(), hasMore: windowHasMore || cursor !== undefined, revisions, ...(etag ? { indexEtag: etag } : {}) },
+      // The window is complete, so any resume cursor is spent. Built explicitly
+      // (rather than spread over the context) so a stale `pageCursor` cannot
+      // survive into the next run and re-read this window from the middle.
+      syncState: {
+        cursor: end.toISOString(),
+        hasMore: windowHasMore,
+        pageCursor: undefined,
+        revisions,
+        ...(etag ? { indexEtag: etag } : {}),
+      },
     };
   }
   if (feed.type === 'NVD_API') {

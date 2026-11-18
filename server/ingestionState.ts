@@ -11,6 +11,17 @@ export interface IngestionState {
   catch_up?: boolean;
   /** Next time to start a catch-up run, used by the scheduler to prioritize catch-up. */
   next_catchup_at?: string;
+  /**
+   * Provider pagination cursor to resume a window that outgrew the per-run page
+   * budget.
+   *
+   * The NVD++ adapter pages a whole window before returning, and its page cap
+   * exists to bound one run's memory and duration. Reaching it used to throw,
+   * discarding every page already fetched: a busy day could never be ingested at
+   * all. The adapter now commits what it has and stores the next provider cursor
+   * here so the following run continues the same window instead of starting over.
+   */
+  pageCursor?: string;
 }
 export interface FeedCursor extends IngestionState { fingerprint: string }
 const HOUR = 3600000;
