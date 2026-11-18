@@ -187,9 +187,15 @@ test('a generic inventory CPE resolves to the inventory vendor/product', () => {
   );
 });
 
-test('a partially resolved generic CPE stays review-gated', () => {
+test('a partially resolved generic CPE scores 90% and does not gate applicability review', () => {
   // The inventory record names no vendor, so the vendor wildcard cannot be
-  // substituted and the identity remains generic: low confidence, review.
+  // substituted; the identity is still wildcarded after resolution and is
+  // reported as generic. Per the current policy a wildcard is a confidence
+  // signal, not a review gate, so the match scores 90%. Note what still gates
+  // it: `matchComponent` treats a wildcard vendor as intersecting, so this
+  // reserved CPE also takes the unverified-version branch and keeps
+  // `applicabilityRequiresReview` true. The two facts are asserted together so
+  // the test states the real behaviour rather than the intent.
   const generic = cpe('*', 'widget', '1.5');
   const matched = matchesWatchlistItem(
     [generic],
@@ -202,6 +208,27 @@ test('a partially resolved generic CPE stays review-gated', () => {
   assert.equal(matched.matched, true);
   assert.equal(matched.confidence, 90);
   assert.equal(matched.applicabilityRequiresReview, true);
+  // Product-wide registration stays false: the vendor component is wildcarded,
+  // so this is a partial pattern rather than an explicit all-versions scope.
+  assert.equal(matched.productWideAllVersions, false);
+});
+
+test('a concrete all-versions registration dispatches without review', () => {
+  // This is the shape the policy change is about: vendor and product are
+  // concrete and only the version is wildcarded, so the operator has declared
+  // the whole product in scope. It matches at 90% with no applicability gate.
+  const matched = matchesWatchlistItem(
+    [cpe('acme', 'widget', '*')],
+    'acme',
+    'widget',
+    [cpe('acme', 'widget', '1.5')],
+    '',
+    '',
+  );
+  assert.equal(matched.matched, true);
+  assert.equal(matched.confidence, 90);
+  assert.equal(matched.applicabilityRequiresReview, false);
+  assert.equal(matched.productWideAllVersions, true);
 });
 test('a CPE vendor/product mismatch falls through to the text fallback', () => {
   const result = matchesWatchlistItem(
