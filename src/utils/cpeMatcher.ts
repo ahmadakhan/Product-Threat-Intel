@@ -1033,23 +1033,54 @@ export function matchesWatchlistItem(
               hasUnescapedCpeWildcard(asset[field as keyof ParsedCPE] as string) ||
               hasUnescapedCpeWildcard(vuln[field as keyof ParsedCPE] as string),
           ));
-        // Audit H-1: an intersecting wildcard asset version ('1.*') against a
-        // version-constrained advisory cannot prove the asset's version falls
-        // inside the advisory's range — the match is uncertain by construction.
-        // The previous `matchRes.unverifiedVersion && !versionUnasserted`
-        // conjunction excluded exactly this shape from review, silently
-        // releasing it to auto-dispatch. A complete product-wide registration
-        // ('*' version, every other component concrete) remains deliberate
-        // operator intent: it covers every branch of the advisory's criteria
-        // tree by construction, so the same release reasoning that clears the
-        // context review clears the version hold too.
-        // Wildcards score 90% confidence but do not require applicability
-        // review on their own — wildcards are a confidence signal, not a
-        // review gate. Only range, generic identity, and unverified-version
-        // issues gate manual applicability review.
+        // Wildcards are a confidence signal, not a review gate. A component
+        // wildcard ('*' vendor, product, version, …) means the operator registered
+        // a broader product scope than the advisory names: that is intent, and it
+        // scores 90%.
+        //
+        // `matchRes.unverifiedVersion` cannot be used here as-is. `matchComponent`
+        // treats an asset `*` as intersecting every advisory token, so a wildcard
+        // asset component also sets `unverifiedVersion` — which `matchCPE` maps to
+        // `applicabilityRequiresReview: true`. Left in the conjunction, that turned
+        // the same wildcard into a 70% low-confidence finding and printed
+        // "Low confidence (70% match confidence)" on the delivered advisory, while
+        // `confidence` (set below) still read 90. The wildcard was counted twice,
+        // and the evidence string disagreed with the score.
+        //
+        // The two real reasons for a version hold survive: an unasserted version
+        // on a *concrete* identity (a bare product registration against a
+        // version-pinned advisory, where no wildcard explains the missing
+        // assertion) and an inventory version that cannot be compared with the
+        // advisory's interval. Generic identity still gates as before.
+        const wildcardExplainsUnverifiedVersion = (
+          ['part', 'vendor', 'product', 'update', 'edition', 'language', 'swEdition', 'targetSw', 'targetHw', 'other'] as const
+        ).some(
+          (field) =>
+            (asset[field] as string) === '*' && (vuln[field] as string) !== '*',
+        );
+        // The wildcard that made the identity generic, as opposed to an identity
+        // the matcher had to infer because the inventory named no vendor/product.
+        const wildcardExplainsGenericIdentity = (
+          ['vendor', 'product'] as const
+        ).some(
+          (field) => (asset[field] as string) === '*' && (vuln[field] as string) !== '*',
+        );
+        // `genericIdentity` is reported by `resolveGenericCpeIdentity` when a
+        // component is still wildcarded after substitution. For a CPE the operator
+        // registered with a '*' vendor or product, that is the wildcard itself —
+        // already scored above — not a second, independent reason to lower the
+        // finding to 70% and print "Low confidence (70% match confidence)".
+        //
+        // A generic identity still gates when no wildcard explains it: a reserved
+        // CPE whose vendor the inventory could not name, matched against a
+        // concrete advisory, where the inference is not backed by the record.
         const applicabilityRequiresReview =
           !productWideAllVersions &&
-          Boolean(rangeNeedsReview || genericIdentity || matchRes.unverifiedVersion);
+          Boolean(
+            rangeNeedsReview ||
+              (genericIdentity && !wildcardExplainsGenericIdentity) ||
+              (matchRes.unverifiedVersion && !wildcardExplainsUnverifiedVersion),
+          );
 
         const confidence = contextNeedsReview ? 90 : applicabilityRequiresReview ? 70 : versionRange ? 100 : 90;
         retain({
@@ -1057,17 +1088,19 @@ export function matchesWatchlistItem(
           method: versionRange ? 'STRICT_CPE_INTERVAL' : 'STRICT_CPE',
           confidence,
           matchedCpe: vulnCpe,
-          evidence: genericIdentity
+          // The evidence text must agree with the score above. It previously keyed
+          // only on `genericIdentity`, so a wildcard-scored 90% match still carried
+          // "(70% confidence)" and the advisory rendered a Low confidence note for
+          // a full-confidence finding.
+          evidence: applicabilityRequiresReview && genericIdentity
             ? 'Matched CPE product identity inferred from the inventory record; confirm the generic CPE is intended (70% confidence)'
             : versionRange
               ? applicabilityRequiresReview
                 ? 'Matched strict CPE 2.3 product identifiers; version or architecture applicability requires review'
                 : `Matched strict CPE 2.3 component tokens + verified in version interval [< ${versionRange.versionEndExcluding || versionRange.versionEndIncluding}] (100% confidence)`
-              : contextNeedsReview
-                ? 'Matched strict CPE 2.3 component tokens (90% confidence)'
-                : applicabilityRequiresReview
-                  ? 'Matched strict CPE 2.3 component tokens; review required (unverified version or context) (70% confidence)'
-                  : 'Matched strict CPE 2.3 component tokens (90% confidence)',
+              : applicabilityRequiresReview
+                ? 'Matched strict CPE 2.3 component tokens; review required (unverified version or context) (70% confidence)'
+                : 'Matched strict CPE 2.3 component tokens (90% confidence)',
           applicabilityRequiresReview,
           productWideAllVersions,
         });

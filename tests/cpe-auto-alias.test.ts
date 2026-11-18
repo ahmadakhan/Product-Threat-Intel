@@ -187,15 +187,12 @@ test('a generic inventory CPE resolves to the inventory vendor/product', () => {
   );
 });
 
-test('a partially resolved generic CPE scores 90% and does not gate applicability review', () => {
-  // The inventory record names no vendor, so the vendor wildcard cannot be
-  // substituted; the identity is still wildcarded after resolution and is
-  // reported as generic. Per the current policy a wildcard is a confidence
-  // signal, not a review gate, so the match scores 90%. Note what still gates
-  // it: `matchComponent` treats a wildcard vendor as intersecting, so this
-  // reserved CPE also takes the unverified-version branch and keeps
-  // `applicabilityRequiresReview` true. The two facts are asserted together so
-  // the test states the real behaviour rather than the intent.
+test('a wildcard vendor scores 90% and carries no low-confidence note', () => {
+  // A wildcard is the operator's declared scope, not a reason to lower the
+  // finding. It used to score 90 numerically while the evidence string said
+  // "(70% confidence)", which made the delivered advisory print "Low confidence
+  // (70% match confidence)" on a full-confidence match. The wildcard no longer
+  // feeds either the applicability gate or the evidence text.
   const generic = cpe('*', 'widget', '1.5');
   const matched = matchesWatchlistItem(
     [generic],
@@ -207,7 +204,8 @@ test('a partially resolved generic CPE scores 90% and does not gate applicabilit
   );
   assert.equal(matched.matched, true);
   assert.equal(matched.confidence, 90);
-  assert.equal(matched.applicabilityRequiresReview, true);
+  assert.equal(matched.applicabilityRequiresReview, false);
+  assert.doesNotMatch(matched.evidence ?? '', /70%/, 'the note must agree with the 90% score');
   // Product-wide registration stays false: the vendor component is wildcarded,
   // so this is a partial pattern rather than an explicit all-versions scope.
   assert.equal(matched.productWideAllVersions, false);
