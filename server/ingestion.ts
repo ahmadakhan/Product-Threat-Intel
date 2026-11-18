@@ -52,10 +52,28 @@ export interface IngestResult {
  * This bounds one run's memory and duration, not correctness: a window that
  * needs more pages is committed at this limit and resumed from the stored
  * `pageCursor` on the next run, so a busy window is ingested across several runs
- * instead of failing outright. At the default 1,000-record page size this is
- * 100,000 records per run.
+ * instead of failing outright.
+ *
+ * Sized from the two limits a run must stay inside:
+ *
+ *  - Memory. Every page's records are held in `cves` until the run returns, so
+ *    the transient cost is the whole run's records, not one page. A 1,000-record
+ *    page of enriched NVD++ data is on the order of 1-4 MB of normalised
+ *    objects; 500 pages is a worst case near 2 GB for a single source. That is
+ *    the reason this is not unlimited, and why the resume path exists.
+ *  - Duration. Provider pacing at the published 1,000 requests/minute is 60 ms
+ *    per page, so 500 pages cost about 30 seconds of sleeping against the
+ *    default 1,800-second `FEED_MAX_DURATION_SECONDS` deadline. Time is not the
+ *    binding constraint; memory is.
+ *
+ * 500 pages is 500,000 records per run: generous for a 24-hour window, while
+ * leaving headroom under a container memory limit. The previous value of 100
+ * turned a normal busy day into a permanent source failure, because reaching the
+ * cap threw away every page already fetched.
  */
-const NVD_PAGE_BUDGET = 100;
+const NVD_PAGE_BUDGET = 500;
+/** Exported so the resume test tracks the real limit instead of a stale copy. */
+export { NVD_PAGE_BUDGET };
 
 export interface IngestContext extends IngestionState {
   /** Last fully committed source checkpoint for the same source configuration. */

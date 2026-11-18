@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { loadConfig } from '../server/config.ts';
-import { ingestFeed } from '../server/ingestion.ts';
+import { ingestFeed, NVD_PAGE_BUDGET } from '../server/ingestion.ts';
 import { encryptionKeys, encrypt } from '../server/secrets.ts';
 import type { ResponseData } from '../server/network.ts';
 import type { ThreatFeed } from '../src/types/index.ts';
@@ -52,15 +52,21 @@ const endlessProvider = (pageCount: number) => {
 };
 
 test('a window larger than the page budget commits progress and resumes instead of failing', async () => {
-  // 150 pages: more than the 100-page budget for a single run. The first page
-  // comes from the conditional probe, and the budget counts the continuation
-  // pages that follow it, so one run reads 101 records.
-  const first = endlessProvider(150);
+  // One page beyond the budget, so the first run is guaranteed to stop early.
+  // The first page comes from the conditional probe and the budget counts the
+  // continuation pages after it, so a run reads NVD_PAGE_BUDGET + 1 records and
+  // stores the cursor for the page after the last one it read.
+  const totalPages = NVD_PAGE_BUDGET + 50;
+  const first = endlessProvider(totalPages);
   const run1 = await ingestFeed(feed, 24, first.request as never, config, async () => undefined);
-  assert.equal(run1.count, 101, 'one run ingests a full budget of pages rather than throwing');
+  assert.equal(
+    run1.count,
+    NVD_PAGE_BUDGET + 1,
+    'one run ingests a full budget of pages rather than throwing',
+  );
   assert.equal(
     run1.syncState?.pageCursor,
-    'page-101',
+    `page-${NVD_PAGE_BUDGET + 1}`,
     'the next provider cursor is stored for the following run',
   );
   assert.equal(run1.syncState?.hasMore, true, 'the window is reported incomplete');
@@ -72,7 +78,7 @@ test('a window larger than the page budget commits progress and resumes instead 
   assert.equal(first.requested[0], 'FIRST', 'the first run starts from the conditional probe');
 
   // The next run resumes from the stored cursor, with no ETag round-trip.
-  const second = endlessProvider(150);
+  const second = endlessProvider(totalPages);
   const run2 = await ingestFeed(
     feed,
     24,
@@ -81,15 +87,15 @@ test('a window larger than the page budget commits progress and resumes instead 
     async () => undefined,
     [],
     undefined,
-    { pageCursor: 'page-101', indexEtag: 'etag-from-run-1' as never },
+    { pageCursor: `page-${NVD_PAGE_BUDGET + 1}`, indexEtag: 'etag-from-run-1' as never },
   );
   assert.equal(
     second.requested[0],
-    'page-101',
+    `page-${NVD_PAGE_BUDGET + 1}`,
     'the resumed run continues from the stored cursor instead of restarting the window',
   );
   assert.ok(!second.requested.includes('FIRST'), 'a resumed run does not re-fetch the first page');
-  assert.equal(run2.count, 49, 'the remainder of the window is ingested');
+  assert.equal(run2.count, totalPages - NVD_PAGE_BUDGET - 1, 'the remainder of the window is ingested');
   assert.equal(run2.syncState?.pageCursor, undefined, 'a completed window clears the resume cursor');
   assert.ok(run2.syncState?.cursor, 'a completed window advances the checkpoint');
 });
