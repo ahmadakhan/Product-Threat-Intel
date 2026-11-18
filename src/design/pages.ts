@@ -44,6 +44,7 @@ export const pages = {
   recipients: { section: 'Autonomous pipeline', title: 'Recipients & webhooks', icon: Users },
    template: { section: 'Autonomous pipeline', title: 'Email template studio', icon: FileCode },
    'daily-digest': { section: 'Autonomous pipeline', title: 'Daily digest studio', icon: CalendarDays },
+   'news-template': { section: 'Autonomous pipeline', title: 'News template studio', icon: FileCode },
    emails: { section: 'Autonomous pipeline', title: 'Delivery log', icon: Mail },
    'email-queue': { section: 'Autonomous pipeline', title: 'Email queue', icon: Inbox },
    'action-center': { section: 'Autonomous pipeline', title: 'Email delivery action center', icon: Activity },

@@ -427,7 +427,7 @@ body{
     margin:0;
     padding:0;
     background:${config.canvasBg};
-    font-family:${digestEscapeHtml(getFontFamilyCss(config.fontFamily))};
+    font-family:${getFontFamilyCss(config.fontFamily)};
 }
 table{
     border-collapse:collapse;
@@ -562,7 +562,15 @@ ${classificationBanner}
                          Severity Breakdown
                      </td>
                     <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;">
-                        {{critical_summary}} {{high_summary}} {{medium_summary}} {{low_summary}}
+                        <!-- One row, one cell per severity. Each summary
+                             fragment is a self-contained <td>, so they need a
+                             real <table>/<tr> parent; emitting them directly
+                             inside the value cell was invalid markup. -->
+                        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;">
+                            <tr>
+                                {{critical_summary}}{{high_summary}}{{medium_summary}}{{low_summary}}
+                            </tr>
+                        </table>
                     </td>
                 </tr>
 
@@ -1027,4 +1035,179 @@ export function renderDailyDigest(config: TemplateCustomization, parts: DailyDig
     .replace(/{{low_kpi}}/g, parts.low_kpi || '')
     .replace(/{{held_for_review}}/g, parts.held_for_review || '')
     .replace(/{{severity_header_badge}}/g, digestHeaderBadge(parts.severity));
+}
+
+const newsHeaderBadge = () => {
+  return `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:#1e40af;color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">SECURITY NEWS</span>`;
+};
+
+export function compileNewsTemplate(config: TemplateCustomization): string {
+  config = normalizeDigestConfig(config);
+  const headerHex = config.headerBg.slice(1);
+  const expanded = headerHex.length === 3 ? [...headerHex].map((ch) => ch + ch).join('') : headerHex;
+  const luminance = [0, 2, 4]
+    .map((offset) => parseInt(expanded.slice(offset, offset + 2), 16) / 255)
+    .map((channel) => (channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4))
+    .reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
+  const headerText = luminance > 0.179 ? '#0f172a' : '#ffffff';
+  const headerMuted = luminance > 0.179 ? '#334155' : '#cbd5e1';
+  const stampHtml = config.showStamp
+    ? `<p style="margin:0 0 8px;font-size:11px;line-height:18px;letter-spacing:1.5px;font-weight:700;color:${config.badgeStampColor};">${config.badgeStampText}</p>`
+    : '';
+  const classificationBanner = config.showClassificationBanner
+    ? `<tr><td style="padding:12px 28px;background:${config.canvasBg};color:${config.fontColor};font-size:10px;line-height:16px;letter-spacing:1px;text-align:center;">${config.classificationText}</td></tr>`
+    : '';
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="x-apple-disable-message-reformatting">
+<title>Security News — Threat Intelligence</title>
+
+<style>
+body{
+    margin:0;
+    padding:0;
+    background:${config.canvasBg};
+    font-family:${getFontFamilyCss(config.fontFamily)};
+}
+table{
+    border-collapse:collapse;
+}
+img{
+    border:0;
+    display:block;
+}
+@media only screen and (max-width:600px){
+    .container{
+        width:100% !important;
+    }
+    .stack{
+        display:block !important;
+        width:100% !important;
+    }
+    .mobile-padding{
+        padding:20px !important;
+    }
+    .title{
+        font-size:22px !important;
+        line-height:28px !important;
+    }
+}
+</style>
+</head>
+
+<body>
+
+<!-- Preview Text -->
+<div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">
+{{news_title}} - {{news_count}} security news article{{#if news_count > 1}}s{{/if}}
+</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${config.canvasBg}">
+<tr>
+<td align="center" style="padding:24px 12px;">
+
+<table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" class="container" style="width:680px;max-width:680px;background:${config.cardBg};border:1px solid #e2e8f0;border-radius:12px;">
+
+${classificationBanner}
+
+    <!-- HEADER -->
+    <tr>
+        <td bgcolor="${config.headerBg}" style="padding:12px 20px 16px;border-radius:12px 12px 0 0;">
+
+            ${stampHtml}
+
+            {{news_subject_badge}}
+
+             <div class="title" style="font-size:18px;line-height:22px;font-weight:700;color:${headerText};">
+                 BA Threat Intelligence
+             </div>
+
+             <div style="padding-top:3px;font-size:13px;line-height:18px;font-weight:600;color:${headerText};">
+                 {{news_title}}
+             </div>
+
+             <div style="padding-top:4px;font-size:11px;line-height:15px;color:${headerMuted};">
+                 {{news_subject}} | Generated: {{news_date}}
+             </div>
+
+        </td>
+    </tr>
+
+    <!-- SUMMARY -->
+    <tr>
+        <td class="mobile-padding" style="padding:16px 20px;border-bottom:1px solid #e2e8f0;">
+
+            <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:${config.accentColor};padding-bottom:4px;">
+                SUMMARY
+            </div>
+
+            <div style="font-size:13px;line-height:20px;color:${config.fontColor};">
+                {{news_summary}}
+            </div>
+
+        </td>
+    </tr>
+
+    <!-- NEWS ARTICLES -->
+    <tr>
+        <td class="mobile-padding" style="padding:20px;">
+
+            <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:${config.accentColor};padding-bottom:8px;">
+                SECURITY NEWS ({{news_count}})
+            </div>
+
+            {{news_articles}}
+
+        </td>
+    </tr>
+
+    <!-- FOOTER -->
+    <tr>
+        <td style="padding:14px 20px;border-top:1px solid #d1d5db;background:#fafafa;border-radius:0 0 12px 12px;">
+
+            <div style="font-size:12px;font-weight:700;color:#0f172a;">
+                BA Threat Intelligence
+            </div>
+
+             <div style="font-size:12px;line-height:18px;color:#64748b;padding-top:4px;">
+                 {{news_footer}}
+             </div>
+
+        </td>
+    </tr>
+
+</table>
+
+</td>
+</tr>
+</table>
+
+</body>
+</html>`;
+}
+
+export function renderNewsTemplate(config: TemplateCustomization, parts: NewsTemplateParts, template?: string): string {
+  const compiled = template || compileNewsTemplate(config);
+  return compiled
+    .replace(/{{news_title}}/g, digestEscapeHtml(parts.news_title))
+    .replace(/{{news_subject}}/g, digestEscapeHtml(parts.news_subject))
+    .replace(/{{news_date}}/g, digestEscapeHtml(parts.news_date))
+    .replace(/{{news_count}}/g, String(parts.news_count))
+    .replace(/{{news_summary}}/g, digestEscapeHtml(parts.news_summary))
+    .replace(/{{news_articles}}/g, parts.news_articles)
+    .replace(/{{news_footer}}/g, digestEscapeHtml(parts.news_footer))
+    .replace(/{{news_subject_badge}}/g, newsHeaderBadge());
+}
+
+export interface NewsTemplateParts {
+  news_title: string;
+  news_subject: string;
+  news_date: string;
+  news_count: number;
+  news_summary: string;
+  news_articles: string;
+  news_footer: string;
 }

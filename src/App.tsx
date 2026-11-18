@@ -22,6 +22,7 @@ const ThreatFeedsView = lazy(() => import('./components/ThreatFeedsView').then((
 const RecipientsView = lazy(() => import('./components/RecipientsView').then((m) => ({ default: m.RecipientsView })));
 const AdvisoryTemplateView = lazy(() => import('./components/AdvisoryTemplateView').then((m) => ({ default: m.AdvisoryTemplateView })));
 const DailyDigestView = lazy(() => import('./components/DailyDigestView').then((m) => ({ default: m.DailyDigestView })));
+const NewsTemplateView = lazy(() => import('./components/NewsTemplateView').then((m) => ({ default: m.NewsTemplateView })));
 const EmailHistoryView = lazy(() => import('./components/EmailHistoryView').then((m) => ({ default: m.EmailHistoryView })));
 const EmailQueueView = lazy(() => import('./components/EmailQueueView').then((m) => ({ default: m.EmailQueueView })));
 const MlOperationsView = lazy(() => import('./components/MlOperationsView').then((m) => ({ default: m.MlOperationsView })));
@@ -65,6 +66,7 @@ export const MainContent: React.FC = () => {
         {activeTab === 'recipients' && <RecipientsView />}
         {activeTab === 'template' && <AdvisoryTemplateView />}
         {activeTab === 'daily-digest' && <DailyDigestView />}
+        {activeTab === 'news-template' && <NewsTemplateView />}
         {activeTab === 'emails' && <EmailHistoryView />}
         {activeTab === 'email-queue' && <EmailQueueView />}
         {activeTab === 'ml-operations' && <MlOperationsView />}

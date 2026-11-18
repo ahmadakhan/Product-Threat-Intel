@@ -74,6 +74,7 @@ import { emailEndpoint } from './emailProviders.ts';
 import {
   compileCustomizedTemplate,
   compileDailyDigestTemplate,
+  compileNewsTemplate,
   DEFAULT_TEMPLATE_CUSTOMIZATION,
 } from '../src/utils/templateCompiler.ts';
 import type { Config } from './config';
@@ -168,7 +169,7 @@ export const OPERATOR_COMMAND_ACTIONS: ReadonlySet<string> = new Set([
  * dedicated field and must accept an absent `data`.
  */
 const ACTION_REQUIRES_DATA =
-  /^(feed|asset|recipient|webhook|cve|alias|template|dailyDigestTemplate)\.save$|^(alias|watchlist|asset|feed)\.import$|^(settings|email)\.(save|configure)$|^finding\.status$/;
+  /^(feed|asset|recipient|webhook|cve|alias|template|dailyDigestTemplate|newsTemplate)\.save$|^(alias|watchlist|asset|feed)\.import$|^(settings|email)\.(save|configure)$|^finding\.status$/;
 
 /**
  * Fail closed: an action that is not recognised at all is rejected here before
@@ -845,6 +846,28 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
       dailyDigestTemplate:
         dailyDigestCustomTemplate || compileDailyDigestTemplate(input.dailyDigestCustomization),
     });
+  } else if (action === 'newsTemplate.save') {
+    const input = z
+      .object({
+        newsDigestCustomization: templateSchema,
+        // Mirror template.save: omission keeps the stored custom news digest
+        // template (a customization-only save); explicit null/blank removes it.
+        newsDigestCustomTemplate: z.string().max(200_000).nullable().optional(),
+      })
+      .parse(data);
+    const existing = (await getForUpdate<any>(db, 'template', 'main')) || {};
+    const newsDigestCustomTemplate = input.newsDigestCustomTemplate === undefined
+      ? existing.newsDigestCustomTemplate ?? null
+      : input.newsDigestCustomTemplate?.trim()
+        ? input.newsDigestCustomTemplate
+        : null;
+    await put(db, 'template', 'main', {
+      ...existing,
+      newsDigestCustomization: input.newsDigestCustomization,
+      newsDigestCustomTemplate,
+      newsDigestTemplate:
+        newsDigestCustomTemplate || compileNewsTemplate(input.newsDigestCustomization),
+    });
   } else if (action === 'finding.status') {
     const input = z
       .object({
@@ -921,7 +944,7 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
         [entity === 'asset' ? 'active' : 'enabled']: !old[entity === 'asset' ? 'active' : 'enabled'],
       });
   } else throw new HttpError(400, 'Unknown command');
-  const audit = commandAudit(action, ['settings', 'email', 'template', 'dailyDigestTemplate'].includes(action.split('.')[0]) ? 'main' : id || newId, data);
+  const audit = commandAudit(action, ['settings', 'email', 'template', 'dailyDigestTemplate', 'newsTemplate'].includes(action.split('.')[0]) ? 'main' : id || newId, data);
   await appendAudit(
     db,
     audit.event,

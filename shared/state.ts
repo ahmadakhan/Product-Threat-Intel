@@ -24,6 +24,7 @@ import {
   DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
   compileCustomizedTemplate,
   compileDailyDigestTemplate,
+  compileNewsTemplate,
 } from '../src/utils/templateCompiler.ts';
 export const DEFAULT_EMAIL_CONFIG: EmailConfiguration = {
   provider: 'SMTP',
@@ -186,6 +187,9 @@ export interface AppState {
   dailyDigestCustomization: TemplateCustomization;
   dailyDigestTemplate: string;
   dailyDigestCustomTemplate: string | null;
+  newsDigestCustomization: TemplateCustomization;
+  newsDigestTemplate: string;
+  newsDigestCustomTemplate: string | null;
   aliases: AliasEntry[];
   /** Exact row counts for every collection, independent of the returned slice. */
   counts: CollectionCounts;
@@ -221,6 +225,9 @@ export const emptyState = (): AppState => ({
   dailyDigestCustomization: { ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION },
   dailyDigestTemplate: compileDailyDigestTemplate(DEFAULT_DAILY_DIGEST_CUSTOMIZATION),
   dailyDigestCustomTemplate: null,
+  newsDigestCustomization: { ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION },
+  newsDigestTemplate: compileNewsTemplate(DEFAULT_DAILY_DIGEST_CUSTOMIZATION),
+  newsDigestCustomTemplate: null,
   counts: zeroCounts(),
   summary: { activeFindings: 0, criticalFindings: 0, kevFindings: 0, deliveredEmails: 0 },
 });

@@ -83,6 +83,7 @@ export const Sidebar: React.FC = () => {
         { id: 'recipients' },
         { id: 'template' },
         { id: 'daily-digest' },
+        { id: 'news-template' },
         { id: 'emails' },
         { id: 'email-queue' },
         { id: 'action-center' },

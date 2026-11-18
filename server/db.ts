@@ -1,5 +1,5 @@
 import { correlationPreflight } from './correlation/preflight.ts';
-import { compileCustomizedTemplate, compileDailyDigestTemplate } from '../src/utils/templateCompiler.ts';
+import { compileCustomizedTemplate, compileDailyDigestTemplate, compileNewsTemplate } from '../src/utils/templateCompiler.ts';
 import pg, { type PoolClient } from 'pg';
 import { readFile, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -863,6 +863,8 @@ export async function state(db: Db, options: StateOptions = {}): Promise<AppStat
     snapshot.customAdvisoryTemplate || compileCustomizedTemplate(snapshot.templateCustomization);
   snapshot.dailyDigestTemplate =
     snapshot.dailyDigestCustomTemplate || compileDailyDigestTemplate(snapshot.dailyDigestCustomization);
+  snapshot.newsDigestTemplate =
+    snapshot.newsDigestCustomTemplate || compileNewsTemplate(snapshot.newsDigestCustomization);
   await attachCounts(db, snapshot);
   return snapshot;
 }
@@ -916,5 +918,7 @@ export async function pipelineState(db: Db, opts?: { skipCveData?: boolean }): P
     snapshot.customAdvisoryTemplate || compileCustomizedTemplate(snapshot.templateCustomization);
   snapshot.dailyDigestTemplate =
     snapshot.dailyDigestCustomTemplate || compileDailyDigestTemplate(snapshot.dailyDigestCustomization);
+  snapshot.newsDigestTemplate =
+    snapshot.newsDigestCustomTemplate || compileNewsTemplate(snapshot.newsDigestCustomization);
   return snapshot;
 }

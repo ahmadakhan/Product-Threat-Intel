@@ -40,6 +40,7 @@ import type {
 import {
   compileCustomizedTemplate,
   compileDailyDigestTemplate,
+  compileNewsTemplate,
   DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
 } from '../utils/templateCompiler';
 
@@ -67,6 +68,14 @@ function useApplication() {
     [dailyDigestCustomTemplate, setDailyDigestCustomTemplate] = useState(() => {
       try {
         return localStorage.getItem('vulnstream_dailyDigestCustomTemplate');
+      } catch {
+        return null;
+      }
+    }),
+    [newsDigestDraft, setNewsDigestDraft] = useState<TemplateCustomization | null>(null),
+    [newsDigestCustomTemplate, setNewsDigestCustomTemplate] = useState(() => {
+      try {
+        return localStorage.getItem('vulnstream_newsDigestCustomTemplate');
       } catch {
         return null;
       }
@@ -372,6 +381,13 @@ function useApplication() {
     (dailyDigestDraft
       ? compileDailyDigestTemplate(dailyDigestDraft)
       : snapshot.dailyDigestTemplate);
+  const newsDigestCustomization =
+    newsDigestDraft || snapshot.newsDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION;
+  const newsDigestTemplate =
+    newsDigestCustomTemplate ||
+    (newsDigestDraft
+      ? compileNewsTemplate(newsDigestDraft)
+      : snapshot.newsDigestTemplate);
   const setDailyDigestCustomTemplatePersisted = (template: string | null) => {
     setDailyDigestCustomTemplate(template);
     try {
@@ -379,6 +395,16 @@ function useApplication() {
         localStorage.setItem('vulnstream_dailyDigestCustomTemplate', template);
       } else {
         localStorage.removeItem('vulnstream_dailyDigestCustomTemplate');
+      }
+    } catch {}
+  };
+  const setNewsDigestCustomTemplatePersisted = (template: string | null) => {
+    setNewsDigestCustomTemplate(template);
+    try {
+      if (template) {
+        localStorage.setItem('vulnstream_newsDigestCustomTemplate', template);
+      } else {
+        localStorage.removeItem('vulnstream_newsDigestCustomTemplate');
       }
     } catch {}
   };
@@ -740,6 +766,22 @@ function useApplication() {
       if (success) {
         setDailyDigestDraft(null);
         if (!customTemplate) setDailyDigestCustomTemplate(null);
+      }
+      return success;
+    },
+    newsDigestCustomization,
+    newsDigestTemplate,
+    setNewsDigestCustomTemplate: setNewsDigestCustomTemplatePersisted,
+    updateNewsDigestCustomization: (update: Partial<TemplateCustomization>) =>
+      setNewsDigestDraft((prev) => ({ ...newsDigestCustomization, ...prev, ...update })),
+    saveNewsDigestTemplate: async (customTemplate?: string | null) => {
+      const success = await save('newsTemplate.save', {
+        newsDigestCustomization,
+        newsDigestCustomTemplate: customTemplate ?? null,
+      });
+      if (success) {
+        setNewsDigestDraft(null);
+        if (!customTemplate) setNewsDigestCustomTemplate(null);
       }
       return success;
     },
