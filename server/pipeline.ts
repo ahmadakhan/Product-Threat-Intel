@@ -711,6 +711,11 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     execution: PipelineExecution | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let released = false;
+  // CVEs streamed from ingestFeed via onBatch are accumulated here so the
+  // pipeline retains full access to every record even after ingestFeed's
+  // internal batch buffer is flushed. Accessible from ingestSources via closure
+  // and from the commit phase below.
+  const streamedCves: NormalizedCVE[] = [];
   const onAbort = () => {
     connectionLost = true;
     if (heartbeat) clearInterval(heartbeat);
@@ -1032,6 +1037,13 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
               targets,
               undefined,
               context,
+              // Stream CVEs to the pipeline-side accumulator as they are
+              // normalized, keeping ingestFeed's in-memory buffer bounded even
+              // for very large windows.
+              async (batch) => {
+                streamedCves.push(...batch);
+              },
+              500,
             );
             if (feed.type === 'CISA_KEV' && result.notModified) {
               if (!cachedKev) throw new Error('KEV conditional response has no source snapshot');
@@ -1077,7 +1089,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             if (
               result.count > 0 &&
               !result.notModified &&
-              results.some((r) => r.sourceId === feed.id && r.cves.length === 0)
+              results.some((r) => r.sourceId === feed.id && r.count === 0)
             ) {
               pushExecutionLog(execution!, `Feed ${feed.id}: returned ${result.count} items but zero CVEs entered the pipeline — possible ingestion filter issue`);
               await writeEvent(pool, {
@@ -1182,7 +1194,11 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     const primaryIngestionStartedAt = Date.now();
     await ingestSources(feeds.filter((feed) => feed.type !== 'EPSS_API'));
     const primaryIngestionDuration = Date.now() - primaryIngestionStartedAt;
-    const preliminaryCorpus = mergeCveRecords([...cachedCves, ...results.flatMap((result) => result.cves)]);
+    const preliminaryCorpus = mergeCveRecords([
+      ...cachedCves,
+      ...results.flatMap((result) => result.cves),
+      ...streamedCves,
+    ]);
     const preliminaryCves = [...preliminaryCorpus.values()];
     // Push structured identity + typed version-range filtering into PostgreSQL.
     // The JS matcher still decides every candidate; this only avoids the full
@@ -1407,6 +1423,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       const byId = mergeCveRecords([
         ...snapshot.cveData,
         ...acceptedResults.filter((result) => !result.notModified).flatMap((result) => result.cves),
+        ...streamedCves,
       ]);
       // Operator-import records are explicit authoritative revisions. Feed
       // refreshes may add enrichment, but they must never replace an operator

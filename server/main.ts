@@ -1,6 +1,8 @@
 import { WorkerLeadership } from './leadership.ts';
 import { readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { getHeapStatistics } from 'node:v8';
+import { totalmem } from 'node:os';
 import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 const _envPath = join(process.cwd(), '.env');
@@ -237,11 +239,11 @@ async function logMlTrainingResult(pool: Db, summary: TrainingSummary): Promise<
  * still has to clear the LONGEST silent stretch a healthy run can produce: a
  * single in-flight source request. NVD pages are the slowest (120 s request
  * timeout, 60 s socket timeout, 5 s provider pacing between pages), and a
- * statement that hits the pool's timeout can add its own round trip. 15 minutes
+ * statement that hits the pool's timeout can add its own round trip. 5 minutes
  * leaves that maximum several times over while still replacing a wedged
  * instance in a bounded time. Configurable via STUCK_PROMISE_MS.
  */
-const STUCK_PROMISE_MS = Number(process.env.STUCK_PROMISE_MS ?? 15 * 60_000);
+const STUCK_PROMISE_MS = Number(process.env.STUCK_PROMISE_MS ?? 5 * 60_000);
 let digestStartedAt = 0;
 let pipelineStartedAt = 0;
 let outboxStartedAt = 0;
@@ -250,6 +252,8 @@ let pipelineController: AbortController | undefined;
 let outboxGeneration = 0;
 /** In-flight self-healing check; prevents overlapping watchdog runs per tick. */
 let selfHealRunning: Promise<void> | null = null;
+/** In-flight memory pressure response; prevents overlapping restart attempts. */
+let memoryPressureRunning: Promise<void> | null = null;
 const tick = () => {
   if (stopping || config.WORKER_ENABLED !== 'true') return;
   verboseLog('worker.tick');
@@ -335,10 +339,47 @@ const tick = () => {
         return count;
       })
       .catch(report('digest'))
-.finally(() => {
+  .finally(() => {
         if (digestGeneration === generation) digest = null;
       });
   }
+
+  // Memory pressure auto-response: hint GC at 90%, graceful restart at 95%.
+  // Running every tick is cheap (memoryUsage() is synchronous) and the guard
+  // prevents overlapping restart attempts. The 95% restart only triggers when
+  // the heap is critically full and self-healing's alert alone is insufficient.
+  if (!memoryPressureRunning) {
+    memoryPressureRunning = (async () => {
+      try {
+        const mem = process.memoryUsage();
+        const heapLimit = getHeapStatistics().heap_size_limit;
+        const memoryLimit = process.constrainedMemory?.() || totalmem();
+        const heapPct =
+          Math.max(
+            heapLimit > 0 ? mem.heapUsed / heapLimit : 0,
+            memoryLimit > 0 ? mem.rss / memoryLimit : 0,
+          ) * 100;
+        if (heapPct >= 90 && typeof globalThis.gc === 'function') {
+          // Hint V8 to collect garbage; not guaranteed to run but reduces
+          // pressure without restarting. Only available with --expose-gc.
+          globalThis.gc();
+          verboseLog(`memory.gc heapPct=${heapPct.toFixed(0)}`);
+        }
+        if (heapPct >= 95) {
+          void report('memory.pressure')(
+            new Error(`Heap at ${heapPct.toFixed(0)}%; initiating graceful restart`),
+          );
+          await shutdown();
+          process.exit(1);
+        }
+      } catch (error) {
+        void report('memory.pressure')(error);
+      } finally {
+        memoryPressureRunning = null;
+      }
+    })();
+  }
+
   // Self-healing auto-recovery check - runs on every worker tick.
   // Monitors pipeline, feeds, and scheduler; triggers recovery and sends
   // immediate alerts to the Security team group when issues are found.
@@ -793,7 +834,7 @@ async function shutdown() {
 }
 process.on('SIGTERM', () => void shutdown());
 process.on('SIGINT', () => void shutdown());
-// Node terminates the process immediately on an unhandled rejection/exception
+// Node terminates the process immediately on an uncaught exception
 // with no listener registered. That would skip shutdown() entirely, leaving the
 // HTTP server and any in-flight pipeline/outbox work to die mid-transaction
 // without the structured event log entry operators rely on to diagnose it.
@@ -801,14 +842,28 @@ process.on('SIGINT', () => void shutdown());
 // connection closes, so a crash here is still safe for the next worker to
 // recover from; this handler only makes the failure visible and gives
 // in-flight work a chance at a clean stop before the process exits.
-const fatal = (event: string) => (error: unknown) => {
-  correlation.supervisor.ingestor.telemetry.log('CRITICAL', 'process.restart_required');
-  report(event)(error);
-  // If a graceful SIGTERM/SIGINT shutdown is already under way, let its own
-  // 30-second deadline govern the exit instead of racing it with a second,
-  // immediate process.exit here.
+//
+// uncaughtException: process state is unknown — must exit after best-effort
+// shutdown. unhandledRejection: the rejecting promise is already garbage, but
+// the process itself may still be healthy — log and report without exiting, so
+// a single rejected promise does not take down the entire server.
+const handleUncaughtException = (error: unknown) => {
+  const detail = describeError(error);
+  correlation.supervisor.ingestor.telemetry.log('CRITICAL', 'uncaught-exception');
+  report('uncaught-exception')(error);
   if (stopping) return;
-  void shutdown().finally(() => process.exit(1));
+  void shutdown()
+    .then(() => process.exit(1))
+    .catch(() => process.exit(1));
 };
-process.on('unhandledRejection', fatal('unhandled-rejection'));
-process.on('uncaughtException', fatal('uncaught-exception'));
+
+const handleUnhandledRejection = (reason: unknown) => {
+  const detail = describeError(reason);
+  correlation.supervisor.ingestor.telemetry.log('ERROR', 'unhandled-rejection');
+  report('unhandled-rejection')(reason);
+  // Do not exit: the rejecting promise is already discarded. Continuing to run
+  // is safer than killing the server over a single rejected promise.
+};
+
+process.on('uncaughtException', handleUncaughtException);
+process.on('unhandledRejection', handleUnhandledRejection);

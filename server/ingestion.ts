@@ -285,6 +285,8 @@ export async function ingestFeed(
   targetCveIds: string[] = [],
   onNvdProgress?: (progress: { offset: number; total: number; records: number }) => Promise<void> | void,
   context: IngestContext = {},
+  onBatch?: (cves: NormalizedCVE[]) => Promise<void>,
+  batchSize = 1000,
 ): Promise<IngestResult> {
   const upstreamRequest = request;
   request = (url, options = {}) => upstreamRequest(url, {
@@ -339,6 +341,21 @@ export async function ingestFeed(
   // -------------------------------------------------------------------------
   const vendorProductKey = (vendor: string, product: string): string =>
     `${vendor?.trim().toLowerCase()}:${product?.trim().toLowerCase()}`;
+
+  // -------------------------------------------------------------------------
+  // Helper: flush accumulated CVEs to the onBatch callback when the in-memory
+  // batch reaches batchSize. Keeps the per-feed memory footprint bounded
+  // regardless of window size; the caller (pipeline) can persist each batch to
+  // the correlation store as it arrives instead of holding an entire window in
+  // RAM.
+  // -------------------------------------------------------------------------
+  const flushBatch = async (cves: NormalizedCVE[]): Promise<void> => {
+    if (onBatch && cves.length >= batchSize) {
+      const batch = [...cves];
+      cves.length = 0;
+      await onBatch(batch);
+    }
+  };
 
   const json = async (
     url: string,
@@ -815,6 +832,7 @@ export async function ingestFeed(
         continue;
       }
       cves.push(parsed.data);
+      await flushBatch(cves);
     }
     // Generic feeds may assert VEX, but unsigned claims cannot suppress alerts.
     // Signed per-source statements are retained; the legacy single `vex` field is
@@ -937,7 +955,7 @@ export async function ingestFeed(
     let totalFetched = 0;
     /** Processes one response page: normalizes records, dedupes, records
      *  revisions, and returns the provider's next cursor when paging continues. */
-    const processPage = (page: any): string | undefined => {
+    const processPage = async (page: any): Promise<string | undefined> => {
       const items = vulncheckNvdItems(page);
       for (const item of items) {
         const id = normalizeCveId(item?.cve?.id);
@@ -981,6 +999,7 @@ export async function ingestFeed(
             continue;
           totalFetched++;
           cves.push(candidate);
+          await flushBatch(cves);
           revisions[id] = candidate.modifiedDate;
           continue;
         }
@@ -988,6 +1007,7 @@ export async function ingestFeed(
         const normalized = normalizeNvdItem(item, feed.id);
         if (normalized) {
           cves.push(normalized);
+          await flushBatch(cves);
           revisions[id] = normalized.modifiedDate;
         } else {
           rejections.push({
@@ -1014,14 +1034,14 @@ export async function ingestFeed(
     // Resuming re-issues the same window and skips the conditional probe: the
     // ETag check would legitimately answer 304 and lose the rest of the window.
     if (resumingWindow) cursor = context.pageCursor;
-    else cursor = processPage(firstOr304);
+    else cursor = await processPage(firstOr304);
     for (let pageNo = 0; pageNo < NVD_PAGE_BUDGET && cursor; pageNo++) {
       const pageUrl = new URL(url);
       for (const key of ['cursor', 'start_cursor', 'page', 'startIndex', 'resultsPerPage']) pageUrl.searchParams.delete(key);
       pageUrl.searchParams.set('cursor', cursor);
       pageUrl.searchParams.set('limit', String(pageSize));
       const page = await fetchNvdPage(pageUrl.href);
-      cursor = processPage(page);
+      cursor = await processPage(page);
       // Page budget reached with more to read: commit this run's records and keep
       // the next cursor. Throwing here discarded everything already fetched, so a
       // window that genuinely exceeded the budget could never be ingested at all.
@@ -1135,6 +1155,7 @@ export async function ingestFeed(
             continue;
           totalFetched++;
           cves.push(candidate);
+          await flushBatch(cves);
           revisions[id] = candidate.modifiedDate;
           continue;
         }
@@ -1142,6 +1163,7 @@ export async function ingestFeed(
         const normalized = normalizeNvdItem(item, feed.id);
         if (normalized) {
           cves.push(normalized);
+          await flushBatch(cves);
           revisions[id] = normalized.modifiedDate;
         } else {
           rejections.push({
