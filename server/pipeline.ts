@@ -238,6 +238,34 @@ function cveContentView(cve: NormalizedCVE): string {
 }
 
 /**
+ * Applicability-only projection of a CVE.
+ *
+ * This is the set of fields that decides which assets a CVE affects. It
+ * deliberately excludes metadata and enrichment (title, description, CVSS,
+ * publication/modification timestamps, EPSS, KEV, exploit sources): providers
+ * rewrite those when they re-analyse a CVE, and that history-only churn must not
+ * re-run correlation or notify recipients. CPE criteria (including the
+ * configurations / `vcVulnerableCPEs` equivalent), per-criterion ranges, the
+ * product-level range, package URLs and the applicability review flags are all
+ * included.
+ */
+function cveApplicabilityView(cve: NormalizedCVE): string {
+  return stableJson({
+    cpeMatches: cve.cpeMatches ?? [],
+    cpeMatchDetails: cve.cpeMatchDetails ?? [],
+    versionRange: cve.versionRange,
+    purls: cve.purls ?? [],
+    applicabilityRequiresReview: cve.applicabilityRequiresReview ?? false,
+    applicabilityPolicy: cve.applicabilityPolicy,
+  });
+}
+
+/** Compact fingerprint of {@link cveApplicabilityView} for whole-corpus snapshots. */
+function cveApplicabilitySignature(cve: NormalizedCVE): string {
+  return createHash('sha256').update(cveApplicabilityView(cve)).digest('hex');
+}
+
+/**
  * (vendor, product) identities a CVE asserts, used to join pre-CVE clusters.
  * Derived only from non-wildcard CPE criteria; a CVE with no parseable
  * structured identity cannot bind a cluster (binding on prose would let a
@@ -1437,7 +1465,15 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       // exactly that reason, and comparing the pre-enrichment view made KEV
       // enrichment silently unpersisted.
       const oldCveViews = new Map<string, string>();
-      for (const old of oldCveMap.values()) oldCveViews.set(old.cveId, cveContentView(old));
+      // Applicability fingerprints are captured before `oldCveMap` is released.
+      // Comparing them after the clear ran against an empty map, so the CPE
+      // change set was always empty and a newly added CPE never re-matched an
+      // old CVE outside the publication window.
+      const oldApplicabilityViews = new Map<string, string>();
+      for (const old of oldCveMap.values()) {
+        oldCveViews.set(old.cveId, cveContentView(old));
+        oldApplicabilityViews.set(old.cveId, cveApplicabilitySignature(old));
+      }
       // Records written by another worker during this run are compared against
       // the commit-time value they actually replaced, so their update is not
       // re-applied as an unchanged no-op and the diff stays correct.
@@ -1505,31 +1541,26 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         const previousView = oldCveViews.get(cve.cveId);
         return previousView === undefined || previousView !== cveContentView(cve);
       });
-      // Audit: detect CVEs whose CPE applicability data changed since the last
-      // run (e.g. NVD published CPE data for CVE-2026-107154). These CVEs must be
+      // Detect CVEs whose CPE applicability data changed since the last run
+      // (e.g. NVD published CPE data for CVE-2026-107154). These CVEs must be
       // re-matched against ALL assets regardless of scopeHours, because the new
       // CPE data may now match assets that previously had no applicable data.
+      // Only applicability fields participate: a history-only revision of the
+      // title, description, CVSS or modifiedDate is not a reason to notify.
       const cpeChangedCveIdsSet = new Set<string>();
       for (const cve of changedCves) {
-        const previous = oldCveMap.get(cve.cveId);
-        if (!previous) continue;
-        const prevCpe = JSON.stringify(previous.cpeMatches ?? []).localeCompare(
-          JSON.stringify(cve.cpeMatches ?? []),
-        );
-        const prevDetails = JSON.stringify(previous.cpeMatchDetails ?? []).localeCompare(
-          JSON.stringify(cve.cpeMatchDetails ?? []),
-        );
-        if (prevCpe !== 0 || prevDetails !== 0) {
-          cpeChangedCveIdsSet.add(cve.cveId);
-          await writeEvent(db, {
-            category: 'PIPELINE',
-            level: 'INFO',
-            code: 'pipeline.cpe_changed',
-            message: `CPE applicability data changed for ${cve.cveId}; will re-match against all assets`,
-            runId: execution!.id,
-            context: { cveId: cve.cveId, title: cve.title },
-          }).catch(() => undefined);
-        }
+        const previousApplicability = oldApplicabilityViews.get(cve.cveId);
+        if (previousApplicability === undefined) continue;
+        if (previousApplicability === cveApplicabilitySignature(cve)) continue;
+        cpeChangedCveIdsSet.add(cve.cveId);
+        await writeEvent(db, {
+          category: 'PIPELINE',
+          level: 'INFO',
+          code: 'pipeline.cpe_changed',
+          message: `CPE applicability data changed for ${cve.cveId}; will re-match against all assets`,
+          runId: execution!.id,
+          context: { cveId: cve.cveId, title: cve.title },
+        }).catch(() => undefined);
       }
       // Persist the CPE-changed set so the next run can re-evaluate even if
       // this run's scopeHours window excludes them.

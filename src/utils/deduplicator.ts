@@ -220,7 +220,44 @@ export function normalizeCveId(rawId: string): string | null {
 }
 
 /**
- * Checks if a CVE falls within the processing window based on scope_hours
+ * Checks whether a CVE is newly published inside the processing window.
+ *
+ * New finding creation is gated on the publication event, not on the latest
+ * record revision. Providers rewrite `modifiedDate` (and often the title or
+ * description) when they re-analyse a CVE or add references; those history-only
+ * revisions do not make an old vulnerability a new detection, and treating them
+ * as such re-matched the historical corpus and produced finding emails for
+ * records that were already processed. `modifiedDate` is used only as a
+ * fallback when no usable publication timestamp exists, because without one
+ * there is no publication event to compare.
+ *
+ * Applicability changes (new CPE criteria, per-criterion ranges, the
+ * product-level range, PURLs, or the review flags) are handled separately by
+ * the pipeline and still re-match outside this window.
+ */
+export function isWithinPublicationScope(
+  publishedDate: string,
+  modifiedDate: string,
+  scopeHours: number,
+  now: Date = new Date(),
+): boolean {
+  if (!scopeHours || scopeHours <= 0) return true; // If 0, no filter
+
+  const cutoffTime = now.getTime() - scopeHours * 60 * 60 * 1000;
+  const publishedTime = new Date(publishedDate).getTime();
+  const modifiedTime = new Date(modifiedDate).getTime();
+  const publication = Number.isFinite(publishedTime)
+    ? publishedTime
+    : Number.isFinite(modifiedTime)
+      ? modifiedTime
+      : 0;
+
+  return publication >= cutoffTime;
+}
+
+/**
+ * Checks if a CVE or news article falls within the processing window based on
+ * the latest of its publication and revision timestamps.
  */
 export function isWithinTimelineScope(
   publishedDate: string,

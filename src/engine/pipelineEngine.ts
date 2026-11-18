@@ -13,7 +13,7 @@ import type {
   AuditLog,
   AliasEntry,
 } from '../types';
-import { normalizeCveId, isWithinTimelineScope, mergeCveRecords } from '../utils/deduplicator';
+import { normalizeCveId, isWithinPublicationScope, mergeCveRecords } from '../utils/deduplicator';
 import {
   DEFAULT_PRODUCT_ALIASES,
   DEFAULT_VENDOR_ALIASES,
@@ -261,7 +261,7 @@ export function runVulnerabilityPipeline(
    * range a few days after they are written.
    */
   evaluatedAt: Date = new Date(),
-  cpeChangedCveIds: Set<string> = new Set(),
+  applicabilityChangedCveIds: Set<string> = new Set(),
 ): PipelineRunResult {
   const started = evaluatedAt,
     known = new Set(existing.map((f) => `${normalizeCveId(f.cveId)}:${f.matchedAssetId}`)),
@@ -471,12 +471,19 @@ export function runVulnerabilityPipeline(
   const matchingStarted = performance.now();
   for (const raw of latest.values()) {
     const canonical = normalizeCveId(raw.cveId);
-    const inTimelineScope = Boolean(canonical && cpeChangedCveIds.has(canonical)) ||
-      isWithinTimelineScope(raw.publishedDate, raw.modifiedDate, settings.scopeHours, started);
-    // All match methods share the timeline gate. Changed CPE applicability must
-    // also reach assets without previous findings, even outside that window.
-    // Existing findings stay eligible so scope expiry alone cannot turn an
-    // active finding into NOT_APPLICABLE during reconciliation.
+    // New detections are gated on the publication event, not on the latest
+    // record revision. A provider rewriting `modifiedDate`, the description or
+    // the title must not make an old CVE look newly published and re-match it
+    // against the whole inventory (which queued finding emails for records that
+    // were already processed). A genuine applicability change still overrides
+    // the window so a newly added CPE/PURL/range can reach assets that had no
+    // previous finding.
+    const applicabilityChanged = Boolean(canonical && applicabilityChangedCveIds.has(canonical));
+    const inTimelineScope = applicabilityChanged ||
+      isWithinPublicationScope(raw.publishedDate, raw.modifiedDate, settings.scopeHours, started);
+    // Existing findings stay eligible even outside the window so scope expiry
+    // alone cannot turn an active finding into NOT_APPLICABLE during
+    // reconciliation.
     if (!canonical || (!inTimelineScope && !knownCves.has(canonical))) continue;
     processed++;
     const cve = { ...raw, cveId: canonical };

@@ -566,6 +566,90 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       assert.equal(finding.notificationStatus, 'QUEUED_FOR_DISPATCH');
       assert.equal(finding.cve.epss.score, 0.9);
     });
+    await t.test('CVE history-only revisions do not notify, while newly matched CPEs do', async () => {
+      await reset();
+      await save('settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: false, autoDispatchEnabled: true });
+      await save('watchlist', 'asset', asset());
+      await save('recipients', 'rec', {
+        id: 'rec', name: 'Test', email: 'test@example.invalid', enabled: true,
+        subscriptionTier: 'ALL_SEVERITIES',
+      });
+      const source = {
+        id: 'history-feed', name: 'History feed', type: 'NVD_API',
+        url: 'https://example.com/nvd', authType: 'NONE', rateLimitPerMin: 600, enabled: true,
+      };
+      await save('feeds', source.id, source);
+      const published = new Date(Date.now() - 60 * 24 * 3600000).toISOString();
+      let description = 'Original wording';
+      let lastModified = published;
+      let criteria: string[] = [];
+      const sourceRequest = async () => ({
+        status: 200,
+        headers: {},
+        body: JSON.stringify({
+          totalResults: 1,
+          vulnerabilities: [{
+            cve: {
+              id: 'CVE-2026-77001',
+              published,
+              lastModified,
+              vulnStatus: 'Analyzed',
+              descriptions: [{ lang: 'en', value: description }],
+              configurations: criteria.length
+                ? [{ nodes: [{ cpeMatch: [{ vulnerable: true, criteria: criteria[0] }] }] }]
+                : [],
+            },
+          }],
+        }),
+      });
+      await queueRun(pool, 24, 'test');
+      await processPipeline(pool, config, sourceRequest);
+      assert.equal((await list(pool, 'findings')).length, 0, 'an out-of-window CVE starts with no finding');
+
+      // History-only revision: the applicability is unchanged, only the
+      // description and record history moved.
+      description = 'Reworded after re-analysis';
+      lastModified = new Date().toISOString();
+      await queueRun(pool, 24, 'test');
+      await processPipeline(pool, config, sourceRequest);
+      assert.equal(
+        (await list(pool, 'findings')).length,
+        0,
+        'a history-only revision must not create a finding',
+      );
+      assert.equal(
+        (await pool.query("SELECT count(*)::int AS n FROM outbox WHERE channel='email'")).rows[0].n,
+        0,
+        'a history-only revision must not queue an email',
+      );
+
+      // Newly matched CPE: the old CVE now names the registered product.
+      criteria = [cpe('*')];
+      lastModified = new Date().toISOString();
+      await queueRun(pool, 24, 'test');
+      await processPipeline(pool, config, sourceRequest);
+      const findings = await list<Finding>(pool, 'findings');
+      assert.equal(findings.length, 1, 'a newly matched CPE must create the finding');
+      assert.equal(findings[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
+      assert.equal(
+        (await pool.query("SELECT count(*)::int AS n FROM outbox WHERE channel='email'")).rows[0].n,
+        1,
+        'a newly matched CPE must queue one email',
+      );
+
+      // Once delivered, another history-only revision must not re-send it.
+      await deliverNext(pool, config, request, async () => 'accepted-history');
+      description = 'Another wording change';
+      lastModified = new Date().toISOString();
+      await queueRun(pool, 24, 'test');
+      await processPipeline(pool, config, sourceRequest);
+      assert.equal((await list(pool, 'findings')).length, 1);
+      assert.equal(
+        (await pool.query("SELECT count(*)::int AS n FROM outbox WHERE channel='email'")).rows[0].n,
+        1,
+        'a history-only revision must not re-send a delivered finding',
+      );
+    });
     await t.test('delivery honors the saved confidence policy for email and webhooks', async () => {
       for (const tightenPolicy of [false, true]) {
         await reset();

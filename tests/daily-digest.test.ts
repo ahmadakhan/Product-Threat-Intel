@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { JSDOM } from 'jsdom';
 import {
   DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
+  compileDailyDigestTemplate,
   renderDailyDigest,
   renderDailyFindingSummary,
   renderDailyHealthReport,
@@ -346,3 +348,77 @@ test('daily schedule and queued delivery attempts render independently in the wo
   assert.ok(noRetries.includes('No future delivery attempt scheduled'));
   assert.ok(!noRetries.includes('none pending'));
 });
+
+test('the severity breakdown row carries one count per severity, in its own cell', () => {
+  // Critical/High/Medium/Low are separate summary lines. Emitting them all
+  // into one <td> made the parser close that cell and re-attribute the rest
+  // to later rows: the counts were missing and a stray "Critical:" spilled
+  // into the table below (see the screenshot from Daily Digest Studio).
+  const html = renderDailyDigest(
+    DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
+    { ...PARTS, critical_count: 2, high_count: 1, medium_count: 1, low_count: 1 },
+  );
+  const doc = new JSDOM(html).window.document;
+  const breakdown = [...doc.querySelectorAll('td')].find(
+    (td) => td.textContent?.trim() === 'Severity Breakdown',
+  );
+  assert.ok(breakdown, 'the digest must render a Severity Breakdown row label');
+  const valueCell = breakdown.nextElementSibling;
+  assert.ok(valueCell, 'the breakdown label must be followed by its value cell');
+
+  const counts = [...(valueCell.querySelector('tr')?.children ?? [])];
+  assert.equal(counts.length, 4, 'the breakdown row must have one cell per severity');
+  for (const [index, label] of ['Critical', 'High', 'Medium', 'Low'].entries()) {
+    assert.equal(counts[index].tagName, 'TD', `${label} count must live in its own cell`);
+    assert.ok(
+      counts[index].textContent?.includes(label),
+      `cell ${index} must report ${label}, got: ${JSON.stringify(counts[index].textContent)}`,
+    );
+  }
+  for (const [index, count] of [2, 1, 1, 1].entries()) {
+    assert.ok(
+      counts[index].textContent?.includes(String(count)),
+      `cell ${index} must report ${count}, got: ${JSON.stringify(counts[index].textContent)}`,
+    );
+  }
+
+  // The regression's symptom: a severity label leaking into a following row.
+  const breakdownRow = breakdown.closest('tr');
+  assert.ok(breakdownRow?.parentElement);
+  for (const siblingRow of [...breakdownRow.parentElement.children]) {
+    if (siblingRow === breakdownRow || siblingRow.tagName !== 'TR') continue;
+    assert.ok(
+      !/Critical:|High:|Medium:|Low:/.test(siblingRow.textContent ?? ''),
+      `severity counts must stay in their own row, found: ${JSON.stringify(siblingRow.textContent)}`,
+    );
+  }
+});
+
+test('every detail row declares exactly two cells', () => {
+  const doc = new JSDOM(compileDailyDigestTemplate(DEFAULT_DAILY_DIGEST_CUSTOMIZATION)).window.document;
+  const rows = [...doc.querySelectorAll('tr')].filter((row) =>
+    ['Severity Breakdown', 'Findings (24h)', 'Confidence Follow-up', 'Platform Health'].includes(
+      row.firstElementChild?.textContent?.trim() ?? '',
+    ),
+  );
+  assert.equal(rows.length, 4, 'the details table must render all four label rows');
+  for (const row of rows) {
+    assert.equal(row.children.length, 2, `row "${row.firstElementChild?.textContent?.trim()}" must have two cells`);
+  }
+});
+
+test('the digest stylesheet quotes font names instead of HTML entities', () => {
+  // The template is text delivered to a mail client wiped by DOMPurify on
+  // preview; it is not HTML that an HTML parser will decode. `&quot;` is
+  // therefore an invalid CSS string, and the whole font-family declaration
+  // is dropped -- the body silently falls back to the client default font.
+  const html = compileDailyDigestTemplate(DEFAULT_DAILY_DIGEST_CUSTOMIZATION);
+  const css = /<style>([\s\S]*?)<\/style>/.exec(html)?.[1] ?? '';
+  assert.ok(!css.includes('&quot;'), 'stylesheet must not contain HTML entities');
+  assert.ok(!css.includes('&amp;'), 'stylesheet must not contain HTML entities');
+  assert.ok(
+    css.includes('font-family:"Plus Jakarta Sans"'),
+    'a quoted font name must survive into the stylesheet',
+  );
+});
+

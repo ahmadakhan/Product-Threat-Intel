@@ -14,7 +14,7 @@ import {
   parseCPE23,
 } from '../src/utils/cpeMatcher.ts';
 import { compareVersions } from '../src/utils/versionComparator.ts';
-import { mergeCveRecords, isWithinTimelineScope, stableJson } from '../src/utils/deduplicator';
+import { mergeCveRecords, isWithinTimelineScope, isWithinPublicationScope, stableJson } from '../src/utils/deduplicator';
 import { quickHash, generateHmacSignature, SortedMerkleAccumulator, merkleRoot, chainAuditLogs, verifyAuditChain } from '../src/utils/cryptoChain';
 import { auditContext, auditText, commandAudit } from '../server/audit.ts';
 import { runVulnerabilityPipeline, validateSsrfSafety } from '../src/engine/pipelineEngine';
@@ -682,32 +682,58 @@ test('equal-time conflicting CVE applicability keeps both candidate sets in revi
 });
 
 /**
- * Timeline scope tests: prove the pipeline filters CVEs by the LATEST of
- * publishedDate and modifiedDate, and that 1 / 2 / 3 / 4-week windows
- * behave correctly.  Dates are relative to a fixed NOW so the assertions are
- * deterministic regardless of when the test suite runs.
+ * Timeline scope tests. Two behaviours are deliberately distinct:
+ *  - news evidence uses the LATEST of publishedDate and modifiedDate, because
+ *    an edited article is still current coverage (`isWithinTimelineScope`);
+ *  - CVE finding creation uses the publication event only, so a provider
+ *    rewriting the record history cannot make an old CVE look newly published
+ *    (`isWithinPublicationScope`).
+ * Dates are relative to a fixed NOW so the assertions are deterministic
+ * regardless of when the test suite runs.
  */
 test('isWithinTimelineScope uses the latest of published and modified dates', () => {
   const NOW = new Date('2026-10-26T12:00:00Z');
   const ONE_WEEK = 168;
 
-  // Published 2 days ago, modified 10 days ago → published is latest → in scope
+  // Published 2 days ago, modified 10 days ago -> published is latest -> in scope
   assert.equal(isWithinTimelineScope('2026-10-24T12:00:00Z', '2026-10-16T12:00:00Z', ONE_WEEK, NOW), true);
 
-  // Published 10 days ago, modified 2 days ago → modified is latest → in scope
+  // Published 10 days ago, modified 2 days ago -> modified is latest -> in scope
   assert.equal(isWithinTimelineScope('2026-10-16T12:00:00Z', '2026-10-24T12:00:00Z', ONE_WEEK, NOW), true);
 
-  // Both 10 days ago → outside the 1-week window → out of scope
+  // Both 10 days ago -> outside the 1-week window -> out of scope
   assert.equal(isWithinTimelineScope('2026-10-16T12:00:00Z', '2026-10-16T12:00:00Z', ONE_WEEK, NOW), false);
 
-  // Both 2 days ago → in scope
+  // Both 2 days ago -> in scope
   assert.equal(isWithinTimelineScope('2026-10-24T12:00:00Z', '2026-10-24T12:00:00Z', ONE_WEEK, NOW), true);
 
-  // Neither date is recent enough → out of scope for 4 weeks too
+  // Neither date is recent enough -> out of scope for 4 weeks too
   assert.equal(
     isWithinTimelineScope('2026-09-20T00:00:00Z', '2026-09-20T00:00:00Z', 4 * ONE_WEEK, NOW),
     false,
   );
+});
+
+test('isWithinPublicationScope ignores revision-only updates', () => {
+  const NOW = new Date('2026-10-26T12:00:00Z');
+  const ONE_WEEK = 168;
+
+  // Published inside the window, no matter how old the last revision is.
+  assert.equal(isWithinPublicationScope('2026-10-24T12:00:00Z', '2026-10-16T12:00:00Z', ONE_WEEK, NOW), true);
+
+  // Published 10 days ago and revised yesterday: a history-only update is not a
+  // new detection.
+  assert.equal(isWithinPublicationScope('2026-10-16T12:00:00Z', '2026-10-24T12:00:00Z', ONE_WEEK, NOW), false);
+
+  // Both outside the window.
+  assert.equal(isWithinPublicationScope('2026-10-16T12:00:00Z', '2026-10-16T12:00:00Z', ONE_WEEK, NOW), false);
+
+  // A missing or unparseable publication date falls back to the revision date.
+  assert.equal(isWithinPublicationScope('not-a-date', '2026-10-24T12:00:00Z', ONE_WEEK, NOW), true);
+  assert.equal(isWithinPublicationScope('not-a-date', 'not-a-date', ONE_WEEK, NOW), false);
+
+  // A zero-hour scope remains unfiltered.
+  assert.equal(isWithinPublicationScope('2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', 0, NOW), true);
 });
 
 function makeCve(cveId: string, published: string, modified: string): NormalizedCVE {
@@ -737,18 +763,19 @@ const WEEK_SCOPED_CVES = [
 ];
 
 const WEEK_WINDOWS = [
-  // NOW = Oct 26T12:00Z
-  // 1-week cutoff  = Oct 19T12:00Z  — 1001 (Oct 22), 1002 (Oct 24)        → 2
-  // 2-week cutoff  = Oct 12T12:00Z  — + 1003 (Oct 16)                      → 3
+  // NOW = Oct 26T12:00Z. New detections are gated by publication date, so a
+  // recent revision of an older record does not pull it into scope.
+  // 1-week cutoff  = Oct 19T12:00Z  — 1001 (Oct 22)                        → 1
+  // 2-week cutoff  = Oct 12T12:00Z  — + 1002 (Oct 18), 1003 (Oct 16)       → 3
   // 3-week cutoff  = Oct  5T12:00Z  — + 1004 (Oct  8)                      → 4
   // 4-week cutoff  = Sep 28T12:00Z  — 1005 (Sep 25) still outside          → 4
-  { label: '1 week', hours: 168, expected: 2 },
+  { label: '1 week', hours: 168, expected: 1 },
   { label: '2 weeks', hours: 336, expected: 3 },
   { label: '3 weeks', hours: 504, expected: 4 },
   { label: '4 weeks', hours: 672, expected: 4 },
 ];
 
-test('pipeline scopeHours supports 1 / 2 / 3 / 4 week windows', () => {
+test('pipeline scopeHours gates new detections by publication date across 1 / 2 / 3 / 4 week windows', () => {
   const { asset, settings } = (() => {
     const asset: WatchListItem = {
       ...structuredClone(INITIAL_WATCHLIST[0]),
@@ -766,7 +793,7 @@ test('pipeline scopeHours supports 1 / 2 / 3 / 4 week windows', () => {
 
   for (const { label, hours, expected } of WEEK_WINDOWS) {
     const inScope = WEEK_SCOPED_CVES.filter((cve) =>
-      isWithinTimelineScope(cve.publishedDate, cve.modifiedDate, hours, now),
+      isWithinPublicationScope(cve.publishedDate, cve.modifiedDate, hours, now),
     );
     assert.equal(
       inScope.length,

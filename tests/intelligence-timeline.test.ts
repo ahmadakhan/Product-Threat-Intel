@@ -93,7 +93,7 @@ function fallbackCve(published: string, modified: string): NormalizedCVE {
   };
 }
 
-test('vendor + product fallback findings respect published and modified dates', () => {
+test('vendor + product fallback findings are gated by publication date, not revision history', () => {
   const fallbackAsset: WatchListItem = {
     ...structuredClone(INITIAL_WATCHLIST[0]),
     id: 'asset-fallback',
@@ -105,17 +105,37 @@ test('vendor + product fallback findings respect published and modified dates', 
     active: true,
   };
   const settings = { ...structuredClone(INITIAL_SETTINGS), scopeHours: 168 };
-  const run = (cve: NormalizedCVE) =>
-    runVulnerabilityPipeline(INITIAL_FEEDS, [cve], [fallbackAsset], [], [], settings, 'test');
+  const run = (cve: NormalizedCVE, applicabilityChanged = false) =>
+    runVulnerabilityPipeline(
+      INITIAL_FEEDS,
+      [cve],
+      [fallbackAsset],
+      [],
+      [],
+      settings,
+      'test',
+      false,
+      {},
+      {},
+      undefined,
+      [],
+      undefined,
+      applicabilityChanged ? new Set([cve.cveId]) : undefined,
+    );
 
-  // Both dates inside the window.
+  // Both dates inside the window: a genuine new detection.
   const recent = run(fallbackCve(daysAgo(1), daysAgo(1)));
   assert.equal(recent.newFindings.length, 1);
   assert.equal(recent.newFindings[0].matchingMethod, 'VENDOR_PRODUCT_FALLBACK');
 
-  // Published ten days ago but modified yesterday: the latest activity is in scope.
-  assert.equal(run(fallbackCve(daysAgo(10), daysAgo(1))).newFindings.length, 1);
+  // Published ten days ago but modified yesterday: the publication event is
+  // outside the window, so a history-only revision must not create a finding.
+  assert.equal(run(fallbackCve(daysAgo(10), daysAgo(1))).newFindings.length, 0);
 
   // Both dates outside the window.
   assert.equal(run(fallbackCve(daysAgo(10), daysAgo(10))).newFindings.length, 0);
+
+  // A real applicability change overrides the publication window, so newly
+  // matched CPEs added to an old CVE still reach the inventory.
+  assert.equal(run(fallbackCve(daysAgo(10), daysAgo(1)), true).newFindings.length, 1);
 });
