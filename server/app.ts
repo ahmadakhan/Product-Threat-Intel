@@ -142,6 +142,7 @@ import {
   digestSeveritySummary,
   digestSeverityKpi,
   formatExecutiveSummary,
+  renderHeldForReview,
 } from '../src/utils/templateCompiler.ts';
 function publicState(data: AppState): AppState {
   return {
@@ -2422,11 +2423,15 @@ export function createApp(
         const executiveSummary = formatExecutiveSummary(sampleFindings.length, severityCounts);
          const parts: DailyDigestParts = {
            advisory_id: `${data.settings.advisoryPrefix}DAILY-PREVIEW`,
-           advisory_title: 'Daily Vulnerability Digest — preview',
+           // The rendered <title> and header read this value, so it has to match
+           // what a real digest is called. It previously said "Daily Vulnerability
+           // Digest — preview" while the header said "Daily Vulnerability
+           // Notification", which made the studio contradict the deliverable.
+           advisory_title: 'Daily Vulnerability Notification — preview',
            dispatch_date: new Date().toISOString(),
            severity: 'HIGH',
            finding_count: sampleFindings.length,
-           severity_counts: '2 critical, 1 high',
+           severity_counts: '2 critical, 1 high, 1 medium, 1 low',
            findings_summary: renderDailyFindingSummary(sampleFindings, dailyConfig),
            health_report: renderDailyHealthReport(sampleHealth, dailyConfig),
            recipient_name: email,
@@ -2437,6 +2442,11 @@ export function createApp(
            asset_count: new Set(sampleFindings.map((f) => f.assetName)).size,
            executive_summary: executiveSummary,
            report_generated: reportGenerated,
+           // Was never supplied, so the Confidence Follow-up row rendered as an
+           // empty cell with no explanation of what the row is for. A real
+           // digest fills it from the finding set; the preview shows the
+           // zero-count wording so the row is visibly present and truthful.
+           held_for_review: renderHeldForReview(0, dailyConfig),
            critical_summary: digestSeveritySummary('CRITICAL', severityCounts.CRITICAL, dailyConfig),
            high_summary: digestSeveritySummary('HIGH', severityCounts.HIGH, dailyConfig),
            medium_summary: digestSeveritySummary('MEDIUM', severityCounts.MEDIUM, dailyConfig),
