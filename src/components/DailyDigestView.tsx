@@ -38,6 +38,7 @@ const SAMPLE_HEALTH: DigestHealth = {
   checkedAt: '2026-10-29T08:00:00.000Z',
   systemUptime: '187 Days 14 Hours',
   systemUptimePercentage: null,
+  pipelineJobs: { total: 0, succeeded: 0, failed: 0 },
 };
 
 export const DailyDigestView: React.FC = () => {

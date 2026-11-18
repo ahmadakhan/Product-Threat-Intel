@@ -2411,6 +2411,7 @@ export function createApp(
           checkedAt: new Date().toISOString(),
           systemUptime: '5 Days 3 Hours',
           systemUptimePercentage: null,
+          pipelineJobs: { total: 0, succeeded: 0, failed: 0 },
         };
         const severityCounts = { CRITICAL: 2, HIGH: 1, MEDIUM: 1, LOW: 1, UNKNOWN: 0 };
         const reportGenerated = new Date().toLocaleString('en-GB', {

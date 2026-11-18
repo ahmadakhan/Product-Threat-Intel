@@ -39,6 +39,7 @@ const HEALTH: DigestHealth = {
   checkedAt: '2026-10-29T08:00:00.000Z',
   systemUptime: '187 Days 14 Hours',
   systemUptimePercentage: 99.98,
+  pipelineJobs: { total: 0, succeeded: 0, failed: 0 },
 };
 
 const PARTS: DailyDigestParts = {
@@ -299,6 +300,7 @@ test('health report separates accepted and failed deliveries and labels times wi
     checkedAt: new Date().toISOString(),
     systemUptime: '2 Days 3 Hours',
     systemUptimePercentage: null,
+    pipelineJobs: { total: 0, succeeded: 0, failed: 0 },
   } as unknown as DigestHealth;
   const html = renderDailyHealthReport(health, {
     ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
@@ -337,7 +339,7 @@ test('daily schedule and queued delivery attempts render independently in the wo
       { status: 'FAILED', count: 7 },
     ],
   }, { ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION, timezone: 'Asia/Dubai' });
-  assert.match(html, /Next Delivery Attempt[\s\S]*?30 Oct 2026 13:00 UTC\+4/);
+  assert.match(html, /Pipeline Jobs \(last 24h\)[\s\S]*?0 jobs[\s\S]*?0 succeeded[\s\S]*?0 failed/);
   assert.match(html, /Next Scheduled Digest[\s\S]*?31 Oct 2026 09:00 UTC\+4/);
   assert.ok(html.includes('100 Queued | 3 Sending | 55 Awaiting review | 750 Provider accepted | 7 Failed'));
 
@@ -345,7 +347,7 @@ test('daily schedule and queued delivery attempts render independently in the wo
     ...HEALTH, nextScheduledAttempt: null,
   }, { ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION, timezone: 'Asia/Dubai' });
   assert.ok(noRetries.includes('31 Oct 2026 09:00 UTC+4'));
-  assert.ok(noRetries.includes('No future delivery attempt scheduled'));
+  assert.ok(!noRetries.includes('Next Delivery Attempt'));
   assert.ok(!noRetries.includes('none pending'));
 });
 

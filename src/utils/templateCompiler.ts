@@ -341,6 +341,7 @@ export interface DigestHealth {
   systemUptime: string;
   /** Legacy availability field; not displayed because process uptime is not availability. */
   systemUptimePercentage: number | null;
+  pipelineJobs: { total: number; succeeded: number; failed: number };
 }
 
 export interface DailyDigestParts {
@@ -774,9 +775,6 @@ export function renderDailyHealthReport(health: DigestHealth | null, config: Tem
   const nextDigest = health.nextDailyDigestAt
     ? formatHealthDate(health.nextDailyDigestAt)
     : 'Not scheduled';
-  const nextDelivery = health.nextScheduledAttempt
-    ? formatHealthDate(health.nextScheduledAttempt)
-    : 'No future delivery attempt scheduled';
   const lastCheck = formatHealthDate(health.checkedAt);
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
 
@@ -836,10 +834,10 @@ export function renderDailyHealthReport(health: DigestHealth | null, config: Tem
 
                 <tr>
                     <td style="padding:10px;border:1px solid #e2e8f0;font-size:12px;">
-                        Next Delivery Attempt
+                        Pipeline Jobs (last 24h)
                     </td>
                     <td style="padding:10px;border:1px solid #e2e8f0;font-size:12px;">
-                        ${digestEscapeHtml(nextDelivery)}
+                        ${health.pipelineJobs.total} jobs &nbsp;|&nbsp; ${health.pipelineJobs.succeeded} succeeded &nbsp;|&nbsp; ${health.pipelineJobs.failed} failed
                     </td>
                 </tr>
 

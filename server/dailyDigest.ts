@@ -229,6 +229,7 @@ interface HealthSnapshot {
   checkedAt: string;
   systemUptime: string;
   systemUptimePercentage: number | null;
+  pipelineJobs: { total: number; succeeded: number; failed: number };
 }
 
 async function computeHealth(
@@ -288,6 +289,30 @@ async function computeHealth(
   } catch {
     database = 'degraded';
   }
+  // Pipeline execution summary for the last 24 hours, derived from audit events.
+  // Events: Pipeline queued / completed / failed / recovered / authoritative auto-dispatch.
+  let pipelineJobs = { total: 0, succeeded: 0, failed: 0 };
+  try {
+    const pipelineAudit = await db.query<{ event: string; count: string }>(
+      `SELECT data->>'event' AS event, count(*)::int AS count
+       FROM audit
+       WHERE data->>'category' = 'PIPELINE'
+         AND created_at > now() - interval '24 hours'
+         AND data->>'event' IN ('Pipeline queued','Pipeline completed','Pipeline failed','AUTHORITATIVE_AUTO_DISPATCH','Pipeline recovered')
+       GROUP BY data->>'event'`,
+    );
+    for (const row of pipelineAudit.rows) {
+      const count = Number(row.count);
+      pipelineJobs.total += count;
+      if (row.event === 'Pipeline completed' || row.event === 'AUTHORITATIVE_AUTO_DISPATCH' || row.event === 'Pipeline recovered') {
+        pipelineJobs.succeeded += count;
+      } else if (row.event === 'Pipeline failed') {
+        pipelineJobs.failed += count;
+      }
+    }
+  } catch {
+    // Non-fatal: pipeline stats are informational only.
+  }
   const uptimeSeconds = process.uptime();
   const uptimeDays = Math.floor(uptimeSeconds / 86400);
   const uptimeHours = Math.floor((uptimeSeconds % 86400) / 3600);
@@ -315,6 +340,7 @@ async function computeHealth(
     checkedAt: new Date().toISOString(),
     systemUptime, // worker-process uptime, kept for continuity
     systemUptimePercentage: null,
+    pipelineJobs,
   };
 }
 
@@ -602,7 +628,7 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
           const highCount = severityCounts.HIGH ?? 0;
           const mediumCount = severityCounts.MEDIUM ?? 0;
           const lowCount = severityCounts.LOW ?? 0;
-          const uniqueAssets = new Set(included.map((finding) => finding.matchedAssetId));
+          const uniqueAssets = new Set(findings.map((finding) => finding.matchedAssetId));
           const reportGenerated = formatReportGenerated(new Date(), timezone);
           // Keep the narrative's scope and counts identical to the recipient's KPIs.
           const executiveSummary = formatExecutiveSummary(included.length, severityCounts);
@@ -611,7 +637,7 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
              advisory_title: view.title,
              dispatch_date: new Date().toISOString(),
              severity: view.severity,
-             finding_count: included.length,
+             finding_count: findings.length,
              severity_counts: formatSeverityCounts(severityCounts),
               findings_summary: renderDailyFindingSummary(
                 included.map((finding) => ({
