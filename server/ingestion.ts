@@ -719,17 +719,53 @@ export async function ingestFeed(
     url.searchParams.set('lastModEndDate', end.toISOString().slice(0, 10));
     const exploited: Record<string, true> = {};
     const seenCursors = new Set<string>();
+    // Page size is adaptive for the same reason as NVD++ below: a VulnCheck KEV
+    // record carries the whole advisory source document (descriptions,
+    // references, remediations), so a page of 100 can exceed the configured
+    // decoded-response limit even though the record count is small. The
+    // transport correctly refuses that payload, but throwing failed the entire
+    // run. Retry the identical window and cursor at half the size (floor 10):
+    // only the page cut changes, so no record is skipped and the returned cursor
+    // still resumes exactly after the last record that was read.
+    const KEV_MAX_RECORDS_PER_PAGE = 100;
+    const KEV_MIN_PAGE_SIZE = 10;
+    const KEV_PAGE_BUDGET = 300;
+    let pageSize = KEV_MAX_RECORDS_PER_PAGE;
     let cursor: string | undefined;
-    for (let pageNo = 0; pageNo < 300; pageNo++) {
+    for (let pageNo = 0; pageNo < KEV_PAGE_BUDGET; pageNo++) {
       const pageUrl = new URL(url);
       // Own pagination parameters; inherited start_cursor/page values can restart a session.
       for (const key of ['cursor', 'start_cursor', 'page']) pageUrl.searchParams.delete(key);
-      pageUrl.searchParams.set('limit', '100');
+      pageUrl.searchParams.set('limit', String(pageSize));
       if (cursor) pageUrl.searchParams.set('cursor', cursor);
       else pageUrl.searchParams.set('start_cursor', '');
-      const { data: page } = await json(pageUrl.href, false, { timeoutMs: 30000, maxResponseBytes: 8 * 1024 * 1024 }, true);
+      // Fetch one page, fetching again at half the page size when the decoded
+      // payload is larger than the configured limit. The window and the cursor
+      // stay fixed, so only the page cut changes and no record is skipped: the
+      // cursor returned for the smaller page resumes after the last record that
+      // was actually read. Once reduced, the page size stays reduced for the rest
+      // of this window.
+      let page: any;
+      for (;;) {
+        try {
+          ({ data: page } = await json(
+            pageUrl.href,
+            false,
+            { timeoutMs: 30000, maxResponseBytes: 8 * 1024 * 1024 },
+            true,
+          ));
+          break;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!/Decoded response exceeds configured/.test(message) || pageSize <= KEV_MIN_PAGE_SIZE)
+            throw error;
+          pageSize = Math.max(KEV_MIN_PAGE_SIZE, Math.floor(pageSize / 2));
+          pageUrl.searchParams.set('limit', String(pageSize));
+        }
+      }
       if (!page || !Array.isArray(page.data)) throw new Error('Invalid VulnCheck KEV response');
-      if (page.data.length > 100) throw new Error('VulnCheck KEV exceeded the requested page size');
+      if (page.data.length > KEV_MAX_RECORDS_PER_PAGE)
+        throw new Error('VulnCheck KEV exceeded the requested page size');
       for (const row of page.data) {
         const record = row?.source || row;
         if (!Array.isArray(record?.cve)) throw new Error('VulnCheck KEV record has no CVE identifiers');
@@ -745,8 +781,16 @@ export async function ingestFeed(
       if (seenCursors.has(nextCursor)) throw new Error('VulnCheck KEV cursor did not advance or repeated a previous cursor');
       seenCursors.add(nextCursor);
       cursor = nextCursor;
-      if (pageNo === 299) throw new Error('VulnCheck KEV pagination exceeded 30,000 records');
-      await sleep(Math.max(1000, 60000 / feed.rateLimitPerMin));
+      // The window is not complete: another page exists. Exceeding the budget is
+      // a deliberate atomic failure here — unlike NVD++, silently dropping KEV
+      // pages would leave exploited CVEs unflagged.
+      if (pageNo === KEV_PAGE_BUDGET - 1)
+        throw new Error(
+          `VulnCheck KEV pagination exceeded ${KEV_PAGE_BUDGET} pages; narrow the ingestion window`,
+        );
+      // Pace with nvdInterval: the provider publishes 1,000 requests/minute, and
+      // the one-second floor this replaced spent that budget at ~60/minute.
+      await sleep(nvdInterval);
     }
     return { cves: [], exploited, count: Object.keys(exploited).length, syncState: { cursor: end.toISOString(), hasMore } };
   }
@@ -1155,8 +1199,16 @@ function normalizeNvdItem(item: any, feedId: string): NormalizedCVE | null {
     cvssData?.vectorString || '';
 
   const details: NonNullable<NormalizedCVE['cpeMatchDetails']> = [];
+  // Complex AND / negated configurations cannot safely be flattened into an OR.
+  // normalizeNvd and normalizeOpenCve both raise this flag; without it here, an
+  // NVD++/NIST record with the same configuration got different review state
+  // depending on which adapter parsed it.
+  let applicabilityRequiresReview = ['Received', 'Awaiting Analysis', 'Undergoing Analysis'].includes(
+    cve.vulnStatus,
+  );
   const walk = (node: any) => {
     if (!node || typeof node !== 'object') return;
+    if (node.negate || node.operator === 'AND') applicabilityRequiresReview = true;
     for (const m of node.cpeMatch || []) {
       if (m.vulnerable === true && typeof m.criteria === 'string' && m.criteria.startsWith('cpe:2.3:')) {
         details.push({
@@ -1197,12 +1249,18 @@ function normalizeNvdItem(item: any, feedId: string): NormalizedCVE | null {
         version,
         score,
         vector: sanitizeCvssVector(vector),
-        severity: cvssData ? cvssSeverity(score) : 'UNKNOWN',
+        // Same rule as normalizeNvd and normalizeOpenCve: `score` is 0 both for
+        // "no score reported" and for a genuine 0.0, so only a metric that
+        // carries its own finite baseScore may produce a severity.
+        severity:
+          !cvssData || cvssData.baseScore == null || !Number.isFinite(score)
+            ? 'UNKNOWN'
+            : cvssSeverity(score),
       },
       cwe,
       cpeMatches,
       cpeMatchDetails: validDetails,
-      applicabilityRequiresReview: ['Received', 'Awaiting Analysis', 'Undergoing Analysis'].includes(cve.vulnStatus),
+      applicabilityRequiresReview,
       sourceFeeds: [feedId],
       // CNA handle normalised to a short vendor name for vendor-advisory detection.
       assignerShortName: typeof cve.sourceIdentifier === 'string'

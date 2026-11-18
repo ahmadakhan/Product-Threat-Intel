@@ -32,7 +32,12 @@ export function ingestionWindow(scopeHours: number, state: IngestionState = {}, 
   const valid = Number.isFinite(cursor) && cursor <= now;
   const start = valid ? cursor - SYNC_OVERLAP_MS : now - Math.min(maxWindowHours, Math.max(0, scopeHours)) * HOUR;
   const end = valid ? Math.min(now, cursor + maxWindowHours * HOUR - SYNC_OVERLAP_MS) : now;
-  return { start: new Date(start), end: new Date(end), incremental: valid, hasMore: end < now - 60000 };
+  // `end` is clamped to `now` and otherwise stops one overlap short of the next
+  // slice, so a catch-up window is incomplete exactly when `end` is before
+  // `now`. The old `now - 60000` margin reported a checkpoint sitting exactly one
+  // window behind as complete: the slice computed end === now, hasMore stayed
+  // false, the catch-up loop stopped, and the remaining backlog was never read.
+  return { start: new Date(start), end: new Date(end), incremental: valid, hasMore: end < now };
 }
 export function recentRevisions(revisions: Record<string, string>, since: Date) {
   const cutoff = since.getTime() - 24 * HOUR;

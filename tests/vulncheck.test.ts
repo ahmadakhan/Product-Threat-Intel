@@ -46,6 +46,64 @@ test('VulnCheck rejects malformed CVE records instead of committing partial expl
   await assert.rejects(ingestFeed(source, 24, async () => response({ data: [{ cve: ['CVE-2026-10001'] }, { cve: ['invalid'] }] }), config, sleep), /invalid CVE identifier/);
   await assert.rejects(ingestFeed(source, 24, async () => response({ data: [{ cve: 'CVE-2026-10001' }] }), config, sleep), /no CVE identifiers/);
 });
+test('VulnCheck KEV retries an oversized page at a smaller limit instead of failing the run', async () => {
+  const requestedLimits: (string | null)[] = [];
+  const requestedCursors: (string | null)[] = [];
+  let calls = 0;
+  const result = await ingestFeed(source, 24, async raw => {
+    calls++;
+    const url = new URL(raw);
+    const limit = url.searchParams.get('limit');
+    requestedLimits.push(limit);
+    requestedCursors.push(url.searchParams.get('cursor'));
+    // A full-size page of rich advisory documents exceeds the decoded limit.
+    if (limit !== '50') throw new Error('Decoded response exceeds configured 8388608-byte limit');
+    // An empty page carries no continuation cursor, so the smaller page is the
+    // last page of the window and the run finishes as a success.
+    return response({ data: [{ cve: ['CVE-2026-10001', 'CVE-2026-10002'] }], _meta: {} });
+  }, config, sleep);
+  assert.equal(calls, 2, 'the oversized page is retried once at the halved size');
+  // The retry keeps the same window and the same (empty) start cursor: only
+  // the page cut changes, so no record in the window is skipped.
+  assert.deepEqual(requestedLimits, ['100', '50']);
+  assert.deepEqual(requestedCursors, [null, null]);
+  assert.equal(result.count, 2);
+  assert.equal(result.exploited!['CVE-2026-10001'], true);
+  assert.equal(result.exploited!['CVE-2026-10002'], true);
+  // The smaller page's cursor ends the run as success, so the window advances
+  // and the records that were read are committed rather than re-fetched.
+  assert.equal(result.syncState!.hasMore, false);
+});
+
+test('VulnCheck KEV keeps the reduced limit for continuation pages of the same window', async () => {
+  const requestedLimits: string[] = [];
+  const result = await ingestFeed(source, 24, async raw => {
+    const url = new URL(raw);
+    const limit = url.searchParams.get('limit') || '';
+    requestedLimits.push(limit);
+    const cursor = url.searchParams.get('cursor');
+    if (!cursor && limit === '100') throw new Error('Decoded response exceeds configured 8388608-byte limit');
+    if (!cursor) return response({ data: [{ cve: ['CVE-2026-10001'] }], _meta: { next_cursor: 'page-2' } });
+    if (cursor === 'page-2') return response({ data: [{ cve: ['CVE-2026-10002'] }], _meta: { next_cursor: 'page-3' } });
+    return response({ data: [{ cve: ['CVE-2026-10003'] }], _meta: {} });
+  }, config, sleep);
+  assert.deepEqual(requestedLimits, ['100', '50', '50', '50']);
+  assert.equal(result.count, 3);
+});
+
+test('VulnCheck KEV surfaces the decoded-limit error once the page cannot be reduced further', async () => {
+  let calls = 0;
+  await assert.rejects(
+    ingestFeed(source, 24, async () => {
+      calls++;
+      throw new Error('Decoded response exceeds configured 8388608-byte limit');
+    }, config, sleep),
+    /Decoded response exceeds configured/,
+  );
+  // 100 -> 50 -> 25 -> 12 -> 10, then the floor stops the retry ladder.
+  assert.equal(calls, 5);
+});
+
 test('VulnCheck requests bounded pages filtered from its committed change checkpoint', async () => {
   const cursor = new Date(Date.now() - 3600000).toISOString();
   const result = await ingestFeed(source, 2880, async raw => {

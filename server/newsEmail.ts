@@ -441,7 +441,7 @@ export function renderConsolidatedNewsEmail(
         typeof item.credibilityScore === 'number' ? credibilityBadge(item.credibilityScore) : '',
       ].filter(Boolean).join('');
       const evidenceBox = evidence
-        ? `<p style="margin:10px 0 0;padding:12px 16px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #1e40af;font-size:12.5px;line-height:20px;color:#334155;">${evidence}</p>`
+        ? `<p style="margin:10px 0 0;padding:12px 16px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0;font-size:12.5px;line-height:20px;color:#334155;">${evidence}</p>`
         : '';
       const zeroDayBanner = item.zeroDay
         ? '<p style="margin:12px 0 0;padding:10px 14px;border-radius:8px;background:#fef3c7;border:1px solid #fcd34d;font-size:12.5px;line-height:19px;font-weight:700;color:#92400e;">Potential zero-day: no assigned CVE</p>'
@@ -449,7 +449,7 @@ export function renderConsolidatedNewsEmail(
       const viewSource = href
         ? `<p style="margin:16px 0 0;"><a href="${escapeHtml(href)}" style="display:inline-block;background:#1e40af;color:#ffffff;text-decoration:none;border-radius:6px;padding:10px 18px;font-size:13px;font-weight:700;">View source article &rarr;</a></p>`
         : '';
-      return `<tr><td style="padding:22px 26px;border-top:1px solid #e2e8f0;border-left:4px solid #1e40af;">
+      return `<tr><td style="padding:22px 26px;border-top:1px solid #e2e8f0;">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;table-layout:fixed;">
           <tr><td style="padding:0 0 10px;">
             <p style="margin:0 0 6px;font-size:11px;line-height:16px;color:#64748b;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;">ARTICLE ${index + 1} OF ${count}</p>
@@ -496,7 +496,7 @@ export function renderConsolidatedNewsEmail(
     })
     .join('');
   const overflowSection = overflow.length
-    ? '<tr><td style="padding:20px 24px 8px;border-top:1px solid #e2e8f0;border-left:4px solid #b7791f;background:#fffbeb;">' +
+    ? '<tr><td style="padding:20px 24px 8px;border-top:1px solid #e2e8f0;background:#fffbeb;">' +
       `<p style="margin:0 0 4px;font-size:11px;line-height:16px;color:#92400e;font-weight:600;letter-spacing:0.5px;">ADDITIONAL ARTICLES (${overflow.length})</p>` +
       '<p style="margin:0;font-size:13px;line-height:19px;color:#475569;">These articles matched your monitored inventory but are shown in summary form because the email reached its size limit.</p></td></tr>' +
       overflowRows

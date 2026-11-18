@@ -75,6 +75,8 @@ const SAMPLE_NEWS_ARTICLES = [
 export const NewsTemplateView: React.FC = () => {
   const {
     settings,
+    error,
+    clearError,
     newsDigestTemplate,
     newsDigestCustomization,
     updateNewsDigestCustomization,
@@ -86,6 +88,7 @@ export const NewsTemplateView: React.FC = () => {
   const [showTestModal, setShowTestModal] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [confirmSave, setConfirmSave] = useState<{ action: string; label: string } | null>(null);
+  const [savingTemplate, setSavingTemplate] = useState(false);
   const [confirmSendTest, setConfirmSendTest] = useState<{ action: string; label: string } | null>(null);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [saveToast, setSaveToast] = useState(false);
@@ -193,7 +196,7 @@ export const NewsTemplateView: React.FC = () => {
         return `<span style="display:inline-block;padding:2px 8px;background:${bg};color:${color};border-radius:10px;font-size:10px;line-height:14px;font-weight:700;">${score}/100 credibility</span>`;
       };
       const evidenceBox = article.evidence
-        ? `<p style="margin:10px 0 0;padding:12px 16px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #1e40af;font-size:12.5px;line-height:20px;color:#334155;">${article.evidence}</p>`
+        ? `<p style="margin:10px 0 0;padding:12px 16px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0;font-size:12.5px;line-height:20px;color:#334155;">${article.evidence}</p>`
         : '';
       const zeroDayBanner = article.zeroDay
         ? '<p style="margin:12px 0 0;padding:10px 14px;border-radius:8px;background:#fef3c7;border:1px solid #fcd34d;font-size:12.5px;line-height:19px;font-weight:700;color:#92400e;">Potential zero-day: no assigned CVE</p>'
@@ -201,7 +204,7 @@ export const NewsTemplateView: React.FC = () => {
       const viewSource = article.source
         ? `<p style="margin:16px 0 0;"><a href="${article.source}" style="display:inline-block;background:#1e40af;color:#ffffff;text-decoration:none;border-radius:6px;padding:10px 18px;font-size:13px;font-weight:700;">View source article &rarr;</a></p>`
         : '';
-      return `<tr><td style="padding:22px 26px;border-top:1px solid #e2e8f0;border-left:4px solid #1e40af;">
+      return `<tr><td style="padding:22px 26px;border-top:1px solid #e2e8f0;">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;table-layout:fixed;">
           <tr><td style="padding:0 0 10px;">
             <p style="margin:0 0 6px;font-size:11px;line-height:16px;color:#64748b;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;">ARTICLE ${index + 1} OF ${SAMPLE_NEWS_ARTICLES.length}</p>
@@ -320,22 +323,60 @@ export const NewsTemplateView: React.FC = () => {
     }
   };
 
+  // Colors are free-text inputs, so a malformed hex fails server validation. Surface
+  // that before the save so the confirmation dialog can explain it instead of the
+  // save appearing to do nothing.
+  const saveValidationError = useMemo(() => {
+    const labels: Array<[string, string]> = [
+      ['canvasBg', 'Canvas Background'],
+      ['cardBg', 'Card Background'],
+      ['headerBg', 'Header Banner Bg'],
+      ['accentColor', 'Accent & Link Color'],
+      ['headingColor', 'Heading Font Color'],
+      ['fontColor', 'Body Font Color'],
+      ['badgeStampColor', 'Stamp Color'],
+    ];
+    const invalid = labels
+      .filter(([key]) => !/^#[0-9a-f]{6}$/i.test(newsDigestCustomization[key as keyof typeof newsDigestCustomization] as string))
+      .map(([, label]) => label);
+    return invalid.length
+      ? `Fix the color value${invalid.length > 1 ? 's' : ''} for: ${invalid.join(
+          ', ',
+        )}. Colors must be a 6-digit hex code like #1e40af.`
+      : null;
+  }, [newsDigestCustomization]);
+
   const handleSave = () => {
+    clearError();
     setConfirmSave({ action: 'save', label: 'Save & Apply to News Digest' });
   };
 
   const executeSave = async () => {
-    if (!confirmSave) return;
+    if (!confirmSave || savingTemplate || saveValidationError) return;
+    setSavingTemplate(true);
     try {
-      if (!(await saveNewsDigestTemplate(isCustomTemplate ? customTemplate : null))) return;
+      const ok = await saveNewsDigestTemplate(isCustomTemplate ? customTemplate : null);
+      if (!ok) {
+        // The save failed (server-side validation or a transient error); the
+        // context `error` now holds the reason. Keep the dialog open so the
+        // failure is visible where the operator clicked.
+        return;
+      }
       if (!isCustomTemplate) {
         setCustomTemplate('');
         setIsCustomTemplate(false);
       }
+      setConfirmSave(null);
       setSaveToast(true);
       setTimeout(() => setSaveToast(false), 2500);
-    } finally {
+    } catch (saveError) {
       setConfirmSave(null);
+      setTestResult({
+        success: false,
+        message: saveError instanceof Error ? saveError.message : 'Save failed',
+      });
+    } finally {
+      setSavingTemplate(false);
     }
   };
 
@@ -1276,39 +1317,67 @@ export const NewsTemplateView: React.FC = () => {
         </div>
       )}
 
-      {/* Confirmation Modals */}
+      {/* Confirmation Modals. z-[60] keeps them above the fullscreen studio
+          overlay and the sticky shell headers (both z-50). */}
       {confirmSave && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setConfirmSave(null)} />
-          <div className="bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800/80 dark:border-zinc-800/80 light:border-zinc-200 rounded-2xl p-6 w-full max-w-md shadow-2xl">
-            <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="news-template-save-title"
+        >
+          <div
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => {
+              if (savingTemplate) return;
+              setConfirmSave(null);
+              clearError();
+            }}
+          />
+          <div className="relative bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800/80 dark:border-zinc-800/80 light:border-zinc-200 rounded-2xl p-6 w-full max-w-md shadow-2xl">
+            <h3
+              id="news-template-save-title"
+              className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2"
+            >
               Save News Template?
             </h3>
-            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 mb-6">
+            <p className="text-xs text-zinc-400 dark:text-zinc-400 light:text-zinc-600 mb-4">
               This will apply your customized news digest template to all future news digests.
             </p>
+            {(saveValidationError || error) && (
+              <div
+                role="alert"
+                className="mb-4 rounded-xl border border-rose-800/50 bg-rose-950/70 light:bg-rose-50 px-3 py-2.5 text-xs text-rose-100 light:text-rose-800"
+              >
+                {saveValidationError || error}
+              </div>
+            )}
             <div className="flex justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setConfirmSave(null)}
-                className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-100 dark:text-zinc-100 light:text-zinc-900 light:hover:text-zinc-900 font-medium transition"
+                onClick={() => {
+                  setConfirmSave(null);
+                  clearError();
+                }}
+                disabled={savingTemplate}
+                className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-100 dark:text-zinc-100 light:text-zinc-900 light:hover:text-zinc-900 font-medium transition disabled:opacity-60"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={executeSave}
-                disabled={confirmSave?.action === 'saving'}
-                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-medium transition"
+                disabled={savingTemplate || !!saveValidationError}
+                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-medium transition disabled:opacity-60"
               >
-                {confirmSave.action === 'saving' ? 'Saving...' : 'Save'}
+                {savingTemplate ? 'Saving...' : 'Save'}
               </button>
             </div>
           </div>
         </div>
       )}
       {confirmSendTest && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setConfirmSendTest(null)} />
           <div className="bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800/80 dark:border-zinc-800/80 light:border-zinc-200 rounded-2xl p-6 w-full max-w-md shadow-2xl">
             <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-2">
@@ -1338,7 +1407,7 @@ export const NewsTemplateView: React.FC = () => {
         </div>
       )}
       {showTestModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowTestModal(false)} />
           <div className="bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800/80 dark:border-zinc-800/80 light:border-zinc-200 rounded-2xl p-6 w-full max-w-md shadow-2xl">
             <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-4">
@@ -1383,7 +1452,7 @@ export const NewsTemplateView: React.FC = () => {
         </div>
       )}
       {showResetConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowResetConfirm(false)} />
           <div className="bg-zinc-900 dark:bg-zinc-900 light:bg-white border border-zinc-800/80 dark:border-zinc-800/80 light:border-zinc-200 rounded-2xl p-6 w-full max-w-md shadow-2xl">
             <h3 className="text-sm font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 mb-4">
@@ -1412,7 +1481,10 @@ export const NewsTemplateView: React.FC = () => {
         </div>
       )}
       {saveToast && (
-        <div className="fixed bottom-4 right-4 z-50 flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-900/20 text-emerald-400 border border-emerald-800/40">
+        <div
+          role="status"
+          className="fixed bottom-4 right-4 z-[70] flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-900/20 text-emerald-400 border border-emerald-800/40"
+        >
           <CheckCircle2 className="w-3 h-3" />
           <span className="text-xs font-medium">News template applied to future digests</span>
         </div>

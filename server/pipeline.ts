@@ -1061,7 +1061,13 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
               itemCountLastRun: result.notModified ? feed.itemCountLastRun : result.count,
               errorLog: result.warnings?.join('; ') || null,
               ssrfValidated: true,
-              etag: result.etag,
+              // An NVD++ run that stopped at the page budget returns only part of
+              // its window. Persisting the ETag it saw would make the next
+              // (resumed or re-issued) window send If-None-Match, get a 304 for
+              // the same state and end the run without reading the rest. Keep the
+              // previously stored validator until the window completes; the
+              // adapter then reports the window's own ETag.
+              etag: result.syncState?.pageCursor ? feed.etag : result.etag,
               consecutiveFailures: 0,
               circuitOpenUntil: null,
             });
