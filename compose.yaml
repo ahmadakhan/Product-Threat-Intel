@@ -17,6 +17,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
     networks: [backend]
   migrate:
     build: .
@@ -37,7 +42,10 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
-      NODE_OPTIONS: --max-old-space-size=320
+      # Keep the V8 heap below the container limit (2G) while leaving room for
+      # the base image, native buffers, and Chromium. --expose-gc enables the
+      # 90% memory-pressure GC hint in server/main.ts.
+      NODE_OPTIONS: --expose-gc --max-old-space-size=1536
       NODE_ENV: production
       PORT: 8080
       DATABASE_URL: postgresql://vulnstream_app:${APP_DB_PASSWORD:?Set runtime password}@db:5432/vulnstream
@@ -58,9 +66,12 @@ services:
       SMTP_FROM: ${SMTP_FROM:-}
       FEED_MAX_DURATION_SECONDS: ${FEED_MAX_DURATION_SECONDS:-1800}
       METRICS_TOKEN: ${METRICS_TOKEN:-}
-      # Only one replica runs background work (pipeline, outbox, digest,
-      # retention, ML training, session cleanup). Two workers would serialise the
-      # same claims against the same rows for no extra throughput.
+      # A guarded job is aborted only after this long without a progress
+      # heartbeat, not after this long in total. A single silent phase (one
+      # slow source request or a wedged statement) must fit below it; raise this
+      # value if operators observe aborts while a run is still making progress.
+      STUCK_PROMISE_MS: ${STUCK_PROMISE_MS:-300000}
+      # Single application instance: it runs the API and all background work.
       WORKER_ENABLED: ${WORKER_ENABLED:-true}
       CORRELATION_DLQ_DIRECTORY: /var/lib/vulnstream/deadletters
       # Dead letters live in PostgreSQL. The legacy directory below is only read
@@ -76,48 +87,16 @@ services:
       - correlation-deadletters:/var/lib/vulnstream/deadletters
       - ml-models:/var/lib/vulnstream/ml
     deploy:
-      replicas: 2
+      replicas: 1
       resources:
         limits:
-          cpus: '1'
-          memory: 512M
+          cpus: '2'
+          memory: 2G
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     stop_grace_period: 35s
-    networks: [backend, egress]
-  prometheus:
-    image: prom/prometheus:v3.15.1
-    profiles: [observability]
-    restart: unless-stopped
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.path=/prometheus
-      - --storage.tsdb.retention.time=30d
-      - --storage.tsdb.retention.size=512MB
-    secrets:
-      - source: vulnstream_metrics_token
-        target: vulnstream_metrics_token
-    ports: ['127.0.0.1:${PROMETHEUS_PORT:-9091}:9090']
-    volumes:
-      - prometheus-data:/prometheus
-      - ./deploy/monitoring/prometheus-compose.yml:/etc/prometheus/prometheus.yml:ro
-      - ./deploy/monitoring/vulnstream-alerts.yml:/etc/prometheus/vulnstream-alerts.yml:ro
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256M
-    healthcheck:
-      test: [CMD, wget, -q, --spider, http://127.0.0.1:9090/-/ready]
-      interval: 15s
-      timeout: 5s
-      retries: 5
     networks: [backend, egress]
   proxy:
     image: caddy:2-alpine
@@ -130,10 +109,14 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
     networks: [backend, egress]
 volumes:
   postgres-data:
-  prometheus-data:
   correlation-deadletters:
   ml-models:
   caddy-data:
@@ -142,7 +125,3 @@ networks:
   backend:
     internal: true
   egress:
-
-secrets:
-  vulnstream_metrics_token:
-    file: ./.runtime/metrics.token

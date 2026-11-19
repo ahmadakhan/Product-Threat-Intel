@@ -23,7 +23,7 @@
     "seed": "node --import tsx --env-file=.env scripts/seed.ts",
     "build:client": "vite build",
     "build:server": "node scripts/build-server.mjs",
-    "start": "node server-dist/main.js",
+    "start": "node --expose-gc server-dist/main.js",
     "start:supervised": "node scripts/supervisor.mjs",
     "operator:create": "node --env-file=.env server-dist/create-user.js",
     "correlation:preflight": "node --import tsx --env-file=.env scripts/correlation-preflight.ts",

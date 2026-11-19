@@ -212,6 +212,13 @@ const schema = z.object({
   // an earlier attempt was delivered; this flag can no longer disable that guard.
   MAIL_CONFIRM_BEFORE_SEND: z.enum(['true', 'false']).default('true'),
   FEED_MAX_DURATION_SECONDS: z.coerce.number().int().min(1).max(7200).default(1800),
+  // Watchdog silence window for guarded background jobs. A job's heartbeat
+  // resets this timer, so it bounds one silent stretch (a slow request or a
+  // wedged statement), not a whole ingestion run. The floor stays above the
+  // longest healthy silent phase (a 120 s NVD request plus socket and pool
+  // timeouts); operators should raise it, never lower it, when a legitimate
+  // phase can stay silent longer than five minutes.
+  STUCK_PROMISE_MS: z.coerce.number().int().min(240_000).max(3_600_000).default(300_000),
   // Background work (pipeline, outbox, digest, retention, ML training,
   // session cleanup) runs unless explicitly disabled. This must stay `true`:
   // .env and .env.example do not set it, so a `false` default silently turns

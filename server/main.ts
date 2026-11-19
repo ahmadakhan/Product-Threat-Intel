@@ -234,9 +234,20 @@ async function logMlTrainingResult(pool: Db, summary: TrainingSummary): Promise<
  * timeout, 60 s socket timeout, 5 s provider pacing between pages), and a
  * statement that hits the pool's timeout can add its own round trip. 5 minutes
  * leaves that maximum several times over while still replacing a wedged
- * instance in a bounded time. Configurable via STUCK_PROMISE_MS.
+ * instance in a bounded time. Configurable via STUCK_PROMISE_MS; the effective
+ * value and the feed duration budget are logged once at startup so operators
+ * can spot a threshold that is below a legitimate silent phase.
  */
-const STUCK_PROMISE_MS = Number(process.env.STUCK_PROMISE_MS ?? 5 * 60_000);
+const STUCK_PROMISE_MS = config.STUCK_PROMISE_MS;
+console.log(
+  JSON.stringify({
+    level: 'info',
+    event: 'config.watchdog',
+    stuckPromiseMs: STUCK_PROMISE_MS,
+    feedMaxDurationSeconds: config.FEED_MAX_DURATION_SECONDS,
+    timestamp: new Date().toISOString(),
+  }),
+);
 let digestStartedAt = 0;
 let pipelineStartedAt = 0;
 let outboxStartedAt = 0;
@@ -255,7 +266,10 @@ const tick = () => {
   void checkLeadership();
   if (!leadership.isLeader) return;
   if (pipeline && !pipelineController?.signal.aborted && Date.now() - pipelineStartedAt > STUCK_PROMISE_MS) {
-    const reason = new Error('Pipeline stopped making progress; cancelling the current attempt');
+    const silentMs = Date.now() - pipelineStartedAt;
+    const reason = new Error(
+      `Pipeline produced no progress for ${silentMs}ms (STUCK_PROMISE_MS=${STUCK_PROMISE_MS}); cancelling the current attempt`,
+    );
     void report('pipeline')(reason);
     pipelineController?.abort(reason);
   }

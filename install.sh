@@ -66,7 +66,7 @@ APP_DB_PASSWORD=$APP_DB_PASSWORD
 ENCRYPTION_KEY=$ENCRYPTION_KEY
 METRICS_TOKEN=$METRICS_TOKEN
 ML_SIGNING_KEY=$ML_SIGNING_KEY
-PROMETHEUS_PORT=9091
+STUCK_PROMISE_MS=300000
 LOG_LEVEL=standard
 SMTP_HOST=
 SMTP_PORT=465
@@ -84,7 +84,7 @@ chmod 600 .runtime/metrics.token
 unset POSTGRES_PASSWORD APP_DB_PASSWORD ENCRYPTION_KEY METRICS_TOKEN ML_SIGNING_KEY
 
 docker compose --env-file .env.production config --quiet
-docker compose --env-file .env.production up -d --build --scale app=2 --wait --wait-timeout 300
+docker compose --env-file .env.production up -d --build --scale app=1 --wait --wait-timeout 300
 
 printf '%s' "$ADMIN_PASSWORD" | docker compose --env-file .env.production exec -T app \
   node server-dist/create-user.js admin ADMIN

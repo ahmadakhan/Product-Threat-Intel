@@ -135,6 +135,15 @@ test('production requires a strong ML signing key and pool settings are validate
     () => loadConfig({ ...baseEnv, POOL_CONNECTION_TIMEOUT_MS: '0' }),
     /POOL_CONNECTION_TIMEOUT_MS/,
   );
+  assert.equal(loadConfig(baseEnv).STUCK_PROMISE_MS, 300_000);
+  assert.throws(
+    () => loadConfig({ ...baseEnv, STUCK_PROMISE_MS: '500' }),
+    /STUCK_PROMISE_MS/,
+  );
+  assert.throws(
+    () => loadConfig({ ...baseEnv, STUCK_PROMISE_MS: 'not-a-number' }),
+    /STUCK_PROMISE_MS/,
+  );
 });
 
 test('database storage modes are validated and retain filesystem defaults outside Compose', () => {

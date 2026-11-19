@@ -7,7 +7,7 @@ COPY . .
 RUN npm run lint && npm run build
 
 FROM node:26-alpine3.22 AS runtime
-ENV NODE_ENV=production PORT=8080
+ENV NODE_ENV=production PORT=8080 NODE_OPTIONS=--expose-gc
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 RUN apk upgrade --no-cache && apk add --no-cache chromium
 WORKDIR /app

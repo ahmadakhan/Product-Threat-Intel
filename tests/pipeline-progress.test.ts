@@ -52,9 +52,9 @@ test('a pipeline without a progress callback still heartbeats', (t) => {
 });
 
 test('the heartbeat period is short enough to outpace the stuck-promise backstop', (t) => {
-  // main.ts defaults STUCK_PROMISE_MS to 15 minutes. The heartbeat must fire
+  // main.ts defaults STUCK_PROMISE_MS to 5 minutes. The heartbeat must fire
   // many times inside that window for the backstop to ever observe liveness.
-  const stuckPromiseDefaultMs = 15 * 60_000;
+  const stuckPromiseDefaultMs = 5 * 60_000;
   const signalsWithinWindow = Math.floor(stuckPromiseDefaultMs / PIPELINE_HEARTBEAT_MS);
   assert.ok(
     signalsWithinWindow >= 10,

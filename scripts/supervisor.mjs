@@ -2,21 +2,22 @@
 /**
  * Crash-recovery supervisor for the VulnStream application process.
  *
- * Spawns the application (`node server-dist/main.js`) and restarts it whenever
+ * Spawns the application (`node --expose-gc server-dist/main.js`) and restarts it whenever
  * it exits, with exponential backoff capped at MAX_RESTART_DELAY_MS. This is
  * the "always running" guarantee for installs that have no container
  * orchestrator restarting the process (bare metal, systemd, a VM).
  *
  * Under Docker Compose or Kubernetes the orchestrator already restarts the
  * container; use the orchestrator's restart policy there and run the app
- * directly (`node server-dist/main.js`) instead of this supervisor.
+ * directly (`node --expose-gc server-dist/main.js`) instead of this supervisor.
  *
  * A SIGTERM/SIGINT stops the loop: the current child is terminated and the
  * supervisor exits without restarting, so an operator or orchestrator can take
  * the instance out of service cleanly.
  *
  * Environment:
- *   VULNSTREAM_APP_COMMAND          command to run the app (default: node server-dist/main.js)
+ *   VULNSTREAM_APP_COMMAND          command to run the app
+ *                                   (default: node --expose-gc server-dist/main.js)
  *   VULNSTREAM_BASE_RESTART_DELAY_MS initial backoff (default: 2000)
  *   VULNSTREAM_MAX_RESTART_DELAY_MS  cap on backoff (default: 300000)
  *   VULNSTREAM_MAX_CONSECUTIVE_FAST_FAILURES fast-loop trip count (default: 5)
@@ -25,7 +26,8 @@
 
 import { spawn } from 'node:child_process';
 
-const APP_COMMAND = process.env.VULNSTREAM_APP_COMMAND ?? 'node server-dist/main.js';
+const APP_COMMAND =
+  process.env.VULNSTREAM_APP_COMMAND ?? 'node --expose-gc server-dist/main.js';
 const [APP_BIN, ...APP_ARGS] = APP_COMMAND.split(/\s+/);
 const BASE_RESTART_DELAY_MS = Number(process.env.VULNSTREAM_BASE_RESTART_DELAY_MS ?? 2_000);
 const MAX_RESTART_DELAY_MS = Number(process.env.VULNSTREAM_MAX_RESTART_DELAY_MS ?? 300_000);

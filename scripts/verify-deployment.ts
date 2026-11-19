@@ -1,11 +1,11 @@
-/** Read-only deployment checks by default; --exercise explicitly tests one app outage. */
+/** Read-only deployment checks by default; --exercise restarts the single app instance. */
 import { execFileSync } from 'node:child_process';
 import { request } from 'node:https';
 import { rootCertificates } from 'node:tls';
 import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 import { writeFile } from 'node:fs/promises';
-const appNames = ['vulnstream-enterprise-app-1', 'vulnstream-enterprise-app-2'];
+const appName = 'vulnstream-enterprise-app-1';
 const proxy = 'vulnstream-enterprise-proxy-1';
 const exercise = process.argv.includes('--exercise');
 if (!process.env.APP_ORIGIN) throw new Error('APP_ORIGIN required');
@@ -48,96 +48,60 @@ async function probe(): Promise<number> {
     req.end();
   });
 }
-function containersHealthy(): boolean {
-  return appNames.every((name) => {
-    const data = JSON.parse(docker(['inspect', name]))[0] as {
-      State: { Health?: { Status: string } };
-      Config: { Labels: Record<string, string> };
-    };
-    if (
-      data.Config.Labels['com.docker.compose.project'] !== 'vulnstream-enterprise' ||
-      data.Config.Labels['com.docker.compose.service'] !== 'app'
-    )
-      throw new Error('UNEXPECTED_CONTAINER_OWNERSHIP');
-    return data.State.Health?.Status === 'healthy';
-  });
+function appHealthy(): boolean {
+  let data: {
+    State: { Health?: { Status: string } };
+    Config: { Labels: Record<string, string> };
+  };
+  try {
+    data = JSON.parse(docker(['inspect', appName]))[0];
+  } catch {
+    return false;
+  }
+  if (
+    data.Config.Labels['com.docker.compose.project'] !== 'vulnstream-enterprise' ||
+    data.Config.Labels['com.docker.compose.service'] !== 'app'
+  )
+    throw new Error('UNEXPECTED_CONTAINER_OWNERSHIP');
+  return data.State.Health?.Status === 'healthy';
+}
+async function waitForApp(attempts: number): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    if (appHealthy()) return true;
+    await delay(500);
+  }
+  return false;
 }
 const latencies: number[] = [];
-let stopped = false,
-  restored = false;
+let restarted = false;
 try {
-  if (!containersHealthy()) throw new Error('BOTH_REPLICAS_MUST_BE_HEALTHY');
+  if (!appHealthy()) throw new Error('APP_MUST_BE_HEALTHY');
+  // Warm the proxy before the restart so the first probe is not confused with
+  // a cold upstream connection.
   latencies.push(await probe());
   if (exercise) {
-    stopped = true;
-    docker(['stop', '--time', '20', appNames[1]]);
+    docker(['stop', '--time', '20', appName]);
+    docker(['start', appName]);
+    restarted = await waitForApp(240);
+    if (!restarted) throw new Error('APP_DID_NOT_RECOVER');
   }
   for (let i = 0; i < 10; i++) latencies.push(await probe());
 } finally {
-  if (stopped) {
-    docker(['start', appNames[1]]);
-    for (let i = 0; i < 120; i++) {
-      try {
-        docker([
-          'exec',
-          appNames[1],
-          'node',
-          '--input-type=module',
-          '-e',
-          'const r=await fetch("http://127.0.0.1:8080/ready");process.exit(r.ok?0:1);',
-        ]);
-        if (containersHealthy()) {
-          restored = true;
-          break;
-        }
-        await delay(500);
-      } catch {
-        await delay(500);
-      }
+  // A failed exercise must leave the service running, not stopped.
+  if (exercise && !restarted) {
+    try {
+      docker(['start', appName]);
+    } catch {
+      /* the operator still has the failing status in the thrown error */
     }
-    if (!restored) throw new Error('REPLICA_DID_NOT_RECOVER');
   }
 }
-let targets = JSON.parse(
-  docker([
-    'exec',
-    'vulnstream-enterprise-prometheus-1',
-    'wget',
-    '-qO-',
-    'http://127.0.0.1:9090/api/v1/targets',
-  ]),
-) as { data: { activeTargets: { health: string }[] } };
-for (
-  let i = 0;
-  i < 45 &&
-  (targets.data.activeTargets.length < 2 ||
-    targets.data.activeTargets.some((target) => target.health !== 'up'));
-  i++
-) {
-  await delay(1000);
-  targets = JSON.parse(
-    docker([
-      'exec',
-      'vulnstream-enterprise-prometheus-1',
-      'wget',
-      '-qO-',
-      'http://127.0.0.1:9090/api/v1/targets',
-    ]),
-  );
-}
-if (
-  targets.data.activeTargets.length < 2 ||
-  targets.data.activeTargets.some((target) => target.health !== 'up')
-)
-  throw new Error('MONITORING_TARGETS_UNHEALTHY');
 const report = {
   proxyRequests: latencies.length,
   proxyFailures: 0,
   maxProxyLatencyMs: Math.max(...latencies),
-  singleReplicaOutageExercised: exercise,
-  replicaRestored: exercise ? restored : null,
-  monitoringTargets: targets.data.activeTargets.length,
-  healthyMonitoringTargets: targets.data.activeTargets.filter((target) => target.health === 'up').length,
+  singleAppRestartExercised: exercise,
+  appRestored: exercise ? restarted : null,
 };
 console.log(JSON.stringify(report, null, 2));
 if (process.env.CORRELATION_DEPLOYMENT_REPORT)
