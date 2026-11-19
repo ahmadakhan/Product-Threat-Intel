@@ -1,25 +1,18 @@
 import { WorkerLeadership } from './leadership.ts';
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { getHeapStatistics } from 'node:v8';
 import { totalmem } from 'node:os';
 import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
+// `npm start` does not pass --env-file, so keep the historical convenience of
+// reading ./.env when the process was started without a DATABASE_URL. Use the
+// runtime parser instead of a hand-rolled one: it handles quoting, escaped
+// newlines, and comments the same way as `--env-file`, and it does not
+// overwrite variables already present in the environment.
 const _envPath = join(process.cwd(), '.env');
 if (existsSync(_envPath) && !process.env.DATABASE_URL) {
-  const _raw = readFileSync(_envPath, 'utf8');
-  for (const _line of _raw.split(String.fromCharCode(10))) {
-    const _trimmed = _line.trim();
-    if (!_trimmed || _trimmed.startsWith('#')) continue;
-    const _eq = _trimmed.indexOf('=');
-    if (_eq === -1) continue;
-    const _key = _trimmed.slice(0, _eq).trim();
-    const _value = _trimmed
-      .slice(_eq + 1)
-      .trim()
-      .replace(/^['"]|['"]$/g, '');
-    if (!(_key in process.env)) process.env[_key] = _value;
-  }
+  process.loadEnvFile(_envPath);
 }
 
 import { backfillCorrelationInventory } from './correlation/inventory.ts';

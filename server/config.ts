@@ -136,7 +136,30 @@ export const DEFAULT_EGRESS_HOSTS = [
   'psirt.global.sonicwall.com', // Web portal redirect target
 ].join(',');
 
+/**
+ * PostgreSQL pool tuning belongs to the environment contract: `pg` accepts
+ * `NaN` silently, so a typo such as `POOL_MAX_CONNECTIONS=lots` used to reach
+ * the driver as an invalid setting instead of failing startup. Empty strings
+ * are treated as unset because Compose renders `${VAR:-}` that way.
+ */
+const poolNumber = (min: number, max: number, fallback: number) =>
+  z.preprocess(
+    (value) => (value === '' || value === undefined ? undefined : value),
+    z.coerce.number().int().min(min).max(max).default(fallback),
+  );
+
+const poolSchema = {
+  // Server-side per-session statement guard, applied through libpq options.
+  POOL_STATEMENT_TIMEOUT_MS: poolNumber(100, 3_600_000, 15_000),
+  POOL_KEEPALIVE_DELAY_MS: poolNumber(0, 600_000, 5_000),
+  POOL_MAX_CONNECTIONS: poolNumber(1, 1_000, 25),
+  POOL_CONNECTION_TIMEOUT_MS: poolNumber(100, 600_000, 5_000),
+  POOL_IDLE_TIMEOUT_MS: poolNumber(1_000, 3_600_000, 30_000),
+  POOL_MAX_LIFETIME_MS: poolNumber(1_000, 86_400_000, 600_000),
+};
+
 const schema = z.object({
+  ...poolSchema,
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   METRICS_TOKEN: z
     .string()
@@ -218,7 +241,14 @@ const schema = z.object({
   CORRELATION_DLQ_STORAGE_MODE: z.enum(['database', 'filesystem']).default('filesystem'),
   ML_DIRECTORY: z.string().default('/var/lib/vulnstream/ml'),
   ML_STORAGE_MODE: z.enum(['database', 'filesystem']).default('filesystem'),
-  ML_SIGNING_KEY: z.string().optional(),
+  // HMAC key for ML artifacts. A short key weakens the integrity check, and an
+  // unset key makes signature verification a no-op, so production requires it.
+  // An empty value is "unset" (Compose renders ${ML_SIGNING_KEY:-} that way and
+  // .env.example ships blank) rather than a zero-length key.
+  ML_SIGNING_KEY: z.preprocess(
+    (value) => (value === '' ? undefined : value),
+    z.string().min(32, 'ML_SIGNING_KEY must contain at least 32 characters').optional(),
+  ),
   ML_LOOKBACK_DAYS: z.coerce.number().int().min(1).max(90).default(7),
   // Controls stdout verbosity for structured operational logs. 'standard' keeps
   // output to lifecycle and error events; 'verbose' adds per-tick detail for
@@ -229,6 +259,32 @@ const schema = z.object({
   INSTANCE_ID: z.string().trim().min(1).max(128).optional(),
 });
 export type Config = z.infer<typeof schema>;
+
+export interface PoolSettings {
+  statementTimeoutMs: number;
+  keepAliveDelayMs: number;
+  maxConnections: number;
+  connectionTimeoutMs: number;
+  idleTimeoutMs: number;
+  maxLifetimeMs: number;
+}
+
+/**
+ * Parse the pool settings on their own. `createPool` is also called by scripts
+ * and tests that never load the full application config, so it must validate
+ * the same variables without requiring DATABASE_URL, APP_ORIGIN, and the rest.
+ */
+export function loadPoolSettings(env: NodeJS.ProcessEnv = process.env): PoolSettings {
+  const parsed = z.object(poolSchema).parse(env);
+  return {
+    statementTimeoutMs: parsed.POOL_STATEMENT_TIMEOUT_MS,
+    keepAliveDelayMs: parsed.POOL_KEEPALIVE_DELAY_MS,
+    maxConnections: parsed.POOL_MAX_CONNECTIONS,
+    connectionTimeoutMs: parsed.POOL_CONNECTION_TIMEOUT_MS,
+    idleTimeoutMs: parsed.POOL_IDLE_TIMEOUT_MS,
+    maxLifetimeMs: parsed.POOL_MAX_LIFETIME_MS,
+  };
+}
 /**
  * Union the allowlist with operator additions, lowercased and de-duplicated.
  * Exported so the merge is testable without a full environment.
@@ -323,6 +379,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (config.NODE_ENV === 'production' && origin.protocol !== 'https:' && config.ALLOW_INSECURE_HTTP !== 'true')
     throw new Error('Production requires an HTTPS APP_ORIGIN unless ALLOW_INSECURE_HTTP is enabled for a private or Tailscale IPv4 origin');
   if (Buffer.from(config.ENCRYPTION_KEY, 'base64').length !== 32) throw new Error('Invalid encryption key');
+  if (config.NODE_ENV === 'production' && !config.ML_SIGNING_KEY)
+    throw new Error(
+      'ML_SIGNING_KEY is required in production: without it ML artifacts are loaded without integrity verification',
+    );
   if (config.NODE_ENV === 'production' && config.FAULT_SIMULATION_ENABLED === 'true')
     throw new Error('FAULT_SIMULATION_ENABLED is not permitted in production');
   if (config.HEARTBEAT_URL) {

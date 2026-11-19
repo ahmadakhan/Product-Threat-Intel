@@ -17,6 +17,7 @@ import { chainAuditLogs, hashAuditLog, SortedMerkleAccumulator } from '../src/ut
 import type { AuditLog } from '../src/types/index.ts';
 import { orderWatchlist } from '../src/utils/watchlist.ts';
 import { auditContext, auditText } from './audit.ts';
+import { loadPoolSettings } from './config.ts';
 export type Db = pg.Pool | PoolClient;
 
 /**
@@ -43,24 +44,23 @@ const withLibpqOption = (url: string, option: string): string => {
 };
 
 export const createPool = (url: string) => {
-  // Server-side per-session guard. A pool property named `statement_timeout` is
+  // Validated at the environment boundary (server/config.ts) so malformed
+  // values fail startup instead of reaching pg as NaN. The statement timeout is
+  // applied through libpq because a pool property named `statement_timeout` is
   // not supported by pg and is silently dropped, which left every query
-  // unbounded. Override per pool with POOL_STATEMENT_TIMEOUT_MS.
-  const statementTimeout = process.env.POOL_STATEMENT_TIMEOUT_MS
-    ? parseInt(process.env.POOL_STATEMENT_TIMEOUT_MS)
-    : 15000;
-  const keepAliveDelayMs = Number(process.env.POOL_KEEPALIVE_DELAY_MS ?? 5000);
+  // unbounded.
+  const settings = loadPoolSettings();
   const pool = new pg.Pool({
-    connectionString: withLibpqOption(url, `-c statement_timeout=${statementTimeout}`),
-    max: process.env.POOL_MAX_CONNECTIONS ? parseInt(process.env.POOL_MAX_CONNECTIONS) : 25,
-    connectionTimeoutMillis: process.env.POOL_CONNECTION_TIMEOUT_MS ? parseInt(process.env.POOL_CONNECTION_TIMEOUT_MS) : 5000,
-    idleTimeoutMillis: process.env.POOL_IDLE_TIMEOUT_MS ? parseInt(process.env.POOL_IDLE_TIMEOUT_MS) : 30000,
+    connectionString: withLibpqOption(url, `-c statement_timeout=${settings.statementTimeoutMs}`),
+    max: settings.maxConnections,
+    connectionTimeoutMillis: settings.connectionTimeoutMs,
+    idleTimeoutMillis: settings.idleTimeoutMs,
     application_name: 'vulnstream',
     timezone: 'LOCAL',
     // Production optimizations
     allowExitOnIdle: true,
     // Connection lifecycle management
-    maxLifetime: process.env.POOL_MAX_LIFETIME_MS ? parseInt(process.env.POOL_MAX_LIFETIME_MS) : 600000,
+    maxLifetime: settings.maxLifetimeMs,
     // A pooled connection can sit idle inside one transaction, or between the
     // client's and the server's view of a quiet period, long enough for a
     // NAT/firewall or cloud LB to silently reap it. Without keepalive the next
@@ -68,9 +68,9 @@ export const createPool = (url: string) => {
     // reads `keepAlive` and `keepAliveInitialDelayMillis`; the previous
     // `keepAliveDelay` was never read by pg or pg-pool and so did nothing.
     keepAlive: true,
-    keepAliveInitialDelayMillis: keepAliveDelayMs,
+    keepAliveInitialDelayMillis: settings.keepAliveDelayMs,
   } as any);
-  
+
   // Monitor connection pool health
   pool.on('connect', () => {
     console.log(JSON.stringify({
@@ -80,15 +80,21 @@ export const createPool = (url: string) => {
       totalCount: pool.totalCount,
     }));
   });
-  
-  pool.on('acquire', () => {
-    console.log(JSON.stringify({
-      level: 'info',
-      event: 'database-pool-acquired',
-      timestamp: new Date().toISOString(),
-      idleCount: pool.idleCount,
-    }));
-  });
+
+  // 'acquire' fires once per query checkout, so logging it at standard level
+  // wrote one structured line per query and dominated log volume on a busy
+  // deployment. Keep it behind the verbose log level used for per-operation
+  // diagnostics; pool health is already visible through connect/remove/error.
+  if (process.env.LOG_LEVEL === 'verbose') {
+    pool.on('acquire', () => {
+      console.log(JSON.stringify({
+        level: 'info',
+        event: 'database-pool-acquired',
+        timestamp: new Date().toISOString(),
+        idleCount: pool.idleCount,
+      }));
+    });
+  }
   
   // The 'remove' event is emitted when the pool disposes a client (for
   // example on timeout or when forced to shrink).  Logging this gives deeper

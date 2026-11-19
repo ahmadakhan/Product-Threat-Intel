@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ADMIN_COMMAND_ACTIONS, OPERATOR_COMMAND_ACTIONS, assertCommandRole } from '../server/commands.ts';
@@ -33,6 +34,7 @@ const ALL_COMMAND_ACTIONS = [
   'settings.save',
   'template.save',
   'dailyDigestTemplate.save',
+  'newsTemplate.save',
   'email.configure',
   'alias.save',
   'alias.delete',
@@ -46,6 +48,25 @@ test('every dispatcher action is classified exactly once (admin or operator)', (
   assert.equal(classified.size, ALL_COMMAND_ACTIONS.length, 'no duplicate classification');
   for (const action of ALL_COMMAND_ACTIONS)
     assert.ok(classified.has(action), `action ${action} must be classified`);
+});
+
+/**
+ * `ALL_COMMAND_ACTIONS` is hand-maintained, so on its own it cannot prove that
+ * every branch in `applyCommand` is reachable. `newsTemplate.save` was handled
+ * by the dispatcher and called by the UI while being absent from both role sets,
+ * which made the fail-closed check reject it with "Unknown command". Scan the
+ * dispatcher source so an unclassified handler branch fails this suite instead
+ * of shipping as a 400.
+ */
+test('every literal action branch in the dispatcher is classified', () => {
+  const source = readFileSync(new URL('../server/commands.ts', import.meta.url), 'utf8');
+  const branches = new Set([...source.matchAll(/\baction === '([^']+)'/g)].map((match) => match[1]));
+  assert.ok(branches.size > 0, 'expected to find action branches in the dispatcher');
+  const classified = new Set([...ADMIN_COMMAND_ACTIONS, ...OPERATOR_COMMAND_ACTIONS]);
+  for (const action of branches) {
+    assert.ok(classified.has(action), `dispatcher branch ${action} must be in ADMIN or OPERATOR actions`);
+    assert.ok(ALL_COMMAND_ACTIONS.includes(action), `${action} must be covered by ALL_COMMAND_ACTIONS`);
+  }
 });
 
 test('admin actions are rejected for non-ADMIN roles and allowed for ADMIN', () => {
@@ -233,6 +254,67 @@ test('dailyDigestTemplate.save preserves custom HTML when visual settings are sa
   });
   assert.equal(template.dailyDigestCustomTemplate, null);
   assert.equal(template.dailyDigestTemplate, compileDailyDigestTemplate(DEFAULT_DAILY_DIGEST_CUSTOMIZATION));
+});
+
+test('newsTemplate.save is reachable and preserves custom HTML when visual settings are saved', async () => {
+  const { applyCommand } = await import('../server/commands.ts');
+  const { loadConfig } = await import('../server/config.ts');
+  const { DEFAULT_TEMPLATE_CUSTOMIZATION, compileNewsTemplate } = await import(
+    '../src/utils/templateCompiler.ts'
+  );
+  const config = loadConfig({
+    NODE_ENV: 'test',
+    DATABASE_URL: 'postgresql://127.0.0.1:1/unused',
+    APP_ORIGIN: 'http://localhost',
+    ENCRYPTION_KEY: randomBytes(32).toString('base64'),
+    WORKER_ENABLED: 'false',
+  });
+  const customHtml = '<html><body><h1>News digest</h1></body></html>';
+  let template = { newsDigestCustomization: DEFAULT_TEMPLATE_CUSTOMIZATION } as Record<string, unknown>;
+  const db = {
+    query: async (sql: string, params?: unknown[]) => {
+      if (sql.startsWith('SELECT data FROM records WHERE kind=$1 AND id=$2 FOR UPDATE'))
+        return { rows: [{ data: template }] };
+      if (sql.startsWith('INSERT INTO records(kind,id,data)')) {
+        template = JSON.parse(String(params?.[2]));
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes('pg_advisory_xact_lock')) return { rows: [{ locked: true }] };
+      if (sql.startsWith('SELECT data FROM audit ORDER BY seq DESC LIMIT 1')) return { rows: [] };
+      if (sql.startsWith('INSERT INTO audit(data)')) return { rows: [], rowCount: 1 };
+      return { rows: [] };
+    },
+  } as never;
+
+  // The action must be classified (a regression made this throw "Unknown
+  // command" from assertCommandRole before the dispatcher was reached).
+  assert.doesNotThrow(() => assertCommandRole('newsTemplate.save', 'ADMIN'));
+  assert.throws(() => assertCommandRole('newsTemplate.save', 'OPERATOR'), /Administrator role required/);
+
+  await applyCommand(db, config, {
+    action: 'newsTemplate.save',
+    data: { newsDigestCustomization: DEFAULT_TEMPLATE_CUSTOMIZATION, newsDigestCustomTemplate: customHtml },
+    actor: 'admin',
+  });
+  assert.equal(template.newsDigestCustomTemplate, customHtml);
+  assert.equal(template.newsDigestTemplate, customHtml);
+
+  // A customization-only save must not delete the custom HTML.
+  await applyCommand(db, config, {
+    action: 'newsTemplate.save',
+    data: { newsDigestCustomization: DEFAULT_TEMPLATE_CUSTOMIZATION },
+    actor: 'admin',
+  });
+  assert.equal(template.newsDigestCustomTemplate, customHtml);
+
+  // Explicit null remains the deliberate removal signal and recompiles defaults.
+  await applyCommand(db, config, {
+    action: 'newsTemplate.save',
+    data: { newsDigestCustomization: DEFAULT_TEMPLATE_CUSTOMIZATION, newsDigestCustomTemplate: null },
+    actor: 'admin',
+  });
+  assert.equal(template.newsDigestCustomTemplate, null);
+  assert.equal(template.newsDigestTemplate, compileNewsTemplate(DEFAULT_TEMPLATE_CUSTOMIZATION));
 });
 
 test('pipeline state uses saved custom advisory HTML and falls back to generated customization', async () => {

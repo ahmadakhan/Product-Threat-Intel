@@ -7,6 +7,7 @@ const base = {
   APP_ORIGIN: 'https://vulnstream.example.com',
   ENCRYPTION_KEY: Buffer.alloc(32, 3).toString('base64'),
   NODE_ENV: 'production',
+  ML_SIGNING_KEY: 'test-only-ml-signing-key-0123456789',
 } as const;
 
 function captureWarnings(fn: () => void): string[] {

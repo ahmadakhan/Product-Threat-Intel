@@ -8,7 +8,7 @@
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, renameSync } from 'node:fs';
 import { createHmac } from 'node:crypto';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import type { Pool } from 'pg';
 import type { ModelArtifact, ModelMetadata, ModelRegistryEntry, ModelStorageOptions, TrainableModel, PredictionResult, FeedbackSignal } from './types.ts';
 import { secureEqual } from '../secrets.ts';
@@ -53,6 +53,20 @@ export class ModelRegistry {
       if (!existsSync(this.directory)) mkdirSync(this.directory, { recursive: true });
       this.loadManifest();
     }
+  }
+
+  /**
+   * Resolve a manifest-relative artifact path inside the configured directory.
+   * The manifest is a local file, but it is still data: a compromised or
+   * corrupted entry such as `../../etc/passwd` must never be read or unlinked
+   * outside the model directory. `resolve` also rejects absolute entries.
+   */
+  private artifactPath(relativePath: string): string {
+    const base = resolve(this.directory);
+    const full = resolve(base, relativePath);
+    if (full !== base && !full.startsWith(base + sep))
+      throw new Error(`ML artifact path escapes the model directory: ${relativePath}`);
+    return full;
   }
 
   private loadManifest(): void {
@@ -132,7 +146,7 @@ export class ModelRegistry {
 
     try {
       const data = JSON.parse(
-        readFileSync(join(this.directory, active.path), 'utf8'),
+        readFileSync(this.artifactPath(active.path), 'utf8'),
       ) as ModelArtifact;
       if (!this.hasValidSignature(data)) return this.rollback(model, modelId, 'INVALID_SIGNATURE');
       model.load(data);
@@ -222,7 +236,7 @@ export class ModelRegistry {
     const artifacts: Array<{ entry: ManifestArtifactEntry; artifact: ModelArtifact }> = [];
     for (const entry of manifestEntry.artifacts) {
       try {
-        const artifact = JSON.parse(readFileSync(join(this.directory, entry.path), 'utf8')) as ModelArtifact;
+        const artifact = JSON.parse(readFileSync(this.artifactPath(entry.path), 'utf8')) as ModelArtifact;
         if (this.hasValidSignature(artifact)) artifacts.push({ entry, artifact });
       } catch {
         // A bad legacy artifact is not imported; remaining versions can still recover the model.
@@ -247,7 +261,7 @@ export class ModelRegistry {
 
     for (const { entry } of artifacts) {
       try {
-        unlinkSync(join(this.directory, entry.path));
+        unlinkSync(this.artifactPath(entry.path));
       } catch {
         // The committed database copy is authoritative; cleanup is best effort.
       }
@@ -336,7 +350,7 @@ export class ModelRegistry {
 
     const prev = rollbackCandidates.sort((a, b) => b.trainedAt.localeCompare(a.trainedAt))[0];
     try {
-      const data = JSON.parse(readFileSync(join(this.directory, prev.path), 'utf8')) as ModelArtifact;
+      const data = JSON.parse(readFileSync(this.artifactPath(prev.path), 'utf8')) as ModelArtifact;
       if (!this.hasValidSignature(data)) {
         // Skip this corrupted or unsigned artifact and try the next candidate.
         const remainingRollbackCandidates = rollbackCandidates.filter((c) => c.version !== prev.version);
@@ -370,7 +384,7 @@ export class ModelRegistry {
     for (const entry of this.manifest[modelId]?.artifacts ?? []) {
       if (keep.has(entry.version)) continue;
       try {
-        const full = join(this.directory, entry.path);
+        const full = this.artifactPath(entry.path);
         if (existsSync(full)) unlinkSync(full);
       } catch {
         /* best-effort cleanup; the manifest entry is dropped regardless */
@@ -384,11 +398,13 @@ export class ModelRegistry {
       await this.persistDatabaseArtifact(modelId, artifact);
       return;
     }
-    const dir = join(this.directory, modelId);
+    const dir = this.artifactPath(modelId);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
     const filename = `${metadata.version}.json`;
-    const path = join(dir, filename);
+    // Contain the version-derived filename as well: a version containing `..`
+    // would otherwise write outside the model directory.
+    const path = this.artifactPath(join(modelId, filename));
     writeFileSync(path, JSON.stringify(artifact, null, 2), 'utf8');
 
     const manifestEntry = this.manifest[modelId] ?? {
@@ -428,11 +444,13 @@ export class ModelRegistry {
       await this.persistDatabaseArtifact(modelId, artifact);
       return;
     }
-    const dir = join(this.directory, modelId);
+    const dir = this.artifactPath(modelId);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
     const filename = `${metadata.version}.json`;
-    const path = join(dir, filename);
+    // Contain the version-derived filename as well: a version containing `..`
+    // would otherwise write outside the model directory.
+    const path = this.artifactPath(join(modelId, filename));
     writeFileSync(path, JSON.stringify(artifact, null, 2), 'utf8');
 
     const manifestEntry = this.manifest[modelId] ?? {
@@ -566,7 +584,7 @@ export class ModelRegistry {
     const entry = this.manifest[modelId];
     if (!entry) return;
     for (const artifact of entry.artifacts) {
-      const full = join(this.directory, artifact.path);
+      const full = this.artifactPath(artifact.path);
       try {
         if (existsSync(full)) unlinkSync(full);
       } catch {

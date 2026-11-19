@@ -12,6 +12,9 @@ const baseEnv = {
   DATABASE_URL: 'postgres://user:pass@127.0.0.1:5432/db',
   APP_ORIGIN: 'http://127.0.0.1:8080',
   ENCRYPTION_KEY: randomBytes(32).toString('base64'),
+  // Required in production; supplied here so the origin tests exercise the
+  // check they name rather than failing on the ML signing requirement first.
+  ML_SIGNING_KEY: 'test-only-ml-signing-key-0123456789',
 };
 
 const runRole = (roles: Parameters<typeof requireRole>, operator?: { role: string }) => {
@@ -94,6 +97,44 @@ test('production HTTP is opt-in for private IPv4 LAN origins only', () => {
     NODE_ENV: 'production',
     APP_ORIGIN: 'http://192.168.1.72:8088',
   }), /HTTPS APP_ORIGIN/);
+});
+
+test('production requires a strong ML signing key and pool settings are validated', () => {
+  const { ML_SIGNING_KEY: _omitted, ...withoutKey } = baseEnv;
+  assert.throws(
+    () =>
+      loadConfig({
+        ...withoutKey,
+        NODE_ENV: 'production',
+        APP_ORIGIN: 'https://vulnstream.example.com',
+      }),
+    /ML_SIGNING_KEY is required in production/,
+  );
+  assert.throws(
+    () => loadConfig({ ...baseEnv, ML_SIGNING_KEY: 'too-short' }),
+    /ML_SIGNING_KEY must contain at least 32 characters/,
+  );
+  // Compose and .env.example represent "unset" as an empty string.
+  assert.equal(loadConfig({ ...baseEnv, ML_SIGNING_KEY: '' }).ML_SIGNING_KEY, undefined);
+  assert.throws(
+    () =>
+      loadConfig({
+        ...withoutKey,
+        ML_SIGNING_KEY: '',
+        NODE_ENV: 'production',
+        APP_ORIGIN: 'https://vulnstream.example.com',
+      }),
+    /ML_SIGNING_KEY is required in production/,
+  );
+  assert.equal(loadConfig(baseEnv).POOL_MAX_CONNECTIONS, 25);
+  assert.throws(
+    () => loadConfig({ ...baseEnv, POOL_MAX_CONNECTIONS: 'lots' }),
+    /POOL_MAX_CONNECTIONS/,
+  );
+  assert.throws(
+    () => loadConfig({ ...baseEnv, POOL_CONNECTION_TIMEOUT_MS: '0' }),
+    /POOL_CONNECTION_TIMEOUT_MS/,
+  );
 });
 
 test('database storage modes are validated and retain filesystem defaults outside Compose', () => {

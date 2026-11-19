@@ -136,6 +136,7 @@ export const ADMIN_COMMAND_ACTIONS: ReadonlySet<string> = new Set([
   'settings.save',
   'template.save',
   'dailyDigestTemplate.save',
+  'newsTemplate.save',
   'email.configure',
   'alias.save',
   'alias.delete',
