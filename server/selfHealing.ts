@@ -44,6 +44,8 @@ const SCHEDULER_STALE_MS = 3 * 60_000;
 const RECENT_FAILURE_MS = 30 * 60_000;
 /** Recovery re-queues are rate limited so a crash loop cannot queue a run per tick. */
 const RECOVERY_RETRY_MS = 10 * 60_000;
+/** Max feeds recovered per tick to avoid a thundering herd of re-probes. */
+const FEED_RECOVERY_PER_TICK = 3;
 
 interface ComponentAlertState {
   lastAlertAt?: string;
@@ -316,9 +318,13 @@ export async function runSelfHealCheck(pool: Pool): Promise<void> {
     (feed) =>
       feed.enabled && feed.healthStatus === 'DOWN' && !(Date.parse(feed.circuitOpenUntil || '') > now),
   );
-  if (recoverableFeeds.length) {
+  // Stagger recovery: only clear a bounded number of feeds per tick so a mass
+  // outage doesn't trigger a thundering herd of re-probes on the next run.
+  const toRecover = recoverableFeeds.slice(0, FEED_RECOVERY_PER_TICK);
+  const deferred = recoverableFeeds.slice(FEED_RECOVERY_PER_TICK);
+  if (toRecover.length) {
     if (await claimRecoverySlot(pool, 'FEED', RECOVERY_RETRY_MS)) {
-      for (const feed of recoverableFeeds) {
+      for (const feed of toRecover) {
         await transaction(pool, async (db) => {
           const current = await getForUpdate<ThreatFeed>(db, 'feeds', feed.id);
           if (
@@ -337,6 +343,7 @@ export async function runSelfHealCheck(pool: Pool): Promise<void> {
         });
       }
     }
+    // Alert includes all recoverable feeds, not just this tick's batch.
     await queueSecurityAlert(
       pool,
       'FEED',
@@ -362,6 +369,7 @@ export async function runSelfHealCheck(pool: Pool): Promise<void> {
       },
     }).catch(() => undefined);
   }
+  // Deferred feeds keep their circuit; they'll be recovered on a later tick.
 
   // SYSTEM: database reachability and process memory.
   const issues: string[] = [];

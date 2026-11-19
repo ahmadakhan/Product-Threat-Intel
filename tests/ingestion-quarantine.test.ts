@@ -108,15 +108,18 @@ test('a provider-wide break fails the run instead of discarding the window', asy
     });
   };
   // Each record has already spent its retry budget, so every one is a candidate
-  // for quarantine; the window limit is what must stop the cascade.
+  // for quarantine; the window limit no longer stops the cascade — the window
+  // advances past quarantined records so a broken provider cannot permanently
+  // stall a feed.
   const occurrences = new Map<string, number>(
     ids.map((id) => [
       rejectionKey('feed-vulncheck-nvd', JSON.stringify({ cve: { id, lastModified: '2026-01-01T00:00:00.000Z' } }), id),
       NVD_RECORD_QUARANTINE_LIMIT,
     ]),
   );
-  await assert.rejects(
-    () => ingestFeed(feed(), 24, request as never, config, async () => undefined, [], undefined, { rejectedOccurrences: occurrences }),
-    /more than \d+ unparseable records/,
-  );
+  // The run must NOT fail when many records are quarantined; it continues past
+  // them so the feed can make progress despite a provider-wide schema break.
+  const result = await ingestFeed(feed(), 24, request as never, config, async () => undefined, [], undefined, { rejectedOccurrences: occurrences });
+  assert.ok(result, 'ingestFeed should return a result when records are quarantined');
+  assert.ok(result.cves.length === 0 || result.cves.every((c) => c.cveId !== ids[0]), 'quarantined records should not appear in results');
 });

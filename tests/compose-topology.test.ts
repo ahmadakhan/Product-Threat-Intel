@@ -38,6 +38,37 @@ test('db and proxy have explicit CPU and memory limits', () => {
   assert.equal((compose.match(/^\s{8}limits:$/gm) ?? []).length, 3, 'db, app, and proxy all need limits');
 });
 
+test('long-running services restart after a crash or host reboot', () => {
+  for (const name of ['db', 'app', 'proxy']) {
+    assert.match(serviceBlock(name), /restart: always/, `${name} must always restart`);
+  }
+  // migrate is a one-shot job; restarting it would loop forever.
+  assert.match(serviceBlock('migrate'), /restart: 'no'/);
+});
+
+test('the app and proxy expose healthchecks the host healer can act on', () => {
+  const app = serviceBlock('app');
+  assert.match(app, /HANG_DETECTION_ENABLED: 'true'/);
+  assert.match(app, /healthcheck:/);
+  assert.match(app, /\/live/);
+  assert.match(serviceBlock('proxy'), /healthcheck:/);
+  assert.match(serviceBlock('proxy'), /nc -z 127\.0\.0\.1 80/);
+});
+
+test('the host healer service and timer are installed together', () => {
+  const service = readFileSync(
+    new URL('../deploy/vulnstream-compose-heal.service', import.meta.url),
+    'utf8',
+  );
+  const timer = readFileSync(
+    new URL('../deploy/vulnstream-compose-heal.timer', import.meta.url),
+    'utf8',
+  );
+  assert.match(service, /heal-compose\.mjs/);
+  assert.match(timer, /Unit=vulnstream-compose-heal\.service/);
+  assert.match(timer, /OnBootSec=/);
+});
+
 test('Prometheus is not part of the Compose deployment', () => {
   assert.doesNotMatch(compose, /^\s{2}prometheus:$/m);
   assert.doesNotMatch(compose, /prometheus-data/);

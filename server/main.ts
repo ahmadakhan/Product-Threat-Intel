@@ -35,7 +35,7 @@ import { enrichmentBacklogCandidates } from '../src/engine/pipelineEngine';
 import type { TrainingSummary } from './ml/train/orchestrator.ts';
 import { isTelemetryAnomaly, shouldSampleMlTelemetry } from './ml/integration.ts';
 import type { Db } from './db';
-import { processPipeline } from './pipeline';
+import { processPipeline, setAbortReason, ABORT_REASON } from './pipeline';
 import { runSelfHealCheck } from './selfHealing';
 import { runRetention } from './retention';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
@@ -106,7 +106,17 @@ if (config.WORKER_ENABLED === 'true') correlation.start();
 else correlation.supervisor.start();
 
 const mlRuntime = await initMlRuntime(pool, mlStorageOptions)
-  .catch((error) => { console.error('ML runtime init failed:', error); return undefined; });
+  .catch((error) => {
+    console.error('ML runtime init failed:', error);
+    void writeEvent(pool, {
+      category: 'ML',
+      level: 'WARNING',
+      code: 'ml.runtime_init_failed',
+      message: 'ML runtime failed to initialize; confidence scoring and retry-delay optimization will degrade',
+      context: { error: (error as Error).message },
+    }).catch(() => undefined);
+    return undefined;
+  });
 const app = createApp(pool, config, request, { correlation, mlRuntime,
   // The liveness probe only performs the stall check where the probe timeout is
   // comfortably above the block threshold; see the option's documentation.
@@ -114,7 +124,14 @@ const app = createApp(pool, config, request, { correlation, mlRuntime,
 });
 // A dedicated database session owns worker leadership for its entire term.
 const leadership = new WorkerLeadership(pool, config.INSTANCE_ID || randomUUID(), () => {
-  pipelineController?.abort(new Error('Worker leadership lost'));
+  // An abort needs an engine reason too, or `transaction()` cannot tell the
+  // loss from its own deadline (see `setAbortReason`).
+  if (pipelineController) {
+    setAbortReason(pipelineController);
+    const leadershipLost = new Error('Worker leadership lost');
+    (leadershipLost as { [ABORT_REASON]?: boolean })[ABORT_REASON] = true;
+    pipelineController.abort(leadershipLost);
+  }
 });
 const checkLeadership = () => leadership.check().catch(report('leader-election'));
 /**
@@ -186,6 +203,41 @@ const report = (event: string) => (error: unknown) => {
   });
   console.error(JSON.stringify({ level: 'error', event, ...detail }));
 };
+/**
+ * Is this rejection an operator/shutdown/watchdog abort rather than a failure?
+ *
+ * Cancellation is signalled only through the AbortController LIFECYCLE: every
+ * external abort call site below stamps its AbortController with an abort
+ * reason. Once an attempt was cancelled, that signal is cancelled for the whole
+ * rejection, so a transient failure that merely lost the same signal is
+ * classified as an abort too. A rejection that reaches the worker without its
+ * attempt being aborted is never classified as an abort.
+ */
+/** Sentinel stamped on abort reasons so they can be recognized regardless of
+ *  constructor or message text. Used by `reasonAborted` to distinguish
+ *  intentional cancellations (shutdown, leadership loss, watchdog) from
+ *  genuine failures. (Defined and exported from pipeline.ts as ABORT_REASON.)
+ */
+
+const reasonAborted = (reason: unknown): boolean => {
+  // The run's own attempt was cancelled (shutdown, leadership loss, watchdog).
+  if (pipelineController?.signal.aborted) return true;
+  // Sentinel stamped by our own abort call sites.
+  if (reason && typeof reason === 'object' && (reason as { [ABORT_REASON]?: boolean })[ABORT_REASON])
+    return true;
+  // A WHATWG timeout reason (AbortSignal.timeout) has name "TimeoutError".
+  const name = reason && typeof reason === 'object' ? (reason as { name?: unknown }).name : undefined;
+  if (name === 'TimeoutError') return true;
+  // DOMException from signal.throwIfAborted() has name "Aborted".
+  if (name === 'Aborted') return true;
+  return false;
+};
+
+const stampAborted = (reason: Error): Error => {
+  (reason as { [ABORT_REASON]?: boolean })[ABORT_REASON] = true;
+  return reason;
+};
+
 
 /**
  * Writes a structured ML training result event to the operational log.
@@ -271,7 +323,12 @@ const tick = () => {
       `Pipeline produced no progress for ${silentMs}ms (STUCK_PROMISE_MS=${STUCK_PROMISE_MS}); cancelling the current attempt`,
     );
     void report('pipeline')(reason);
-    pipelineController?.abort(reason);
+    // The stall is the engine's external reason, not an internal error: stamp
+    // it explicitly so `reasonAborted` cannot mistake it for a failure.
+    if (pipelineController) {
+      setAbortReason(pipelineController);
+      pipelineController.abort(reason);
+    }
   }
   if (!pipeline) {
     pipelineStartedAt = Date.now();
@@ -284,7 +341,14 @@ const tick = () => {
         verboseLog('pipeline.completed', { processed: result });
         return result;
       })
-      .catch(report('pipeline'))
+      // Aborts are expected: shutdown, losing leadership, or the stall watchdog
+      // all cancel the current attempt. Reporting one as a worker failure writes
+      // an ERROR event (and queues a security alert) for work the operator or
+      // the watchdog deliberately stopped, so `reasonAborted` classifies them
+      // and every other rejection is still reported as a failure.
+      .catch((error) => {
+        if (!reasonAborted(error)) report('pipeline')(error);
+      })
       .finally(() => {
         if (pipelineController === controller) {
           pipeline = null;
@@ -426,7 +490,7 @@ const RETENTION_RUN_LIMIT_MS = 10 * 60_000;
  * from a legitimately slow sweep and runs a concurrent cleanup under the same
  * schedule row. It is 2x the run limit so a run that finishes near its deadline
  * is never raced. */
-const RETENTION_CLAIM_TTL_MS = 2 * RETENTION_RUN_LIMIT_MS;
+const RETENTION_CLAIM_TTL_MS = 3 * RETENTION_RUN_LIMIT_MS;
 async function claimRetention(policy: AppSettings['retentionConfig']): Promise<boolean> {
   return transaction(
     pool,
@@ -536,23 +600,33 @@ retentionTick();
 let dailyDigestRunning: Promise<unknown> | null = null;
 let dailyDigestStartedAt = 0;
 let dailyDigestGeneration = 0;
+let dailyDigestController: AbortController | undefined;
 const dailyDigestTick = () => {
   if (dailyDigestRunning && Date.now() - dailyDigestStartedAt > STUCK_PROMISE_MS) {
     void report('dailyDigest')(new Error('Previous daily digest run is still running; starting a new attempt'));
     dailyDigestGeneration++;
     dailyDigestRunning = null;
+    dailyDigestController?.abort(new Error('Daily digest stalled; cancelled'));
+    dailyDigestController = undefined;
   }
   if (stopping || config.WORKER_ENABLED !== 'true' || !leadership.isLeader || dailyDigestRunning) return;
   dailyDigestStartedAt = Date.now();
   const generation = ++dailyDigestGeneration;
+  dailyDigestController = new AbortController();
+  const stuckTimer = setTimeout(() => {
+    dailyDigestController?.abort(new Error(`Daily digest exceeded ${STUCK_PROMISE_MS}ms`));
+  }, STUCK_PROMISE_MS);
+  stuckTimer.unref();
   dailyDigestRunning = (async () => {
     verboseLog('dailyDigest.start');
-    await runDailyDigest(pool);
+    await runDailyDigest(pool, dailyDigestController.signal);
     verboseLog('dailyDigest.completed');
   })()
     .catch(report('dailyDigest'))
     .finally(() => {
+      clearTimeout(stuckTimer);
       if (dailyDigestGeneration === generation) dailyDigestRunning = null;
+      dailyDigestController = undefined;
     });
 };
 const ML_TRAINING_INTERVAL_MS = Number(process.env.ML_TRAINING_INTERVAL_MS ?? 60 * 60_000);
@@ -608,11 +682,13 @@ const mlTrainingTick = () => {
       // Release the claim on failure so the next tick (or another replica) can
       // retry immediately instead of waiting out the claim TTL. A stale run
       // must not clear a newer owner's claim.
-      return pool
+      const releaseClaim = pool
         .query(
           "UPDATE records SET data=data || jsonb_build_object('claimedAt',NULL,'claimToken',NULL) WHERE kind='systemState' AND id=$1 AND data->>'claimToken'=$2",
           [ML_TRAINING_SCHEDULE_ID, claimToken],
         )
+        .catch(() => undefined);
+      return releaseClaim
         .catch(() => undefined)
         .then(() => {
           if (error instanceof TrainingAlreadyRunningError) return null;
@@ -726,66 +802,69 @@ const deadLetterRetryTick = async () => {
       for (const row of rows.rows) {
         try {
           const deadLetter = parseRecordData<{ findingId?: string; id?: string }>(row.data);
-          // Re-queue the finding through the normal pipeline path by marking
-          // the finding as not-yet-dispatched so the next pipeline run picks it up.
           const findingId = deadLetter.findingId || deadLetter.id;
-          const finding = findingId
-            ? await get<Finding>(pool, 'findings', findingId)
-            : undefined;
-          // The dead letter is always resolved: leaving it open would retry it
-          // every tick forever, and its retry budget lives on the finding, not
-          // on this row. An orphaned letter (no finding) has nothing to retry.
-          if (finding) {
-            const attempts = (finding.deadLetterCount ?? 0) + 1;
-            // A resolved, dismissed or patched finding is a terminal operator
-            // decision; re-queueing it would resurrect a finding they closed.
-            const terminal = ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status);
-            if (terminal) {
-              // Nothing to do beyond closing the letter.
-            } else if (attempts > MAX_DEAD_LETTER_RETRIES) {
-              exhausted++;
-              await put(pool, 'findings', findingId!, {
-                ...finding,
-                // The budget is left exactly as it is: it is spent, and a later
-                // requeue must not inherit a larger allowance than it had.
-                // Park it as a terminal, operator-visible failure. The next
-                // pipeline run must not silently turn this back into a resend;
-                // reconcileFindings preserves DELIVERY_FAILED (see its comment).
-                notificationStatus: 'DELIVERY_FAILED',
-                dispatchDeferred: true,
-                timeline: [
-                  ...(finding.timeline ?? []),
-                  {
-                    timestamp: new Date().toISOString(),
-                    action: 'Dead-letter retry budget exhausted',
-                    system: 'Delivery worker',
-                    details: `${MAX_DEAD_LETTER_RETRIES} automatic retries did not reach the recipient; operator action required`,
-                  },
-                ],
-              });
-              await writeEvent(pool, {
-                category: 'EMAIL',
-                level: 'ERROR',
-                code: 'deadLetter.retry_exhausted',
-                message: `Finding ${findingId} exhausted ${MAX_DEAD_LETTER_RETRIES} dead-letter retries; parked for operator action`,
-                context: { findingId: findingId, cveId: finding.cveId, attempts },
-              }).catch(() => undefined);
-            } else {
-              await put(pool, 'findings', findingId!, {
-                ...finding,
-                deadLetterCount: attempts,
-                notificationStatus: 'QUEUED_FOR_DISPATCH',
-                autoDispatchedAt: null,
-                reviewNotifiedAt: null,
-              });
-              retried++;
+          await transaction(pool, async (db) => {
+            // Re-queue the finding through the normal pipeline path by marking
+            // the finding as not-yet-dispatched so the next pipeline run picks it up.
+            const finding = findingId ? await get<Finding>(db, 'findings', findingId) : undefined;
+            // The dead letter is always resolved: leaving it open would retry it
+            // every tick forever, and its retry budget lives on the finding, not
+            // on this row. An orphaned letter (no finding) has nothing to retry.
+            if (finding) {
+              const attempts = (finding.deadLetterCount ?? 0) + 1;
+              // A resolved, dismissed or patched finding is a terminal operator
+              // decision; re-queueing it would resurrect a finding they closed.
+              const terminal = ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status);
+              if (terminal) {
+                // Nothing to do beyond closing the letter.
+              } else if (attempts > MAX_DEAD_LETTER_RETRIES) {
+                exhausted++;
+                await put(db, 'findings', findingId!, {
+                  ...finding,
+                  // The budget is left exactly as it is: it is spent, and a later
+                  // requeue must not inherit a larger allowance than it had.
+                  // Park it as a terminal, operator-visible failure. The next
+                  // pipeline run must not silently turn this back into a resend;
+                  // reconcileFindings preserves DELIVERY_FAILED (see its comment).
+                  notificationStatus: 'DELIVERY_FAILED',
+                  dispatchDeferred: true,
+                  timeline: [
+                    ...(finding.timeline ?? []),
+                    {
+                      timestamp: new Date().toISOString(),
+                      action: 'Dead-letter retry budget exhausted',
+                      system: 'Delivery worker',
+                      details: `${MAX_DEAD_LETTER_RETRIES} automatic retries did not reach the recipient; operator action required`,
+                    },
+                  ],
+                });
+                await writeEvent(db, {
+                  category: 'EMAIL',
+                  level: 'ERROR',
+                  code: 'deadLetter.retry_exhausted',
+                  message: `Finding ${findingId} exhausted ${MAX_DEAD_LETTER_RETRIES} dead-letter retries; parked for operator action`,
+                  context: { findingId: findingId, cveId: finding.cveId, attempts },
+                }).catch(() => undefined);
+              } else {
+                await put(db, 'findings', findingId!, {
+                  ...finding,
+                  deadLetterCount: attempts,
+                  notificationStatus: 'QUEUED_FOR_DISPATCH',
+                  autoDispatchedAt: null,
+                  reviewNotifiedAt: null,
+                });
+                retried++;
+              }
             }
-          }
-          // Mark the dead letter as resolved (handled: retried, parked, or orphaned)
-          await put(pool, 'delivery_dead_letters', row.id, {
-            ...deadLetter,
-            resolvedAt: new Date().toISOString(),
-            resolvedBy: 'auto-retry',
+            // Mark the dead letter as resolved (handled: retried, parked, or orphaned).
+            // Re-queue happens before resolve in the same transaction so a crash
+            // between the two leaves the finding re-queued (idempotent via
+            // delivery dedupe) and the dead letter unresolved (retried next tick).
+            await put(db, 'delivery_dead_letters', row.id, {
+              ...deadLetter,
+              resolvedAt: new Date().toISOString(),
+              resolvedBy: 'auto-retry',
+            });
           });
         } catch (error) {
           void report('deadLetter.retry')(error);
@@ -866,7 +945,12 @@ cleanup.unref();
 async function shutdown() {
   if (stopping) return;
   stopping = true;
-  pipelineController?.abort(new Error('Pipeline cancelled during shutdown'));
+  if (pipelineController) {
+    setAbortReason(pipelineController);
+    const shutdownReason = new Error('Pipeline cancelled during shutdown');
+    (shutdownReason as { [ABORT_REASON]?: boolean })[ABORT_REASON] = true;
+    pipelineController.abort(shutdownReason);
+  }
   clearInterval(timer);
   clearInterval(retentionTimer);
   clearInterval(dailyDigestTimer);

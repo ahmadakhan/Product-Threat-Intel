@@ -1,0 +1,13 @@
+[Unit]
+Description=Periodically reconcile VulnStream Compose containers
+
+[Timer]
+# Docker restarts exited containers itself; this timer also repairs containers
+# that are running but have failed their healthcheck for consecutive probes.
+OnBootSec=2min
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=vulnstream-compose-heal.service
+
+[Install]
+WantedBy=timers.target

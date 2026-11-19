@@ -1,6 +1,7 @@
 import type { Db } from './db.ts';
 import type { NormalizedCVE, WatchListItem } from '../src/types/index.ts';
 import type { NvdVersionRange } from '../src/utils/versionComparator.ts';
+import type { QueryResult } from 'pg';
 import {
   DEFAULT_PRODUCT_ALIASES,
   DEFAULT_VENDOR_ALIASES,
@@ -296,7 +297,47 @@ function assetIndexRows(assets: WatchListItem[], options: MatchIndexOptions): As
     }));
 }
 
-const CHUNK = 500;
+const CHUNK = 100;
+
+const STATEMENT_TIMEOUT_CODE = '57014';
+const MAX_STATEMENT_RETRIES = 5;
+const STATEMENT_RETRY_BASE_MS = 500;
+
+function chunkArray<T>(array: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < array.length; i += size) {
+    chunks.push(array.slice(i, i + size));
+  }
+  return chunks;
+}
+
+/**
+ * Runs a statement with exponential-backoff retries on PostgreSQL statement
+ * timeout (57014). INSERT ... ON CONFLICT and DELETE are idempotent, so a
+ * timed-out statement can be safely retried without risking duplicate work.
+ */
+async function withStatementTimeoutRetry(
+  db: Db,
+  query: string,
+  values: unknown[] = [],
+  maxRetries: number = MAX_STATEMENT_RETRIES,
+): Promise<QueryResult<Record<string, unknown>>> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await db.query(query, values);
+    } catch (error) {
+      const code = (error as { code?: string })?.code;
+      if (code !== STATEMENT_TIMEOUT_CODE || attempt === maxRetries) {
+        lastError = error;
+        break;
+      }
+      const backoffMs = STATEMENT_RETRY_BASE_MS * 2 ** attempt;
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+    }
+  }
+  throw lastError;
+}
 
 /**
  * Refreshes the candidate index from the current corpus and inventory. The
@@ -328,6 +369,11 @@ export async function syncMatchIndex(
       });
   }
 
+  // TRUNCATE + bulk INSERT replaces upsert+delete. TRUNCATE is O(1) (page
+  // deallocation, no per-row work) and avoids per-row GIN conflict resolution
+  // from ON CONFLICT plus the expensive DELETE ... ANY() scan. TRUNCATE is
+  // transactional, so a rollback restores the previous index contents.
+  await withStatementTimeoutRetry(db, 'TRUNCATE TABLE match_asset_index');
   for (let offset = 0; offset < assetRows.length; offset += CHUNK) {
     const chunk = assetRows.slice(offset, offset + CHUNK);
     const values: unknown[] = [];
@@ -336,17 +382,14 @@ export async function syncMatchIndex(
       values.push(row.assetId, row.identities, row.version === null ? null : row.version.toString());
       return `($${first},$${first + 1}::text[],$${first + 2}::bigint)`;
     });
-    await db.query(
-      `INSERT INTO match_asset_index(asset_id,identities,version_ordinal) VALUES${params.join(',')}
-       ON CONFLICT(asset_id) DO UPDATE SET identities=EXCLUDED.identities,
-         version_ordinal=EXCLUDED.version_ordinal,updated_at=now()`,
+    await withStatementTimeoutRetry(
+      db,
+      `INSERT INTO match_asset_index(asset_id,identities,version_ordinal) VALUES${params.join(',')}`,
       values,
     );
   }
-  await db.query('DELETE FROM match_asset_index WHERE NOT (asset_id = ANY($1::text[]))', [
-    assetRows.map((row) => row.assetId),
-  ]);
 
+  await withStatementTimeoutRetry(db, 'TRUNCATE TABLE match_cve_index');
   for (let offset = 0; offset < cveRows.length; offset += CHUNK) {
     const chunk = cveRows.slice(offset, offset + CHUNK);
     const values: unknown[] = [];
@@ -364,28 +407,12 @@ export async function syncMatchIndex(
       );
       return `($${first},$${first + 1},$${first + 2}::text[],$${first + 3}::bigint,$${first + 4},$${first + 5}::bigint,$${first + 6},$${first + 7})`;
     });
-    await db.query(
-      `INSERT INTO match_cve_index(cve_id,criterion_id,identities,start_ordinal,start_inclusive,end_ordinal,end_inclusive,unbounded)
-       VALUES${params.join(',')}
-       ON CONFLICT(cve_id,criterion_id) DO UPDATE SET identities=EXCLUDED.identities,
-         start_ordinal=EXCLUDED.start_ordinal,start_inclusive=EXCLUDED.start_inclusive,
-         end_ordinal=EXCLUDED.end_ordinal,end_inclusive=EXCLUDED.end_inclusive,
-         unbounded=EXCLUDED.unbounded,updated_at=now()`,
+    await withStatementTimeoutRetry(
+      db,
+      `INSERT INTO match_cve_index(cve_id,criterion_id,identities,start_ordinal,start_inclusive,end_ordinal,end_inclusive,unbounded) VALUES${params.join(',')}`,
       values,
     );
   }
-  await db.query(
-    `DELETE FROM match_cve_index
-      WHERE NOT (cve_id = ANY($1::text[]))
-         OR NOT ((cve_id, criterion_id) IN (
-              SELECT cve_id, criterion_id
-                FROM unnest($1::text[], $2::text[]) AS t(cve_id, criterion_id)
-            ))`,
-    // Both arrays must be positionally aligned. De-duplicating the CVE ids here
-    // would zip them against a longer criterion array and delete every criterion
-    // after the first one for a multi-criterion CVE.
-    [cveRows.map((row) => row.cveId), cveRows.map((row) => row.criterionId)],
-  );
 }
 
 /**
@@ -396,7 +423,8 @@ export async function syncMatchIndex(
 export async function buildCandidatePairs(
   db: Db,
 ): Promise<Map<string, Set<string>>> {
-  const result = await db.query(
+  const result = await withStatementTimeoutRetry(
+    db,
     `SELECT DISTINCT c.cve_id, a.asset_id
        FROM match_cve_index c
        JOIN match_asset_index a ON a.identities && c.identities

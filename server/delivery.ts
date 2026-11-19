@@ -727,7 +727,7 @@ async function confirmPriorDelivery(
   const messageId = job.payload.unconfirmedProviderId || log?.providerId || '';
   if (!messageId) return 'unknown';
   const token = decrypt(saved.apiKey, encryptionKeys(config), `email-provider:${saved.provider}`);
-  if (!token) return 'unknown';
+  if (!token) return 'not-delivered';
   return lookupProviderDelivery(saved, token, messageId, request);
 }
 

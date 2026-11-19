@@ -20,6 +20,22 @@ if ! docker info >/dev/null 2>&1; then
   printf '%s\n' 'Docker is not running or the current user cannot access its daemon.' >&2
   exit 1
 fi
+
+# A restart policy only helps after a reboot if the Docker daemon itself starts.
+require_docker_boot() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl cat docker.service >/dev/null 2>&1 || return 0
+  systemctl is-enabled --quiet docker.service && return 0
+  if [ "$(id -u)" -eq 0 ] && systemctl enable docker.service >/dev/null 2>&1; then
+    printf '%s\n' 'Enabled docker.service so containers start after a reboot.'
+    return 0
+  fi
+  printf '%s\n' 'Docker is not enabled at boot, so containers would not start after a reboot.' >&2
+  printf '%s\n' 'Run "sudo systemctl enable docker" and rerun this installer.' >&2
+  exit 1
+}
+require_docker_boot
+
 if ! command -v openssl >/dev/null 2>&1; then
   printf '%s\n' 'OpenSSL is required to generate deployment secrets.' >&2
   exit 1

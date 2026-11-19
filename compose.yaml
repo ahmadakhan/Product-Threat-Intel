@@ -1,7 +1,7 @@
 services:
   db:
     image: postgres:17-alpine
-    restart: unless-stopped
+    restart: always
     environment:
       POSTGRES_DB: vulnstream
       POSTGRES_USER: vulnstream_migrator
@@ -26,6 +26,10 @@ services:
   migrate:
     build: .
     command: [node, server-dist/migrate.js]
+    # One-shot job, not a service: it runs to completion and must not be
+    # restarted by Docker. The application refuses to start on a schema
+    # mismatch, and install/upgrade always runs this job before the app.
+    restart: 'no'
     depends_on:
       db:
         condition: service_healthy
@@ -35,7 +39,7 @@ services:
     networks: [backend]
   app:
     build: .
-    restart: unless-stopped
+    restart: always
     depends_on:
       db:
         condition: service_healthy
@@ -73,6 +77,10 @@ services:
       STUCK_PROMISE_MS: ${STUCK_PROMISE_MS:-300000}
       # Single application instance: it runs the API and all background work.
       WORKER_ENABLED: ${WORKER_ENABLED:-true}
+      # Make /live answer 503 when the event loop has been blocked for more
+      # than 10 seconds. The Compose healthcheck below marks the container
+      # unhealthy; the host heal timer restarts it.
+      HANG_DETECTION_ENABLED: 'true'
       CORRELATION_DLQ_DIRECTORY: /var/lib/vulnstream/deadletters
       # Dead letters live in PostgreSQL. The legacy directory below is only read
       # once at startup to import files left by an earlier file-based deploy; it
@@ -80,6 +88,8 @@ services:
       CORRELATION_DLQ_STORAGE_MODE: database
       ML_DIRECTORY: /var/lib/vulnstream/ml
       ML_STORAGE_MODE: database
+    ports:
+      - "127.0.0.1:8080:8080"
     volumes:
       # Legacy-only: dead letters are stored in PostgreSQL (see
       # CORRELATION_DLQ_STORAGE_MODE). This volume exists solely so an upgrade
@@ -97,10 +107,24 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     stop_grace_period: 35s
+    healthcheck:
+      # /live is the process liveness probe, not readiness. A database outage
+      # must not trigger a restart loop; an event-loop stall must.
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:8080/live').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 60s
     networks: [backend, egress]
   proxy:
     image: caddy:2-alpine
-    restart: unless-stopped
+    restart: always
     depends_on: [app]
     environment:
       APP_HOST: ${APP_HOST:?Set public hostname}
@@ -109,6 +133,12 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+    healthcheck:
+      test: [CMD-SHELL, "nc -z 127.0.0.1 80 && nc -z 127.0.0.1 443"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     deploy:
       resources:
         limits:

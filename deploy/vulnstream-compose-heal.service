@@ -1,0 +1,18 @@
+[Unit]
+Description=Reconcile VulnStream Compose containers
+Documentation=https://github.com/ahmadakhan/Product-Threat-Intel
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Change the path if the checkout is not installed at /opt/vulnstream.
+# For the LAN project, override HEAL_PROJECT with:
+#   systemctl edit vulnstream-compose-heal.service
+Environment=HEAL_PROJECT=vulnstream-enterprise
+StateDirectory=vulnstream-compose-heal
+Environment=HEAL_STATE_FILE=/var/lib/vulnstream-compose-heal/state.json
+ExecStart=/usr/bin/node /opt/vulnstream/scripts/heal-compose.mjs
+
+# A hung container is killed after the same grace period Compose uses.
+TimeoutStartSec=120

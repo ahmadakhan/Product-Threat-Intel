@@ -6,13 +6,33 @@ Keep `.env.production` out of source control and restrict host access. Protect d
 
 Release with `docker compose --env-file .env.production up -d --build`. Confirm the migration job exits successfully, `docker compose --env-file .env.production ps` reports healthy services, and sign-in, a pipeline and a test delivery work. Before upgrading, take a backup and test restoration. Do not run older code against a newer schema unless compatibility has been verified. Stop application traffic before a rollback requiring database restoration.
 
-For a fresh Linux installation, `bash ./install.sh` creates a protected `.env.production`, generates distinct database passwords and encryption/metrics secrets, starts the Compose stack, and prompts for the initial administrator password. It requires Bash, Docker Engine, and the Compose v2 plugin; it does not install or modify the host's Docker packages. In database storage mode, products, feeds, settings, queue records, audit data, dead letters and ML model artifacts are stored in PostgreSQL. The ML/DLQ named volumes are retained only to import data from earlier filesystem-backed deployments; remove them after confirming migration and backups. Caddy certificate state and optional Prometheus time-series data remain in infrastructure volumes.
+For a fresh Linux installation, `bash ./install.sh` creates a protected `.env.production`, generates distinct database passwords and encryption/metrics secrets, starts the Compose stack, and prompts for the initial administrator password. It requires Bash, Docker Engine, and the Compose v2 plugin; it does not install Docker packages. When run as root it enables an existing `docker.service` for boot; otherwise Docker must already be enabled. In database storage mode, products, feeds, settings, queue records, audit data, dead letters and ML model artifacts are stored in PostgreSQL. The ML/DLQ named volumes are retained only to import data from earlier filesystem-backed deployments; remove them after confirming migration and backups. Caddy certificate state remains in infrastructure volumes.
+
+### Automatic start and recovery
+
+`db`, `app` and `proxy` use `restart: always`, so Docker starts them after a host reboot and restarts them when the process exits. The Docker daemon itself must be enabled at boot:
+
+```sh
+sudo systemctl enable --now docker
+```
+
+The `migrate` container is a one-shot job, not a long-running service. It exits after applying migrations and deliberately has `restart: 'no'`; a restart loop would never make a failed migration succeed. The app verifies the schema version at startup and refuses to run against an older schema.
+
+`app` enables event-loop hang detection and its healthcheck probes `/live`; `proxy` checks that ports 80 and 443 are listening; `db` uses `pg_isready`. Docker reports an unhealthy container but does not restart it. Install the host-side healer timer to start stopped services and restart one that has been unhealthy for consecutive checks:
+
+```sh
+sudo cp deploy/vulnstream-compose-heal.service deploy/vulnstream-compose-heal.timer /etc/systemd/system/
+# If the checkout is not /opt/vulnstream, edit ExecStart in the .service file.
+sudo systemctl daemon-reload
+sudo systemctl enable --now vulnstream-compose-heal.timer
+```
+
+For the LAN project, run `sudo systemctl edit vulnstream-compose-heal.service` and set `HEAL_PROJECT=vulnstream-lan`. The healer only repairs existing containers; it does not bootstrap a stack that was never created and does not touch `migrate`. A missing or short `ML_SIGNING_KEY` remains a startup failure by design: generate a 32+ character key, add it to the deployment environment, and recreate the app.
 
 `bash ./install-lan.sh` is a separate LAN/tailnet option. It binds Caddy to the entered RFC1918 and Tailscale IPv4 addresses on ports `80` and `443`; HTTP redirects to HTTPS and the API remains internal on container port `8080`. It uses an isolated PostgreSQL volume/project and inherits `EGRESS_ALLOWED_HOSTS` and `EGRESS_ALLOWED_HOSTS_EXTRA` from `.env.production` when present; otherwise it uses the bundled Compose defaults. An explicit empty allowlist still denies outbound hosts. A private CA signs one certificate containing both IP addresses, which also supports clients that omit SNI for IP URLs. Install `.runtime/lan-ca.crt` in each client's trusted root store; protect `.runtime/lan-ca.key` and restrict access to the Docker host. Restrict access to a trusted network and do not port-forward this service.
 
 For an existing LAN deployment, update `APP_ORIGIN` in `.env.lan` to `https://<TAILSCALE-IP>`, generate the combined-IP certificate, then apply the HTTPS overlay without recreating the database:
 
-```sh
 ```sh
 bash ./scripts/lan-tls-certs.sh
 docker compose --project-name vulnstream-lan --env-file .env.lan -f compose.yaml -f compose.lan.yaml up -d --force-recreate --no-deps app proxy

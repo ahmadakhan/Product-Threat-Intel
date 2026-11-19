@@ -380,7 +380,7 @@ async function computeHealth(
  * has opted in). Intended to be polled on a short interval by the worker; the
  * claim logic guarantees at-most-once execution per calendar day per timezone.
  */
-export async function runDailyDigest(pool: pg.Pool): Promise<number> {
+export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promise<number> {
   const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
   const daily = settings.dailyDigest || DEFAULT_SETTINGS.dailyDigest;
   if (!daily?.enabled) return 0;
@@ -398,6 +398,9 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
   let locked = false;
   let failed = false;
   try {
+    // Abort early if the run was cancelled (shutdown, leadership loss, stall watchdog).
+    signal?.throwIfAborted();
+
     // Cheap pre-check without the advisory lock: every tick after the send time
     // (and after today's digest already ran) would otherwise take the session
     // lock and write two INFO events per replica per minute — thousands of
@@ -618,6 +621,7 @@ export async function runDailyDigest(pool: pg.Pool): Promise<number> {
         };
         let jobs = 0;
         for (const recipient of recipients) {
+          signal?.throwIfAborted();
           // Relevance ranks eligible findings; it must never override subscriptions or hide an alert.
           const received = mailboxReceived(recipient);
           const candidate = findings

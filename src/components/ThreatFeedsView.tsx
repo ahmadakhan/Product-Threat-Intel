@@ -493,17 +493,15 @@ export const ThreatFeedsView: React.FC = () => {
                         >
                           <Edit2 className="w-3.5 h-3.5" />
                         </button>
-                        {!feed.vendorSeed && feed.type !== 'NVD_API' && (
-                          <button
+                        <button
                             onClick={() => setDeletingFeed(feed)}
                             className="p-1 text-zinc-400 hover:text-red-400 dark:text-zinc-400 dark:hover:text-red-400 light:text-zinc-600 light:hover:text-red-500 transition"
                             title="Delete Feed"
                             aria-label={`Delete ${feed.name}`}
-                          >
+                        >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
-                        )}
-                      </div>
+                        </div>
                     </td>
                   </tr>
                 );

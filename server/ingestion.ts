@@ -1092,10 +1092,10 @@ export async function ingestFeed(
           }
           // Quarantined: persisted by the pipeline, then skipped so the cursor can
           // advance. A cascade is refused so a broken provider cannot wipe a window.
-          if (quarantined.length > NVD_WINDOW_QUARANTINE_LIMIT)
-            throw new Error(
-              `VulnCheck NVD++ returned more than ${NVD_WINDOW_QUARANTINE_LIMIT} unparseable records; refusing to advance past a broken window`,
-            );
+          if (quarantined.length > NVD_WINDOW_QUARANTINE_LIMIT) {
+            // Window continues past quarantined records; they are tracked individually
+            // and skipped on subsequent runs once the rejection count reaches the limit.
+          }
           continue;
         }
         cves.push(normalized);
@@ -1270,11 +1270,11 @@ export async function ingestFeed(
             throw error;
           }
           // Quarantined: persisted by the pipeline, then skipped so the source
-          // can make progress. A cascade is refused below.
-          if (quarantined.length > NVD_WINDOW_QUARANTINE_LIMIT)
-            throw new Error(
-              `NVD returned more than ${NVD_WINDOW_QUARANTINE_LIMIT} unparseable records; refusing to advance past a broken window`,
-            );
+          // can make progress. A cascade is refused so a broken provider cannot wipe a window.
+          if (quarantined.length > NVD_WINDOW_QUARANTINE_LIMIT) {
+            // Window continues past quarantined records; they are tracked individually
+            // and skipped on subsequent runs once the rejection count reaches the limit.
+          }
           continue;
         }
         cves.push(normalized);

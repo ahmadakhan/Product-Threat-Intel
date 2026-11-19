@@ -36,6 +36,10 @@ export class WorkerLeadership {
         'SELECT pg_try_advisory_lock(784921, hashtext(current_schema())) AS locked',
       );
       if (!result.rows[0]?.locked || this.stopped) return;
+      // Re-check stopped after acquiring the lock: close() may have run in
+      // the meantime and released this client. Never attach a released client
+      // as the leader's session.
+      if (this.stopped) return;
       this.client = client;
       retained = true;
       this.acquiredAt = new Date().toISOString();

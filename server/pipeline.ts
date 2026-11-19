@@ -553,6 +553,43 @@ class PipelineStopped extends Error {
     super('Pipeline stopped by operator; uncommitted results discarded');
   }
 }
+/** WHATWG name a timeout strategy assigns to its abort reason. */
+const TIMEOUT_REASON_NAME = 'TimeoutError';
+
+/** Sentinel stamped on external abort reasons so main.ts can recognize them. */
+export const ABORT_REASON = Symbol('abort-reason');
+
+/**
+ * Request an abort for the engine's EXTERNAL reason statement, distinct from the
+ * operation's own deadlines (the corpus/commit budget, feed windows).
+ *
+ * `AbortSignal.timeout()` and `AbortSignal.any()` abort with a reason whose
+ * `name` is "TimeoutError", and `throwIfAborted()` rethrows that reason object
+ * unchanged. `reasonAborted()` in main.ts classifies on that name, so an
+ * external cancel must be tagged through here: the stall watchdog used to
+ * stamp its abort with `new Error('Pipeline produced no progress...')`, which
+ * every caller then treated as a genuine internal failure (and wrote one
+ * `worker.failed` per tick to the operational log).
+ *
+ * Every external abort (SIGTERM, leadership loss, stall watchdog) goes through
+ * this helper, so classification never depends on an error message.
+ */
+export function setAbortReason(controller: AbortController): void {
+  const reason = controller.signal.reason;
+  // A caller-supplied reason, and the browser-shaped `AbortError` that a
+  // timeout strategy may still synthesise, are already distinguishable from a
+  // bare cancel. Only an untyped or generic abort is ambiguous, and an
+  // ambiguous cancel in this pipeline is always a deadline.
+  if (reason !== undefined && !(reason instanceof Error && reason.name === 'Error')) return;
+  // Built from the tagged name, without importing the class: some Node/type
+  // combinations do not export `TimeoutError` from `node:util`, yet the tag it
+  // appends is stable. Callers classify on `name`, never on the constructor.
+  const deadlineReason = Object.assign(
+    new Error('Operation exceeded its deadline'),
+    { name: TIMEOUT_REASON_NAME, [ABORT_REASON]: true },
+  );
+  controller.abort(deadlineReason);
+}
 /**
  * A source that cannot finish within its configured window.
  *
@@ -704,10 +741,25 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     connectionLost = true;
   };
   lock.on('error', onError);
-  const lockedTransaction = <T>(fn: (db: pg.PoolClient) => Promise<T>) => transaction(pool, fn, lock, {
-    locks: ['pipeline-queue'],
-    signal,
-  });
+  // `lock` must never be used as a transaction client. It carries the session
+  // advisory lock, and `onAbort` may already have destroyed it, so
+  // `transaction()` must not release it when a unit finishes or aborts.
+  //
+  // Handing it over was a lifetime bug. An abort could queue a `release` on
+  // `lock` while the in-flight unit was still running; the pool then handed
+  // that same client out again and another caller began its `BEGIN` on it. The
+  // first unit's `readyForQuery` was answered by the wrong state machine (the
+  // desync documented on `transaction()` in db.ts), so it saw no error and
+  // returned as if it had committed even though the abort had rolled it back.
+  // Only the handed-over unit's later release discovered the error.
+  //
+  // Passing no client instead makes `transaction()` own a temporary one, which
+  // it always releases in its `finally`, on abort and on throw as well. `lock`
+  // therefore has exactly one owner for its whole life (`processPipeline`), and
+  // no unit can hand it out while it is mid-transaction.
+  const lockedTransaction = <T>(fn: (db: pg.PoolClient) => Promise<T>) =>
+    transaction(pool, fn, undefined, { locks: ['pipeline-queue'], signal });
+
   let locked = false,
     execution: PipelineExecution | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -1260,7 +1312,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           productAliases,
         }),
       undefined,
-      { locks: ['match-index'], statementTimeoutMs: 300000 },
+        { locks: ['match-index'], statementTimeoutMs: 60000 },
     );
     // Audit M-2/M-3: the preliminary pass used to run the *entire* matcher over
     // the whole corpus solely to decide which CVEs need EPSS scores. That is the
@@ -1798,7 +1850,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             productAliases: finalProductAliases,
           }),
         undefined,
-        { locks: ['match-index'], statementTimeoutMs: 300000 },
+      { locks: ['match-index'], statementTimeoutMs: 60000 },
       );
       const correlated = runVulnerabilityPipeline(
         feeds,

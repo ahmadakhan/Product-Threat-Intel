@@ -72,8 +72,6 @@ export function parseCPE23(cpeString: string): ParsedCPE {
 
   const cached = cpeCache.get(cpeString);
   if (cached && cached.expiresAt > Date.now()) {
-    // Refresh TTL on access
-    cpeCache.set(cpeString, { value: cached.value, expiresAt: Date.now() + CPE_CACHE_TTL_MS });
     return cached.value;
   }
 
