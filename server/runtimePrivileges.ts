@@ -10,6 +10,7 @@ export async function grantRuntimePrivileges(db: Db, role = 'vulnstream_app'): P
     GRANT SELECT,INSERT ON audit,operational_events TO ${target};
     GRANT SELECT,INSERT,UPDATE ON state_metrics TO ${target};
     GRANT SELECT ON assets,vendor_product_aliases,correlation_asset_inventory,schema_migrations TO ${target};
+    GRANT SELECT ON correlation_generated_columns TO ${target};
     GRANT SELECT,INSERT,UPDATE ON unstructured_advisories TO ${target};
     GRANT SELECT,INSERT,UPDATE,DELETE ON correlation_matches TO ${target};
     GRANT SELECT,INSERT,UPDATE,DELETE ON delivery_claims TO ${target};
