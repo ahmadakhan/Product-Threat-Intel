@@ -69,6 +69,7 @@ export const FEED_TYPES = [
   'VULNCHECK_KEV',
   'VULNCHECK_NVD',
   'NVD_API',
+  'OPENCVE_API',
   'OTX_API',
   'OSV_API',
   'GITHUB_ADVISORIES',

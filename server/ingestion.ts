@@ -1294,6 +1294,56 @@ export async function ingestFeed(
       syncState: { cursor: end.toISOString(), hasMore: windowHasMore, revisions },
     };
   }
+  if (feed.type === 'OPENCVE_API') {
+    // OpenCVE — free community CVE enrichment source. Returns individual CVE
+    // detail records in a format normalized by normalizeOpenCve.
+    const url = new URL(feed.url);
+    const resultsPerPage = Math.min(Math.max(1, feed.rateLimitPerMin || 50), 2000);
+    url.searchParams.set('limit', String(resultsPerPage));
+    url.searchParams.set('offset', '0');
+
+    const cves: NormalizedCVE[] = [];
+    const withdrawals: NonNullable<IngestResult['withdrawals']> = [];
+    const rejections: NonNullable<IngestResult['rejections']> = [];
+    const seenIds = new Set<string>();
+    const revisions: Record<string, string> = {};
+    let totalFetched = 0;
+    let offset = 0;
+    let hasMore = true;
+
+    for (let pageNo = 0; pageNo < 500 && hasMore; pageNo++) {
+      const pageUrl = new URL(url);
+      pageUrl.searchParams.set('offset', String(offset));
+      const { data: page } = await json(pageUrl.href, false, {
+        timeoutMs: 60000,
+        socketTimeoutMs: 30000,
+        maxResponseBytes: 32 * 1024 * 1024,
+      }, true);
+      if (!page || !Array.isArray(page.results)) throw new Error('Invalid OpenCVE API response');
+      if (page.results.length === 0) break;
+      for (const detail of page.results) {
+        const id = normalizeCveId(detail?.cve_id);
+        if (!id || seenIds.has(id)) throw new Error('OpenCVE returned an invalid or duplicate CVE');
+        seenIds.add(id);
+        const normalized = normalizeOpenCve(detail, feed.id);
+        if (!normalized) continue;
+        totalFetched++;
+        cves.push(normalized);
+        await flushBatch(cves);
+        revisions[id] = normalized.modifiedDate;
+      }
+      offset += page.results.length;
+      hasMore = page.results.length === resultsPerPage;
+      if (hasMore) await sleep(Math.max(1000, 60000 / feed.rateLimitPerMin));
+    }
+    return {
+      cves,
+      count: totalFetched,
+      withdrawals,
+      rejections,
+      syncState: { cursor: new Date().toISOString(), hasMore: false, revisions },
+    };
+  }
   throw new Error(`Unsupported feed adapter: ${feed.type}`);
 }
 

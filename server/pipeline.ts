@@ -914,6 +914,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     // failing every run with "Unsupported feed adapter".
     const SUPPORTED_FEED_ADAPTERS = new Set([
       'NVD_API',
+      'OPENCVE_API',
       'VULNCHECK_NVD',
       'VULNCHECK_KEV',
       'RSS_ATOM',
