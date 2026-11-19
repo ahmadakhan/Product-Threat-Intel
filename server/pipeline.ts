@@ -909,10 +909,28 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       });
     });
     const allFeeds = await list<ThreatFeed>(pool, 'feeds');
+    // Feed adapter types that `ingestFeed` can actually handle. Anything else
+    // (retired types such as MITRE_CVE / OPENCVE_API) is skipped instead of
+    // failing every run with "Unsupported feed adapter".
+    const SUPPORTED_FEED_ADAPTERS = new Set([
+      'NVD_API',
+      'VULNCHECK_NVD',
+      'VULNCHECK_KEV',
+      'RSS_ATOM',
+      'OTX_API',
+      'OSV_API',
+      'GITHUB_ADVISORIES',
+      'CISA_KEV',
+      'EPSS_API',
+      'JSON_SEARCH_API',
+    ]);
     // VULNCHECK_NVD respects its enabled flag like all other feeds.
     // Operators configure a Bearer token and enable it via the Feeds UI;
     // without credentials the feed is auto-disabled by bootstrap.
-    const feeds = allFeeds.filter((feed) => feed.enabled);
+    const feeds = allFeeds.filter((feed) => feed.enabled && SUPPORTED_FEED_ADAPTERS.has(feed.type));
+    for (const skipped of allFeeds.filter((f) => f.enabled && !SUPPORTED_FEED_ADAPTERS.has(f.type))) {
+      pushExecutionLog(execution!, `Feed ${skipped.id}: skipped — unsupported feed adapter (${skipped.type})`);
+    }
     const feedTypesById = new Map(allFeeds.map((feed) => [feed.id, feed.type]));
     const [cachedCves, cachedWithdrawals, inventory, aliasEntries] = await Promise.all([
       list<NormalizedCVE>(pool, 'cveData'),
