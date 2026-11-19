@@ -740,16 +740,6 @@ export function renderDailyHealthReport(health: DigestHealth | null, config: Tem
     health.workerHeartbeatAgeSeconds !== null
       ? `${health.workerHeartbeatAgeSeconds} seconds ago`
       : 'N/A';
-  const deliveryQueueLabel = [
-    ['QUEUED', 'Queued'],
-    ['SENDING', 'Sending'],
-    ['REVIEW', 'Awaiting review'],
-    ['ACCEPTED', 'Provider accepted'],
-    ['FAILED', 'Failed'],
-  ].map(([status, label]) => {
-    const count = health.backlog.filter((b) => b.status === status).reduce((sum, b) => sum + b.count, 0);
-    return `${count} ${label}`;
-  }).join(' | ');
   const formatHealthDate = (iso: string): string => {
     const date = new Date(iso);
     if (Number.isNaN(date.getTime())) return '—';
@@ -776,6 +766,26 @@ export function renderDailyHealthReport(health: DigestHealth | null, config: Tem
     ? formatHealthDate(health.nextDailyDigestAt)
     : 'Not scheduled';
   const lastCheck = formatHealthDate(health.checkedAt);
+  // Built after `formatHealthDate` exists so the retry timestamp renders in the
+  // workspace timezone like every other date in the report. A non-zero retained
+  // count with no scheduled attempt is the interesting case: the queue is idle
+  // but work is still held, so it is stated explicitly rather than inferred from
+  // a bare count.
+  const deliveryQueueLabel = [
+    health.nextScheduledAttempt
+      ? `Next delayed retry ${formatHealthDate(health.nextScheduledAttempt)}`
+      : 'No future delivery attempt scheduled',
+    ...[
+      ['QUEUED', 'Queued'],
+      ['SENDING', 'Sending'],
+      ['REVIEW', 'Awaiting review'],
+      ['ACCEPTED', 'Provider accepted'],
+      ['FAILED', 'Failed'],
+    ].map(([status, label]) => {
+      const count = health.backlog.filter((b) => b.status === status).reduce((sum, b) => sum + b.count, 0);
+      return `${count} ${label}`;
+    }),
+  ].join(' | ');
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
 
                 <tr bgcolor="#f8fafc">

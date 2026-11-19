@@ -47,7 +47,7 @@ import {
   rankAndRateLimitZeroDays,
   runVulnerabilityPipeline,
 } from '../src/engine/pipelineEngine';
-import { ingestFeed, type IngestContext, FeedDeferred } from './ingestion';
+import { ingestFeed, type IngestContext, type CVERejection, FeedDeferred } from './ingestion';
 import { assessFindings } from './ml/assessment.ts';
 import {
   predictCredibilityWeights,
@@ -67,6 +67,7 @@ import { bindClusterToCve, clusterSuppressedAssets } from './correlation/cluster
 import { refreshCandidatePairs } from './versionIndex';
 import { recoveryDue, recoveryAt, isPermanentFeedFailure, shouldStartAutomaticRun } from './feedRecovery';
 import { ingestionWindow, type FeedCursor } from './ingestionState';
+import { persistIngestionRejections, rejectionOccurrences } from './ingestionRejections';
 import type { Requester } from './network';
 import { withAbortSignal } from './network';
 import { feedEgressHosts, type Config } from './config';
@@ -934,6 +935,8 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     const knownWithdrawalAt = new Map(cachedWithdrawals.map((entry) => [entry.cveId, entry.modifiedDate]));
     let succeeded = 0,
       rawCount = 0;
+    /** Rejections from feeds whose run failed before returning a result. */
+    const rejectedThisRun: CVERejection[] = [];
     const results: Awaited<ReturnType<typeof ingestFeed>>[] = [];
     const feedUpdates: ThreatFeed[] = [];
     // Bound cross-feed concurrency; each adapter also paces its own pages.
@@ -1019,6 +1022,10 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
               knownCveModifiedAt,
               knownWithdrawalAt,
               knownCveContent: canonicalCache,
+              // Prior rejection counts let the adapter decide when an unparseable
+              // record has been retried enough to quarantine. Without this the
+              // window could never advance past a permanently broken record.
+              rejectedOccurrences: await rejectionOccurrences(pool, feed.id),
               ...(feed.type === 'OSV_API'
                 ? {
                     targetPurls: inventory
@@ -1105,6 +1112,28 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             signal?.throwIfAborted();
             if (e instanceof PipelineStopped || connectionLost) throw e;
             const message = e instanceof Error ? e.message : 'Ingestion failed';
+            // A record-level rejection is a data defect recovery can fix: keep
+            // the rejections it carried so the loss is recorded even though the
+            // feed run itself failed, and never let the breaker classify it as a
+            // configuration fault (that would mark the source permanently DOWN
+            // for one bad record). The feed is DEGRADED, the checkpoint stays
+            // before the bad record, and the next run retries the window.
+            const carriedRejections = (e as { rejections?: CVERejection[] }).rejections;
+            if (carriedRejections?.length) {
+              rejectedThisRun.push(...carriedRejections);
+              feedUpdates.push({
+                ...feed,
+                healthStatus: 'DEGRADED',
+                latencyMs: Date.now() - start,
+                errorLog: message,
+                // One bad record is not evidence the source is unreachable: it
+                // must not consume the failure budget that opens the breaker.
+                consecutiveFailures: feed.consecutiveFailures || 0,
+                circuitOpenUntil: feed.circuitOpenUntil ?? null,
+              });
+              pushExecutionLog(execution!, `Feed ${feed.id}: ${message} (record rejection; window deferred)`);
+              continue;
+            }
             // Audit H-5: a configuration fault (SSRF-rejected destination,
             // malformed or unsupported URL, unusable checkpoint) cannot be fixed
             // by retrying. Record it as DOWN with no circuit and no failure
@@ -1378,6 +1407,19 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             latencyMs: update.latencyMs,
           },
         });
+      // Persist every record a feed delivered that failed normalization. Before
+      // this, adapters collected `rejections` into an array the pipeline then
+      // discarded: a schema change or poisoned record silently removed findings
+      // from the corpus. This is a durability requirement, not telemetry, so it
+      // runs before the corpus write and raises an ERROR event on any nonzero
+      // count. Rejections from a feed whose configuration changed mid-run are
+      // excluded for the same reason its results are: they describe a source
+      // that is no longer configured. `rejectedThisRun` is filtered by feed id
+      // below so an obsolete response cannot populate the live backlog.
+      const rejectedRecords = [
+        ...acceptedResults.flatMap((result) => result.rejections ?? []),
+        ...rejectedThisRun.filter((rejection) => validSources.has(rejection.feedId)),
+      ];
       // Commit a durable native-correlation handoff with the source checkpoint.
       // Existing inventory remains authoritative; no record-store assets are copied.
       for (const result of acceptedResults)
@@ -1425,6 +1467,15 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         ...acceptedResults.filter((result) => !result.notModified).flatMap((result) => result.cves),
         ...streamedCves,
       ]);
+      // Persist rejections now that the merged corpus is known: a rejection whose
+      // identity is present in `byId` has been fixed (or an earlier revision of
+      // it parses), so it is closed rather than reported forever. Runs before
+      // the corpus write so the loss is recorded even if a later step fails.
+      if (rejectedRecords.length)
+        await persistIngestionRejections(db, rejectedRecords, {
+          runId: execution!.id,
+          ingestedIds: new Set(byId.keys()),
+        });
       // Operator-import records are explicit authoritative revisions. Feed
       // refreshes may add enrichment, but they must never replace an operator
       // correction made while ingestion was in progress.

@@ -691,8 +691,19 @@ enrichmentBacklogTick();
 // Dead-letter auto-retry: re-process delivery_dead_letters on a cadence so
 // findings whose transport failed are retried automatically instead of
 // waiting for operator intervention. Only the leader runs this.
+//
+// Bounded per finding. The previous loop reset every unresolved dead letter to
+// QUEUED_FOR_DISPATCH exactly once and then marked the letter resolved, so a
+// finding could be dead-lettered, re-dispatched, dead-lettered and retried again
+// with nothing counting the attempts. That made a bounded retry budget (the
+// outbox's `maxAttempts`) unbounded in practice, and a recipient that will never
+// accept mail produced an endless retry loop. The attempt count now lives on the
+// finding, survives every reset (reconcileFindings keeps `deadLetterCount`), and
+// a finding that exhausts it is parked for operator action with a single alert
+// instead of being requeued.
 let deadLetterRetryRunning: Promise<unknown> | null = null;
 const DEAD_LETTER_RETRY_INTERVAL_MS = Number(process.env.DEAD_LETTER_RETRY_INTERVAL_MS ?? 15 * 60_000);
+const MAX_DEAD_LETTER_RETRIES = Number(process.env.MAX_DEAD_LETTER_RETRIES ?? 3);
 const deadLetterRetryTick = async () => {
   if (stopping || config.WORKER_ENABLED !== 'true' || !leadership.isLeader || deadLetterRetryRunning) return;
   deadLetterRetryRunning = (async () => {
@@ -704,6 +715,7 @@ const deadLetterRetryTick = async () => {
       );
       if (rows.rows.length === 0) return;
       let retried = 0;
+      let exhausted = 0;
       for (const row of rows.rows) {
         try {
           const deadLetter = parseRecordData<{ findingId?: string; id?: string }>(row.data);
@@ -713,16 +725,56 @@ const deadLetterRetryTick = async () => {
           const finding = findingId
             ? await get<Finding>(pool, 'findings', findingId)
             : undefined;
+          // The dead letter is always resolved: leaving it open would retry it
+          // every tick forever, and its retry budget lives on the finding, not
+          // on this row. An orphaned letter (no finding) has nothing to retry.
           if (finding) {
-            await put(pool, 'findings', findingId!, {
-              ...finding,
-              notificationStatus: 'QUEUED_FOR_DISPATCH',
-              autoDispatchedAt: null,
-              reviewNotifiedAt: null,
-            });
-            retried++;
+            const attempts = (finding.deadLetterCount ?? 0) + 1;
+            // A resolved, dismissed or patched finding is a terminal operator
+            // decision; re-queueing it would resurrect a finding they closed.
+            const terminal = ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status);
+            if (terminal) {
+              // Nothing to do beyond closing the letter.
+            } else if (attempts > MAX_DEAD_LETTER_RETRIES) {
+              exhausted++;
+              await put(pool, 'findings', findingId!, {
+                ...finding,
+                // The budget is left exactly as it is: it is spent, and a later
+                // requeue must not inherit a larger allowance than it had.
+                // Park it as a terminal, operator-visible failure. The next
+                // pipeline run must not silently turn this back into a resend;
+                // reconcileFindings preserves DELIVERY_FAILED (see its comment).
+                notificationStatus: 'DELIVERY_FAILED',
+                dispatchDeferred: true,
+                timeline: [
+                  ...(finding.timeline ?? []),
+                  {
+                    timestamp: new Date().toISOString(),
+                    action: 'Dead-letter retry budget exhausted',
+                    system: 'Delivery worker',
+                    details: `${MAX_DEAD_LETTER_RETRIES} automatic retries did not reach the recipient; operator action required`,
+                  },
+                ],
+              });
+              await writeEvent(pool, {
+                category: 'EMAIL',
+                level: 'ERROR',
+                code: 'deadLetter.retry_exhausted',
+                message: `Finding ${findingId} exhausted ${MAX_DEAD_LETTER_RETRIES} dead-letter retries; parked for operator action`,
+                context: { findingId: findingId, cveId: finding.cveId, attempts },
+              }).catch(() => undefined);
+            } else {
+              await put(pool, 'findings', findingId!, {
+                ...finding,
+                deadLetterCount: attempts,
+                notificationStatus: 'QUEUED_FOR_DISPATCH',
+                autoDispatchedAt: null,
+                reviewNotifiedAt: null,
+              });
+              retried++;
+            }
           }
-          // Mark the dead letter as resolved (retried)
+          // Mark the dead letter as resolved (handled: retried, parked, or orphaned)
           await put(pool, 'delivery_dead_letters', row.id, {
             ...deadLetter,
             resolvedAt: new Date().toISOString(),
@@ -738,7 +790,7 @@ const deadLetterRetryTick = async () => {
           level: 'INFO',
           code: 'deadLetter.auto_retry',
           message: `Auto-retried ${retried} delivery dead letter(s)`,
-          context: { retried },
+          context: { retried, exhausted },
         }).catch(() => undefined);
       }
     } catch (error) {
@@ -844,25 +896,30 @@ process.on('SIGINT', () => void shutdown());
 // in-flight work a chance at a clean stop before the process exits.
 //
 // uncaughtException: process state is unknown — must exit after best-effort
-// shutdown. unhandledRejection: the rejecting promise is already garbage, but
-// the process itself may still be healthy — log and report without exiting, so
-// a single rejected promise does not take down the entire server.
-const handleUncaughtException = (error: unknown) => {
-  const detail = describeError(error);
-  correlation.supervisor.ingestor.telemetry.log('CRITICAL', 'uncaught-exception');
-  report('uncaught-exception')(error);
+// shutdown. unhandledRejection is treated the same way: a rejected promise with
+// no handler means some async operation was abandoned mid-flight, and this
+// process cannot know what it left half-applied (an outbox job claimed but not
+// finalised, a transaction opened but not committed). Continuing to serve and to
+// claim deliveries from that state is what turns one bug into a duplicate email
+// or a lost finding that is impossible to reconstruct. The process drains,
+// exits, and the supervisor/leader election hands its work to a replacement —
+// which is the self-healing behaviour, not running on in an unknown state.
+const exitAfterDrain = (error: unknown) => {
+  report('unhandled-rejection')(error);
   if (stopping) return;
   void shutdown()
     .then(() => process.exit(1))
     .catch(() => process.exit(1));
 };
 
+const handleUncaughtException = (error: unknown) => {
+  correlation.supervisor.ingestor.telemetry.log('CRITICAL', 'uncaught-exception');
+  exitAfterDrain(error);
+};
+
 const handleUnhandledRejection = (reason: unknown) => {
-  const detail = describeError(reason);
   correlation.supervisor.ingestor.telemetry.log('ERROR', 'unhandled-rejection');
-  report('unhandled-rejection')(reason);
-  // Do not exit: the rejecting promise is already discarded. Continuing to run
-  // is safer than killing the server over a single rejected promise.
+  exitAfterDrain(reason);
 };
 
 process.on('uncaughtException', handleUncaughtException);

@@ -104,6 +104,9 @@ export function reconcileFindings(
        // Announcement state is never reset by a re-evaluation: it records
        // what was *sent*, not what currently applies.
        reviewNotifiedAt: old.reviewNotifiedAt ?? candidate.reviewNotifiedAt ?? null,
+      // The dead-letter retry budget is spent, not reset: a requeue that cleared
+      // it would make the cap meaningless (the sweep would retry forever).
+      deadLetterCount: old.deadLetterCount ?? candidate.deadLetterCount,
       exploitRisk: candidate.exploitRisk,
       mlAssessment: candidate.mlAssessment,
       notificationStatus,

@@ -52,7 +52,14 @@ test('VulnCheck NVD++ pages are paced for its 1,000 requests/minute budget, not 
     const cursor = new URL(url).searchParams.get('cursor');
     return respond(200, {
       data: [
-        { cve: { id: cursor ? 'CVE-2026-0002' : 'CVE-2026-0001', lastModified: '2026-01-01T00:00:00.000Z' } },
+        {
+          cve: {
+            id: cursor ? 'CVE-2026-0002' : 'CVE-2026-0001',
+            published: '2026-01-01T00:00:00.000Z',
+            lastModified: '2026-01-01T00:00:00.000Z',
+            descriptions: [{ lang: 'en', value: 'Pacing fixture record' }],
+          },
+        },
       ],
       _meta: cursor ? {} : { next_cursor: 'page-2' },
     });

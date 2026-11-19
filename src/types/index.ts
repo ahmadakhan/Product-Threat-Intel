@@ -384,6 +384,15 @@ export interface Finding {
    * records written before this field existed.
    */
   reviewNotifiedAt?: string | null;
+  /**
+   * Number of automatic dead-letter retries this finding has consumed.
+   *
+   * Persisted on the finding (not on the transient dead-letter row) so the retry
+   * budget survives every requeue: `reconcileFindings` carries it forward and the
+   * dead-letter sweep refuses to requeue a finding that exhausted it. Optional for
+   * records written before this field existed; treated as 0.
+   */
+  deadLetterCount?: number;
   timeline: {
     timestamp: string;
     action: string;
@@ -1138,6 +1147,7 @@ export type RetentionKind =
   | 'emailLogs'
   | 'webhookLogs'
   | 'executions'
+  | 'cveRejections'
   | 'auditLogs'
   | 'events';
 

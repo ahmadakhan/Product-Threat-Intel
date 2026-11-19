@@ -40,6 +40,7 @@ import {
 import { transaction, state, get, getForUpdate, getMany, put, appendAudit, list, verifyStoredAudit } from './db';
 import { queryCollection } from './collections';
 import { runRetention, previewRetention } from './retention';
+import { openRejectionCount } from './ingestionRejections';
 import { buildAliasMap } from '../src/utils/cpeMatcher.ts';
 import { runCpeSimulation } from '../src/utils/cpeSimulation.ts';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine.ts';
@@ -545,6 +546,24 @@ export function createApp(
       `SELECT count(*) FROM records
         WHERE kind='delivery_dead_letters' AND COALESCE(data->>'resolvedAt','')=''`,
     ).then((r) => Number(r.rows[0]?.count ?? 0));
+    // Records a feed delivered but that failed normalization: a lost finding,
+    // not a quality metric. Surfaced here so the probe that already watches the
+    // delivery queue also watches ingestion completeness.
+    const rejectionCount = await openRejectionCount(pool).catch(() => 0);
+    // The scheduler heartbeat is the only durable proof that *some* worker is
+    // actually running work. A cluster of healthy followers with no leader has
+    // an HTTP server that answers 200 on every replica while nothing runs, so
+    // readiness must be derived from this row, not from process liveness.
+    const scheduler = (
+      await pool
+        .query('SELECT heartbeat, EXTRACT(EPOCH FROM (now() - heartbeat)) * 1000 AS age_ms FROM scheduler_state WHERE id=1')
+        .catch(() => ({ rows: [] as { heartbeat: Date | null; age_ms: string | null }[] }))
+    ).rows[0];
+    const schedulerAgeMs = scheduler?.heartbeat ? Number(scheduler.age_ms) : null;
+    // 3x the worker tick (5s) plus slack for one long statement; the internal
+    // watchdog uses the same 3-minute threshold before it queues a catch-up.
+    const SCHEDULER_STALE_MS = 3 * 60_000;
+    const schedulerStale = schedulerAgeMs === null || !Number.isFinite(schedulerAgeMs) || schedulerAgeMs > SCHEDULER_STALE_MS;
     const now = Date.now();
     const leaderStale = !leaderState ||
       !(leaderState.heartbeatAt && Date.parse(leaderState.heartbeatAt) > now - 30000);
@@ -561,6 +580,16 @@ export function createApp(
         status: leaderStale ? 'error' : 'ok',
         message: leaderStale ? 'no leader or stale heartbeat' : `leader: ${leaderState?.leaderId ?? 'unknown'}`,
       },
+      // Distinct from `leader`: a live leader that is not ticking is still
+      // broken (wedged pipeline, dead worker loop). Kubernetes should restart.
+      scheduler: {
+        status: schedulerStale ? 'error' : 'ok',
+        message: schedulerStale
+          ? schedulerAgeMs === null
+            ? 'scheduler heartbeat missing'
+            : `scheduler heartbeat stale (${Math.round(schedulerAgeMs / 1000)}s)`
+          : `scheduler ticked ${Math.round((schedulerAgeMs ?? 0) / 1000)}s ago`,
+      },
       circuitBreaker: {
         status: circuitOpen ? 'degraded' : 'ok',
         message: circuitOpen ? 'overall dispatch cap tripped' : 'all dispatch paths open',
@@ -568,6 +597,13 @@ export function createApp(
       deadLetters: {
         status: deadLetterCount > 50 ? 'degraded' : 'ok',
         message: `${deadLetterCount} unresolved dead letter(s)`,
+      },
+      ingestionRejections: {
+        // Any open rejection means a delivered vulnerability never reached
+        // correlation. It degrades readiness for visibility without taking the
+        // node out of rotation for a single poisoned record.
+        status: rejectionCount > 0 ? 'degraded' : 'ok',
+        message: `${rejectionCount} open ingestion rejection(s)`,
       },
     };
     const allOk = Object.values(healthChecks).every((c) => c.status === 'ok');
@@ -585,6 +621,8 @@ export function createApp(
       isLeader: !leaderStale && Boolean(leaderState),
       circuitBreakerTripped: circuitOpen ?? false,
       unresolvedDeadLetters: deadLetterCount,
+      openIngestionRejections: rejectionCount,
+      schedulerAgeMs,
       uptimeMs: process.uptime() * 1000,
     });
   }));

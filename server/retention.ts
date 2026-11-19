@@ -16,6 +16,7 @@ export const RETENTION_KINDS: readonly RetentionKind[] = [
   'emailLogs',
   'webhookLogs',
   'executions',
+  'cveRejections',
   'events',
 ];
 
@@ -38,6 +39,9 @@ const TIMESTAMP_FIELDS: Record<Exclude<RetentionKind, 'intelligenceMatches'>, st
   emailLogs: 'sentAt',
   webhookLogs: 'sentAt',
   executions: 'startTime',
+  // Age by first observation: the age of the defect, not of its latest retry,
+  // is what makes a bounded backlog of unparseable records eventually drain.
+  cveRejections: 'firstSeenAt',
   auditLogs: 'timestamp',
   events: 'occurred_at',
 };

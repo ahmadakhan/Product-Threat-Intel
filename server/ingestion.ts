@@ -27,6 +27,40 @@ export class FeedDeferred extends Error {
     this.name = 'FeedDeferred';
   }
 }
+
+/**
+ * A source record that the adapter could not normalize.
+ *
+ * Thrown instead of skipping the record: the adapter's pagination cursor only
+ * ever moves forward, so a skipped record inside a completed window is retired
+ * permanently (NVD will not return it for the same lastModStartDate range). The
+ * run fails so the checkpoint stays before the bad record and the next run
+ * re-requests the window; the rejection it carries is persisted by the pipeline
+ * so the loss is operator-visible even while the retry is failing.
+ */
+export class NvdRecordRejected extends Error {
+  /** The rejection itself, so the carried list and this object never diverge. */
+  readonly rejection: CVERejection;
+  constructor(cveId: string, feedId: string, rejection?: CVERejection) {
+    super(`NVD record ${cveId} failed normalization; ingestion window deferred for retry`);
+    this.name = 'NvdRecordRejected';
+    // Callers pass the rejection they built from the raw item so the identity
+    // here is the SAME one they look up in `rejectedOccurrences` and persist. A
+    // locally-built hash (e.g. just the CVE id) would never match the persisted
+    // row, so the occurrence count would stay at zero and quarantine could never
+    // trigger — the source would then be blocked by that record forever.
+    this.rejection = rejection ?? {
+      feedId,
+      cveId,
+      recordHash: cveId,
+      category: 'SCHEMA_VALIDATION',
+      summary: 'Record failed normalization; window will be retried',
+      rejectedAt: new Date().toISOString(),
+    };
+  }
+}
+
+type IngestErrorWithRejections = Error & { rejections?: CVERejection[] };
 export interface IngestResult {
   sourceId?: string;
   syncState?: IngestionState;
@@ -89,8 +123,36 @@ export interface IngestContext extends IngestionState {
   knownCveContent?: ReadonlyMap<string, NormalizedCVE>;
   /** Active inventory package URLs; OSV queries only versioned package identities. */
   targetPurls?: readonly string[];
+  /**
+   * Distinct records this source has already rejected across runs.
+   *
+   * A record that cannot be normalized must not be retired silently, but a
+   * permanently unparseable record must not stop the source forever either: the
+   * window checkpoint never advances, so the feed could never make progress.
+   * Once a record has been rejected this many times it is *quarantined* — it is
+   * skipped, its rejection is persisted, and the window advances past it. The
+   * quarantine is bounded so a provider-wide schema break cannot discard a whole
+   * window; see `NVD_RECORD_QUARANTINE_LIMIT`.
+   */
+  rejectedOccurrences?: ReadonlyMap<string, number>;
 }
 const CHECKPOINT_OVERLAP_MS = 15 * 60 * 1000;
+
+/**
+ * Runs a record must have been rejected for before the window may advance past it.
+ *
+ * Chosen so a page retried on the normal backoff (bounded at one hour) gets
+ * several attempts before it is quarantined, but a genuinely unfixable record
+ * delays ingestion by hours rather than permanently.
+ */
+export const NVD_RECORD_QUARANTINE_LIMIT = 3;
+/** How many quarantined records one window may skip before the run fails. */
+export const NVD_WINDOW_QUARANTINE_LIMIT = 25;
+
+/** Stable identity of a rejected record, matching `rejectionId` in ingestionRejections. */
+export function rejectionKey(feedId: string, recordHash: string, cveId?: string): string {
+  return `feed:${feedId}:${recordHash || cveId || 'unidentified'}`;
+}
 export function getIngestionWindowStart(end: Date, scopeHours: number, checkpoint?: string, maxHours = 2880): Date {
   const requestedStart = end.getTime() - Math.min(scopeHours, maxHours) * 3600000;
   if (!checkpoint) return new Date(requestedStart);
@@ -946,6 +1008,9 @@ export async function ingestFeed(
     const cves: NormalizedCVE[] = [];
     const withdrawals: NonNullable<IngestResult['withdrawals']> = [];
     const rejections: NonNullable<IngestResult['rejections']> = [];
+    // Records skipped after exhausting the retry budget; bounded per window so a
+    // provider-wide schema break cannot silently discard the whole window.
+    const quarantined: CVERejection[] = [];
     const seenCursors = new Set<string>();
     // Duplicate IDs across pages mean the provider (or the cursor relay) reused
     // records; advancing the cursor past them would silently lose integrity, so
@@ -1005,20 +1070,37 @@ export async function ingestFeed(
         }
         totalFetched++;
         const normalized = normalizeNvdItem(item, feed.id);
-        if (normalized) {
-          cves.push(normalized);
-          await flushBatch(cves);
-          revisions[id] = normalized.modifiedDate;
-        } else {
-          rejections.push({
+        if (!normalized) {
+          // Never advance the cursor past an unparsed record on the first attempts:
+          // the stored resume cursor is the only way back into this window.
+          const recordHash = stableJson(item).slice(0, 128);
+          const rejection: CVERejection = {
             feedId: feed.id,
             cveId: id,
-            recordHash: stableJson(item).slice(0, 128),
+            recordHash,
             category: 'SCHEMA_VALIDATION',
             summary: 'VulnCheck NVD++ record failed normalization',
             rejectedAt: new Date().toISOString(),
-          });
+          };
+          rejections.push(rejection);
+          const attempts = (context.rejectedOccurrences?.get(rejectionKey(feed.id, recordHash, id)) ?? 0) + 1;
+          quarantined.push(rejection);
+          if (attempts < NVD_RECORD_QUARANTINE_LIMIT) {
+            const error = new NvdRecordRejected(id, feed.id, rejection) as IngestErrorWithRejections;
+            error.rejections = [...rejections];
+            throw error;
+          }
+          // Quarantined: persisted by the pipeline, then skipped so the cursor can
+          // advance. A cascade is refused so a broken provider cannot wipe a window.
+          if (quarantined.length > NVD_WINDOW_QUARANTINE_LIMIT)
+            throw new Error(
+              `VulnCheck NVD++ returned more than ${NVD_WINDOW_QUARANTINE_LIMIT} unparseable records; refusing to advance past a broken window`,
+            );
+          continue;
         }
+        cves.push(normalized);
+        await flushBatch(cves);
+        revisions[id] = normalized.modifiedDate;
       }
       const nextCursor = page._meta?.next_cursor || page.next_cursor || page.next;
       if (typeof nextCursor !== 'string' || !nextCursor) return undefined;
@@ -1104,6 +1186,9 @@ export async function ingestFeed(
     const cves: NormalizedCVE[] = [];
     const withdrawals: NonNullable<IngestResult['withdrawals']> = [];
     const rejections: NonNullable<IngestResult['rejections']> = [];
+    // Records skipped after exhausting the retry budget; bounded per window so a
+    // provider-wide schema break cannot silently discard the whole window.
+    const quarantined: CVERejection[] = [];
     const seenIds = new Set<string>();
     const revisions: Record<string, string> = {};
     let totalFetched = 0;
@@ -1161,20 +1246,40 @@ export async function ingestFeed(
         }
         totalFetched++;
         const normalized = normalizeNvdItem(item, feed.id);
-        if (normalized) {
-          cves.push(normalized);
-          await flushBatch(cves);
-          revisions[id] = normalized.modifiedDate;
-        } else {
-          rejections.push({
+        if (!normalized) {
+          // A record that cannot be normalized is unparsed exposure, not a
+          // skippable row. Advancing `offset` past it silently would retire it
+          // forever: NVD's lastModStartDate window never returns it again.
+          const recordHash = stableJson(item).slice(0, 128);
+          const rejection: CVERejection = {
             feedId: feed.id,
             cveId: id,
-            recordHash: stableJson(item).slice(0, 128),
+            recordHash,
             category: 'SCHEMA_VALIDATION',
             summary: 'NVD record failed normalization',
             rejectedAt: new Date().toISOString(),
-          });
+          };
+          rejections.push(rejection);
+          const attempts = (context.rejectedOccurrences?.get(rejectionKey(feed.id, recordHash, id)) ?? 0) + 1;
+          quarantined.push(rejection);
+          if (attempts < NVD_RECORD_QUARANTINE_LIMIT) {
+            // Retry the window: the checkpoint must stay before the bad record.
+            // Everything the page saw is carried so the loss is recorded now.
+            const error = new NvdRecordRejected(id, feed.id, rejection) as IngestErrorWithRejections;
+            error.rejections = [...rejections];
+            throw error;
+          }
+          // Quarantined: persisted by the pipeline, then skipped so the source
+          // can make progress. A cascade is refused below.
+          if (quarantined.length > NVD_WINDOW_QUARANTINE_LIMIT)
+            throw new Error(
+              `NVD returned more than ${NVD_WINDOW_QUARANTINE_LIMIT} unparseable records; refusing to advance past a broken window`,
+            );
+          continue;
         }
+        cves.push(normalized);
+        await flushBatch(cves);
+        revisions[id] = normalized.modifiedDate;
       }
       offset += page.vulnerabilities.length;
       hasMore = offset < page.totalResults;

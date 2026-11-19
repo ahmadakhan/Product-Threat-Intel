@@ -60,8 +60,20 @@ const VENDOR_CNAS = new Set([
   'nable',
 ]);
 
-/** Feed types treated as authoritative vendor sources. */
-const AUTHORITATIVE_FEED_TYPES = new Set(['RSS_ATOM', 'JSON_SEARCH_API', 'VULNCHECK_NVD']);
+/**
+ * Feed types that are a machine-readable CVE/advisory registry rather than news
+ * coverage. NVD mirrors and CVE/OSV registries carry CNA attribution in the
+ * record itself; they are never "third-party news" and never a vendor bulletin
+ * on their own (Case 3 tests the assigner and references instead).
+ */
+const REGISTRY_FEED_TYPES = new Set(['VULNCHECK_NVD', 'NVD_API', 'OSV_API', 'GITHUB_ADVISORIES']);
+
+/**
+ * General news / search feed types. These are third-party coverage by nature,
+ * so a record sourced only from one of them is Case 4 whether or not an
+ * operator has marked the feed authoritative.
+ */
+const GENERAL_FEED_TYPES = new Set(['RSS_ATOM', 'JSON_SEARCH_API', 'OTX_API', 'GOOGLE_CSE']);
 
 /** Keywords that indicate a product is the vulnerable root subject (not a prerequisite). */
 const ROOT_SUBJECT_INDICATORS = [
@@ -98,9 +110,31 @@ function nonSubjectContext(text: string): boolean {
 }
 
 /**
+ * Whether a source feed is an official vendor advisory.
+ *
+ * A vendor bulletin must come from a feed that can actually carry one:
+ *
+ *  - a general news/RSS/search feed is third-party coverage even when an operator
+ *    has marked it authoritative — a blog post about a Cisco flaw is not a Cisco
+ *    PSIRT advisory, so it must classify as Case 4.
+ *  - a registry feed (NVD/VulnCheck CVE/OSV) is official vulnerability data and
+ *    is Case 3 on its own; the entry's CNA attribution is tested first.
+ *  - any other (vendor-integration) feed type is a bulletin only when the
+ *    operator explicitly marked it authoritative.
+ */
+function isAuthoritativeVendorFeed(feed: ThreatFeed): boolean {
+  if (GENERAL_FEED_TYPES.has(feed.type)) return false;
+  if (REGISTRY_FEED_TYPES.has(feed.type)) return true;
+  return feed.authoritative === true;
+}
+
+/**
  * Determines whether the source record is an official vendor advisory/PSIRT.
- * Checks: CNA is a known vendor, or the record carries a Vendor Advisory
- * reference tag, or the feed is an authoritative vendor feed type.
+ *
+ * Order matters. CNA attribution is the strongest signal (the vendor itself
+ * assigned the CVE). A vendor-advisory reference is next. Feed authority is the
+ * last resort and, per {@link isAuthoritativeVendorFeed}, can only come from a
+ * registry feed explicitly vouched for by an operator.
  */
 function isVendorAdvisory(cve: NormalizedCVE, feeds: Map<string, ThreatFeed>): boolean {
   // CNA is the vendor itself: NVD/VulnCheck records whose assignerShortName is a
@@ -108,18 +142,14 @@ function isVendorAdvisory(cve: NormalizedCVE, feeds: Map<string, ThreatFeed>): b
   // vendor advisories.
   const assigner = (cve.assignerShortName ?? '').toLowerCase();
   if (assigner && VENDOR_CNAS.has(assigner)) return true;
-  // Feed-level authority: any source feed that is an authoritative vendor feed.
-  for (const feedId of cve.sourceFeeds ?? []) {
-    const feed = feeds.get(feedId);
-    if (feed && AUTHORITATIVE_FEED_TYPES.has(feed.type)) return true;
-    if (feed && feed.authoritative === true) return true;
-  }
   // Vendor Advisory reference tag in remediation.
   const ref = cve.remediation?.vendorAdvisoryRef || '';
   if (ref) return true;
-  // CVE references tagged as Vendor Advisory.
-  // (References are not stored on NormalizedCVE; the vendorAdvisoryRef is the
-  // persisted signal that ingestion extracted from NVD references.)
+  // Feed-level authority: a registry feed an operator marked authoritative.
+  for (const feedId of cve.sourceFeeds ?? []) {
+    const feed = feeds.get(feedId);
+    if (feed && isAuthoritativeVendorFeed(feed)) return true;
+  }
   return false;
 }
 
@@ -283,10 +313,15 @@ export function classifyMatch(
   }
 
   // Case 4: Third-party feed / general news — source is not a vendor advisory.
+  // A registry feed is authoritative infrastructure rather than third-party
+  // coverage, so it does not make a record Case 4. A general news/RSS feed is
+  // third-party by nature: it is Case 4 whether or not an operator trusted it.
   const sourceFeeds = cve.sourceFeeds ?? [];
   const hasThirdPartyFeed = sourceFeeds.some((fid) => {
     const feed = feeds.get(fid);
-    return Boolean(feed && !AUTHORITATIVE_FEED_TYPES.has(feed.type) && feed.authoritative !== true);
+    if (!feed) return false;
+    if (GENERAL_FEED_TYPES.has(feed.type)) return true;
+    return !REGISTRY_FEED_TYPES.has(feed.type) && feed.authoritative !== true;
   });
   // Case 4: third-party feed/news present without a vendor bulletin.
   if (hasThirdPartyFeed) {

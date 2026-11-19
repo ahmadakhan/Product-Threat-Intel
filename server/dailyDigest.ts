@@ -242,8 +242,34 @@ async function computeHealth(
 ): Promise<HealthSnapshot> {
   const start = performance.now();
   let database: HealthSnapshot['database'] = 'connected';
+  // This runs inside the transaction that already claimed the digest day. When
+  // `db` is that transaction's client, any failing statement (a missing table, a
+  // permission error, an aborted statement) leaves the transaction in the
+  // 25P02 "current transaction is aborted" state: the `catch` below swallowed
+  // the error and every later statement in the digest failed, so a health-probe
+  // fault rolled back the claim and the day's findings were never delivered.
+  // A savepoint makes each health probe recoverable: a failure rolls back to it
+  // and the digest continues with a degraded health section.
+  const guardedHealthQuery = async <T>(run: () => Promise<T>): Promise<T | undefined> => {
+    let savepoint = false;
+    try {
+      await db.query('SAVEPOINT daily_health');
+      savepoint = true;
+    } catch {
+      // A server that does not support savepoints (or a connection outside a
+      // transaction) still gets the plain behavior below.
+    }
+    try {
+      const result = await run();
+      if (savepoint) await db.query('RELEASE SAVEPOINT daily_health').catch(() => undefined);
+      return result;
+    } catch {
+      if (savepoint) await db.query('ROLLBACK TO SAVEPOINT daily_health').catch(() => undefined);
+      throw new Error('health query failed');
+    }
+  };
   try {
-    await db.query('SELECT 1');
+    await guardedHealthQuery(() => db.query('SELECT 1'));
   } catch {
     database = 'degraded';
   }
@@ -265,8 +291,8 @@ async function computeHealth(
   let deliveryQueue: { nextScheduledAttempt: string | null } | undefined;
   let backlog: { status: string; count: number }[] = [];
   try {
-    deliveryQueue = (
-      await db.query<{
+    const deliveryQueueResult = await guardedHealthQuery(() =>
+      db.query<{
         nextScheduledAttempt: string | null;
         expiredLeases: number;
       }>(
@@ -274,18 +300,20 @@ async function computeHealth(
            min(next_attempt) FILTER (WHERE status='QUEUED' AND next_attempt>now()) AS "nextScheduledAttempt",
            count(*) FILTER (WHERE status='SENDING' AND locked_at<now()-interval '2 minutes')::int AS "expiredLeases"
          FROM outbox WHERE status IN ('QUEUED','SENDING')`,
-      )
-    ).rows[0];
-    backlog = (
-      await db.query<{ status: string; count: number }>(
+      ),
+    );
+    deliveryQueue = deliveryQueueResult?.rows[0];
+    const backlogResult = await guardedHealthQuery(() =>
+      db.query<{ status: string; count: number }>(
         // ACCEPTED is required: the health report derives "Processed" from it.
         // Without it every digest reported `0 processed` next to a non-zero
         // backlog, which reads as a stuck queue even on a healthy day.
         `SELECT status,count(*)::int AS count FROM outbox
           WHERE status IN ('QUEUED','SENDING','FAILED','REVIEW','ACCEPTED')
           GROUP BY status`,
-      )
-    ).rows;
+      ),
+    );
+    backlog = backlogResult?.rows ?? [];
   } catch {
     database = 'degraded';
   }
@@ -293,15 +321,17 @@ async function computeHealth(
   // Events: Pipeline queued / completed / failed / recovered / authoritative auto-dispatch.
   let pipelineJobs = { total: 0, succeeded: 0, failed: 0 };
   try {
-    const pipelineAudit = await db.query<{ event: string; count: string }>(
-      `SELECT data->>'event' AS event, count(*)::int AS count
-       FROM audit
-       WHERE data->>'category' = 'PIPELINE'
-         AND created_at > now() - interval '24 hours'
-         AND data->>'event' IN ('Pipeline queued','Pipeline completed','Pipeline failed','AUTHORITATIVE_AUTO_DISPATCH','Pipeline recovered')
-       GROUP BY data->>'event'`,
+    const pipelineAudit = await guardedHealthQuery(() =>
+      db.query<{ event: string; count: string }>(
+        `SELECT data->>'event' AS event, count(*)::int AS count
+         FROM audit
+         WHERE data->>'category' = 'PIPELINE'
+           AND created_at > now() - interval '24 hours'
+           AND data->>'event' IN ('Pipeline queued','Pipeline completed','Pipeline failed','AUTHORITATIVE_AUTO_DISPATCH','Pipeline recovered')
+         GROUP BY data->>'event'`,
+      ),
     );
-    for (const row of pipelineAudit.rows) {
+    for (const row of pipelineAudit?.rows ?? []) {
       const count = Number(row.count);
       pipelineJobs.total += count;
       if (row.event === 'Pipeline completed' || row.event === 'AUTHORITATIVE_AUTO_DISPATCH' || row.event === 'Pipeline recovered') {

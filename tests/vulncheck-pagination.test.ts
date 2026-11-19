@@ -44,7 +44,16 @@ const endlessProvider = (pageCount: number) => {
     const n = Number((cursor ?? '0').replace('page-', '')) || 0;
     if (n >= pageCount) return respond({ data: [], _meta: {} });
     return respond({
-      data: [{ cve: { id: `CVE-2026-${String(n + 1).padStart(4, '0')}`, lastModified: '2026-01-01T00:00:00.000Z' } }],
+      data: [
+        {
+          cve: {
+            id: `CVE-2026-${String(n + 1).padStart(4, '0')}`,
+            published: '2026-01-01T00:00:00.000Z',
+            lastModified: '2026-01-01T00:00:00.000Z',
+            descriptions: [{ lang: 'en', value: 'Pagination fixture record' }],
+          },
+        },
+      ],
       _meta: { next_cursor: `page-${n + 1}` },
     });
   };

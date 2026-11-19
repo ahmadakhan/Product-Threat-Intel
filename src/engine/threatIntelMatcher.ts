@@ -1,6 +1,22 @@
 /**
  * Unified threat-intelligence matching and dispatch preparation.
  *
+ * NOT THE PRODUCTION CORRELATION PATH.
+ *
+ * The service correlates and delivers findings through
+ * `src/engine/pipelineEngine.ts` (`runVulnerabilityPipeline` -> `matchesWatchlistItem`
+ * -> `classifyFinding`) and the durable outbox in `server/delivery.ts` plus
+ * `server/deliveryClaims.ts`. Nothing under `server/` imports this module: a
+ * grep for `threatIntelMatcher` in `server/` returns only its own tests.
+ *
+ * It is retained as a standalone, fully tested reference implementation of the
+ * matching contract (and for offline analysis via `analyzeThreatIntel`). A
+ * guarantee that holds here — notably `all_findings_accounted_for` — is NOT a
+ * guarantee of the running service. If this module is ever wired into the
+ * server, that wiring must be reviewed against `pipelineEngine.ts` first: the
+ * two implementations use different dedupe key spaces (`inventory_rule` versus
+ * `findingId` batches) and different identity indexes.
+ *
  * This module is the single deterministic path from a raw vulnerability record
  * (NVD 2.0, VulnCheck, OSV, a vendor advisory, or a news item) and an
  * operator-owned Vendor+Product list to one deduplicated dispatch plan.
@@ -466,6 +482,19 @@ function identityGroupsOverlap(
 
 function hasWildcard(value: string): boolean {
   return value.includes('*');
+}
+
+/**
+ * Escaped-insensitive form of a CPE component for identity comparison.
+ *
+ * CPE 2.3 permits `\+` and `+` to denote the same literal, and the two parsers
+ * in this codebase disagree about which they return. Comparing the unescaped
+ * form makes the decision independent of which parser produced the value, while
+ * leaving `*`/`?` wildcards and the `+`/`#` characters that distinguish real
+ * products (`c++` vs `c`) untouched.
+ */
+function componentNormalForm(value: string): string {
+  return value.replace(/\\(.)/g, '$1');
 }
 
 function wildcardPattern(value: string): RegExp {
@@ -2048,12 +2077,20 @@ function matchCpeForInventory(
   const cpe = parseCpe(criterion.criteria);
   if (!cpe.isValid) return null;
 
-  const vendorMatches = componentMatches(cpe.vendor, inventory.vendor, 'vendor', options.vendorAliases ?? {});
-  const productMatches = componentMatches(cpe.product, inventory.product, 'product', options.productAliases ?? {});
+  // Parse variants differ on CPE 2.3 escapes: one parser keeps the backslash
+  // (matching NVD dictionary spelling), another removes it. That difference must
+  // never decide a match, so every identity is compared in the escaped-insensitive
+  // normalized form. Without this, an operator's `acme\+corp` inventory CPE and
+  // the same vendor emitted unescaped by another adapter simply stopped matching.
+  const comparable = (value: string) => componentNormalForm(value);
+  const criterionVendor = comparable(cpe.vendor);
+  const criterionProduct = comparable(cpe.product);
+  const vendorMatches = componentMatches(criterionVendor, comparable(inventory.vendor), 'vendor', options.vendorAliases ?? {});
+  const productMatches = componentMatches(criterionProduct, comparable(inventory.product), 'product', options.productAliases ?? {});
   const inventoryCpeMatches = inventory.cpes.some(
     (inventoryCpe) =>
-      componentMatches(cpe.vendor, inventoryCpe.vendor, 'vendor', options.vendorAliases ?? {}) &&
-      componentMatches(cpe.product, inventoryCpe.product, 'product', options.productAliases ?? {}),
+      componentMatches(criterionVendor, comparable(inventoryCpe.vendor), 'vendor', options.vendorAliases ?? {}) &&
+      componentMatches(criterionProduct, comparable(inventoryCpe.product), 'product', options.productAliases ?? {}),
   );
   if (!(vendorMatches && productMatches) && !inventoryCpeMatches) return null;
 

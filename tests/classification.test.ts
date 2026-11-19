@@ -123,10 +123,21 @@ test('Case 3: vendorAdvisoryRef classifies as vendor advisory', () => {
   assert.equal(sourceCategory, 'VENDOR_ADVISORY');
 });
 
-test('Case 3: authoritative RSS_ATOM feed classifies as vendor advisory', () => {
+test('Case 4: an operator-authoritative RSS_ATOM feed is trusted coverage, not a vendor advisory', () => {
+  // Authority on a news feed means "we trust this publisher", not "this is the
+  // vendor's PSIRT". Classifying it Case 3 reported third-party blog posts as
+  // official vendor advisories, which is a source-attribution defect: the security
+  // team must be able to tell a Cisco PSIRT bulletin from a blog about Cisco.
   const c = cve({ assignerShortName: 'mitre', sourceFeeds: ['rss'] });
   const a = asset();
   const { caseClassification, sourceCategory } = classifyMatch(c, a, feeds, 'VENDOR_PRODUCT_FALLBACK', 70);
+  assert.equal(caseClassification, 'CASE_4_VENDOR_PRODUCT_GENERAL_FEED');
+  assert.equal(sourceCategory, 'THIRD_PARTY_FEED');
+});
+
+test('Case 3: a registry feed (VULNCHECK_NVD) is an official advisory source', () => {
+  const c = cve({ assignerShortName: 'mitre', sourceFeeds: ['vc'] });
+  const { caseClassification, sourceCategory } = classifyMatch(c, asset(), feeds, 'VENDOR_PRODUCT_FALLBACK', 70);
   assert.equal(caseClassification, 'CASE_3_VENDOR_ADVISORY');
   assert.equal(sourceCategory, 'VENDOR_ADVISORY');
 });
