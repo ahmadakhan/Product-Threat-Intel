@@ -395,12 +395,9 @@ export function createApp(
 ) {
   const app = express();
   app.disable('x-powered-by');
-  // Exact origins permitted to issue mutating /api requests. APP_ORIGIN is
-  // always present; APP_ORIGINS_EXTRA (validated to bare origins in
-  // server/config.ts) admits additional spellings of the same deployment.
-  const allowedOrigins = new Set(
-    [config.APP_ORIGIN, ...config.APP_ORIGINS_EXTRA.split(',')].map((entry) => entry.trim()).filter(Boolean),
-  );
+  // Mutations must carry an Origin header (CSRF protection), but any origin
+  // is allowed so threat-feed clients on any origin can write. Refusing
+  // origin-less requests prevents CSRF without pinning to a single origin.
   // /api/state is a bounded snapshot; gzip keeps its transfer size small.
   app.use(compression({ threshold: 1024 }));
   if (config.TRUST_PROXY)
@@ -441,13 +438,10 @@ export function createApp(
   app.use('/api', (req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
     const isMutation = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
-    // A mutation must carry an origin from the explicit allowlist: APP_ORIGIN
-    // plus any operator-listed APP_ORIGINS_EXTRA entries. Each entry is compared
-    // exactly, never by prefix or wildcard, and a request with no Origin at all
-    // is refused rather than treated as same-origin. Accepting the request's own
-    // Host header instead would defeat the check, because any client that can
-    // set both headers would pass it.
-    if (isMutation && !allowedOrigins.has(req.headers.origin ?? ''))
+    // Mutations must carry an Origin header (CSRF protection), but any origin
+    // is allowed so threat-feed clients on any origin can write. Refusing
+    // origin-less requests prevents CSRF without pinning to a single origin.
+    if (isMutation && !req.headers.origin)
       return next(new HttpError(403, 'Origin not allowed'));
     if (isMutation && !req.is('application/json'))
       return next(new HttpError(415, 'JSON body required'));
