@@ -22,7 +22,9 @@ kind: PodDisruptionBudget
 metadata:
   name: vulnstream
 spec:
-  minAvailable: 1
+  # One instance cannot stay available through a voluntary disruption. Allow
+  # the single pod to be evicted so node drains and upgrades are not blocked.
+  maxUnavailable: 1
   selector:
     matchLabels: {app: vulnstream}
 ---
@@ -32,7 +34,7 @@ metadata:
   name: vulnstream
 spec:
   serviceName: vulnstream-headless
-  replicas: 2
+  replicas: 1
   podManagementPolicy: Parallel
   selector:
     matchLabels: {app: vulnstream}
@@ -48,12 +50,6 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
         seccompProfile: {type: RuntimeDefault}
-      affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchLabels: {app: vulnstream}
-              topologyKey: kubernetes.io/hostname
       initContainers:
         - name: migrate
           image: vulnstream-enterprise:local-verified
@@ -75,7 +71,7 @@ spec:
         - name: app
           image: vulnstream-enterprise:local-verified
           imagePullPolicy: IfNotPresent
-          args: [node, --max-old-space-size=320, server-dist/main.js]
+          args: [node, --expose-gc, --max-old-space-size=1536, server-dist/main.js]
           env:
             - name: DATABASE_URL
               valueFrom:
@@ -130,7 +126,7 @@ spec:
             capabilities: {drop: [ALL]}
           resources:
             requests: {cpu: 250m, memory: 256Mi}
-            limits: {cpu: '2', memory: 512Mi}
+            limits: {cpu: '2', memory: 2Gi}
           volumeMounts:
             - {name: deadletters, mountPath: /var/lib/vulnstream/deadletters}
             - {name: tmp, mountPath: /tmp}
