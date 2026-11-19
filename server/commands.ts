@@ -926,8 +926,6 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
     if (!id) throw new HttpError(400, 'Record ID required');
     const old = await getForUpdate<any>(db, kind, id);
     if (!old) throw new HttpError(404, 'Record not found');
-    if (entity === 'feed' && operation === 'delete' && old.vendorSeed)
-      throw new HttpError(403, 'Vendor-seeded feeds cannot be deleted');
     if (entity === 'asset')
       await syncCorrelationAsset(db, { ...old, active: operation === 'delete' ? false : !old.active });
     if (operation === 'delete') {
