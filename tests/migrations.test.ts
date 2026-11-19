@@ -227,3 +227,38 @@ test('migration 026 retires legacy operational_events indexes without losing cov
     }
   }
 });
+
+test('migrations never overwrite existing settings, email delivery, recipients, feeds, watchlist, or logs values', async () => {
+  // These record kinds live as JSONB in records(kind=..., id=...). A migration
+  // that does `SET data = <literal>` on any of them would clobber every
+  // operator-tuned value:
+  //   - settings        -> Settings page values
+  //   - emailConfig     -> SMTP / email delivery settings
+  //   - recipients      -> Email recipients
+  //   - feeds           -> Threat feeds (and their APIs)
+  //   - watchlist       -> Monitored products
+  //   - emailLogs       -> Email delivery logs
+  //   - webhookLogs     -> Webhook delivery logs
+  //   - executions      -> Pipeline execution logs
+  //   - auditLogs       -> Audit trail (append-only, never clobbered)
+  const protectedKinds = ["'settings'", "'emailConfig'", "'recipients'", "'feeds'", "'watchlist'", "'emailLogs'", "'webhookLogs'", "'executions'", "'auditLogs'"];
+  for (const file of await migrationFiles()) {
+    const sql = await readFile(path.join(migrationsDir, file), 'utf8');
+    const withoutComments = sql.replace(/--[^\n]*/g, '');
+    for (const kind of protectedKinds) {
+      const updates = [...withoutComments.matchAll(
+        new RegExp(`UPDATE\\s+records\\s+SET\\s+data\\s*=\\s*([^;]+?)\\s+WHERE\\s+kind\\s*=\\s*${kind}`, 'gi'),
+      )];
+      for (const update of updates) {
+        const setClause = update[1];
+        // Must reference existing data rather than replacing the whole JSONB blob.
+        assert.ok(
+          /jsonb_set\s*\(\s*data/i.test(setClause) ||
+          /\bdata\s*-\s*'/i.test(setClause) ||
+          /COALESCE\s*\(\s*data->>/i.test(setClause),
+          `${file} replaces the entire ${kind} record without preserving existing data: ${setClause.slice(0, 140)}`,
+        );
+      }
+    }
+  }
+});
