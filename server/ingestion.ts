@@ -257,7 +257,7 @@ export function normalizeNvd(item: any, feedId: string): NormalizedCVE | null {
   };
    for (const config of cve.configurations || []) walk(config);
   const validDetails = details.filter((d) => cpePreFilter(d.criteria) && parseCPE23(d.criteria).isValid);
-  const description = cve.descriptions?.find((d: any) => d.lang === 'en')?.value || cve.id;
+  const description = (cve.descriptions?.find((d: any) => d.lang === 'en')?.value || cve.id).slice(0, 30000);
   const score = metric?.baseScore ?? 0;
   try {
     return cveSchema.parse({
@@ -1356,7 +1356,7 @@ function normalizeNvdItem(item: any, feedId: string): NormalizedCVE | null {
   const validDetails = details.filter((d) => cpePreFilter(d.criteria) && parseCPE23(d.criteria).isValid);
 
   const description =
-    cve.descriptions?.find((d: any) => d.lang === 'en')?.value || cve.id || '';
+    (cve.descriptions?.find((d: any) => d.lang === 'en')?.value || cve.id || '').slice(0, 30000);
 
   const cwe =
     (cve.weaknesses || [])

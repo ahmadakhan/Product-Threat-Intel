@@ -88,7 +88,7 @@ export function parseOsvVulnerability(
   const modifiedDate = providerTimestamp(advisory.modified, 'OSV modified');
   const cveIds = [...new Set((advisory.aliases || []).map((alias) => normalizeCveId(alias)).filter((value): value is string => !!value))];
   const title = advisory.summary || advisory.details?.split(/\r?\n/, 1)[0] || id;
-  const description = advisory.details || advisory.summary || title;
+  const description = (advisory.details || advisory.summary || title).slice(0, 30000);
   const result: ParsedAdvisories = { cves: [], articles: [], withdrawals: [] };
   if (advisory.withdrawn) {
     const withdrawnAt = providerTimestamp(advisory.withdrawn, 'OSV withdrawal');
@@ -178,7 +178,7 @@ export function parseGitHubAdvisories(
       continue;
     }
     const title = advisory.summary || advisory.ghsa_id;
-    const description = advisory.description || advisory.summary;
+    const description = (advisory.description || advisory.summary).slice(0, 30000);
     if (!cveIds.length) {
       result.articles.push(advisoryArticle({
         id: advisory.ghsa_id.toLowerCase(),
