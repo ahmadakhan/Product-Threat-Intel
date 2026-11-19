@@ -1294,6 +1294,73 @@ export async function ingestFeed(
       syncState: { cursor: end.toISOString(), hasMore: windowHasMore, revisions },
     };
   }
+  if (feed.type === 'MITRE_CVE') {
+    // MITRE CVE Project — cvelistV5 delta log on GitHub. Returns an array of
+    // CVE delta entries (CVE ID + last modified date). Individual CVE detail
+    // records live at https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/{year}/{cve-id}.json.
+    // This adapter indexes the delta log and emits minimal CVE records (IDs +
+    // dates only, applicabilityRequiresReview=true) so the pipeline can track
+    // which CVEs changed; enrichment (CVSS, CPEs, descriptions) comes from
+    // authoritative sources such as VulnCheck NVD++.
+    const url = new URL(feed.url);
+    const { data: deltaLog } = await json(url.href, false, {
+      timeoutMs: 120000,
+      socketTimeoutMs: 60000,
+      maxResponseBytes: 64 * 1024 * 1024,
+    }, true);
+    if (!Array.isArray(deltaLog)) throw new Error('MITRE delta log did not return a JSON array');
+
+    const cves: NormalizedCVE[] = [];
+    const withdrawals: NonNullable<IngestResult['withdrawals']> = [];
+    const rejections: NonNullable<IngestResult['rejections']> = [];
+    const seenIds = new Set<string>();
+    const revisions: Record<string, string> = {};
+    let totalFetched = 0;
+
+    for (const entry of deltaLog) {
+      const cveId = normalizeCveId(entry?.cveID ?? entry?.id ?? '');
+      if (!cveId || seenIds.has(cveId)) continue;
+      seenIds.add(cveId);
+
+      const dateUpdated = entry?.dateUpdated ?? entry?.dateModified ?? entry?.lastModified ?? '';
+      const modifiedDate = dateUpdated ? iso(dateUpdated) : new Date().toISOString();
+
+      cves.push({
+        cveId,
+        title: cveId,
+        description: '',
+        publishedDate: modifiedDate,
+        modifiedDate,
+        cvss: { version: 'UNKNOWN', score: 0, vector: '', severity: 'UNKNOWN' },
+        cwe: [],
+        cpeMatches: [],
+        cpeMatchDetails: [],
+        applicabilityRequiresReview: true,
+        sourceFeeds: [feed.id],
+        epss: { score: 0, percentile: 0 },
+        cisaKev: { isKev: false },
+        exploitStatus: 'None',
+        remediation: {
+          patchUrl: '',
+          vendorAdvisoryRef: `https://cve.mitre.org/cgi-bin/cvename.cgi?name=${cveId}`,
+          immediateActions: [],
+          workarounds: [],
+          rollbackPlan: '',
+          stepByStep: [],
+        },
+      });
+      totalFetched++;
+      revisions[cveId] = modifiedDate;
+    }
+
+    return {
+      cves,
+      count: totalFetched,
+      withdrawals,
+      rejections,
+      syncState: { cursor: new Date().toISOString(), hasMore: false, revisions },
+    };
+  }
   if (feed.type === 'OPENCVE_API') {
     // OpenCVE — free community CVE enrichment source. Returns individual CVE
     // detail records in a format normalized by normalizeOpenCve.

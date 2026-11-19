@@ -2213,6 +2213,7 @@ export function createApp(
                           maxResponseBytes: 256 * 1024,
                         }
                       : { ...egressOptions, headers };
+        if (feed.type === 'MITRE_CVE') (requestOptions as { maxResponseBytes?: number }).maxResponseBytes = 64 * 1024 * 1024;
         response = await request(testUrl.href, requestOptions);
         if (response.status >= 200 && response.status < 300) {
           if (feed.type === 'RSS_ATOM') parseSyndication(response.body, feed.id, 2880);
