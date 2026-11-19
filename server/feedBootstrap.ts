@@ -59,11 +59,12 @@ export async function reconcileRecommendedFeeds(db: PoolClient): Promise<void> {
       errorLog: source.errorLog,
     });
   }
-  // Retire any legacy MITRE/OpenCVE feeds that may persist in existing
-  // databases. VulnCheck NVD++ is the recommended authoritative CVE source;
-  // NIST NVD 2.0 remains available as a free community service (NVD_API type)
-  // and is not retired.
-  const RETIRED_FEED_TYPES = new Set(['MITRE_CVE', 'OPENCVE_API']);
+  // MITRE/OpenCVE feeds are no longer forcibly retired. VulnCheck NVD++ is
+  // the recommended authoritative CVE source; NIST NVD 2.0 remains available
+  // as a free community service (NVD_API type). MITRE_CVE and OPENCVE_API
+  // types have no ingest adapter, so enabled feeds of those types are skipped
+  // gracefully by the pipeline instead of failing every run.
+  const RETIRED_FEED_TYPES = new Set<string>([]);
   for (const feed of existing) {
     if (!RETIRED_FEED_TYPES.has(feed.type)) continue;
     await put(db, 'feeds', feed.id, {
