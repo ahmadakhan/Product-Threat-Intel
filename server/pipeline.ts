@@ -1258,7 +1258,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           productAliases,
         }),
       undefined,
-      { locks: ['match-index'] }, // Use match-index advisory lock for exclusive coordination
+      { locks: ['match-index'], statementTimeoutMs: 300000 },
     );
     // Audit M-2/M-3: the preliminary pass used to run the *entire* matcher over
     // the whole corpus solely to decide which CVEs need EPSS scores. That is the
@@ -1796,7 +1796,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             productAliases: finalProductAliases,
           }),
         undefined,
-        { locks: ['match-index'] },
+        { locks: ['match-index'], statementTimeoutMs: 300000 },
       );
       const correlated = runVulnerabilityPipeline(
         feeds,

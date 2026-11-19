@@ -510,6 +510,14 @@ export interface TransactionOptions {
    * releases the resource it exists to protect.
    */
   signal?: AbortSignal;
+  /**
+   * Override the pool-level statement timeout for this transaction, in
+   * milliseconds. Set locally via `SET LOCAL` so it reverts when the
+   * transaction commits or rolls back. Used by the correlation candidate-index
+   * refresh, whose GIN join can exceed the default 15s statement timeout on
+   * large installations.
+   */
+  statementTimeoutMs?: number;
 }
 
 /**
@@ -610,6 +618,10 @@ export async function transaction<T>(
   options.signal?.addEventListener('abort', onAbort, { once: true });
   try {
     await db.query('BEGIN');
+    // Override the pool-level statement timeout for long-running transaction
+    // work (e.g. correlation candidate-index refresh). Reverts on COMMIT/ROLLBACK.
+    if (typeof options.statementTimeoutMs === 'number' && Number.isFinite(options.statementTimeoutMs))
+      await db.query(`SET LOCAL statement_timeout = '${options.statementTimeoutMs}ms'`);
     // Named, transaction-scoped locks replace the former global mutation lock.
     // Row-level locks on the records being mutated provide the per-record
     // serialization that operators actually need. CRITICAL: acquire locks in
