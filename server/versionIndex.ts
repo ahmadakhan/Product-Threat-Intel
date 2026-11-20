@@ -510,18 +510,23 @@ export async function syncMatchIndex(
       ),
     ],
   );
+  // Anti-join against the incoming set, not a tuple NOT IN.
+  //
+  // The previous form (`WHERE NOT (cve_id = ANY(...)) OR NOT ((cve_id,
+  // criterion_id) IN (SELECT ...))`) cannot use the primary key for the second
+  // predicate: PostgreSQL evaluates the nested `IN` over an unnest of two 45k
+  // arrays, which is a hash join over the whole table on every run. This shape
+  // lets the planner hash the incoming set once and probe per row, and it keeps
+  // the positional alignment of the two arrays that the tuple form depended on.
+  const incoming = cveRows.map((row) => ({ cve_id: row.cveId, criterion_id: row.criterionId }));
   await withStatementTimeoutRetry(
     db,
-    `DELETE FROM match_cve_index
-      WHERE NOT (cve_id = ANY($1::text[]))
-         OR NOT ((cve_id, criterion_id) IN (
-              SELECT cve_id, criterion_id
-                FROM unnest($1::text[], $2::text[]) AS t(cve_id, criterion_id)
-            ))`,
-    // Both arrays must be positionally aligned. De-duplicating the CVE ids here
-    // would zip them against a longer criterion array and delete every criterion
-    // after the first one for a multi-criterion CVE.
-    [cveRows.map((row) => row.cveId), cveRows.map((row) => row.criterionId)],
+    `DELETE FROM match_cve_index m
+      WHERE NOT EXISTS (
+        SELECT 1 FROM jsonb_to_recordset($1::jsonb) AS t(cve_id text, criterion_id text)
+         WHERE t.cve_id = m.cve_id AND t.criterion_id = m.criterion_id
+      )`,
+    [JSON.stringify(incoming)],
   );
 }
 
