@@ -553,6 +553,22 @@ class PipelineStopped extends Error {
     super('Pipeline stopped by operator; uncommitted results discarded');
   }
 }
+
+/**
+ * The pipeline could not take its advisory-lock connection because the pool was
+ * saturated. This is a scheduling condition, not a failure of the run: the tick
+ * retries on its next pass and the operator sees the pool state in the event.
+ */
+export class PipelinePoolStarved extends Error {
+  readonly detail: { total: number; idle: number; waiting: number; error: string };
+  constructor(detail: { total: number; idle: number; waiting: number; error: string }) {
+    super(
+      `Could not acquire the pipeline connection (pool total=${detail.total} idle=${detail.idle} waiting=${detail.waiting}); run deferred`,
+    );
+    this.name = 'PipelinePoolStarved';
+    this.detail = detail;
+  }
+}
 /** WHATWG name a timeout strategy assigns to its abort reason. */
 const TIMEOUT_REASON_NAME = 'TimeoutError';
 
@@ -560,21 +576,32 @@ const TIMEOUT_REASON_NAME = 'TimeoutError';
 export const ABORT_REASON = Symbol('abort-reason');
 
 /**
- * Request an abort for the engine's EXTERNAL reason statement, distinct from the
+ * Marks an abort as an EXTERNAL cancel for the engine, distinct from the
  * operation's own deadlines (the corpus/commit budget, feed windows).
  *
  * `AbortSignal.timeout()` and `AbortSignal.any()` abort with a reason whose
  * `name` is "TimeoutError", and `throwIfAborted()` rethrows that reason object
  * unchanged. `reasonAborted()` in main.ts classifies on that name, so an
- * external cancel must be tagged through here: the stall watchdog used to
- * stamp its abort with `new Error('Pipeline produced no progress...')`, which
- * every caller then treated as a genuine internal failure (and wrote one
- * `worker.failed` per tick to the operational log).
+ * external cancel must be tagged through here.
  *
- * Every external abort (SIGTERM, leadership loss, stall watchdog) goes through
- * this helper, so classification never depends on an error message.
+ * IMPORTANT: this only tags the controller's CURRENT reason; it never aborts.
+ * Call sites are written as
+ *
+ *     setAbortReason(controller);
+ *     controller.abort(new Error('Worker leadership lost'));
+ *
+ * and an earlier version of this helper aborted on the caller's behalf when the
+ * signal was not yet aborted. That made the caller's own `abort(reason)` a
+ * silent no-op (the signal was already aborted), so EVERY external cancel -
+ * leadership loss, shutdown, and the stall watchdog - arrived at the engine as
+ * a generic "Operation exceeded its deadline". Operators lost the actual cause
+ * in the event log, and the watchdog's measured stall duration was discarded.
+ * Returning without aborting leaves the caller's reason authoritative.
  */
 export function setAbortReason(controller: AbortController): void {
+  // Not aborted yet: there is no reason to tag, and aborting here would
+  // overwrite the caller's own abort reason (see the note above).
+  if (!controller.signal.aborted) return;
   const reason = controller.signal.reason;
   // A caller-supplied reason, and the browser-shaped `AbortError` that a
   // timeout strategy may still synthesise, are already distinguishable from a
@@ -706,7 +733,14 @@ export async function stopRunWithClient(
         return run;
       },
       lockClient,
-      { locks: ['pipeline-queue'] },
+      // A caller that passes its own client is already inside the worker's
+      // `pipeline-queue` critical section: the worker holds the session advisory
+      // lock on a different connection for the whole run. Taking it again here
+      // waited on a lock the same run owns and could never release until the run
+      // ended - a hard deadlock. In that case the lock is declared acquired (the
+      // same contract `queueRun` uses). Without a client, the lock is taken
+      // normally to serialize against a fresh stop request.
+      lockClient ? { locks: [], lockAcquired: ['pipeline-queue'] } : { locks: ['pipeline-queue'] },
     );
 }
 /** How often a running pipeline proves it is still alive. */
@@ -735,7 +769,32 @@ export function pipelineHeartbeat(
 
 export async function processPipeline(pool: pg.Pool, config: Config, request: Requester, signal?: AbortSignal, onProgress?: () => void): Promise<boolean> {
   signal?.throwIfAborted();
-  const lock = await pool.connect();
+  // The session advisory lock needs its own connection for the whole run.
+  // `pool.connect()` rejects after `connectionTimeoutMs` when every slot is
+  // busy. Nothing is wrong with the run in that case — it simply never started —
+  // so the failure is reported as a scheduling condition with the pool's state
+  // instead of an opaque timeout, and the next tick retries. Without this the
+  // watchdog saw a bare "timeout exceeded when trying to connect" and the
+  // operator could not tell pool exhaustion from a broken database.
+  let lock: pg.PoolClient;
+  try {
+    lock = await pool.connect();
+  } catch (error) {
+    const detail = {
+      total: pool.totalCount,
+      idle: pool.idleCount,
+      waiting: pool.waitingCount,
+      error: error instanceof Error ? error.message : String(error),
+    };
+    await writeEvent(pool, {
+      category: 'PIPELINE',
+      level: 'WARNING',
+      code: 'pipeline.pool_exhausted',
+      message: 'Pipeline could not acquire its advisory-lock connection; run deferred to the next tick',
+      context: detail,
+    }).catch(() => undefined);
+    throw new PipelinePoolStarved(detail);
+  }
   let connectionLost = false;
   const onError = () => {
     connectionLost = true;

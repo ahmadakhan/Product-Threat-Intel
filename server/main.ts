@@ -35,7 +35,7 @@ import { enrichmentBacklogCandidates } from '../src/engine/pipelineEngine';
 import type { TrainingSummary } from './ml/train/orchestrator.ts';
 import { isTelemetryAnomaly, shouldSampleMlTelemetry } from './ml/integration.ts';
 import type { Db } from './db';
-import { processPipeline, setAbortReason, ABORT_REASON } from './pipeline';
+import { processPipeline, setAbortReason, ABORT_REASON, PipelinePoolStarved } from './pipeline';
 import { runSelfHealCheck } from './selfHealing';
 import { runRetention } from './retention';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
@@ -222,6 +222,10 @@ const report = (event: string) => (error: unknown) => {
 const reasonAborted = (reason: unknown): boolean => {
   // The run's own attempt was cancelled (shutdown, leadership loss, watchdog).
   if (pipelineController?.signal.aborted) return true;
+  // The run never started because the pool had no free connection. That is a
+  // deferral, not a failure; writing `worker.failed` for it every tick turned
+  // transient pool pressure into a permanent ERROR stream.
+  if (reason instanceof PipelinePoolStarved) return true;
   // Sentinel stamped by our own abort call sites.
   if (reason && typeof reason === 'object' && (reason as { [ABORT_REASON]?: boolean })[ABORT_REASON])
     return true;
@@ -310,24 +314,93 @@ let outboxGeneration = 0;
 let selfHealRunning: Promise<void> | null = null;
 /** In-flight memory pressure response; prevents overlapping restart attempts. */
 let memoryPressureRunning: Promise<void> | null = null;
+
+/**
+ * Memory pressure auto-response: hint GC at 90%, graceful restart at 95%.
+ *
+ * Runs on every instance regardless of leadership. `process.memoryUsage()` and
+ * `getHeapStatistics()` are synchronous and cheap, so the per-tick cost is
+ * negligible, and the guard prevents overlapping restart attempts.
+ *
+ * The GC hint only exists with `--expose-gc` (set in compose.yaml alongside
+ * `--max-old-space-size`), which is why it is feature-detected rather than
+ * assumed.
+ */
+function checkMemoryPressure(): void {
+  if (memoryPressureRunning || stopping) return;
+  memoryPressureRunning = (async () => {
+    try {
+      const mem = process.memoryUsage();
+      const heapLimit = getHeapStatistics().heap_size_limit;
+      const memoryLimit = process.constrainedMemory?.() || totalmem();
+      const heapPct =
+        Math.max(heapLimit > 0 ? mem.heapUsed / heapLimit : 0, memoryLimit > 0 ? mem.rss / memoryLimit : 0) * 100;
+      if (heapPct >= 90 && typeof globalThis.gc === 'function') {
+        // Hint V8 to collect garbage; not guaranteed to run but reduces pressure
+        // without restarting. Only available with --expose-gc.
+        globalThis.gc();
+        verboseLog(`memory.gc heapPct=${heapPct.toFixed(0)}`);
+      }
+      if (heapPct >= 95) {
+        void report('memory.pressure')(new Error(`Heap at ${heapPct.toFixed(0)}%; initiating graceful restart`));
+        await shutdown();
+        process.exit(1);
+      }
+    } catch (error) {
+      void report('memory.pressure')(error);
+    } finally {
+      memoryPressureRunning = null;
+    }
+  })();
+}
+
+/** Pipeline start time whose half-budget warning has already been emitted. */
+let warnedStallRunAt = 0;
+
 const tick = () => {
   if (stopping || config.WORKER_ENABLED !== 'true') return;
   verboseLog('worker.tick');
   // Periodically check/acquire leadership so followers can take over when the
   // leader dies. Only the leader runs background jobs.
   void checkLeadership();
+  // The memory guard runs on EVERY instance, not just the leader. It used to be
+  // below the `isLeader` return, so a follower polling for leadership never
+  // checked its own heap and could only die by the kernel's OOM killer - with no
+  // graceful restart, no event, and no shutdown drain. Process health is not a
+  // leadership concern.
+  checkMemoryPressure();
   if (!leadership.isLeader) return;
+  // Approaching the stall budget is a capacity signal: a healthy run that comes
+  // within 50% of the threshold means one slow source response will abort the
+  // next one. Warn once per run (keyed by its start time) so operators raise
+  // STUCK_PROMISE_MS from evidence instead of discovering it as a mid-run abort.
+  if (pipeline && !pipelineController?.signal.aborted && pipelineStartedAt !== warnedStallRunAt) {
+    const silentMs = Date.now() - pipelineStartedAt;
+    if (silentMs > STUCK_PROMISE_MS / 2) {
+      warnedStallRunAt = pipelineStartedAt;
+      void writeEvent(pool, {
+        category: 'PIPELINE',
+        level: 'WARNING',
+        code: 'pipeline.stall_approaching',
+        message: `Pipeline has been silent for ${Math.round(silentMs / 1000)}s, over half of the ${Math.round(STUCK_PROMISE_MS / 1000)}s stall budget`,
+        context: { silentMs, stuckPromiseMs: STUCK_PROMISE_MS, feedMaxDurationSeconds: config.FEED_MAX_DURATION_SECONDS },
+      }).catch(() => undefined);
+    }
+  }
   if (pipeline && !pipelineController?.signal.aborted && Date.now() - pipelineStartedAt > STUCK_PROMISE_MS) {
     const silentMs = Date.now() - pipelineStartedAt;
     const reason = new Error(
       `Pipeline produced no progress for ${silentMs}ms (STUCK_PROMISE_MS=${STUCK_PROMISE_MS}); cancelling the current attempt`,
     );
     void report('pipeline')(reason);
-    // The stall is the engine's external reason, not an internal error: stamp
-    // it explicitly so `reasonAborted` cannot mistake it for a failure.
+    // The stall is the engine's external cancel, not an internal error: stamp
+    // the sentinel so `reasonAborted` classifies it as an abort rather than a
+    // failure. `setAbortReason` deliberately does not abort (an earlier version
+    // aborted here and silently discarded the message below), so the reason that
+    // reaches the engine is the one built above, carrying the measured stall.
     if (pipelineController) {
       setAbortReason(pipelineController);
-      pipelineController.abort(reason);
+      pipelineController.abort(stampAborted(reason));
     }
   }
   if (!pipeline) {
@@ -419,37 +492,7 @@ const tick = () => {
   // Running every tick is cheap (memoryUsage() is synchronous) and the guard
   // prevents overlapping restart attempts. The 95% restart only triggers when
   // the heap is critically full and self-healing's alert alone is insufficient.
-  if (!memoryPressureRunning) {
-    memoryPressureRunning = (async () => {
-      try {
-        const mem = process.memoryUsage();
-        const heapLimit = getHeapStatistics().heap_size_limit;
-        const memoryLimit = process.constrainedMemory?.() || totalmem();
-        const heapPct =
-          Math.max(
-            heapLimit > 0 ? mem.heapUsed / heapLimit : 0,
-            memoryLimit > 0 ? mem.rss / memoryLimit : 0,
-          ) * 100;
-        if (heapPct >= 90 && typeof globalThis.gc === 'function') {
-          // Hint V8 to collect garbage; not guaranteed to run but reduces
-          // pressure without restarting. Only available with --expose-gc.
-          globalThis.gc();
-          verboseLog(`memory.gc heapPct=${heapPct.toFixed(0)}`);
-        }
-        if (heapPct >= 95) {
-          void report('memory.pressure')(
-            new Error(`Heap at ${heapPct.toFixed(0)}%; initiating graceful restart`),
-          );
-          await shutdown();
-          process.exit(1);
-        }
-      } catch (error) {
-        void report('memory.pressure')(error);
-      } finally {
-        memoryPressureRunning = null;
-      }
-    })();
-  }
+  checkMemoryPressure();
 
   // Self-healing auto-recovery check - runs on every worker tick.
   // Monitors pipeline, feeds, and scheduler; triggers recovery and sends
