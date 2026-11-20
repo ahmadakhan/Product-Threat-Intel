@@ -315,19 +315,44 @@ function chunkArray<T>(array: T[], size: number): T[][] {
  * Runs a statement with exponential-backoff retries on PostgreSQL statement
  * timeout (57014). INSERT ... ON CONFLICT and DELETE are idempotent, so a
  * timed-out statement can be safely retried without risking duplicate work.
+ *
+ * A statement timeout aborts the whole transaction, so retrying the same
+ * statement on the same connection would only produce 25P02 ("current
+ * transaction is aborted"). When the caller passes a checked-out client (it is
+ * already inside `transaction()`), every attempt therefore runs under a
+ * savepoint and a timeout rolls back to it before the retry. A pool connection
+ * is in autocommit mode, where the failed statement is already rolled back.
  */
+let statementSavepointSequence = 0;
+
 async function withStatementTimeoutRetry(
   db: Db,
   query: string,
   values: unknown[] = [],
   maxRetries: number = MAX_STATEMENT_RETRIES,
 ): Promise<QueryResult<Record<string, unknown>>> {
+  const inTransaction = typeof (db as { release?: unknown }).release === 'function';
   let lastError: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const savepoint = `stmt_retry_${statementSavepointSequence++}`;
     try {
-      return await db.query(query, values);
+      if (inTransaction) await db.query(`SAVEPOINT ${savepoint}`);
+      const result = await db.query(query, values);
+      if (inTransaction) await db.query(`RELEASE SAVEPOINT ${savepoint}`);
+      return result;
     } catch (error) {
       const code = (error as { code?: string })?.code;
+      if (inTransaction) {
+        // Restore a usable transaction before deciding whether to retry. If the
+        // rollback itself fails the connection is unusable, so surface the
+        // original error rather than masking it.
+        try {
+          await db.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+          await db.query(`RELEASE SAVEPOINT ${savepoint}`);
+        } catch {
+          throw error;
+        }
+      }
       if (code !== STATEMENT_TIMEOUT_CODE || attempt === maxRetries) {
         lastError = error;
         break;
@@ -369,11 +394,11 @@ export async function syncMatchIndex(
       });
   }
 
-  // TRUNCATE + bulk INSERT replaces upsert+delete. TRUNCATE is O(1) (page
-  // deallocation, no per-row work) and avoids per-row GIN conflict resolution
-  // from ON CONFLICT plus the expensive DELETE ... ANY() scan. TRUNCATE is
-  // transactional, so a rollback restores the previous index contents.
-  await withStatementTimeoutRetry(db, 'TRUNCATE TABLE match_asset_index');
+  // Upsert + delete retains compatibility with the app database role, which has
+  // INSERT/UPDATE/DELETE but not TRUNCATE on the match index tables. Chunks are
+  // small (100) and every statement is wrapped in withStatementTimeoutRetry so
+  // statement timeouts on the GIN-indexed identities column are retried instead
+  // of failing the whole run.
   for (let offset = 0; offset < assetRows.length; offset += CHUNK) {
     const chunk = assetRows.slice(offset, offset + CHUNK);
     const values: unknown[] = [];
@@ -384,12 +409,18 @@ export async function syncMatchIndex(
     });
     await withStatementTimeoutRetry(
       db,
-      `INSERT INTO match_asset_index(asset_id,identities,version_ordinal) VALUES${params.join(',')}`,
+      `INSERT INTO match_asset_index(asset_id,identities,version_ordinal) VALUES${params.join(',')}
+       ON CONFLICT(asset_id) DO UPDATE SET identities=EXCLUDED.identities,
+         version_ordinal=EXCLUDED.version_ordinal,updated_at=now()`,
       values,
     );
   }
+  await withStatementTimeoutRetry(
+    db,
+    'DELETE FROM match_asset_index WHERE NOT (asset_id = ANY($1::text[]))',
+    [assetRows.map((row) => row.assetId)],
+  );
 
-  await withStatementTimeoutRetry(db, 'TRUNCATE TABLE match_cve_index');
   for (let offset = 0; offset < cveRows.length; offset += CHUNK) {
     const chunk = cveRows.slice(offset, offset + CHUNK);
     const values: unknown[] = [];
@@ -409,10 +440,28 @@ export async function syncMatchIndex(
     });
     await withStatementTimeoutRetry(
       db,
-      `INSERT INTO match_cve_index(cve_id,criterion_id,identities,start_ordinal,start_inclusive,end_ordinal,end_inclusive,unbounded) VALUES${params.join(',')}`,
+      `INSERT INTO match_cve_index(cve_id,criterion_id,identities,start_ordinal,start_inclusive,end_ordinal,end_inclusive,unbounded)
+       VALUES${params.join(',')}
+       ON CONFLICT(cve_id,criterion_id) DO UPDATE SET identities=EXCLUDED.identities,
+         start_ordinal=EXCLUDED.start_ordinal,start_inclusive=EXCLUDED.start_inclusive,
+         end_ordinal=EXCLUDED.end_ordinal,end_inclusive=EXCLUDED.end_inclusive,
+         unbounded=EXCLUDED.unbounded,updated_at=now()`,
       values,
     );
   }
+  await withStatementTimeoutRetry(
+    db,
+    `DELETE FROM match_cve_index
+      WHERE NOT (cve_id = ANY($1::text[]))
+         OR NOT ((cve_id, criterion_id) IN (
+              SELECT cve_id, criterion_id
+                FROM unnest($1::text[], $2::text[]) AS t(cve_id, criterion_id)
+            ))`,
+    // Both arrays must be positionally aligned. De-duplicating the CVE ids here
+    // would zip them against a longer criterion array and delete every criterion
+    // after the first one for a multi-criterion CVE.
+    [cveRows.map((row) => row.cveId), cveRows.map((row) => row.criterionId)],
+  );
 }
 
 /**

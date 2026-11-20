@@ -34,6 +34,30 @@ test('audit V-2: the outbox pass sweeps expired delivery claims', async () => {
   );
 });
 
+test('a cancelled pipeline is detached after a bounded grace period', async () => {
+  // A promise that ignores its abort signal used to keep `pipeline` set
+  // forever, so every later tick skipped the start branch and the worker never
+  // recovered. The guard is a source-level contract because main.ts starts a
+  // server at import time; the failure mode is a permanently wedged worker.
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('../server/main.ts', import.meta.url), 'utf8');
+  const grace = /PIPELINE_ABORT_GRACE_MS = (\d[\d_]*)/.exec(source);
+  assert.ok(grace, 'the abort grace period must be a named constant');
+  const graceMs = Number(grace![1].replaceAll('_', ''));
+  assert.ok(graceMs > 0 && graceMs <= 5 * 60_000, 'the grace period must be bounded');
+
+  const tick = source.slice(source.indexOf('const tick = () => {'), source.indexOf('const WORKER_TICK_MS'));
+  assert.match(tick, /pipelineController\?\.signal\.aborted/, 'the guard must only act on cancelled attempts');
+  assert.match(tick, /pipelineAbortedAt = Date\.now\(\)/, 'the grace period must start on first observation');
+  assert.match(
+    tick,
+    /Date\.now\(\) - pipelineAbortedAt > PIPELINE_ABORT_GRACE_MS/,
+    'detachment must be time-bounded',
+  );
+  assert.match(tick, /pipeline = null;/, 'a wedged attempt must be detached so a fresh one can start');
+  assert.match(tick, /pipelineAbortedAt = 0;/, 'the grace state must be reset for the next attempt');
+});
+
 test('releaseExpiredClaims deletes only expired CLAIMED rows with no owning job', async () => {
   // Contract check against a stubbed database: the sweep deletes exactly the
   // rows that can never block a delivery again — CLAIMED, expired, and with no

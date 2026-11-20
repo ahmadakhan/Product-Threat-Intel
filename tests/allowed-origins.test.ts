@@ -43,7 +43,7 @@ test('APP_ORIGINS_EXTRA normalises entries and rejects a path', () => {
 });
 
 test(
-  'mutations accept the listed origins only and still refuse origin-less requests',
+  'mutations require an Origin header and still refuse origin-less requests',
   { skip: !database },
   async () => {
     const extra = 'https://vulnstream.lan';
@@ -56,8 +56,10 @@ test(
     await migrate(pool);
     const app = createApp(pool, config);
     // No session is needed to observe the origin gate: it runs before
-    // authentication, so a permitted origin advances to 401 while a refused one
-    // stops at 403.
+    // authentication, so a request with any Origin header advances to 401 while
+    // an origin-less mutation stops at 403. The gate intentionally accepts any
+    // present origin so threat-feed clients on arbitrary origins can write; the
+    // JSON content-type and session/CSRF checks remain the CSRF boundary.
     const status = async (origin?: string) => {
       const request = supertest(app).post('/api/commands').send({});
       if (origin) request.set('Origin', origin);
@@ -66,16 +68,20 @@ test(
     assert.equal(await status(config.APP_ORIGIN), 401, 'APP_ORIGIN passes the gate');
     assert.equal(await status(extra), 401, 'a listed extra origin passes the gate');
     assert.equal(await status(), 403, 'an origin-less mutation is refused');
-    assert.equal(await status('https://evil.test'), 403, 'a foreign origin is refused');
+    assert.equal(
+      await status('https://evil.test'),
+      401,
+      'any present origin passes the CSRF gate and reaches authentication',
+    );
     assert.equal(
       await status('https://vulnstream.internal.evil.test'),
-      403,
-      'a prefix match against an allowed origin is not enough',
+      401,
+      'the gate no longer compares against an origin allowlist',
     );
     assert.equal(
       await status('http://vulnstream.internal'),
-      403,
-      'scheme is part of the origin comparison',
+      401,
+      'the gate no longer compares scheme against an allowlist',
     );
     await pool.end();
   },

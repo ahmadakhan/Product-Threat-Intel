@@ -295,6 +295,8 @@ async function logMlTrainingResult(pool: Db, summary: TrainingSummary): Promise<
  * can spot a threshold that is below a legitimate silent phase.
  */
 const STUCK_PROMISE_MS = config.STUCK_PROMISE_MS;
+/** How long a cancelled pipeline attempt may take to settle before it is detached. */
+const PIPELINE_ABORT_GRACE_MS = 30_000;
 console.log(
   JSON.stringify({
     level: 'info',
@@ -306,6 +308,15 @@ console.log(
 );
 let digestStartedAt = 0;
 let pipelineStartedAt = 0;
+/**
+ * When the current pipeline attempt was first observed cancelled. A cancelled
+ * attempt normally rejects within its own checkpoint, but a promise that ignores
+ * the abort must not pin the worker forever: after this grace period the
+ * attempt is detached and a fresh one may start. The session advisory lock was
+ * already released by the abort path, so a replacement worker can safely
+ * recover the interrupted execution.
+ */
+let pipelineAbortedAt = 0;
 let outboxStartedAt = 0;
 let digestGeneration = 0;
 let pipelineController: AbortController | undefined;
@@ -403,8 +414,31 @@ const tick = () => {
       pipelineController.abort(stampAborted(reason));
     }
   }
+  // A cancelled attempt normally rejects at its next checkpoint, but the abort
+  // signal cannot interrupt a synchronous stretch or a promise that ignores it.
+  // Left alone, such an attempt keeps `pipeline` set and blocks every future
+  // run for the life of the process. After a bounded grace period, detach it:
+  // the abort path already released the session advisory lock, so the fresh
+  // attempt started below can safely recover the interrupted execution. The
+  // detached promise still settles on its own; its `finally` is generation-
+  // guarded, so it cannot clear the replacement.
+  if (pipeline && pipelineController?.signal.aborted) {
+    if (!pipelineAbortedAt) {
+      pipelineAbortedAt = Date.now();
+    } else if (Date.now() - pipelineAbortedAt > PIPELINE_ABORT_GRACE_MS) {
+      void report('pipeline')(
+        new Error(
+          `Cancelled pipeline did not settle within ${PIPELINE_ABORT_GRACE_MS}ms; detaching the attempt so the worker can recover`,
+        ),
+      );
+      pipeline = null;
+      pipelineController = undefined;
+      pipelineAbortedAt = 0;
+    }
+  }
   if (!pipeline) {
     pipelineStartedAt = Date.now();
+    pipelineAbortedAt = 0;
     const controller = new AbortController();
     pipelineController = controller;
     pipeline = processPipeline(pool, config, request, controller.signal, () => {
@@ -426,6 +460,7 @@ const tick = () => {
         if (pipelineController === controller) {
           pipeline = null;
           pipelineController = undefined;
+          pipelineAbortedAt = 0;
         }
       });
   }

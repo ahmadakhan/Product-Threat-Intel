@@ -316,7 +316,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
         400,
       );
     });
-    await t.test('unauthenticated reads, CSRF and foreign origins are rejected', async () => {
+    await t.test('unauthenticated reads, CSRF and origin-less mutations are rejected', async () => {
       assert.equal((await supertest(app).get('/api/state')).status, 401);
       assert.equal((await supertest(app).get('/api/events')).status, 401);
       assert.equal((await viewer.get('/api/events')).status, 200);
@@ -341,7 +341,18 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
             .set('x-csrf-token', csrf)
             .send({})
         ).status,
+        400,
+        'any present origin passes the CSRF gate; the empty command body is then rejected by validation',
+      );
+      assert.equal(
+        (
+          await admin
+            .post('/api/commands')
+            .set('x-csrf-token', csrf)
+            .send({})
+        ).status,
         403,
+        'an origin-less mutation is refused',
       );
       const response = await admin.get('/api/state');
       assert.equal(response.status, 200);
@@ -588,7 +599,7 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
       });
       assert.equal(unlistedWebhook.status, 400, 'feed host allowance must not expand webhook egress');
     });
-    await t.test('vendor-seeded feeds cannot be deleted but can be toggled', async () => {
+    await t.test('vendor-seeded feeds can be toggled and deleted', async () => {
       const seeded = await command('feed.save', {
         name: 'Seeded NVD',
         type: 'NVD_API',
@@ -627,15 +638,16 @@ test('PostgreSQL API, auth, pipeline, durable delivery and recovery', { skip: !d
         'bulk import must reject endpoint duplicates too',
       );
       assert.equal(
-        (await command('feed.delete', undefined, seededFeed.id)).status,
-        403,
-        'vendor-seeded feed should be rejected',
-      );
-      assert.equal(
         (await command('feed.toggle', undefined, seededFeed.id)).status,
         200,
         'vendor-seeded feed should be toggleable',
       );
+      assert.equal(
+        (await command('feed.delete', undefined, seededFeed.id)).status,
+        200,
+        'vendor-seeded feed should be deletable',
+      );
+      assert.equal(await get(pool, 'feeds', seededFeed.id), undefined);
       const custom = await command('feed.save', {
         name: 'Custom Feed',
         type: 'RSS_ATOM',

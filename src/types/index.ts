@@ -890,12 +890,8 @@ export interface PipelineExecution {
      * counted via the historical marker for one deploy cycle.
      */
     recoveryAttempts?: number;
-    /** Findings held for the digest window; they are queued by the delivery worker. */
-    digestBuffered?: number;
     /** IntelligenceMatch records auto-sent to the Security team this run. */
     newsNotificationsQueued?: number;
-    /** Unverifiable-match notifications queued to the Security team this run. */
-    unverifiableNotificationsQueued?: number;
     /**
      * Consolidated zero-day digest emails queued to the Security team this run.
      * Digests replace the individual alerts the per-run cap withheld, so this

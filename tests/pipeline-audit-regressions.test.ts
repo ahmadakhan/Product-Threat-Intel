@@ -139,16 +139,89 @@ test(
         const queued = (await list<Finding>(pool, 'findings')).length;
         assert.ok(queued >= 1, 'the finding survives the recomputation');
       });
+      await t.test('zero-day cap withholds capped evidence from the ordinary news email and delivers a digest', async () => {
+        await reset();
+        // This case is about the news/digest split, not CVE findings.
+        await pool.query("DELETE FROM records WHERE kind='cveData'");
+        await pool.query("DELETE FROM records WHERE kind='recipients'");
+        await save('recipients', 'sec', {
+          id: 'sec',
+          name: 'Security',
+          email: 'sec@example.invalid',
+          enabled: true,
+          subscriptionTier: 'ALL_SEVERITIES',
+          deliveryGroup: 'SECURITY_TEAM',
+        });
+        await save('feeds', 'news', {
+          id: 'news',
+          name: 'News',
+          enabled: true,
+          type: 'RSS_ATOM',
+          url: 'https://example.com/feed',
+          authType: 'NONE',
+          rateLimit: 60,
+          healthStatus: 'UNTESTED',
+        });
+        // One more article than the cap, so exactly one match is withheld and
+        // consolidated into a digest.
+        const articleCount = 51;
+        const pubDate = new Date().toUTCString();
+        const items = Array.from(
+          { length: articleCount },
+          (_, index) =>
+            `<item><title>Example Widget zero-day ${index}</title>` +
+            `<link>https://example.com/zero-day-${index}</link>` +
+            `<pubDate>${pubDate}</pubDate>` +
+            '<description>Example Widget zero-day is actively exploited in the wild</description></item>',
+        ).join('');
+        const xml = `<rss version="2.0"><channel><title>Security</title>${items}</channel></rss>`;
+        await queueRun(pool, 24, 'test');
+        await processPipeline(pool, config, async () => ({ status: 200, body: xml, headers: {} }));
+
+        const digests = await list<{ advisoryId: string; matchCount: number; articles: string[] }>(
+          pool,
+          'zeroDayDigests',
+        );
+        assert.equal(digests.length, 1, 'one digest per vendor/product group');
+        assert.equal(digests[0].matchCount, 1, 'exactly the capped match is withheld');
+
+        const outbox = await pool.query<{
+          advisory_id: string;
+          payload: {
+            newsEvidence?: { articles: { id: string }[] };
+            zeroDayDigest?: { articles: { id: string }[]; matchCount: number };
+          };
+        }>("SELECT advisory_id, payload FROM outbox WHERE channel='email'");
+        const digestJobs = outbox.rows.filter((row) => String(row.advisory_id).startsWith('ZERODAY:'));
+        const newsJobs = outbox.rows.filter((row) => String(row.advisory_id).startsWith('NEWS:'));
+        assert.equal(digestJobs.length, 1, 'one digest email for the single Security-team recipient');
+        assert.equal(newsJobs.length, 1, 'ordinary news is still one consolidated email');
+
+        const digestArticleIds = new Set(
+          (digestJobs[0].payload.zeroDayDigest?.articles ?? []).map((article) => article.id),
+        );
+        const newsArticleIds = new Set(
+          (newsJobs[0].payload.newsEvidence?.articles ?? []).map((article) => article.id),
+        );
+        assert.equal(digestArticleIds.size, 1, 'the digest names the withheld evidence');
+        assert.equal(newsArticleIds.size, articleCount - 1, 'the capped article is not in the ordinary email');
+        for (const id of digestArticleIds) {
+          assert.ok(!newsArticleIds.has(id), 'withheld evidence is delivered only through the digest');
+        }
+      });
       await t.test('a stop between checkpoint and progress write cannot be overwritten', async () => {
         await reset();
         const queued = await queueRun(pool, 24, 'test');
         const connect = pool.connect.bind(pool);
         let intercepted = false;
         // The first checkout is the worker's run-lock connection, held for the
-        // whole run. An operator stop must write through that same session: a
-        // fresh connection cannot take `pipeline-queue` (the worker owns it)
-        // and, if it tried inside its transaction, would deadlock against it.
+        // whole run. An operator stop must not reuse it as a transaction client
+        // (the abort path may release it mid-transaction), but it also cannot
+        // wait on `pipeline-queue`: the in-flight worker transaction holds that
+        // lock while it awaits this stop. The stop therefore runs on a fresh
+        // connection with the queue lock declared acquired.
         let runLockClient: pg.PoolClient | undefined;
+        const runLockQueries: string[] = [];
         const workerPool = new Proxy(pool, {
           get(target, property) {
             if (property !== 'connect') {
@@ -162,6 +235,7 @@ test(
               const release = client.release;
               client.query = ((...args: unknown[]) => {
                 const [sql, values] = args;
+                if (client === runLockClient && typeof sql === 'string') runLockQueries.push(sql);
                 const forward = () => (query as (...args: unknown[]) => unknown).apply(client, args);
                 if (
                   !intercepted &&
@@ -188,6 +262,10 @@ test(
         });
         await processPipeline(workerPool, config, noNetwork);
         assert.equal(intercepted, true);
+        assert.ok(
+          !runLockQueries.some((sql) => /^\s*BEGIN\b/i.test(sql)),
+          'the stop must not open a transaction on the worker run-lock connection',
+        );
         const stopped = await get<PipelineExecution>(pool, 'executions', queued.id);
         assert.equal(stopped?.status, 'CANCELLED');
         assert.ok(stopped?.stopRequestedAt);

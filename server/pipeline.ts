@@ -77,11 +77,11 @@ import {
   findingRevision,
   queueAdvisory,
   queueConsolidatedFindingNotifications,
+  queueZeroDayDigestNotification,
   recipientAllows,
   revision,
   type Job,
 } from './delivery';
-import { bufferFindingsForDigest } from './digest';
 import { loadNewsRecipients, queueConsolidatedNews, newsArticleIdentity } from './newsQueue';
 import { renderAdvisory } from './advisoryRender';
 import { HttpError } from './validation';
@@ -697,51 +697,56 @@ export async function stopRun(pool: pg.Pool, id: string, actor: string): Promise
 }
 
 /**
- * Record a stop in a queue-serialized transaction, optionally reusing the
- * worker's connection. Network ingestion never holds the queue-admission lock.
+ * Record a stop in a queue-serialized transaction.
+ *
+ * `workerLockClient` is only a signal that the caller already owns the worker's
+ * run lock. In that case the queue-admission lock is declared acquired so this
+ * write does not wait on the in-flight worker transaction that holds it. The
+ * client itself is never used as a transaction client: the abort path may
+ * release it mid-transaction, and handing it to `transaction()` would
+ * desynchronise the pool (see the lifetime note on `processPipeline`).
+ * Network ingestion never holds the queue-admission lock.
  */
 export async function stopRunWithClient(
   pool: pg.Pool,
   id: string,
   actor: string,
-  lockClient?: pg.PoolClient,
+  workerLockClient?: pg.PoolClient,
 ): Promise<PipelineExecution> {
-    return transaction(
-      pool,
-      async (db) => {
-        const run = await getForUpdate<PipelineExecution>(db, 'executions', id);
-        if (!run) throw new HttpError(404, 'Execution not found');
-        if (!['QUEUED', 'RUNNING'].includes(run.status) || run.stopRequestedAt) return run;
-        run.stopRequestedAt = new Date().toISOString();
-        if (run.status === 'QUEUED') {
-          run.status = 'CANCELLED';
-          run.endTime = run.stopRequestedAt;
-        }
-        run.logs.push('Operator requested stop');
-        await put(db, 'executions', id, run);
-        await writeEvent(db, {
-          category: 'PIPELINE',
-          code: 'pipeline.stop_requested',
-          message: 'Operator requested pipeline stop',
-          runId: id,
-          context: {
-            actor,
-            stopRequestedAt: run.stopRequestedAt,
-          },
-        });
-        await appendAudit(db, 'Pipeline stop requested', `Execution ${id}`, actor, 'PIPELINE');
-        return run;
-      },
-      lockClient,
-      // A caller that passes its own client is already inside the worker's
-      // `pipeline-queue` critical section: the worker holds the session advisory
-      // lock on a different connection for the whole run. Taking it again here
-      // waited on a lock the same run owns and could never release until the run
-      // ended - a hard deadlock. In that case the lock is declared acquired (the
-      // same contract `queueRun` uses). Without a client, the lock is taken
-      // normally to serialize against a fresh stop request.
-      lockClient ? { locks: [], lockAcquired: ['pipeline-queue'] } : { locks: ['pipeline-queue'] },
-    );
+  return transaction(
+    pool,
+    async (db) => {
+      const run = await getForUpdate<PipelineExecution>(db, 'executions', id);
+      if (!run) throw new HttpError(404, 'Execution not found');
+      if (!['QUEUED', 'RUNNING'].includes(run.status) || run.stopRequestedAt) return run;
+      run.stopRequestedAt = new Date().toISOString();
+      if (run.status === 'QUEUED') {
+        run.status = 'CANCELLED';
+        run.endTime = run.stopRequestedAt;
+      }
+      run.logs.push('Operator requested stop');
+      await put(db, 'executions', id, run);
+      await writeEvent(db, {
+        category: 'PIPELINE',
+        code: 'pipeline.stop_requested',
+        message: 'Operator requested pipeline stop',
+        runId: id,
+        context: {
+          actor,
+          stopRequestedAt: run.stopRequestedAt,
+        },
+      });
+      await appendAudit(db, 'Pipeline stop requested', `Execution ${id}`, actor, 'PIPELINE');
+      return run;
+    },
+    undefined,
+    // A worker-owned stop is already inside the `pipeline-queue` critical
+    // section: taking the lock again on a fresh connection would wait on the
+    // in-flight worker transaction and deadlock. Declaring it acquired keeps
+    // the same contract while the write still runs on a connection the abort
+    // path does not own.
+    workerLockClient ? { locks: [], lockAcquired: ['pipeline-queue'] } : { locks: ['pipeline-queue'] },
+  );
 }
 /** How often a running pipeline proves it is still alive. */
 export const PIPELINE_HEARTBEAT_MS = 15_000;
@@ -967,7 +972,12 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           intervalMinutes: settings.schedulerIntervalMinutes,
         }, schedulerNow)
       )
-        execution = await queueRun(pool, undefined, 'scheduler', undefined, lock);
+        // `queueRun` must own a fresh connection: `lock` carries the run's
+        // session advisory lock and must never be used as a transaction client
+        // (an abort can destroy it mid-transaction). The `pipeline-queue` lock
+        // `queueRun` acquires is a different namespace from the run lock, so
+        // this cannot deadlock with the run already in progress.
+        execution = await queueRun(pool, undefined, 'scheduler');
     }
     await pool.query('UPDATE scheduler_state SET heartbeat=now() WHERE id=1');
     if (!execution) return false;
@@ -2104,8 +2114,17 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       // cap was meant to convert into a digest. The digests are now recorded
       // durably so the operator and the UI can see what was withheld.
       const zeroDayCap = Math.max(1, Math.min(MAX_ZERO_DAYS_PER_RUN, Math.floor(getZeroDayCap())));
-      const { matches: rateLimitedMatches, digests: zeroDayDigests } =
-        rankAndRateLimitZeroDays(vexEnforced, intelligenceMatches, zeroDayCap);
+      // The cap has two effects that must stay in lockstep: the suppressed
+      // matches must not reach the ordinary news email, and their counterpart
+      // findings must not reach the ordinary finding email. The digest below is
+      // the only delivery path for withheld evidence. Previously only the match
+      // set was consumed, so every capped finding was still dispatched
+      // individually and the digest was recorded but never sent.
+      const {
+        findings: rateLimitedFindings,
+        matches: rateLimitedMatches,
+        digests: zeroDayDigests,
+      } = rankAndRateLimitZeroDays(vexEnforced, intelligenceMatches, zeroDayCap);
       // Declared with the other queue counters below; hoisted here because the
       // digest delivery happens before the ordinary dispatch block runs.
       let zeroDayDigestNotificationsQueued = 0;
@@ -2207,8 +2226,17 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       // Audit C-3: exceeding the cap must not silence the operator. Each digest
       // is delivered as one consolidated email per Security-team recipient, so
       // the cost bound the cap protects still holds. The findings themselves stay
-      // out of the normal dispatch path.
+      // out of the normal dispatch path (see `rateLimitedFindings` below).
       if (digestPayloads.length) {
+        // The digest queue is idempotent per recipient and content revision, so
+        // a retried commit cannot send the same digest twice.
+        const digestRecipients = await loadNewsRecipients(db);
+        for (const { payload } of digestPayloads)
+          zeroDayDigestNotificationsQueued += await queueZeroDayDigestNotification(
+            db,
+            payload,
+            digestRecipients,
+          );
         // Keep zero-day evidence available in the UI without sending a third
         // email repeating the same findings or source articles.
         await writeEvent(db, {
@@ -2216,28 +2244,29 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           code: 'matching.zero_day_digests_recorded',
           message: 'Zero-day evidence recorded for consolidated findings and news',
           runId: execution!.id,
-          context: { digests: digestPayloads.length },
+          context: {
+            digests: digestPayloads.length,
+            notificationsQueued: zeroDayDigestNotificationsQueued,
+          },
         });
       }
       const queueStarted = Date.now();
       let notificationsQueued = 0,
         advisoriesQueued = 0,
-        digestBuffered = 0,
         newsNotificationsQueued = 0,
-        newsArticlesQueued = 0,
-        manualReviewFindingsQueued = 0;
+        newsArticlesQueued = 0;
       // Security news is consolidated into ONE email per recipient per run, and an
       // article already delivered to a recipient is never delivered again. The
       // per-match queue could not guarantee that: the matcher re-keys a match on
       // `hash(cveId || articleId)`, so the same story produced new rows (and new
       // emails) whenever it was re-correlated or syndicated through another feed.
-      if (intelligenceMatches.length) {
+      if (rateLimitedMatches.length) {
         const securityRecipients = await loadNewsRecipients(db);
         if (securityRecipients.length) {
           const articleMap = new Map(
             articles.map((article) => [article.id, article] as [string, IntelligenceArticle]),
           );
-          const news = await queueConsolidatedNews(db, intelligenceMatches, articleMap, securityRecipients, {
+          const news = await queueConsolidatedNews(db, rateLimitedMatches, articleMap, securityRecipients, {
             enqueue: async (input) =>
               enqueue(
                 input.db,
@@ -2293,7 +2322,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             message: 'Consolidated security-news email dispatched to the security team',
             runId: execution!.id,
             context: {
-              matches: intelligenceMatches.length,
+              matches: rateLimitedMatches.length,
               recipientsNotified: news.emailsQueued,
               articlesIncluded: news.articlesIncluded,
               articlesAlreadySent: news.articlesSuppressed,
@@ -2310,7 +2339,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       // had not been told yet — including recipients added later. The
       // per-recipient `delivery_claims` record inside the consolidated queue is
       // what decides whether THIS recipient still needs THIS finding.
-      const pending = vexEnforced.filter(
+      const pending = rateLimitedFindings.filter(
         (f) =>
           // Status and advisoryId are global bookkeeping. A DELIVERED finding
           // can still be new to a recipient added later. Only a recipient's
@@ -2334,7 +2363,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       const zeroDayLog = zeroDayDigestNotificationsQueued
         ? `; ${zeroDayDigestNotificationsQueued} zero-day digest notifications queued`
         : '';
-      let deliveryLog = `${notificationsQueued} jobs queued${digestBuffered ? `; ${digestBuffered} findings buffered for the digest window` : ''}${newsNotificationsQueued ? `; ${newsNotificationsQueued} consolidated news emails queued` : ''}${manualReviewFindingsQueued ? `; ${manualReviewFindingsQueued} limited-confidence emails queued` : ''}${zeroDayLog}`;
+      let deliveryLog = `${notificationsQueued} jobs queued${newsNotificationsQueued ? `; ${newsNotificationsQueued} consolidated news emails queued` : ''}${zeroDayLog}`;
       // Audit L-2: an ingestion outage and a correlation failure are different
       // incidents. Keep the FAILED status (it drives alerting and the audit
       // level) but state explicitly in the log that correlation completed over
@@ -2382,7 +2411,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             name: 'Delivery queue',
             status: 'SUCCESS',
             durationMs: Date.now() - queueStarted,
-            details: `${notificationsQueued} jobs queued${digestBuffered ? `; ${digestBuffered} findings buffered for the digest window` : ''}${newsNotificationsQueued ? `; ${newsNotificationsQueued} consolidated news emails queued (${newsArticlesQueued} articles)` : ''}${manualReviewFindingsQueued ? `; ${manualReviewFindingsQueued} limited-confidence emails queued` : ''}${zeroDayLog}; transport acceptance is tracked separately`,
+            details: `${notificationsQueued} jobs queued${newsNotificationsQueued ? `; ${newsNotificationsQueued} consolidated news emails queued (${newsArticlesQueued} articles)` : ''}${zeroDayLog}; transport acceptance is tracked separately`,
           },
         ],
       };
@@ -2392,9 +2421,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         matchedWatchlist: newDetectionCount,
         notificationsQueued,
         advisoriesQueued,
-        digestBuffered,
         newsNotificationsQueued,
-        unverifiableNotificationsQueued: manualReviewFindingsQueued,
         zeroDayDigestNotificationsQueued,
       };
       await saveActiveExecution(db, execution);

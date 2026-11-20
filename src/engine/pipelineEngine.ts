@@ -356,6 +356,29 @@ export function runVulnerabilityPipeline(
             ...aliasGroupKeys(p, DEFAULT_PRODUCT_ALIASES, effectiveProductAliases),
           ]),
         ];
+  // Alias expansion is a pure function of the spelling and the effective alias
+  // maps, both of which are fixed for the whole run. Every CVE criterion used to
+  // re-expand the same vendor/product names (and every inventory row did it
+  // again for the index), which is the hottest allocation path in a large
+  // corpus x inventory cross product. Memoise per spelling for this run only.
+  const vendorKeyCache = new Map<string, string[]>();
+  const productKeyCache = new Map<string, string[]>();
+  const cachedVendorKeys = (v: string): string[] => {
+    let keys = vendorKeyCache.get(v);
+    if (!keys) {
+      keys = aliasVendorKeys(v);
+      vendorKeyCache.set(v, keys);
+    }
+    return keys;
+  };
+  const cachedProductKeys = (p: string): string[] => {
+    let keys = productKeyCache.get(p);
+    if (!keys) {
+      keys = aliasProductKeys(p);
+      productKeyCache.set(p, keys);
+    }
+    return keys;
+  };
   for (const asset of activeAssets) {
     const seenPurls = new Set<string>();
     for (const purl of asset.purls ?? []) {
@@ -376,8 +399,8 @@ export function runVulnerabilityPipeline(
     const seenProducts = new Set<string>();
     const indexIdentity = (vendor: string, product: string) => {
       if (!vendor || !product) return;
-      for (const vendorKey of aliasVendorKeys(vendor))
-        for (const productKey of aliasProductKeys(product)) {
+      for (const vendorKey of cachedVendorKeys(vendor))
+        for (const productKey of cachedProductKeys(product)) {
           const key = `${vendorKey}\u0000${productKey}`;
           if (seenProducts.has(key)) continue;
           seenProducts.add(key);
@@ -442,8 +465,8 @@ export function runVulnerabilityPipeline(
         add(activeAssets);
         break;
       }
-      for (const vendorKey of aliasVendorKeys(parsed.vendor))
-        for (const productKey of aliasProductKeys(parsed.product))
+      for (const vendorKey of cachedVendorKeys(parsed.vendor))
+        for (const productKey of cachedProductKeys(parsed.product))
           add(assetsByProduct.get(`${vendorKey}\u0000${productKey}`) || []);
     }
     return [...candidates.values()];
@@ -487,31 +510,57 @@ export function runVulnerabilityPipeline(
     if (!canonical || (!inTimelineScope && !knownCves.has(canonical))) continue;
     processed++;
     const cve = { ...raw, cveId: canonical };
+    // Everything below depends only on the CVE record, not on the asset being
+    // evaluated. It used to be rebuilt inside the asset loop, so a CVE matching
+    // N assets allocated N copies of the same criteria set, applicability
+    // arrays and source labels. Hoisting it is a pure refactor that removes the
+    // dominant allocation cost of the correlation pass.
+    //
+    // An explicit CPE match criteria is authoritative for its own entry: a
+    // per-entry range without bounds means "any version of this product", so the
+    // product-level versionRange must not be applied across all criteria. The
+    // product-level range is only a fallback when the CVE has no match details
+    // at all.
+    // Criteria present in `cpeMatches` but not in `cpeMatchDetails` still
+    // describe affected products; match them with the product-level range
+    // rather than discarding them.
+    const detailCriteria = new Set((cve.cpeMatchDetails ?? []).map((detail) => detail.criteria));
+    const extraCriteria = cve.cpeMatchDetails?.length
+      ? cve.cpeMatches.filter((criteria) => !detailCriteria.has(criteria))
+      : [];
+    const applicabilitySets = cve.cpeMatchDetails?.length
+      ? [
+          ...cve.cpeMatchDetails.map(({ criteria, range }) => ({
+            cpes: [criteria],
+            range: range && Object.values(range).some(Boolean) ? range : undefined,
+          })),
+          ...(extraCriteria.length ? [{ cpes: extraCriteria, range: cve.versionRange }] : []),
+        ]
+      : [{ cpes: cve.cpeMatches, range: cve.versionRange }];
+    const advisoryLacksApplicabilityData = !(
+      cve.cpeMatches?.length ||
+      cve.cpeMatchDetails?.length ||
+      cve.purls?.length
+    );
+    const isAuthoritativeSource = cve.sourceFeeds?.some((feedId) => feedAuthority.get(feedId) === true);
+    // Build a human-readable source label for the enrichment evidence. Resolve
+    // feeds through the id map built once per run; the previous `_feeds.find`
+    // inside the finding loop was O(findings x feeds) on every run.
+    const sourceLabels = cve.sourceFeeds?.map((feedId) => {
+      const feed = feedsById.get(feedId);
+      if (!feed) return feedId;
+      const t = feed.type;
+      if (t === 'RSS_ATOM' || t === 'JSON_SEARCH_API') return 'vendor advisory';
+      // VulnCheck NVD++ mirrors both the NVD and MITRE CVE lists, so the
+      // label names both upstream registries the record was sourced from.
+      if (t === 'VULNCHECK_NVD') return 'authoritative source (NVD/MITRE via VulnCheck NVD++)';
+      return `authoritative source (${t})`;
+    }).filter(Boolean);
+    const sourceLabel = sourceLabels.length > 0 ? sourceLabels.join(' ') : '';
     for (const asset of assetsForCve(cve, canonical)) {
       const key = `${canonical}:${asset.id}`;
       if (!inTimelineScope && !known.has(key)) continue;
       if (known.has(key) && !includeExistingCandidates) continue;
-      // An explicit CPE match criteria is authoritative for its own entry: a
-      // per-entry range without bounds means "any version of this product", so the
-      // product-level versionRange must not be applied across all criteria. The
-      // product-level range is only a fallback when the CVE has no match details
-      // at all.
-      // Criteria present in `cpeMatches` but not in `cpeMatchDetails` still
-      // describe affected products; match them with the product-level range
-      // rather than discarding them.
-      const detailCriteria = new Set((cve.cpeMatchDetails ?? []).map((detail) => detail.criteria));
-      const extraCriteria = cve.cpeMatchDetails?.length
-        ? cve.cpeMatches.filter((criteria) => !detailCriteria.has(criteria))
-        : [];
-      const applicabilitySets = cve.cpeMatchDetails?.length
-        ? [
-            ...cve.cpeMatchDetails.map(({ criteria, range }) => ({
-              cpes: [criteria],
-              range: range && Object.values(range).some(Boolean) ? range : undefined,
-            })),
-            ...(extraCriteria.length ? [{ cpes: extraCriteria, range: cve.versionRange }] : []),
-          ]
-        : [{ cpes: cve.cpeMatches, range: cve.versionRange }];
       // Per-CPE ranges apply only to that CPE criterion. PURLs use the
       // package-level range and must never borrow another product's bounds.
       const matches = applicabilitySets.map(({ cpes, range }) =>
@@ -567,11 +616,6 @@ export function runVulnerabilityPipeline(
       //    difference;
       //  - `matchesWatchlistItem` returns it early only when nothing else in its
       //    own applicability set matched.
-      const advisoryLacksApplicabilityData = !(
-        cve.cpeMatches?.length ||
-        cve.cpeMatchDetails?.length ||
-        cve.purls?.length
-      );
       // A complete product-wide registration (every component but vendor/product
       // wildcarded) is a deliberate, broad "monitor everything" choice by the
       // operator, the same choice that already releases the per-match version
@@ -587,22 +631,9 @@ export function runVulnerabilityPipeline(
       const confirmedProductWideMatch = Boolean(result.productWideAllVersions) && !result.applicabilityRequiresReview;
       const confirmedKevProductOnlyMatch =
         confirmedProductWideMatch && result.method === 'VENDOR_PRODUCT_FALLBACK' && cve.cisaKev?.isKev === true;
-      const isAuthoritativeSource = cve.sourceFeeds?.some((feedId) => feedAuthority.get(feedId) === true);
       const authoritativeSourceDispatch =
         isAuthoritativeSource &&
         (result.method === 'VENDOR_PRODUCT_FALLBACK' || result.method === 'VENDOR_PRODUCT_ALIAS');
-      // Build a human-readable source label for the enrichment evidence.
-      const sourceLabels = cve.sourceFeeds?.map((feedId) => {
-        const feed = _feeds.find((f) => f.id === feedId);
-        if (!feed) return feedId;
-        const t = feed.type;
-        if (t === 'RSS_ATOM' || t === 'JSON_SEARCH_API') return 'vendor advisory';
-        // VulnCheck NVD++ mirrors both the NVD and MITRE CVE lists, so the
-        // label names both upstream registries the record was sourced from.
-        if (t === 'VULNCHECK_NVD') return 'authoritative source (NVD/MITRE via VulnCheck NVD++)';
-        return `authoritative source (${t})`;
-      }).filter(Boolean);
-      const sourceLabel = sourceLabels.length > 0 ? sourceLabels.join(' ') : '';
       // packageRejected is the only hard exclusion: it proves the package
       // identifiers disagree with the CPE match, i.e. a false positive.
       const confirmed = !packageRejected;

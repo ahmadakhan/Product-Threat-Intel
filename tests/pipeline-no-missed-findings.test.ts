@@ -378,6 +378,42 @@ test('the candidate index includes criteria absent from cpeMatchDetails', async 
   assert.ok(insert!.values.includes('cpe-extra-0'), 'the extra criterion gets its own row');
 });
 
+test('a statement timeout inside a transaction is retried from a savepoint', async () => {
+  const statements: string[] = [];
+  let timedOut = false;
+  const db = {
+    // A checked-out client: `release` is what marks it as already inside a
+    // transaction, where a timeout aborts the whole block.
+    release: () => undefined,
+    query: async (sql: string) => {
+      statements.push(sql);
+      if (sql.startsWith('INSERT INTO match_asset_index') && !timedOut) {
+        timedOut = true;
+        const error = new Error('canceling statement due to statement timeout') as Error & {
+          code?: string;
+        };
+        error.code = '57014';
+        throw error;
+      }
+      return { rows: [] };
+    },
+  } as never;
+  await syncMatchIndex(db, [], [assetRecord()]);
+  assert.ok(
+    statements.some((sql) => sql.startsWith('SAVEPOINT')),
+    'each attempt runs under a savepoint inside a transaction',
+  );
+  assert.ok(
+    statements.some((sql) => sql.startsWith('ROLLBACK TO SAVEPOINT')),
+    'a timeout must restore the transaction before retrying',
+  );
+  assert.equal(
+    statements.filter((sql) => sql.startsWith('INSERT INTO match_asset_index')).length,
+    2,
+    'the timed-out insert is retried',
+  );
+});
+
 /* ------------------------------------------ declared identity / stale CPEs */
 
 test('an asset whose declared product differs from a stale CPE still matches that identity', () => {
