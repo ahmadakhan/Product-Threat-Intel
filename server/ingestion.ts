@@ -627,7 +627,7 @@ export async function ingestFeed(
   if (feed.type === 'GITHUB_ADVISORIES') {
     if (feed.authType !== 'NONE' || feed.url !== GITHUB_ADVISORIES_URL)
       throw new Error('GitHub advisories require the official global advisories endpoint without authentication');
-    const { start, end, hasMore } = ingestionWindow(scopeHours, context, Date.now(), 24);
+    const { start, end, hasMore } = ingestionWindow(scopeHours, context);
     const results: ReturnType<typeof parseGitHubAdvisories> = {
       cves: [],
       articles: [],

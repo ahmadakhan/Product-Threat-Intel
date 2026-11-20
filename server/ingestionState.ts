@@ -27,11 +27,30 @@ export interface FeedCursor extends IngestionState { fingerprint: string }
 const HOUR = 3600000;
 export const SYNC_OVERLAP_MS = 10 * 60000;
 /** Bootstrap at most one day; resume older checkpoints in bounded daily slices. */
-export function ingestionWindow(scopeHours: number, state: IngestionState = {}, now = Date.now(), maxWindowHours = 24) {
+export function ingestionWindow(
+  scopeHours: number,
+  state: IngestionState = {},
+  now = Date.now(),
+  maxWindowHours = Number.POSITIVE_INFINITY,
+) {
   const cursor = state.cursor ? Date.parse(state.cursor) : NaN;
   const valid = Number.isFinite(cursor) && cursor <= now;
-  const start = valid ? cursor - SYNC_OVERLAP_MS : now - Math.min(maxWindowHours, Math.max(0, scopeHours)) * HOUR;
-  const end = valid ? Math.min(now, cursor + maxWindowHours * HOUR - SYNC_OVERLAP_MS) : now;
+  // The slice size is the operator's scope window, NOT a hard 24h.
+  //
+  // This used to default to 24, which silently overrode `scopeHours` for every
+  // INCREMENTAL run: with a 168h scope the first run fetched 7 days and every
+  // subsequent run fetched 24h, so a long window could never be honoured and a
+  // catch-up after downtime was truncated to a day per run. The slice still
+  // exists (a very wide window is read as consecutive resumable slices via
+  // `hasMore`), but its size now comes from the configured scope.
+  //
+  // The first run is also bounded by the same slice, so a huge scope bootstraps
+  // progressively instead of issuing one unbounded request.
+  const sliceHours = Number.isFinite(maxWindowHours)
+    ? Math.min(maxWindowHours, Math.max(1, Math.floor(scopeHours)))
+    : Math.max(1, Math.floor(scopeHours));
+  const start = valid ? cursor - SYNC_OVERLAP_MS : now - sliceHours * HOUR;
+  const end = valid ? Math.min(now, cursor + sliceHours * HOUR - SYNC_OVERLAP_MS) : now;
   // `end` is clamped to `now` and otherwise stops one overlap short of the next
   // slice, so a catch-up window is incomplete exactly when `end` is before
   // `now`. The old `now - 60000` margin reported a checkpoint sitting exactly one

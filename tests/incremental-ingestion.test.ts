@@ -29,15 +29,32 @@ test('RSS ingestion identifies the real reader and preserves conditional fetches
   await assert.rejects(ingestFeed(source, 24, async () => ({ status: 403, body: '<html>Forbidden</html>', headers: {} }), config, sleep), /HTTP 403/);
 });
 
-test('bootstrap is bounded and checkpoints catch up without gaps in bounded daily windows', () => {
+test('the configured scope window is honoured exactly, and catch-up stays in resumable slices', () => {
   const now = Date.parse('2026-10-22T00:00:00Z');
-  assert.equal(now - ingestionWindow(2880, {}, now).start.getTime(), 24 * 3600000);
+  // The operator's scope is the slice size. This used to be hard-capped at 24h,
+  // which silently overrode scopeHours on every incremental run and truncated
+  // catch-up after downtime to one day per run.
+  assert.equal(now - ingestionWindow(2880, {}, now).start.getTime(), 2880 * 3600000);
+  assert.equal(now - ingestionWindow(168, {}, now).start.getTime(), 168 * 3600000);
+  assert.equal(now - ingestionWindow(6, {}, now).start.getTime(), 6 * 3600000);
+
+  // An incremental run resumes at the checkpoint (minus the overlap) and reads
+  // one scope-sized slice, reporting hasMore while backlog remains.
   const checkpoint = now - 72 * 3600000;
   const window = ingestionWindow(24, { cursor: new Date(checkpoint).toISOString() }, now);
   assert.equal(window.start.getTime(), checkpoint - SYNC_OVERLAP_MS);
   assert.equal(window.end.getTime() - window.start.getTime(), 24 * 3600000);
   assert.equal(window.hasMore, true);
+
+  // A wider scope reads a correspondingly wider slice, so a 168h scope resumes
+  // 168h at a time instead of stopping a day short on every run.
+  const wide = ingestionWindow(168, { cursor: new Date(now - 100 * 3600000).toISOString() }, now);
+  assert.equal(wide.hasMore, false, 'a single 168h slice covers a 100h backlog');
+
   assert.equal(ingestionWindow(24, { cursor: new Date(now + 3600000).toISOString() }, now).incremental, false);
+
+  // An explicit cap is still honoured for callers that need one.
+  assert.equal(now - ingestionWindow(2880, {}, now, 24).start.getTime(), 24 * 3600000);
 });
 test('NVD requests only changes since its checkpoint and reports the frozen end watermark', async () => {
   const cursor = new Date(Date.now() - 3600000).toISOString();

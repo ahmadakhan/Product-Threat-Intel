@@ -456,7 +456,9 @@ export async function syncMatchIndex(
        FROM jsonb_to_recordset($1::jsonb)
          AS t(asset_id text, identities text[], version_ordinal bigint)
      ON CONFLICT(asset_id) DO UPDATE SET identities=EXCLUDED.identities,
-       version_ordinal=EXCLUDED.version_ordinal,updated_at=now()`,
+       version_ordinal=EXCLUDED.version_ordinal,updated_at=now()
+     WHERE (match_asset_index.identities, match_asset_index.version_ordinal)
+           IS DISTINCT FROM (EXCLUDED.identities, EXCLUDED.version_ordinal)`,
     [
       JSON.stringify(
         assetRows.map((row) => ({
@@ -483,7 +485,16 @@ export async function syncMatchIndex(
      ON CONFLICT(cve_id,criterion_id) DO UPDATE SET identities=EXCLUDED.identities,
        start_ordinal=EXCLUDED.start_ordinal,start_inclusive=EXCLUDED.start_inclusive,
        end_ordinal=EXCLUDED.end_ordinal,end_inclusive=EXCLUDED.end_inclusive,
-       unbounded=EXCLUDED.unbounded,updated_at=now()`,
+       unbounded=EXCLUDED.unbounded,updated_at=now()
+     -- Only touch rows that actually changed. An unqualified DO UPDATE rewrites
+     -- every row on every run, and each rewritten row re-indexes into the GIN
+     -- identities index: on 45k index rows that is minutes of work under
+     -- contention for a run in which nothing changed. Skipping unchanged rows
+     -- turns the steady-state refresh into a no-op scan.
+     WHERE (match_cve_index.identities, match_cve_index.start_ordinal, match_cve_index.start_inclusive,
+            match_cve_index.end_ordinal, match_cve_index.end_inclusive, match_cve_index.unbounded)
+       IS DISTINCT FROM (EXCLUDED.identities, EXCLUDED.start_ordinal, EXCLUDED.start_inclusive,
+            EXCLUDED.end_ordinal, EXCLUDED.end_inclusive, EXCLUDED.unbounded)`,
     [
       JSON.stringify(
         cveRows.map((row) => ({

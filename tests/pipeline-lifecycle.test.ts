@@ -143,7 +143,16 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       };
       await queueRun(pool, 2880, 'test');
       await processPipeline(pool, config, success);
-      assert.ok(Date.parse(requestedEnd) - Date.parse(requestedStart) <= 86400000);
+      // The operator's scope is honoured, not silently capped: a 2880h scope
+      // requests a 2880h window (clamped to the 120-day safety maximum).
+      assert.ok(
+        Date.parse(requestedEnd) - Date.parse(requestedStart) <= 120 * 86400000,
+        'the requested window never exceeds the 120-day safety bound',
+      );
+      assert.ok(
+        Date.parse(requestedEnd) - Date.parse(requestedStart) > 120 * 86400000 - 3600000,
+        'a 2880h scope is requested at full width, not truncated to a day',
+      );
       const first = await get<any>(pool, 'feedCursors', source.id);
       assert.equal(first.cursor, requestedEnd);
       await queueRun(pool, 24, 'test');
