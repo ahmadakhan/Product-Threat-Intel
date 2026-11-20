@@ -345,7 +345,8 @@ export async function ingestFeed(
   scopeHours: number,
   request: Requester,
   config: Config,
-  sleep: (ms: number) => Promise<unknown> = delay,
+  sleep: (ms: number, signal?: AbortSignal) => Promise<unknown> =
+    (ms, signal) => delay(ms, undefined, { signal }),
   targetCveIds: string[] = [],
   onNvdProgress?: (progress: { offset: number; total: number; records: number }) => Promise<void> | void,
   context: IngestContext = {},
@@ -449,11 +450,14 @@ export async function ingestFeed(
       } catch (error) {
         const transient = error instanceof Error && (/timed out|timeout|^aborted$|socket hang up|premature close/i.test(error.message) || ['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'UND_ERR_SOCKET'].includes((error as NodeJS.ErrnoException).code || ''));
         if (!retryTransient || !transient || attempt >= maxAttempts - 1) throw error;
-        await sleep(Math.max(nvdInterval, backoffDelay(attempt)));
+        const delayMs = Math.max(nvdInterval, backoffDelay(attempt));
+        if (delayMs > 60000) throw new FeedDeferred(Math.ceil(delayMs / 1000));
+        await sleep(delayMs, context.signal);
         continue;
       }
       const retryableStatus = [429, 502, 503, 504].includes(response.status);
       if (!retryTransient || !retryableStatus || attempt >= maxAttempts - 1) break;
+      const backoff = response.status === 429 ? 0 : backoffDelay(attempt);
       const retryAfter = response.headers['retry-after'];
       const retryAfterValue = Array.isArray(retryAfter) ? retryAfter[0] : retryAfter;
       const retryAfterSeconds = retryAfterValue ? Number(retryAfterValue) : NaN;
@@ -464,12 +468,17 @@ export async function ingestFeed(
           ? retryAfterDate - Date.now()
           : response.status === 429
             ? 30000
-            : backoffDelay(attempt);
+            : backoff;
       // Never retry earlier than the provider permits. Long cooldowns defer the
       // source to a later run instead of occupying this worker indefinitely.
-      if (retryDelay > 60000)
-        throw new FeedDeferred(Math.ceil(retryDelay / 1000));
-      await sleep(Math.max(nvdInterval, retryDelay, backoffDelay(attempt)));
+      // A 429 has a deliberate 30-second fallback cooldown; generic jitter must
+      // not widen it when FEED_RETRY_MAX_DELAY_MS is configured above 30s.
+      const delayMs = response.status === 429
+        ? Math.max(nvdInterval, retryDelay)
+        : Math.max(nvdInterval, retryDelay, backoff);
+      if (delayMs > 60000)
+        throw new FeedDeferred(Math.ceil(delayMs / 1000));
+      await sleep(delayMs, context.signal);
     }
     if (response.status === 304) {
       // Cursor-paginated sources carry their index ETag in the sync state.
@@ -952,7 +961,7 @@ export async function ingestFeed(
             socketTimeoutMs: 30000,
             maxResponseBytes: 32 * 1024 * 1024,
             headers: { Authorization: `Bearer ${apiKey}` },
-          }, true);
+          }, true, config.FEED_RETRY_VULNCHECK_MAX_ATTEMPTS);
           return data;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -977,7 +986,7 @@ export async function ingestFeed(
             socketTimeoutMs: 30000,
             maxResponseBytes: 32 * 1024 * 1024,
             headers: { Authorization: `Bearer ${apiKey}` },
-          }, true);
+          }, true, config.FEED_RETRY_VULNCHECK_MAX_ATTEMPTS);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           if (/Decoded response exceeds configured/.test(message) && pageSize > 50) {

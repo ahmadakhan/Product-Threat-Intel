@@ -19,49 +19,50 @@ function escapeHtml(value: string): string {
 }
 
 function parse(template: string): Node[] {
-	const tokenPattern = /\{\{\{?\s*(#if\s+[^}\s]+|#each\s+[^}\s]+|\/[a-z]+|[^}]+?)\s*\}?\}\}/g;
-	let cursor = tokenPattern.lastIndex;
+	const tokenPattern = /\{\{\{?\s*(#if\s+[^}\s]+|#each\s+[^}\s]+|\/[a-z]+|else|[^}]+?)\s*\}?\}\}/g;
+	const tokens: Array<{ index: number; end: number; value: string; raw: boolean }> = [];
+	for (let match = tokenPattern.exec(template); match; match = tokenPattern.exec(template)) {
+		tokens.push({
+			index: match.index,
+			end: tokenPattern.lastIndex,
+			value: match[0].startsWith('{{{') ? match[0].slice(3, -3).trim() : match[0].slice(2, -2).trim(),
+			raw: match[0].startsWith('{{{'),
+		});
+	}
+	let tokenIndex = 0;
 
 	const sequence = (stops: Stop[] = []): { nodes: Node[]; stop?: Stop } => {
 		const nodes: Node[] = [];
-		let match: RegExpExecArray | null;
-		let cursor = tokenPattern.lastIndex;
-		while ((match = tokenPattern.exec(template))) {
-			if (match.index <= cursor) {
-				// exec didn't advance past our position (lastIndex was reset to 0
-				// by a prior null exec in a nested call). Stop to avoid an
-				// infinite loop re-processing the same tokens.
-				break;
-			}
-			if (match.index > cursor) nodes.push({ type: 'text', value: template.slice(cursor, match.index) });
-			cursor = tokenPattern.lastIndex;
-			const token = match[0];
-			const inner = token.startsWith('{{{') ? token.slice(3, -3).trim() : token.slice(2, -2).trim();
-			if (stops.includes(inner as Stop)) return { nodes, stop: inner as Stop };
-			const ifMatch = /^#if\s+([a-z_][a-z0-9_]*)$/i.exec(inner);
+		let cursor = tokenIndex ? tokens[tokenIndex - 1].end : 0;
+		while (tokenIndex < tokens.length) {
+			const token = tokens[tokenIndex++];
+			if (token.index > cursor) nodes.push({ type: 'text', value: template.slice(cursor, token.index) });
+			cursor = token.end;
+			if (stops.includes(token.value as Stop)) return { nodes, stop: token.value as Stop };
+			const ifMatch = /^#if\s+([a-z_][a-z0-9_]*)$/i.exec(token.value);
 			if (ifMatch) {
 				const yes = sequence(['else', '/if']);
-				cursor = tokenPattern.lastIndex;
-				let no: Node[] = [];
-				if (yes.stop === 'else') {
-					no = sequence(['/if']).nodes;
-					cursor = tokenPattern.lastIndex;
-				}
+				if (!yes.stop) throw new Error('Unclosed {{#if}} block');
+				const noResult = yes.stop === 'else' ? sequence(['/if']) : null;
+				if (noResult && !noResult.stop) throw new Error('Unclosed {{#if}} block');
+				const no = noResult?.nodes ?? [];
 				nodes.push({ type: 'if', key: ifMatch[1], yes: yes.nodes, no });
+				cursor = tokens[tokenIndex - 1]?.end ?? cursor;
 				continue;
 			}
-			const eachMatch = /^#each\s+([a-z_][a-z0-9_]*)$/i.exec(inner);
+			const eachMatch = /^#each\s+([a-z_][a-z0-9_]*)$/i.exec(token.value);
 			if (eachMatch) {
-				const children = sequence(['/each']).nodes;
-				cursor = tokenPattern.lastIndex;
+				const result = sequence(['/each']);
+				if (!result.stop) throw new Error('Unclosed {{#each}} block');
+				const children = result.nodes;
 				nodes.push({ type: 'each', key: eachMatch[1], children });
+				cursor = tokens[tokenIndex - 1]?.end ?? cursor;
 				continue;
 			}
-			if (inner.startsWith('#') || inner.startsWith('/')) continue;
-			nodes.push({ type: 'value', key: inner, raw: token.startsWith('{{{') });
+			if (token.value.startsWith('#') || token.value.startsWith('/')) continue;
+			nodes.push({ type: 'value', key: token.value, raw: token.raw });
 		}
 		if (cursor < template.length) nodes.push({ type: 'text', value: template.slice(cursor) });
-		cursor = template.length;
 		return { nodes };
 	};
 

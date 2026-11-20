@@ -1,0 +1,141 @@
+// Canonical default advisory email HTML. Kept in TypeScript so both the browser and bundled server use the same source.
+export const DEFAULT_ADVISORY_EMAIL_TEMPLATE = String.raw`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="x-apple-disable-message-reformatting">
+  <meta http-equiv="x-ua-compatible" content="ie=edge">
+  <title>Enterprise Vulnerability Notification</title>
+  <!--[if mso]>
+  <xml>
+    <o:OfficeDocumentSettings>
+      <o:AllowPNG/>
+      <o:PixelsPerInch>96</o:PixelsPerInch>
+    </o:OfficeDocumentSettings>
+  </xml>
+  <![endif]-->
+  <style>
+    html, body { width: 100% !important; margin: 0 !important; padding: 0 !important; }
+    body { background-color: #f1f5f9; -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table { border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    a { color: #075985; }
+    @media screen and (max-width: 640px) {
+      .shell { width: 100% !important; }
+      .gutter { padding: 8px !important; }
+      .pad { padding-left: 16px !important; padding-right: 16px !important; }
+      .stack { display: block !important; width: 100% !important; box-sizing: border-box !important; }
+      .stack-gap { padding-top: 9px !important; }
+      .matrix-label { display: block !important; width: 100% !important; padding-bottom: 1px !important; border-bottom: 0 !important; }
+      .matrix-value { display: block !important; width: 100% !important; padding-top: 1px !important; }
+      .matrix-head { display: none !important; }
+      .cell-label { display: inline !important; font-weight: bold !important; color: #526477 !important; }
+      .title { font-size: 22px !important; line-height: 28px !important; }
+    }
+  </style>
+</head>
+<body style="margin:0;padding:0;background-color:#f1f5f9;font-family:Arial,Helvetica,sans-serif;color:#172033;">
+  <div style="display:none!important;visibility:hidden;opacity:0;color:transparent;height:0;width:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;">
+    ENTERPRISE VULNERABILITY NOTIFICATION · {{advisory_id}} · {{advisory_title}} · Tracked Records: {{cve_count}} CVEs
+  </div>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9" style="width:100%;background-color:#f1f5f9;">
+    <tr>
+      <td align="center" class="gutter" style="padding:20px 12px;">
+        <!--[if mso]><table role="presentation" width="680" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->
+        <table role="presentation" class="shell" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="width:100%;max-width:680px;background-color:#ffffff;border:1px solid #dbe3ec;">
+          <tr>
+            <td class="pad" bgcolor="#073b5c" style="padding:22px 28px;background-color:#073b5c;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr><td style="font-size:11px;line-height:16px;font-weight:bold;letter-spacing:1.1px;color:#c7e6f5;">ENTERPRISE VULNERABILITY NOTIFICATION&nbsp; &middot;&nbsp; {{advisory_id}}</td></tr>
+                <tr><td class="title" style="padding-top:9px;font-size:27px;line-height:34px;font-weight:bold;color:#ffffff;">
+                  {{#if is_top_critical}}<span style="color:#ffb4ad;">{{top_severity_label}}</span>{{else}}{{#if is_top_high}}<span style="color:#ffd18a;">{{top_severity_label}}</span>{{else}}{{#if is_top_medium}}<span style="color:#ffe58a;">{{top_severity_label}}</span>{{else}}<span style="color:#c8e6d5;">{{top_severity_label}}</span>{{/if}}{{/if}}{{/if}}
+                </td></tr>
+                <tr><td style="padding-top:5px;font-size:17px;line-height:24px;font-weight:bold;color:#ffffff;word-break:break-word;">{{advisory_title}}</td></tr>
+                <tr><td style="padding-top:7px;font-size:12px;line-height:18px;color:#d5e8f2;">Tracked Records: <strong style="color:#ffffff;">{{cve_count}} CVEs</strong></td></tr>
+              </table>
+            </td>
+          </tr>
+
+          <tr>
+            <td class="pad" style="padding:14px 28px;background-color:#eaf2f7;border-bottom:1px solid #dbe3ec;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td class="stack" width="25%" valign="top" style="width:25%;padding-right:8px;font-size:11px;line-height:16px;color:#526477;"><strong style="display:block;color:#172033;">ADVISORY ID</strong>{{advisory_id}}</td>
+                  <td class="stack stack-gap" width="25%" valign="top" style="width:25%;padding-right:8px;font-size:11px;line-height:16px;color:#526477;"><strong style="display:block;color:#172033;">PUBLISHED</strong>{{published_date}}</td>
+                  <td class="stack stack-gap" width="25%" valign="top" style="width:25%;padding-right:8px;font-size:11px;line-height:16px;color:#526477;"><strong style="display:block;color:#172033;">LAST MODIFIED</strong>{{updated_date}}</td>
+                  <td class="stack stack-gap" width="25%" valign="top" style="width:25%;font-size:11px;line-height:16px;color:#526477;"><strong style="display:block;color:#172033;">INVENTORY STATUS</strong>{{inventory_status}}</td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <tr><td class="pad" style="padding:22px 28px 8px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">01&nbsp; Executive Summary</td></tr>
+              <tr><td style="padding-top:9px;font-size:14px;line-height:22px;color:#263445;">
+                {{#if executive_summary}}{{{executive_summary}}}{{else}}{{#if is_single_correlation}}1 current inventory correlation.{{else}}{{correlation_count}} current inventory correlations.{{/if}} Top severity: {{top_severity_label}}. Confirm applicability and consult the vendor before remediation.{{/if}}
+              </td></tr>
+            </table>
+          </td></tr>
+
+          <tr><td class="pad" style="padding:22px 28px 8px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">02&nbsp; Vulnerability Summary Matrix</td></tr></table>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:10px;border:1px solid #cbd5e1;">
+              <tr bgcolor="#eaf2f7">
+                <th class="matrix-head" align="left" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">CVE Identifier</th>
+                <th class="matrix-head" align="left" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">Severity</th>
+                <th class="matrix-head" align="left" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">Vendor</th>
+                <th class="matrix-head" align="left" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">Affected Product</th>
+              </tr>
+              {{#each cves}}
+              <tr>
+                <td class="matrix-label" style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:17px;"><span class="cell-label" style="display:none;">CVE Identifier: </span><a href="{{url}}" style="color:#075985;text-decoration:underline;word-break:break-word;">{{id}} &#8599;</a></td>
+                <td class="matrix-value" style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:17px;font-weight:bold;"><span class="cell-label" style="display:none;">Severity: </span>{{#if is_critical}}<span style="color:#b42318;">CRITICAL ({{cvss_score}})</span>{{else}}{{#if is_high}}<span style="color:#b54708;">HIGH ({{cvss_score}})</span>{{else}}{{#if is_medium}}<span style="color:#8a6500;">MEDIUM ({{cvss_score}})</span>{{else}}<span style="color:#16794b;">LOW ({{cvss_score}})</span>{{/if}}{{/if}}{{/if}}</td>
+                <td class="matrix-value" style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:17px;word-break:break-word;"><span class="cell-label" style="display:none;">Vendor: </span>{{vendor}}</td>
+                <td class="matrix-value" style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:17px;word-break:break-word;"><span class="cell-label" style="display:none;">Affected Product: </span>{{product}}</td>
+              </tr>
+              {{/each}}
+            </table>
+          </td></tr>
+
+          <tr><td class="pad" style="padding:22px 28px 8px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">03&nbsp; Technical Record Breakdown &amp; Required Mitigation</td></tr></table>
+            {{#each cves}}
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f8fafc" style="margin-top:10px;border:1px solid #dbe3ec;background-color:#f8fafc;">
+              <tr><td style="padding:12px 14px 0;font-size:14px;line-height:20px;font-weight:bold;color:#172033;word-break:break-word;">{{id}}&nbsp; &middot;&nbsp; {{vendor}} / {{product}}</td></tr>
+              <tr><td style="padding:5px 14px 0;font-size:12px;line-height:18px;font-weight:bold;">{{#if is_critical}}<span style="color:#b42318;">CRITICAL</span>{{else}}{{#if is_high}}<span style="color:#b54708;">HIGH</span>{{else}}{{#if is_medium}}<span style="color:#8a6500;">MEDIUM</span>{{else}}<span style="color:#16794b;">LOW</span>{{/if}}{{/if}}{{/if}} &middot; {{cvss_score}}</td></tr>
+              <tr><td style="padding:10px 14px 0;font-size:12px;line-height:18px;color:#344256;"><strong>Description:</strong> {{{description}}}</td></tr>
+              <tr><td style="padding:8px 14px 0;font-size:12px;line-height:18px;color:#344256;word-break:break-word;"><strong>Affected Versions:</strong> {{affected_versions}} &nbsp;|&nbsp; <a href="{{nvd_url}}" style="color:#075985;text-decoration:underline;">NVD Source &#8599;</a></td></tr>
+              <tr><td style="padding:11px 14px 0;font-size:12px;line-height:18px;font-weight:bold;color:#172033;">Required Actions &amp; Mitigation</td></tr>
+              <tr><td style="padding:4px 14px 13px;font-size:12px;line-height:19px;color:#344256;">
+                {{#each mitigations}}<div style="padding-top:4px;">&#8226;&nbsp; {{{this}}}</div>{{/each}}
+              </td></tr>
+            </table>
+            {{/each}}
+          </td></tr>
+
+          <tr><td class="pad" style="padding:22px 28px 22px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">04&nbsp; Honeywell Recommended Actions</td></tr></table>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:8px;">
+              {{#each honeywell_actions}}
+              <tr><td valign="top" width="18" style="width:18px;padding:4px 0;font-size:14px;line-height:20px;color:#075985;">&#8226;</td><td style="padding:4px 0;font-size:13px;line-height:20px;color:#263445;"><strong>{{title}}:</strong> {{{detail}}}</td></tr>
+              {{/each}}
+            </table>
+          </td></tr>
+
+          <tr><td class="pad" bgcolor="#eaf2f7" style="padding:14px 28px;background-color:#eaf2f7;border-top:1px solid #cbd5e1;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr><td style="font-size:12px;line-height:18px;color:#263445;"><strong>{{#if contact_team}}{{contact_team}}{{else}}BA Security Operations{{/if}}:</strong> <a href="mailto:{{#if contact_email}}{{contact_email}}{{else}}DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com{{/if}}" style="color:#075985;text-decoration:underline;">{{#if contact_email}}{{contact_email}}{{else}}DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com{{/if}}</a></td></tr>
+              <tr><td style="padding-top:4px;font-size:11px;line-height:17px;color:#526477;">{{#if tlp_classification}}{{tlp_classification}}{{else}}TLP:AMBER // INTERNAL{{/if}}</td></tr>
+              <tr><td style="padding-top:10px;font-size:11px;line-height:17px;color:#526477;">This advisory ({{advisory_id}}) is compiled from vendor disclosures and vulnerability intelligence sources. Verify environment applicability prior to deploying remediation.</td></tr>
+            </table>
+          </td></tr>
+        </table>
+        <!--[if mso]></td></tr></table><![endif]-->
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+`;

@@ -1,8 +1,5 @@
 import type { Advisory, Finding, TemplateCustomization } from '../src/types/index.ts';
-import {
-  DEFAULT_TEMPLATE_CUSTOMIZATION,
-  compileCustomizedTemplate,
-} from '../src/utils/templateCompiler.ts';
+import { DEFAULT_ADVISORY_EMAIL_TEMPLATE } from '../src/utils/defaultAdvisoryEmailTemplate.ts';
 import { confidenceIsLimited, renderAdvisory } from './advisoryRender.ts';
 import { advisoryEmail } from './advisoryEmail.ts';
 import { mlComposeAdvisoryEmail } from './ml/integration.ts';
@@ -121,18 +118,19 @@ export interface SavedTemplateRecord {
 }
 
 /**
- * Resolves the compiled advisory template the operator designed.
+ * Resolves the advisory email template the operator designed.
  *
  * This is the same precedence the application state uses (`customAdvisoryTemplate`
- * first, otherwise the compiled customization, otherwise the product default),
- * so a delivered email is rendered from the template the editor previews. The
+ * first, otherwise the shared product template), so a delivered email is rendered
+ * from the same source the editor previews. Legacy color/layout customization
+ * records remain readable but no longer replace the canonical default HTML. The
  * consolidated finding path previously rendered from the built-in default, which
  * made real emails differ from the preview in layout, colours and branding.
  */
 export function resolveAdvisoryTemplate(record?: SavedTemplateRecord | null): string {
   const custom = record?.customAdvisoryTemplate;
   if (typeof custom === 'string' && custom.trim()) return custom;
-  return compileCustomizedTemplate(record?.templateCustomization ?? DEFAULT_TEMPLATE_CUSTOMIZATION);
+  return DEFAULT_ADVISORY_EMAIL_TEMPLATE;
 }
 
 export interface DeliveryDocumentInput {
@@ -162,8 +160,7 @@ export interface DeliveryDocumentInput {
 export function renderFindingsDocument(input: DeliveryDocumentInput): DeliveryDocument {
   const { advisory, findings } = input;
   const generatedAt = input.generatedAt ?? new Date();
-  const template =
-    input.template ?? compileCustomizedTemplate(input.templateCustomization ?? DEFAULT_TEMPLATE_CUSTOMIZATION);
+  const template = input.template ?? DEFAULT_ADVISORY_EMAIL_TEMPLATE;
   // An operator template that does not render must not cost the recipient the
   // finding. A malformed custom template (unbalanced blocks) used to throw out of
   // renderAdvisory, which failed the delivery and lost the alert; the built-in
@@ -181,7 +178,7 @@ export function renderFindingsDocument(input: DeliveryDocumentInput): DeliveryDo
       }),
     );
     html = renderAdvisory(
-      compileCustomizedTemplate(DEFAULT_TEMPLATE_CUSTOMIZATION),
+      DEFAULT_ADVISORY_EMAIL_TEMPLATE,
       advisory,
       findings,
       { generatedAt },

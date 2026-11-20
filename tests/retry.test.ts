@@ -107,3 +107,103 @@ test('a caller abort during an attempt is terminal, not a retryable failure', as
   assert.equal(calls, 1, 'no further attempts are made after a caller abort');
   assert.ok(Date.now() - started < 400, 'it does not sleep through the backoff first');
 });
+
+test('the backoff sleep is cancelled when the caller aborts mid-sleep', async () => {
+  // Without `abortableDelay` the backoff was a bare setTimeout that could not be
+  // interrupted: a shutdown that arrived during the sleep waited out the whole
+  // remaining delay, so a worker could hang for up to maxDelayMs after being
+  // asked to stop. The delay must reject with the caller's reason as soon as
+  // the signal aborts.
+  const controller = new AbortController();
+  const reason = new Error('Worker leadership lost');
+  const started = Date.now();
+  const run = withRetry(
+    async () => {
+      throw new Error('socket hang up');
+    },
+    { maxAttempts: 5, baseDelayMs: 5000, maxDelayMs: 5000, signal: controller.signal },
+  );
+  setTimeout(() => controller.abort(reason), 10);
+  await assert.rejects(run, (error: unknown) => error === reason);
+  assert.ok(Date.now() - started < 400, 'the backoff is interrupted instead of sleeping 5s');
+});
+
+test('the backoff sleep is cancelled when the caller aborts mid-sleep (short delay)', async () => {
+  const controller = new AbortController();
+  const reason = new Error('shutdown');
+  const started = Date.now();
+  const run = withRetry(
+    async () => {
+      throw new Error('socket hang up');
+    },
+    { maxAttempts: 5, baseDelayMs: 10000, maxDelayMs: 10000, signal: controller.signal },
+  );
+  setTimeout(() => controller.abort(reason), 5);
+  await assert.rejects(run, (error: unknown) => error === reason);
+  assert.ok(Date.now() - started < 400, 'a 10s backoff is cut short by the abort');
+});
+
+test('maxAttempts must be an integer greater than or equal to 1', async () => {
+  await assert.rejects(() => withRetry(async () => undefined, { maxAttempts: 0 }), /maxAttempts/);
+  await assert.rejects(() => withRetry(async () => undefined, { maxAttempts: -1 }), /maxAttempts/);
+  await assert.rejects(() => withRetry(async () => undefined, { maxAttempts: 1.5 }), /maxAttempts/);
+  await assert.rejects(() => withRetry(async () => undefined, { maxAttempts: '3' as unknown as number }), /maxAttempts/);
+});
+
+test('retry delays must be finite, non-negative, and maxDelayMs must be >= baseDelayMs', async () => {
+  await assert.rejects(
+    () => withRetry(async () => undefined, { baseDelayMs: -1 }),
+    /Retry delays must be finite/,
+  );
+  await assert.rejects(
+    () => withRetry(async () => undefined, { maxDelayMs: 100, baseDelayMs: 200 }),
+    /maxDelayMs must be >= baseDelayMs/,
+  );
+  await assert.rejects(
+    () => withRetry(async () => undefined, { maxDelayMs: Number.POSITIVE_INFINITY }),
+    /Retry delays must be finite/,
+  );
+});
+
+test('jitterFactor must be between 0 and 1', async () => {
+  await assert.rejects(() => withRetry(async () => undefined, { jitterFactor: -0.1 }), /jitterFactor/);
+  await assert.rejects(() => withRetry(async () => undefined, { jitterFactor: 1.1 }), /jitterFactor/);
+});
+
+test('a valid delay configuration is accepted and the result is returned', async () => {
+  let calls = 0;
+  const result = await withRetry(
+    async () => {
+      calls++;
+      if (calls < 3) throw new Error('socket hang up');
+      return 'ok';
+    },
+    { maxAttempts: 5, baseDelayMs: 1, maxDelayMs: 5, jitterFactor: 0 },
+  );
+  assert.equal(result, 'ok');
+  assert.equal(calls, 3);
+});
+
+test('the delay is bounded by maxDelayMs even when jitter would push it over', async () => {
+  // The old calculateDelay added jitter to the capped delay without re-capping,
+  // so a delay of maxDelayMs + up to jitterFactor*maxDelayMs could be slept.
+  // The result must never exceed the configured maximum.
+  const delays: number[] = [];
+  let attempts = 0;
+  await withRetry(
+    async () => {
+      attempts++;
+      if (attempts < 4) throw new Error('socket hang up');
+      return 'ok';
+    },
+    {
+      maxAttempts: 6,
+      baseDelayMs: 1000,
+      maxDelayMs: 1000,
+      jitterFactor: 1,
+      onRetry: (_attempt, _error, delayMs) => delays.push(delayMs),
+    },
+  );
+  assert.ok(delays.length >= 3, 'the backoff ran for the failed attempts');
+  for (const delay of delays) assert.ok(delay <= 1000, `delay ${delay} exceeded maxDelayMs`);
+});

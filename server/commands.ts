@@ -72,11 +72,10 @@ import { DEFAULT_SETTINGS, DEFAULT_EMAIL_CONFIG } from '../shared/state.ts';
 import { emailConfigSchema } from './validation.ts';
 import { emailEndpoint } from './emailProviders.ts';
 import {
-  compileCustomizedTemplate,
   compileDailyDigestTemplate,
   compileNewsTemplate,
-  DEFAULT_TEMPLATE_CUSTOMIZATION,
 } from '../src/utils/templateCompiler.ts';
+import { DEFAULT_ADVISORY_EMAIL_TEMPLATE } from '../src/utils/defaultAdvisoryEmailTemplate.ts';
 import type { Config } from './config';
 import {
   isSmtpEmailProvider,
@@ -822,7 +821,7 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
       ...existing,
       templateCustomization: input.templateCustomization,
       customAdvisoryTemplate,
-      advisoryTemplate: customAdvisoryTemplate || compileCustomizedTemplate(input.templateCustomization),
+      advisoryTemplate: customAdvisoryTemplate || DEFAULT_ADVISORY_EMAIL_TEMPLATE,
     });
   } else if (action === 'dailyDigestTemplate.save') {
     const input = z

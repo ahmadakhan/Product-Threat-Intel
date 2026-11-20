@@ -29,11 +29,26 @@ import {
   Edit3,
   Hash,
 } from 'lucide-react';
-import { DEFAULT_TEMPLATE_CUSTOMIZATION } from '../utils/templateCompiler';
+import {
+  DEFAULT_TEMPLATE_CUSTOMIZATION,
+  stripGeneratedExecutiveSummaryMarkup,
+} from '../utils/templateCompiler';
 import { renderEmailTemplate } from '../utils/emailTemplate';
+
+const escapeTemplateValue = (value: string) =>
+  value.replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[char]!);
 
 export const AdvisoryTemplateView: React.FC = () => {
   const {
+    advisories = [],
+    findings = [],
+    selectedAdvisory = null,
     advisoryTemplate,
     customAdvisoryTemplate,
     settings,
@@ -361,69 +376,134 @@ const handleInsertToken = (token: string) => {
     // substituted below. Kept in step with the replace() chain so the live
     // preview (and the test email built from it) never leaks unrendered
     // {{else}}/{{/if}} tags or bare {{token}} placeholders.
+    const previewAdvisory = selectedAdvisory ?? [...advisories]
+      .sort((a, b) => b.createdDate.localeCompare(a.createdDate))[0] ?? null;
+    const selectedIds = new Set(previewAdvisory?.findingIds ?? []);
+    const previewFindings = previewAdvisory
+      ? findings.filter((finding) => selectedIds.has(finding.id) || finding.advisoryId === previewAdvisory.id)
+      : [];
+    const previewCves = previewAdvisory
+      ? (previewFindings.length
+          ? previewFindings.map((finding) => {
+              const severity = finding.cve.cvss.severity || previewAdvisory.severity;
+              const range = finding.cve.versionRange;
+              const versions = [
+                range?.versionStartIncluding ? `>= ${range.versionStartIncluding}` : '',
+                range?.versionStartExcluding ? `> ${range.versionStartExcluding}` : '',
+                range?.versionEndIncluding ? `<= ${range.versionEndIncluding}` : '',
+                range?.versionEndExcluding ? `< ${range.versionEndExcluding}` : '',
+              ].filter(Boolean).join(' and ');
+              const remediation = finding.cve.remediation;
+              return {
+                id: finding.cveId,
+                url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(finding.cveId)}`,
+                nvd_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(finding.cveId)}`,
+                is_critical: severity === 'CRITICAL',
+                is_high: severity === 'HIGH',
+                is_medium: severity === 'MEDIUM',
+                cvss_score: typeof finding.cve.cvss.score === 'number' ? finding.cve.cvss.score.toFixed(1) : 'N/A',
+                vendor: finding.matchedAssetVendor || 'Unavailable',
+                product: finding.matchedAssetProduct || finding.matchedAssetName || 'Unavailable',
+                description: escapeTemplateValue(finding.cve.description || 'No vendor description published.'),
+                affected_versions: versions || 'Confirm with vendor',
+                mitigations: [
+                  ...(remediation?.immediateActions || []),
+                  ...(remediation?.stepByStep || []),
+                  ...(remediation?.workarounds || []),
+                ].map(escapeTemplateValue),
+              };
+            })
+          : previewAdvisory.cveIds.map((id) => ({
+              id,
+              url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`,
+              nvd_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`,
+              is_critical: previewAdvisory.severity === 'CRITICAL',
+              is_high: previewAdvisory.severity === 'HIGH',
+              is_medium: previewAdvisory.severity === 'MEDIUM',
+              cvss_score: 'N/A',
+              vendor: 'Unavailable',
+              product: 'Unavailable',
+              description: 'No current inventory finding details are available for this CVE.',
+              affected_versions: 'Confirm with vendor',
+              mitigations: ['Confirm affected versions and follow current vendor guidance before remediation.'],
+            })))
+      : [];
+    const previewSeverity = previewAdvisory?.severity || 'UNKNOWN';
+    const previewCorrelationCount = previewFindings.length || previewAdvisory?.affectedSystems.length || 0;
+    const previewModifiedDate = previewFindings
+      .map((finding) => finding.cve.modifiedDate)
+      .filter((date): date is string => Boolean(date))
+      .sort()
+      .slice(-1)[0] || previewAdvisory?.createdDate;
+    const previewSummary = previewAdvisory?.executiveSummary ||
+      (previewCorrelationCount === 1
+        ? '1 current inventory correlation.'
+        : `${previewCorrelationCount} current inventory correlations.`) +
+        ` Top severity: ${previewSeverity}. Confirm applicability and consult the vendor before remediation.`;
+
+    // Use the selected advisory, or the newest available advisory, so the
+    // Studio preview shows production data instead of sample CVEs.
     const previewValues: Record<string, unknown> = {
-      advisory_title: 'Example advisory — template preview only',
+      advisory_title: previewAdvisory?.title || 'No advisory available',
       remediation_link: 'https://example.com',
-      severity: 'HIGH',
-      advisory_id: previewId,
-      top_severity_label: 'HIGH',
-      is_top_critical: false,
-      is_top_high: true,
-      is_top_medium: false,
-      cve_count: 2,
-      published_date: previewDate,
-      updated_date: previewDate,
-      inventory_status: '2 current inventory correlations',
-      executive_summary: 'This preview shows two example findings. Confirm applicability and consult the vendor before remediation.',
-      is_single_correlation: false,
-      correlation_count: 2,
-      cves: [
-        {
-          id: 'CVE-2026-0001',
-          url: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0001',
-          nvd_url: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0001',
-          is_critical: false,
-          is_high: true,
-          is_medium: false,
-          cvss_score: '8.1',
-          vendor: 'Example Vendor',
-          product: 'Example Product',
-          description: 'A remotely exploitable vulnerability affects the listed product versions.',
-          affected_versions: '>= 4.2 and < 4.8',
-          mitigations: ['Confirm affected versions with the vendor.', 'Apply only documented remediation.'],
-        },
-        {
-          id: 'CVE-2026-0002',
-          url: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0002',
-          nvd_url: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0002',
-          is_critical: false,
-          is_high: false,
-          is_medium: true,
-          cvss_score: '5.4',
-          vendor: 'Another Vendor',
-          product: 'Product Line',
-          description: 'A sample medium-severity vulnerability for the template preview.',
-          affected_versions: '10.1 through 10.4',
-          mitigations: ['Monitor vendor guidance and validate the affected version.'],
-        },
-      ],
+      severity: previewSeverity,
+      advisory_id: previewAdvisory?.id || previewId,
+      top_severity_label: previewSeverity,
+      is_top_critical: previewSeverity === 'CRITICAL',
+      is_top_high: previewSeverity === 'HIGH',
+      is_top_medium: previewSeverity === 'MEDIUM',
+      cve_count: previewAdvisory?.cveIds.length || 0,
+      published_date: previewAdvisory?.createdDate
+        ? new Date(previewAdvisory.createdDate).toLocaleDateString('en-GB')
+        : 'Unavailable',
+      updated_date: previewModifiedDate
+        ? new Date(previewModifiedDate).toLocaleDateString('en-GB')
+        : 'Unavailable',
+      inventory_status: previewCorrelationCount
+        ? `${previewCorrelationCount} current inventory correlation${previewCorrelationCount === 1 ? '' : 's'}`
+        : 'No current inventory correlations',
+      executive_summary: escapeTemplateValue(stripGeneratedExecutiveSummaryMarkup(previewSummary)),
+      is_single_correlation: previewCorrelationCount === 1,
+      correlation_count: previewCorrelationCount,
+      cves: previewCves,
       honeywell_actions: [
-        { title: 'Confirm scope', detail: 'Validate affected assets and versions against current vendor guidance.' },
-        { title: 'Plan remediation', detail: 'Apply documented remediation through change management.' },
+        { title: 'Confirm scope', detail: escapeTemplateValue('Validate affected assets and versions against current vendor guidance.') },
+        { title: 'Plan remediation', detail: escapeTemplateValue('Apply documented remediation through change management.') },
       ],
       contact_team: 'BA Security Operations',
       contact_email: 'DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com',
       tlp_classification: 'TLP:AMBER // INTERNAL',
     };
 
-    // Resolve {{#if key}}...{{else}}...{{/if}} then {{#if key}}...{{/if}}
-    // blocks before simple token replacement. This strips {{else}}/{{/if}}
-    // tags from the output while still letting nested {{key}} tokens be
-    // substituted by the replace() chain that follows.
+    // Severity badge colours mirror the server (server/advisoryRender.ts
+    // SEVERITY_COLORS) so severity badges are driven by criticality, never by
+    // the link colour setting.
+    const SEVERITY_COLORS: Record<string, string> = {
+      CRITICAL: '#dc2626',
+      HIGH: '#ea580c',
+      MEDIUM: '#ca8a04',
+      LOW: '#10b981',
+      UNKNOWN: '#6b7280',
+    };
+    const previewSeverityColor = SEVERITY_COLORS[String(previewValues.severity)] ?? SEVERITY_COLORS.UNKNOWN;
+    const previewSeverityLabel = previewSeverity.charAt(0) + previewSeverity.slice(1).toLowerCase();
+
     let processed = (!hasExistingHeader ? headerBanner + html : html);
     processed = renderEmailTemplate(processed, previewValues, { preserveUnknown: true });
 
-    return processed;
+    return processed
+      .replace(/{{severity}}/g, previewSeverity)
+      .replace(/{{severity_text}}/g, previewSeverityLabel)
+      .replace(
+        /{{severity_header_badge}}/g,
+        `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:${previewSeverityColor};color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">${previewSeverityLabel} SEVERITY</span>`,
+      )
+      .replace(
+        /{{severity_badge}}/g,
+        `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:${previewSeverityColor};color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">${previewSeverity}</span>`,
+      )
+      .replace(/{{advisory_id}}/g, previewId)
+      .replace(/{{advisory_title}}/g, 'Example advisory — template preview only');
   };
 
   /**

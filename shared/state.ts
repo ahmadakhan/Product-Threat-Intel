@@ -22,10 +22,10 @@ import type { ZeroDayDigest } from '../src/engine/pipelineEngine.ts';
 import {
   DEFAULT_TEMPLATE_CUSTOMIZATION,
   DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
-  compileCustomizedTemplate,
   compileDailyDigestTemplate,
   compileNewsTemplate,
 } from '../src/utils/templateCompiler.ts';
+import { DEFAULT_ADVISORY_EMAIL_TEMPLATE } from '../src/utils/defaultAdvisoryEmailTemplate.ts';
 export const DEFAULT_EMAIL_CONFIG: EmailConfiguration = {
   provider: 'SMTP',
   fromEmail: '',
@@ -221,7 +221,7 @@ export const emptyState = (): AppState => ({
   emailConfig: { ...DEFAULT_EMAIL_CONFIG },
   templateCustomization: { ...DEFAULT_TEMPLATE_CUSTOMIZATION },
   customAdvisoryTemplate: null,
-  advisoryTemplate: compileCustomizedTemplate(DEFAULT_TEMPLATE_CUSTOMIZATION),
+  advisoryTemplate: DEFAULT_ADVISORY_EMAIL_TEMPLATE,
   dailyDigestCustomization: { ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION },
   dailyDigestTemplate: compileDailyDigestTemplate(DEFAULT_DAILY_DIGEST_CUSTOMIZATION),
   dailyDigestCustomTemplate: null,

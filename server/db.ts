@@ -1,5 +1,6 @@
 import { correlationPreflight } from './correlation/preflight.ts';
-import { compileCustomizedTemplate, compileDailyDigestTemplate, compileNewsTemplate } from '../src/utils/templateCompiler.ts';
+import { compileDailyDigestTemplate, compileNewsTemplate } from '../src/utils/templateCompiler.ts';
+import { DEFAULT_ADVISORY_EMAIL_TEMPLATE } from '../src/utils/defaultAdvisoryEmailTemplate.ts';
 import pg, { type PoolClient } from 'pg';
 import { readFile, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -875,10 +876,10 @@ export async function state(db: Db, options: StateOptions = {}): Promise<AppStat
   // updates change updated_at, so using the generic query order made edits jump
   // to the top of the monitored-products table.
   snapshot.watchlist = orderWatchlist(snapshot.watchlist);
-  // Saved branding is authoritative; regenerate HTML with the current layout so
-  // existing installations receive layout fixes without losing customization.
+  // Keep a hand-authored template authoritative; installations without one use
+  // the canonical product HTML shared with Template Studio.
   snapshot.advisoryTemplate =
-    snapshot.customAdvisoryTemplate || compileCustomizedTemplate(snapshot.templateCustomization);
+    snapshot.customAdvisoryTemplate || DEFAULT_ADVISORY_EMAIL_TEMPLATE;
   snapshot.dailyDigestTemplate =
     snapshot.dailyDigestCustomTemplate || compileDailyDigestTemplate(snapshot.dailyDigestCustomization);
   snapshot.newsDigestTemplate =
@@ -933,7 +934,7 @@ export async function pipelineState(db: Db, opts?: { skipCveData?: boolean }): P
     else if (row.kind === 'template') Object.assign(snapshot, row.data);
   }
   snapshot.advisoryTemplate =
-    snapshot.customAdvisoryTemplate || compileCustomizedTemplate(snapshot.templateCustomization);
+    snapshot.customAdvisoryTemplate || DEFAULT_ADVISORY_EMAIL_TEMPLATE;
   snapshot.dailyDigestTemplate =
     snapshot.dailyDigestCustomTemplate || compileDailyDigestTemplate(snapshot.dailyDigestCustomization);
   snapshot.newsDigestTemplate =

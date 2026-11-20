@@ -221,6 +221,9 @@ const schema = z.object({
   // Attempts include the initial request; Retry-After and provider pacing remain
   // lower bounds on the delay.
   FEED_RETRY_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
+  // VulnCheck NVD++ / KEV retain their five-attempt budget for paginated
+  // snapshots while remaining independently configurable.
+  FEED_RETRY_VULNCHECK_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(5),
   FEED_RETRY_BASE_DELAY_MS: z.coerce.number().int().min(0).max(60000).default(2000),
   FEED_RETRY_MAX_DELAY_MS: z.coerce.number().int().min(0).max(120000).default(30000),
   FEED_RETRY_JITTER_FACTOR: z.coerce.number().min(0).max(1).default(0.2),

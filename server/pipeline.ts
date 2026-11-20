@@ -684,7 +684,7 @@ function boundExecutionLogs(logs: string[]): string[] {
 async function saveActiveExecution(db: pg.PoolClient, execution: PipelineExecution) {
   const saved = await db.query(
     `UPDATE records SET data=$2::jsonb,updated_at=now()
-     WHERE kind='executions' AND id=$1 AND data->>'status' IN ('QUEUED','RUNNING')
+     WHERE kind='executions' AND id=$1 AND data->>'status'='RUNNING'
        AND COALESCE(data->>'stopRequestedAt','')='' RETURNING id`,
     [execution.id, JSON.stringify(execution)],
   );
@@ -1401,7 +1401,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             execution!.phases[0].details = `${feeds.length} sources processed; ${Math.max(seen, rawCount)} records read`;
             execution!.stats.rawIngested = Math.max(seen, rawCount);
             await saveActiveExecution(db, execution!);
-          });
+          }, undefined, { locks: ['pipeline-queue'], signal });
         }
       };
       const workers = await Promise.allSettled(Array.from({ length: concurrency }, worker));

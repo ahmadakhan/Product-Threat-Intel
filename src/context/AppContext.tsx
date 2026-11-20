@@ -38,7 +38,6 @@ import type {
   MlFindingFeedbackResponse,
 } from '../types';
 import {
-  compileCustomizedTemplate,
   compileDailyDigestTemplate,
   compileNewsTemplate,
   DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
@@ -766,7 +765,7 @@ function useApplication() {
       (await call<PipelineExecution>('/pipeline', { scopeHours, incrementalFeeds })) || null,
     templateCustomization: customization,
     customAdvisoryTemplate: snapshot.customAdvisoryTemplate,
-    advisoryTemplate: snapshot.customAdvisoryTemplate || (draft ? compileCustomizedTemplate(draft) : snapshot.advisoryTemplate),
+    advisoryTemplate: snapshot.customAdvisoryTemplate || snapshot.advisoryTemplate,
     updateTemplateCustomization: (update: Partial<TemplateCustomization>) =>
       setDraft((prev) => ({ ...snapshot.templateCustomization, ...prev, ...update })),
     saveTemplate: async (customAdvisoryTemplate?: string | null) => {

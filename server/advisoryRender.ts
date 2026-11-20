@@ -290,7 +290,11 @@ function enterpriseTemplateValues(
       affected_versions: versionLines.length ? versionLines.join(', ') : 'All unpatched releases',
       // `{{{description}}}` in the template, so escape here: the value is CVE
       // prose from an external source, never markup we intend to honour.
-      description: escape(detail?.description || primary?.cve.description || 'No vendor description published.'),
+      description: `${escape(detail?.description || primary?.cve.description || 'No vendor description published.')}${
+        primary && confidenceIsLimited(primary)
+          ? `<br><strong>Low confidence${confidencePercent(primary) ? ` (${escape(confidencePercent(primary))})` : ''}:</strong> ${escape(stripConfidenceEvidence(primary.matchingEvidence) || 'Applicability could not be fully verified; confirm the affected version with the vendor before remediation.')}`
+          : ''
+      }`,
       mitigations: mitigations.length
         ? mitigations.map((action) => escape(action))
         : ['Apply the vendor security update once tested in your environment.',

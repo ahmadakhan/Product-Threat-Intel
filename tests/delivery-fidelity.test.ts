@@ -13,6 +13,8 @@ import {
 } from '../server/deliveryDocument.ts';
 import { DEFAULT_EMAIL_CONFIG } from '../shared/state.ts';
 import { DEFAULT_TEMPLATE_CUSTOMIZATION, compileCustomizedTemplate } from '../src/utils/templateCompiler.ts';
+import { DEFAULT_ADVISORY_EMAIL_TEMPLATE } from '../src/utils/defaultAdvisoryEmailTemplate.ts';
+import { readFileSync } from 'node:fs';
 import type { Requester } from '../server/network.ts';
 
 /* -------------------------------------------------------------------------- */
@@ -166,19 +168,24 @@ test('SendGrid and Postmark attachments carry the exact HTML under their own sch
 /* Document fidelity                                                           */
 /* -------------------------------------------------------------------------- */
 
-test('the operator template wins: custom template, then customization, then default', () => {
+test('the canonical advisory template wins unless an explicit custom HTML template is saved', () => {
   const custom = '<html><body>custom {{marker}}</body></html>';
   assert.equal(resolveAdvisoryTemplate({ customAdvisoryTemplate: custom }), custom);
   assert.equal(
     resolveAdvisoryTemplate({ customAdvisoryTemplate: '   ', templateCustomization: DEFAULT_TEMPLATE_CUSTOMIZATION }),
-    compileCustomizedTemplate(DEFAULT_TEMPLATE_CUSTOMIZATION),
+    DEFAULT_ADVISORY_EMAIL_TEMPLATE,
     'a blank custom template falls through',
   );
   assert.equal(
     resolveAdvisoryTemplate({ templateCustomization: { ...DEFAULT_TEMPLATE_CUSTOMIZATION, headerBg: '#123456' } }),
-    compileCustomizedTemplate({ ...DEFAULT_TEMPLATE_CUSTOMIZATION, headerBg: '#123456' }),
+    DEFAULT_ADVISORY_EMAIL_TEMPLATE,
   );
-  assert.equal(resolveAdvisoryTemplate(undefined), compileCustomizedTemplate(DEFAULT_TEMPLATE_CUSTOMIZATION));
+  assert.equal(resolveAdvisoryTemplate(undefined), DEFAULT_ADVISORY_EMAIL_TEMPLATE);
+  assert.equal(
+    DEFAULT_ADVISORY_EMAIL_TEMPLATE,
+    readFileSync(new URL('../server/default-advisory-email-template.html', import.meta.url), 'utf8'),
+    'Studio and server defaults must stay byte-identical to the supplied HTML file',
+  );
 });
 
 test('a findings document renders from the operator template, not the built-in default', () => {
@@ -189,6 +196,10 @@ test('a findings document renders from the operator template, not the built-in d
   assert.ok(branded.html.includes('#123456'));
   assert.ok(branded.html.includes('ACME SOC'));
   assert.ok(!plain.html.includes('ACME SOC'));
+  assert.ok(plain.html.includes('#073b5c'), 'default findings email uses the new template header');
+  assert.ok(plain.html.includes('ENTERPRISE VULNERABILITY NOTIFICATION'));
+  assert.ok(!plain.html.includes('THREAT INTELLIGENCE &amp; BA CYBER SECURITY OPERATIONS'));
+  assert.ok(!plain.html.includes('{{'), 'nested template conditionals and placeholders are fully rendered');
 });
 
 test('the plain-text part states each low-confidence finding and its reason', () => {
