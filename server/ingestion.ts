@@ -110,6 +110,8 @@ const NVD_PAGE_BUDGET = 500;
 export { NVD_PAGE_BUDGET };
 
 export interface IngestContext extends IngestionState {
+  /** Pipeline cancellation signal, including while an adapter waits to retry. */
+  signal?: AbortSignal;
   /** Last fully committed source checkpoint for the same source configuration. */
   checkpoint?: string;
   /** Latest cached CVE revision times, keyed by canonical CVE ID. */

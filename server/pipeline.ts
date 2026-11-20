@@ -1164,7 +1164,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
               await sourceCheckpoint();
               return response;
             };
-            const checkedSleep = async (ms: number) => {
+            const checkedSleep = async (ms: number, sleepSignal?: AbortSignal) => {
               const until = Date.now() + ms;
               while (Date.now() < until) {
                 // `sourceCheckpoint` awaits a database read and a clock check, so
@@ -1174,7 +1174,22 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
                 const delay = until - Date.now();
                 await sourceCheckpoint();
                 if (delay <= 0) return;
-                await new Promise((resolve) => setTimeout(resolve, Math.min(500, delay)));
+                const activeSignal = sleepSignal ?? signal;
+                if (activeSignal?.aborted) activeSignal.throwIfAborted();
+                await new Promise<void>((resolve, reject) => {
+                  let timer: ReturnType<typeof setTimeout> | undefined;
+                  const onAbort = () => {
+                    if (timer) clearTimeout(timer);
+                    activeSignal?.removeEventListener('abort', onAbort);
+                    reject(activeSignal?.reason ?? new Error('Operation aborted'));
+                  };
+                  timer = setTimeout(() => {
+                    activeSignal?.removeEventListener('abort', onAbort);
+                    resolve();
+                  }, Math.min(500, delay));
+                  activeSignal?.addEventListener('abort', onAbort, { once: true });
+                  if (activeSignal?.aborted) onAbort();
+                });
               }
             };
             const savedCursor = await get<FeedCursor>(pool, 'feedCursors', feed.id);
@@ -1190,6 +1205,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
               feed.type === 'CISA_KEV' ? await get<KevSnapshot>(pool, 'feedSnapshots', feed.id) : undefined;
             const cachedKev = savedKev?.fingerprint === sourceFingerprint(feed) ? savedKev : undefined;
             const context: IngestContext = {
+              signal,
               ...(execution!.incrementalFeeds !== false && cursor ? cursor : {}),
               knownCveModifiedAt,
               knownWithdrawalAt,
