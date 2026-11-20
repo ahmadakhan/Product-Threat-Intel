@@ -69,6 +69,10 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-}
       FEED_MAX_DURATION_SECONDS: ${FEED_MAX_DURATION_SECONDS:-1800}
+      FEED_RETRY_MAX_ATTEMPTS: ${FEED_RETRY_MAX_ATTEMPTS:-3}
+      FEED_RETRY_BASE_DELAY_MS: ${FEED_RETRY_BASE_DELAY_MS:-2000}
+      FEED_RETRY_MAX_DELAY_MS: ${FEED_RETRY_MAX_DELAY_MS:-30000}
+      FEED_RETRY_JITTER_FACTOR: ${FEED_RETRY_JITTER_FACTOR:-0.2}
       # How many feeds are polled concurrently. Feeds are I/O-bound and each
       # keeps its own provider pacing, so this bounds network fan-out, not CPU.
       # The run's floor is the slowest single feed; a wider pool only helps when

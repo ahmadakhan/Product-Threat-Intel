@@ -217,6 +217,13 @@ const schema = z.object({
   // an earlier attempt was delivered; this flag can no longer disable that guard.
   MAIL_CONFIRM_BEFORE_SEND: z.enum(['true', 'false']).default('true'),
   FEED_MAX_DURATION_SECONDS: z.coerce.number().int().min(1).max(7200).default(1800),
+  // Retry budget for transient feed transport failures and HTTP 429/502/503/504.
+  // Attempts include the initial request; Retry-After and provider pacing remain
+  // lower bounds on the delay.
+  FEED_RETRY_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
+  FEED_RETRY_BASE_DELAY_MS: z.coerce.number().int().min(0).max(60000).default(2000),
+  FEED_RETRY_MAX_DELAY_MS: z.coerce.number().int().min(0).max(120000).default(30000),
+  FEED_RETRY_JITTER_FACTOR: z.coerce.number().min(0).max(1).default(0.2),
   // Watchdog silence window for guarded background jobs. A job's heartbeat
   // resets this timer, so it bounds one silent stretch (a slow request or a
   // wedged statement), not a whole ingestion run. The floor stays above the
@@ -340,6 +347,8 @@ export function feedEgressHosts(type: unknown, endpoint: unknown, configuredHost
 }
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = schema.parse(env);
+  if (parsed.FEED_RETRY_MAX_DELAY_MS < parsed.FEED_RETRY_BASE_DELAY_MS)
+    throw new Error('FEED_RETRY_MAX_DELAY_MS must be >= FEED_RETRY_BASE_DELAY_MS');
   const config = {
     ...parsed,
     INSTANCE_ID: parsed.INSTANCE_ID || randomUUID(),

@@ -78,15 +78,15 @@ const DEFAULT_OPTIONS: RetryOptionsInternal<unknown> = {
 /**
  * Calculates delay with exponential backoff and jitter.
  *
- * `attempt` is 0-based: the first retry waits ~baseDelayMs, not 2x it. The
- * jitter is uniform in [0, jitterFactor*delay] and is ADDED to the capped
- * delay, so it can never exceed `maxDelayMs` by more than the jitter fraction.
+ * `attempt` is 0-based: the first retry waits ~baseDelayMs, not 2x it.
+ * Jitter is added after exponential backoff, then the result is capped so the
+ * configured maximum is a hard upper bound.
  */
 function calculateDelay(attempt: number, options: Required<RetryOptions<unknown>>): number {
   const exponentialDelay = options.baseDelayMs * Math.pow(2, attempt);
   const cappedDelay = Math.min(exponentialDelay, options.maxDelayMs);
   const jitter = cappedDelay * options.jitterFactor * Math.random();
-  return Math.floor(cappedDelay + jitter);
+  return Math.min(options.maxDelayMs, Math.floor(cappedDelay + jitter));
 }
 
 /** Rethrows the caller's own abort reason instead of inventing a new Error. */
@@ -94,6 +94,30 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
   throw reason instanceof Error ? reason : new Error('Operation aborted');
+}
+
+/** Backoff is cancellable so shutdown never waits out the remaining delay. */
+function abortableDelay(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+  throwIfAborted(signal);
+  return new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const onAbort = () => {
+      cleanup();
+      const reason = signal?.reason;
+      reject(reason instanceof Error ? reason : new Error('Operation aborted'));
+    };
+    timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, delayMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    // Close the check/listen race if cancellation happened during setup.
+    if (signal?.aborted) onAbort();
+  });
 }
 
 /**
@@ -132,6 +156,13 @@ export async function withRetry<T>(
   options: RetryOptions<T> = {}
 ): Promise<T> {
   const opts = { ...DEFAULT_OPTIONS, ...options } as Required<RetryOptions<T>>;
+  if (!Number.isInteger(opts.maxAttempts) || opts.maxAttempts < 1)
+    throw new RangeError('maxAttempts must be an integer greater than or equal to 1');
+  if (!Number.isFinite(opts.baseDelayMs) || opts.baseDelayMs < 0 ||
+      !Number.isFinite(opts.maxDelayMs) || opts.maxDelayMs < opts.baseDelayMs)
+    throw new RangeError('Retry delays must be finite, non-negative, and maxDelayMs must be >= baseDelayMs');
+  if (!Number.isFinite(opts.jitterFactor) || opts.jitterFactor < 0 || opts.jitterFactor > 1)
+    throw new RangeError('jitterFactor must be between 0 and 1');
   let lastError: unknown;
 
   for (let attempt = 0; attempt < opts.maxAttempts; attempt++) {
@@ -188,7 +219,7 @@ export async function withRetry<T>(
       const delayMs = calculateDelay(attempt, opts);
       opts.onRetry(attempt + 1, error, delayMs);
 
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await abortableDelay(delayMs, opts.signal);
     } finally {
       // Always release this attempt's timer and listener. Without the cleanup a
       // long-lived retry (many attempts) accumulates one listener per attempt on

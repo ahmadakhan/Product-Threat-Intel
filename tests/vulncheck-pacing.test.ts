@@ -13,6 +13,10 @@ const env = {
   APP_ORIGIN: 'https://vulnstream.internal',
   ENCRYPTION_KEY: randomBytes(32).toString('base64'),
   WORKER_ENABLED: 'false',
+  // The suite's assertions pin the old hardcoded 5-attempt budget and the
+  // exact Retry-After values, so they opt into those settings explicitly.
+  FEED_RETRY_MAX_ATTEMPTS: '5',
+  FEED_RETRY_JITTER_FACTOR: '0',
 };
 const config = loadConfig(env);
 
