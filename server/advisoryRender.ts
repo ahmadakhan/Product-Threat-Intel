@@ -189,6 +189,137 @@ export interface AdvisoryRenderOptions {
    * email. Callers that render once may omit it.
    */
   generatedAt?: Date;
+  /** Team name shown in the email footer. Operator-configurable. */
+  contactTeam?: string;
+  /** Address the recipient replies to, shown as the footer contact. */
+  contactEmail?: string;
+  /** Distribution marking shown in the footer (e.g. `TLP:AMBER // INTERNAL`). */
+  tlpClassification?: string;
+}
+
+interface EnterpriseCve {
+  id: string;
+  source_url: string;
+  severity: string;
+  is_critical: boolean;
+  is_high: boolean;
+  is_medium: boolean;
+  is_low: boolean;
+  cvss_score: string;
+  vendor: string;
+  product: string;
+  affected_versions: string;
+  description: string;
+  mitigations: string[];
+}
+
+/**
+ * Placeholder values for the enterprise notification template.
+ *
+ * The shipped template addresses a flat top-level severity pair plus a nested
+ * `cves` array whose items carry per-item boolean flags (`is_critical`,
+ * `is_high`, ...) and a per-CVE `mitigations` list. None of that existed in the
+ * engine's variable set, so rendering the template produced the static chrome
+ * with every piece of content missing. Everything here is derived from the same
+ * `findings` the rest of the view uses, so the two cannot disagree.
+ *
+ * Values are returned RAW, not pre-escaped. The renderer escapes `{{name}}`
+ * itself; escaping here as well produced `&amp;amp;` in the output (a severity
+ * label "CRITICAL & HIGH" reached recipients as "CRITICAL &amp;amp; HIGH").
+ * Fields the template reads with `{{{triple}}}` (descriptions, mitigations) are
+ * escaped in place at the point they are built, because those bypass the
+ * renderer's escaping by design.
+ */
+function enterpriseTemplateValues(
+  advisory: Advisory,
+  findings: Finding[] | undefined,
+  options: AdvisoryRenderOptions,
+  vulnerabilityDetails: { cve_id: string; cvss_score: string; description: string; published_date: string; last_modified_date: string }[],
+  escape: (value: string) => string,
+): Record<string, unknown> {
+  const rankOrder = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
+  const cveIds = [...advisory.cveIds].sort(
+    (a, b) => severityRank(b, advisory, findings) - severityRank(a, advisory, findings) || a.localeCompare(b),
+  );
+  const severityOf = (cveId: string) => cveSeverity(cveId, advisory, findings).toUpperCase();
+
+  // Top severity is the strongest severity present, so the strip and the hero
+  // badge reflect the worst item rather than the advisory's stored label.
+  const worst = cveIds.reduce<string>(
+    (current, cveId) =>
+      rankOrder.indexOf(severityOf(cveId)) !== -1 &&
+      rankOrder.indexOf(severityOf(cveId)) < rankOrder.indexOf(current)
+        ? severityOf(cveId)
+        : current,
+    advisory.severity.toUpperCase(),
+  );
+  const distinctSeverities = [...new Set(cveIds.map(severityOf))].filter((s) => s !== 'UNKNOWN');
+  // "CRITICAL & HIGH" when several share top billing; a single word otherwise.
+  const topSeverityLabel = distinctSeverities.length > 1
+    ? distinctSeverities.sort((a, b) => rankOrder.indexOf(a) - rankOrder.indexOf(b)).join(' & ')
+    : (distinctSeverities[0] ?? worst);
+
+  const cves: EnterpriseCve[] = cveIds.map((cveId) => {
+    const cveFindings = findings?.filter((finding) => finding.cveId === cveId) ?? [];
+    const severity = severityOf(cveId);
+    // Report the most severe finding first: it is the one an operator must act on.
+    const primary =
+      cveFindings.find((finding) => finding.cve.cvss.severity.toUpperCase() === severity) ?? cveFindings[0];
+    const detail = vulnerabilityDetails.find((entry) => entry.cve_id === escape(cveId));
+    const versionLines = [...new Set(cveFindings.map((finding) => affectedVersionLabel(finding)).filter(Boolean))];
+    const mitigations = [...
+      new Set(
+        cveFindings.flatMap((finding) => [
+          ...(finding.cve.remediation?.immediateActions ?? []),
+          ...(finding.cve.remediation?.stepByStep ?? []),
+        ]),
+      ),
+    ].filter((action) => action.trim());
+    return {
+      id: cveId,
+      source_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(cveId)}`,
+      severity,
+      is_critical: severity === 'CRITICAL',
+      is_high: severity === 'HIGH',
+      is_medium: severity === 'MEDIUM',
+      is_low: severity === 'LOW' || severity === 'UNKNOWN',
+      cvss_score: typeof primary?.cve.cvss.score === 'number' ? primary.cve.cvss.score.toFixed(1) : 'N/A',
+      vendor: primary?.matchedAssetVendor || 'Unknown',
+      product: primary?.matchedAssetProduct || findingProductLabel(primary),
+      affected_versions: versionLines.length ? versionLines.join(', ') : 'All unpatched releases',
+      // `{{{description}}}` in the template, so escape here: the value is CVE
+      // prose from an external source, never markup we intend to honour.
+      description: escape(detail?.description || primary?.cve.description || 'No vendor description published.'),
+      mitigations: mitigations.length
+        ? mitigations.map((action) => escape(action))
+        : ['Apply the vendor security update once tested in your environment.',
+             'Restrict network access to affected systems until remediation is validated.'],
+    };
+  });
+
+  const generatedAt = options.generatedAt ?? new Date();
+  const commissioned = new Date(advisory.createdDate);
+  return {
+    top_severity_label: topSeverityLabel,
+    is_top_critical: worst === 'CRITICAL',
+    is_top_high: worst === 'HIGH',
+    is_top_medium: worst === 'MEDIUM',
+    is_top_low: worst === 'LOW' || worst === 'UNKNOWN',
+    published_date: formattedDate(advisory.createdDate),
+    updated_date:
+      Number.isNaN(commissioned.getTime()) ? formattedDate(advisory.createdDate) : formattedDate(generatedAt.toISOString()),
+    inventory_status: `${cves.length} Asset${cves.length === 1 ? '' : 's'} Flagged`,
+    cve_count: cves.length,
+    cves,
+    honeywell_actions: [
+      { title: 'Inventory & Scope:', detail: ' Identify all instances of the listed vendor products in your environment.' },
+      { title: 'Validate Exposure:', detail: ' Confirm the deployed versions fall within the affected ranges before remediation.' },
+      { title: 'Apply Remediation:', detail: ' Deploy vendor-supplied updates through your change control process.' },
+    ],
+    contact_team: options.contactTeam || 'Security Operations',
+    contact_email: options.contactEmail || '',
+    tlp_classification: options.tlpClassification || 'TLP:AMBER // INTERNAL',
+  };
 }
 
 export function renderAdvisory(
@@ -368,6 +499,13 @@ export function renderAdvisory(
     }),
     advisory_published_date: formattedDate(advisory.createdDate),
     executive_summary: escape(stripGeneratedExecutiveSummaryMarkup(composedSummary)),
+    // Raw variant for templates that emit the summary with `{{{triple}}}` and
+    // expect the emphasis the generator produces to survive. The escaped value
+    // above remains the default so a `{{double}}` template can never inject
+    // markup; the generator's own `<strong>` wrapper is the only markup this
+    // carries, and it is re-escaped here so a hostile finding title inside the
+    // sentence cannot break out of it.
+    executive_summary_html: escape(composedSummary).replace(/&lt;strong&gt;/g, '<strong>').replace(/&lt;\/strong&gt;/g, '</strong>'),
     cve_ids: advisory.cveIds.join(', '),
     affected_systems: advisory.affectedSystems.join('\n'),
     affected_systems_html: advisory.affectedSystems
@@ -454,6 +592,15 @@ export function renderAdvisory(
     })(),
     vulnerabilities: vulnerabilityDetails,
     references: referenceDetails,
+    // ---- Schema required by the enterprise notification template ----------
+    //
+    // The attached template addresses a nested `cves` array with per-item
+    // boolean severity flags, a top-level severity pair, and a fixed set of
+    // operational fields. Without these, the template rendered as a shell: every
+    // placeholder resolved to the empty string and only the static chrome
+    // remained. These are derived from the same findings as the rest of the
+    // view, so the two schemas can never disagree about the content.
+    ...enterpriseTemplateValues(advisory, findings, options, vulnerabilityDetails, escape),
   };
   const rawHtmlTokens = new Set([
     'cve_id_links',
@@ -466,40 +613,193 @@ export function renderAdvisory(
     'severity_badge',
     'severity_header_badge',
     'severity_summary',
+    // Carries the generator's own <strong> emphasis; see the note where it is
+    // built. Registered as raw so `{{executive_summary_html}}` is not escaped a
+    // second time.
+    'executive_summary_html',
   ]);
-  // Process {{#if key}}...{{/if}} conditional blocks.
-  let processed = template.replace(/\{\{#if\s+([a-z_]+)\}\}([\s\S]*?)\{\{\/if\}\}/g, (_, key, content) => {
-    const val = values[key];
-    const truthy = val !== undefined && val !== null && val !== '' &&
-      !(Array.isArray(val) && val.length === 0);
-    return truthy ? content : '';
-  });
-  // Process {{#each array}}...{{/each}} loops.
-  processed = processed.replace(/\{\{#each\s+([a-z_]+)\}\}([\s\S]*?)\{\{\/each\}\}/g, (_, key, content) => {
-    const arr = values[key];
-    if (!Array.isArray(arr) || arr.length === 0) return '';
-    return arr.map((item) => {
-      let inner = content;
-      // Replace {{field}} inside the loop body with item[field].
-      for (const [k, v] of Object.entries(item as Record<string, unknown>)) {
-        inner = inner.replace(new RegExp(`\\{\\{\\s*${k}\\s*\\}\\}`, 'g'), String(v ?? ''));
-      }
-      // Replace {{#if field}}...{{/if}} inside the loop body.
-      inner = inner.replace(/\{\{#if\s+([a-z_]+)\}\}([\s\S]*?)\{\{\/if\}\}/g, (_2: string, k2: string, c2: string) => {
-        const v2 = (item as Record<string, unknown>)[k2];
-        const truthy2 = v2 !== undefined && v2 !== null && v2 !== '' &&
-          !(Array.isArray(v2) && v2.length === 0);
-        return truthy2 ? c2 : '';
-      });
-      return inner;
-    }).join('');
-  });
-  // Replace {{{key}}} (raw HTML) and {{key}} (escaped or raw for HTML fields) for top-level values.
-  return processed.replace(/{{{([a-z_]+)}}}/g, (_, key) => {
-    if (rawHtmlTokens.has(key)) return String(values[key] || '');
-    return escape(String(values[key] || ''));
-  }).replace(/{{([a-z_]+)}}/g, (_, key) => {
-    if (rawHtmlTokens.has(key)) return String(values[key] || '');
-    return escape(String(values[key] || ''));
-  });
+  // A proper recursive renderer replaced three chained regexes.
+  //
+  // The regex approach could not express the template ship set: `{{#if}}` was
+  // matched non-greedily against the first `{{/if}}`, so a three-level nested
+  // chain (critical/high/medium) closed at the wrong place and emitted raw
+  // block text; `{{#if}}` inside `{{#each}}` handled exactly one level; and an
+  // item's array field (`mitigations`) could not be iterated at all. The result
+  // was a template that rendered as static chrome with no content. This walks
+  // the blocks with a real stack, so nesting is unbounded and each block sees
+  // its own scope.
+  return renderTemplateBlocks(template, [values], { escape, rawHtmlTokens });
+}
+
+interface TemplateRenderContext {
+  escape: (value: string) => string;
+  rawHtmlTokens: ReadonlySet<string>;
+}
+
+/** Thrown to abandon an unsafe template without emitting a partial document. */
+class TemplateRenderError extends Error {}
+
+/**
+ * Resolves one placeholder against the scope stack (innermost scope first).
+ *
+ * Returns `undefined` when the name is not in scope, which is what lets a
+ * template omit optional fields without leaking literal `{{name}}` text into a
+ * recipient's inbox.
+ */
+function lookupTemplateValue(
+  name: string,
+  scopes: readonly Record<string, unknown>[],
+): unknown {
+  if (name === 'this' || name === '.') {
+    const top = scopes[scopes.length - 1];
+    // A primitive loop item is stored as `{ this: value }`, so `{{this}}` must
+    // yield the value. Returning the wrapper object produced "[object Object]"
+    // for every string item (e.g. each mitigation) and made the entry vanish.
+    return Object.prototype.hasOwnProperty.call(top, 'this') ? top.this : top;
+  }
+  for (let i = scopes.length - 1; i >= 0; i--) {
+    const scope = scopes[i];
+    if (Object.prototype.hasOwnProperty.call(scope, name)) return scope[name];
+  }
+  return undefined;
+}
+
+/** Block truthiness: empty strings, empty arrays, false and undefined are false. */
+function templateTruthy(value: unknown): boolean {
+  if (value === undefined || value === null || value === false) return false;
+  if (value === '') return false;
+  if (Array.isArray(value)) return value.length > 0;
+  return true;
+}
+
+function stringifyTemplateValue(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return '';
+}
+
+/**
+ * Renders `{{#if}}`, `{{#each}}` (including nested blocks and nested `{{#if}}`
+ * inside them) and `{{{raw}}}` / `{{escaped}}` placeholders.
+ *
+ * Iterative with an explicit block stack rather than recursion per token, so a
+ * deeply nested template cannot grow the JS stack. A template whose blocks are
+ * unbalanced throws instead of emitting half a document, and the caller falls
+ * back to the built-in template.
+ */
+function renderTemplateBlocks(
+  template: string,
+  scopes: Record<string, unknown>[],
+  context: TemplateRenderContext,
+): string {
+  const token = /\{\{\{?\s*(#if\s+[^}\s]+|#each\s+[^}\s]+|\/[a-z]+|[^}]+?)\s*\}?\}\}/g;
+  let out = '';
+  let cursor = 0;
+
+  for (let match = token.exec(template); match; match = token.exec(template)) {
+    // Emit the literal text before this tag.
+    out += template.slice(cursor, match.index);
+    cursor = match.index + match[0].length;
+    const inner = match[1].trim();
+    const isTriple = match[0].startsWith('{{{');
+
+    if (inner.startsWith('#if ')) {
+      // Split the block on a TOP-LEVEL {{else}}: a nested if inside the true
+      // branch owns its own else, so a plain indexOf would pick the wrong one.
+      const end = findBlockEnd(template, cursor, 'if');
+      if (!end) throw new TemplateRenderError('Unclosed {{#if}} block');
+      const wholeBlock = template.slice(cursor, end.start);
+      cursor = end.after;
+      token.lastIndex = cursor;
+      const split = splitOnElse(wholeBlock);
+      const truthy = templateTruthy(lookupTemplateValue(inner.slice(4).trim(), scopes));
+      if (truthy) out += renderTemplateBlocks(split.yes, scopes, context);
+      else if (split.no) out += renderTemplateBlocks(split.no, scopes, context);
+      continue;
+    }
+
+    if (inner.startsWith('#each ')) {
+      const end = findBlockEnd(template, cursor, 'each');
+      if (!end) throw new TemplateRenderError('Unclosed {{#each}} block');
+      const body = template.slice(cursor, end.start);
+      cursor = end.after;
+      token.lastIndex = cursor;
+      const value = lookupTemplateValue(inner.slice(6).trim(), scopes);
+      if (Array.isArray(value))
+        for (const item of value)
+          out += renderTemplateBlocks(
+            body,
+            // A primitive item (e.g. a list of strings) is exposed as `this`;
+            // an object item becomes its own scope so `{{title}}` resolves.
+            item !== null && typeof item === 'object'
+              ? [...scopes, item as Record<string, unknown>]
+              : [...scopes, { this: item }],
+            context,
+          );
+      continue;
+    }
+
+    if (inner.startsWith('/')) throw new TemplateRenderError(`Unexpected {{${inner}}}`);
+
+    const text = stringifyTemplateValue(lookupTemplateValue(inner, scopes));
+    out += isTriple || context.rawHtmlTokens.has(inner) ? text : context.escape(text);
+  }
+
+  return out + template.slice(cursor);
+}
+
+/**
+ * Splits an `#if` body at its top-level `{{else}}`.
+ *
+ * A nested block may contain its own `{{else}}`, so the split walks the block
+ * tags and only accepts an `{{else}}` seen at depth 0. Without this the template's
+ * `{{#if}}...{{else}}{{#if}}...{{/if}}{{/if}}` chains paired the wrong tags and
+ * the whole conditional collapsed to one branch.
+ */
+function splitOnElse(body: string): { yes: string; no: string | null } {
+  const pattern = /\{\{\s*(#[a-z]+|\/[a-z]+|else)\s*\}\}/g;
+  let depth = 0;
+  for (let match = pattern.exec(body); match; match = pattern.exec(body)) {
+    const tag = match[1];
+    if (tag.startsWith('#')) depth++;
+    else if (tag.startsWith('/')) depth--;
+    else if (tag === 'else' && depth === 0)
+      return { yes: body.slice(0, match.index), no: body.slice(match.index + match[0].length) };
+  }
+  return { yes: body, no: null };
+}
+
+/** Finds the matching close tag for a block starting at `from`, honouring nesting. */
+function findBlockEnd(
+  template: string,
+  from: number,
+  kind: 'each' | 'if',
+): { start: number; after: number } | null {
+  // Open tags carry an argument (`{{#if x}}`), close tags do not, so the
+  // opener alternative must consume the rest of the tag. Matching only
+  // `#[a-z]+` silently skipped every opener and left the scanner seeing nothing
+  // but closes. `{{else}}` is a body separator, not a block, and must not change
+  // the nesting depth.
+  const pattern = /\{\{\s*(#[a-z]+(?:\s+[^}]*)?|\/[a-z]+)\s*\}\}/g;
+  pattern.lastIndex = from;
+  // Track a stack of open block kinds, not a single counter: `{{#if}}` and
+  // `{{#each}}` nest inside each other, so a counter that increments on any
+  // opener and decrements on any closer would let an inner close match an outer
+  // open and report the wrong body.
+  const open: string[] = [kind];
+  for (let match = pattern.exec(template); match; match = pattern.exec(template)) {
+    const tag = match[1];
+    if (tag.startsWith('#')) {
+      // Keep only the block kind, not its argument: `#if x` and `#if y` are the
+      // same kind of block for matching purposes.
+      open.push(tag.slice(1).split(/\s+/)[0]);
+      continue;
+    }
+    const closing = tag.slice(1);
+    if (open[open.length - 1] !== closing) continue;
+    open.pop();
+    if (!open.length) return { start: match.index, after: match.index + match[0].length };
+  }
+  return null;
 }

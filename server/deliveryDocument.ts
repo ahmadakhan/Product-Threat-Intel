@@ -164,7 +164,29 @@ export function renderFindingsDocument(input: DeliveryDocumentInput): DeliveryDo
   const generatedAt = input.generatedAt ?? new Date();
   const template =
     input.template ?? compileCustomizedTemplate(input.templateCustomization ?? DEFAULT_TEMPLATE_CUSTOMIZATION);
-  const html = renderAdvisory(template, advisory, findings, { generatedAt });
+  // An operator template that does not render must not cost the recipient the
+  // finding. A malformed custom template (unbalanced blocks) used to throw out of
+  // renderAdvisory, which failed the delivery and lost the alert; the built-in
+  // template is used instead and the failure is reported loudly.
+  let html: string;
+  try {
+    html = renderAdvisory(template, advisory, findings, { generatedAt });
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        level: 'error',
+        event: 'advisory.template_render_failed',
+        message: 'Custom advisory template failed to render; using the built-in template',
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    html = renderAdvisory(
+      compileCustomizedTemplate(DEFAULT_TEMPLATE_CUSTOMIZATION),
+      advisory,
+      findings,
+      { generatedAt },
+    );
+  }
   const email = advisoryEmail(advisory, html, findings.map(deliveryFindingDetail), { findings });
   const limited = limitedConfidenceLines(findings);
   const text = limited.length ? `${email.text}\n\n${limited.join('\n')}` : email.text;

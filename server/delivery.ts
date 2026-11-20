@@ -548,7 +548,11 @@ const findingDetail = (finding: Finding) =>
 const vendorLinkFor = (findings: Finding[]) =>
   uniqueSorted(
     findings
-      .map((finding) => finding.cve.remediation.vendorAdvisoryRef || finding.cve.remediation.patchUrl)
+      // `remediation` is optional on NormalizedCVE. Dereferencing it directly
+      // crashed the whole render for any CVE without remediation metadata, so a
+      // single such finding produced no email at all rather than an advisory
+      // with an empty vendor link.
+      .map((finding) => finding.cve.remediation?.vendorAdvisoryRef || finding.cve.remediation?.patchUrl)
       .filter((link): link is string => !!link),
   )[0] || '';
 /**
