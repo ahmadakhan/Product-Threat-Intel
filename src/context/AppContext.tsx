@@ -408,6 +408,25 @@ function useApplication() {
     } catch {}
   };
 
+  const renderAdvisoryPreview = useCallback(async (input: {
+    template: string;
+    contactTeam?: string;
+    contactEmail?: string;
+    tlpClassification?: string;
+  }): Promise<{ ok: true; html: string } | { ok: false; error: string }> => {
+    try {
+      const result = await request<{ success: boolean; html?: string; error?: string }>(
+        '/advisory-template-render',
+        input,
+        'POST',
+      );
+      if (result.success && typeof result.html === 'string') return { ok: true, html: result.html };
+      return { ok: false, error: result.error || 'Template could not be rendered' };
+    } catch (renderError) {
+      return { ok: false, error: renderError instanceof Error ? renderError.message : String(renderError) };
+    }
+  }, [request]);
+
   return {
     ...snapshot,
     activeTab,
@@ -449,24 +468,7 @@ function useApplication() {
      * chrome. Calling the server keeps one renderer, so the preview is the
      * document that will actually be delivered.
      */
-    renderAdvisoryPreview: async (input: {
-      template: string;
-      contactTeam?: string;
-      contactEmail?: string;
-      tlpClassification?: string;
-    }): Promise<{ ok: true; html: string } | { ok: false; error: string }> => {
-      try {
-        const result = await request<{ success: boolean; html?: string; error?: string }>(
-          '/advisory-template-render',
-          input,
-          'POST',
-        );
-        if (result.success && typeof result.html === 'string') return { ok: true, html: result.html };
-        return { ok: false, error: result.error || 'Template could not be rendered' };
-      } catch (renderError) {
-        return { ok: false, error: renderError instanceof Error ? renderError.message : String(renderError) };
-      }
-    },
+    renderAdvisoryPreview,
     sessionTimeRemainingSec: session
       ? Math.max(0, Math.floor((new Date(session.expiresAt).getTime() - clock) / 1000))
       : 0,

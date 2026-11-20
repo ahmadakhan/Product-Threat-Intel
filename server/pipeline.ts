@@ -770,8 +770,6 @@ export const PIPELINE_HEARTBEAT_MS = 15_000;
  * with 40 fast RSS feeds and one slow API gains most from a wider pool, while a
  * small one gains nothing above its feed count.
  */
-const FEED_CONCURRENCY = Math.max(1, Math.min(32, Number(process.env.FEED_CONCURRENCY ?? 10) || 10));
-
 /**
  * Body of the pipeline heartbeat timer.
  *
@@ -1113,7 +1111,12 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       // single long tail. `latencyMs` is the provider's own reported latency
       // from the previous run, so the order is learned rather than hard-coded.
       const ordered = [...sources].sort((left, right) => (right.latencyMs ?? 0) - (left.latencyMs ?? 0));
-      const concurrency = Math.min(ordered.length, FEED_CONCURRENCY);
+      // The leadership and run-lock sessions are pinned for the whole run. Keep
+      // at least one additional pool slot for progress/commit transactions and
+      // another for unrelated worker/API work; otherwise high feed concurrency
+      // can starve the very checkpoints needed to stop feeds cleanly.
+      const poolBound = Math.max(1, config.POOL_MAX_CONNECTIONS - 4);
+      const concurrency = Math.min(ordered.length, config.FEED_CONCURRENCY, poolBound);
       let nextIndex = 0;
       const worker = async () => {
         while (nextIndex < ordered.length) {

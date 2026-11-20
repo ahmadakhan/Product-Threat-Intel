@@ -351,7 +351,7 @@ const handleInsertToken = (token: string) => {
     // The server-compiled template bakes headerBg into <td bgcolor=...>. Custom
     // templates are operator-owned HTML; they always get our header banner
     // prepended so a missing custom header doesn't leave the email headerless.
-    const hasExistingHeader = /<td\s+bgcolor=/i.test(source);
+    const hasExistingHeader = /<td\b[^>]*\bbgcolor\s*=/i.test(source);
 
     // Replace hardcoded header colors in-place so client-side headerBg changes
     // take effect on the live preview (only matches if server-compiled header exists).

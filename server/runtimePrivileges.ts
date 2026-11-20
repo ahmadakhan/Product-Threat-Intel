@@ -7,7 +7,8 @@ export async function grantRuntimePrivileges(db: Db, role = 'vulnstream_app'): P
   const target = '"' + role + '"';
   await db.query(`GRANT USAGE ON SCHEMA ${quotedSchema} TO ${target};
     GRANT SELECT,INSERT,UPDATE,DELETE ON users,sessions,login_attempts,records,outbox,scheduler_state,rate_limit_buckets TO ${target};
-    GRANT SELECT,INSERT ON audit,operational_events TO ${target};
+    GRANT SELECT,INSERT ON audit TO ${target};
+    GRANT SELECT,INSERT,DELETE ON operational_events TO ${target};
     GRANT SELECT,INSERT,UPDATE ON state_metrics TO ${target};
     GRANT SELECT ON assets,vendor_product_aliases,correlation_asset_inventory,schema_migrations TO ${target};
     GRANT SELECT ON correlation_generated_columns TO ${target};

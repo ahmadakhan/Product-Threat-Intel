@@ -900,6 +900,9 @@ export function createApp(
     '/api/correlation/simulate',
     '/api/threat/cpe-simulate',
     '/api/retention/preview',
+    // Template preview only renders supplied HTML with sample data; it does
+    // not persist changes and the Studio may request it repeatedly while open.
+    '/api/advisory-template-render',
   ]);
   const mutationLimiter = options.mutationLimiter ?? createDatabaseRateLimiter(pool);
   const ingestLimiter =

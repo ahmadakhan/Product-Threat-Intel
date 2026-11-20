@@ -152,7 +152,10 @@ const poolSchema = {
   // Server-side per-session statement guard, applied through libpq options.
   POOL_STATEMENT_TIMEOUT_MS: poolNumber(100, 3_600_000, 15_000),
   POOL_KEEPALIVE_DELAY_MS: poolNumber(0, 600_000, 5_000),
-  POOL_MAX_CONNECTIONS: poolNumber(1, 1_000, 25),
+  // Leadership, the pipeline run lock, and a live transaction require three
+  // sessions; a fourth prevents ordinary API/worker traffic from consuming the
+  // pipeline's final transaction slot.
+  POOL_MAX_CONNECTIONS: poolNumber(4, 1_000, 25),
   POOL_CONNECTION_TIMEOUT_MS: poolNumber(100, 600_000, 5_000),
   POOL_IDLE_TIMEOUT_MS: poolNumber(1_000, 3_600_000, 30_000),
   POOL_MAX_LIFETIME_MS: poolNumber(1_000, 86_400_000, 600_000),
@@ -217,6 +220,7 @@ const schema = z.object({
   // an earlier attempt was delivered; this flag can no longer disable that guard.
   MAIL_CONFIRM_BEFORE_SEND: z.enum(['true', 'false']).default('true'),
   FEED_MAX_DURATION_SECONDS: z.coerce.number().int().min(1).max(7200).default(1800),
+  FEED_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(10),
   // Retry budget for transient feed transport failures and HTTP 429/502/503/504.
   // Attempts include the initial request; Retry-After and provider pacing remain
   // lower bounds on the delay.

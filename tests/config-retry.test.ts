@@ -33,6 +33,18 @@ test('FEED_RETRY_MAX_ATTEMPTS must be an integer 1..10', () => {
   assert.throws(() => loadConfig({ ...baseEnv, FEED_RETRY_MAX_ATTEMPTS: '11' }), throwsWithField('FEED_RETRY_MAX_ATTEMPTS'));
 });
 
+test('pipeline pool and feed concurrency settings reject unsafe values', () => {
+  assert.throws(
+    () => loadConfig({ ...baseEnv, POOL_MAX_CONNECTIONS: '3' }),
+    throwsWithField('POOL_MAX_CONNECTIONS'),
+    'the worker needs separate leadership, run-lock, transaction, and spare connections',
+  );
+  assert.throws(() => loadConfig({ ...baseEnv, FEED_CONCURRENCY: '0' }), throwsWithField('FEED_CONCURRENCY'));
+  assert.throws(() => loadConfig({ ...baseEnv, FEED_CONCURRENCY: '33' }), throwsWithField('FEED_CONCURRENCY'));
+  assert.throws(() => loadConfig({ ...baseEnv, FEED_CONCURRENCY: '2.5' }), throwsWithField('FEED_CONCURRENCY'));
+  assert.equal(loadConfig(baseEnv).FEED_CONCURRENCY, 10);
+});
+
 test('FEED_RETRY_BASE_DELAY_MS must be >= 0 and <= 60000', () => {
   assert.throws(() => loadConfig({ ...baseEnv, FEED_RETRY_BASE_DELAY_MS: '-1' }), throwsWithField('FEED_RETRY_BASE_DELAY_MS'));
   assert.throws(() => loadConfig({ ...baseEnv, FEED_RETRY_BASE_DELAY_MS: '60001' }), throwsWithField('FEED_RETRY_BASE_DELAY_MS'));
