@@ -467,6 +467,14 @@ const handleInsertToken = (token: string) => {
    * rejecting a template the operator is mid-way through editing).
    */
   const currentTemplateSource = customAdvisoryTemplate || advisoryTemplate;
+  /**
+   * True when the Studio has no saved custom template yet.
+   *
+   * The pane then shows the built-in template, which looks identical to "my
+   * template is broken" from the operator's side - that is exactly how a missing
+   * save was misdiagnosed as a renderer fault. Stated explicitly instead.
+   */
+  const usingBuiltInTemplate = !customAdvisoryTemplate;
   const previewHtml =
     serverPreview && serverPreview.template === currentTemplateSource
       ? serverPreview.html
@@ -1332,7 +1340,13 @@ const handleInsertToken = (token: string) => {
                   <div className="flex items-center space-x-1">
                     <span className="text-zinc-500">
                       {previewHtml.length} chars
-                      {previewError ? ' — preview error' : serverPreview?.html ? ' — server-rendered' : ''}
+                      {previewError
+                        ? ' — preview error'
+                        : usingBuiltInTemplate
+                          ? ' — built-in template (no custom template saved)'
+                          : serverPreview?.html
+                            ? ' — server-rendered'
+                            : ''}
                     </span>
                   </div>
                 </div>

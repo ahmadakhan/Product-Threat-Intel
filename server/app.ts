@@ -2400,7 +2400,7 @@ export function createApp(
           tlpClassification: z.string().max(120).optional(),
         })
         .parse(req.body ?? {});
-      const template = body.template ?? resolveAdvisoryTemplate(await get(pool, 'settings', 'main'));
+      const template = body.template ?? resolveAdvisoryTemplate(await get(pool, 'template', 'main'));
       const sample = sampleAdvisoryForPreview();
       try {
         const html = renderAdvisory(template, sample.advisory, sample.findings, {
