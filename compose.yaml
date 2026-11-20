@@ -69,6 +69,11 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-}
       FEED_MAX_DURATION_SECONDS: ${FEED_MAX_DURATION_SECONDS:-1800}
+      # How many feeds are polled concurrently. Feeds are I/O-bound and each
+      # keeps its own provider pacing, so this bounds network fan-out, not CPU.
+      # The run's floor is the slowest single feed; a wider pool only helps when
+      # total feed work exceeds that feed's latency.
+      FEED_CONCURRENCY: ${FEED_CONCURRENCY:-10}
       METRICS_TOKEN: ${METRICS_TOKEN:-}
       # A guarded job is aborted only after this long without a progress
       # heartbeat, not after this long in total. A single silent phase (one

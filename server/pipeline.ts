@@ -752,6 +752,20 @@ export async function stopRunWithClient(
 export const PIPELINE_HEARTBEAT_MS = 15_000;
 
 /**
+ * How many feeds are ingested concurrently.
+ *
+ * Feeds are I/O-bound (one HTTP request at a time, each paced by its own
+ * provider rate limit), so this is a network-concurrency bound, not a CPU one:
+ * raising it does not contend for the event loop. Each adapter keeps its own
+ * per-provider pacing, so the limit here cannot exceed a provider's rate limit.
+ *
+ * Configurable because the right value depends on the feed mix: a deployment
+ * with 40 fast RSS feeds and one slow API gains most from a wider pool, while a
+ * small one gains nothing above its feed count.
+ */
+const FEED_CONCURRENCY = Math.max(1, Math.min(32, Number(process.env.FEED_CONCURRENCY ?? 10) || 10));
+
+/**
  * Body of the pipeline heartbeat timer.
  *
  * Firing is itself proof the run is alive: the event loop is turning and this
@@ -1082,12 +1096,22 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     const feedUpdates: ThreatFeed[] = [];
     // Bound cross-feed concurrency; each adapter also paces its own pages.
     const ingestSources = async (sources: ThreatFeed[], targets: string[] = []) => {
-      const concurrency = Math.min(sources.length, 6);
+      // Longest-processing-time-first.
+      //
+      // The pool used to take feeds in database order. With 41 feeds where one
+      // (VulnCheck NVD++, 48-114s per request) costs more than all the RSS feeds
+      // combined (~80s total), the run's wall time was that one feed plus
+      // whatever happened to start alongside it. Starting the expensive sources
+      // first overlaps them with everything else instead of ending the run on a
+      // single long tail. `latencyMs` is the provider's own reported latency
+      // from the previous run, so the order is learned rather than hard-coded.
+      const ordered = [...sources].sort((left, right) => (right.latencyMs ?? 0) - (left.latencyMs ?? 0));
+      const concurrency = Math.min(ordered.length, FEED_CONCURRENCY);
       let nextIndex = 0;
       const worker = async () => {
-        while (nextIndex < sources.length) {
+        while (nextIndex < ordered.length) {
           const i = nextIndex++;
-          const feed = sources[i];
+          const feed = ordered[i];
           // Audit R-1: this checkpoint is the only stop signal in the loop, and
           // the circuit-open branch below used to `continue` straight past it on
           // the next iteration. Every iteration now re-checks the operator's
