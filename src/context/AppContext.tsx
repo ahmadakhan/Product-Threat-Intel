@@ -441,6 +441,33 @@ function useApplication() {
     selectedAdvisory,
     setSelectedAdvisory,
     csrfToken: session?.csrfToken || '',
+    /**
+     * Renders a template through the SERVER renderer for the Studio preview.
+     *
+     * The component used to preview with its own client-side substitution,
+     * which only knew the built-in placeholder set: an operator template using
+     * `cves[]`, nested `{{#each}}` or per-item severity flags previewed as empty
+     * chrome. Calling the server keeps one renderer, so the preview is the
+     * document that will actually be delivered.
+     */
+    renderAdvisoryPreview: async (input: {
+      template: string;
+      contactTeam?: string;
+      contactEmail?: string;
+      tlpClassification?: string;
+    }): Promise<{ ok: true; html: string } | { ok: false; error: string }> => {
+      try {
+        const result = await request<{ success: boolean; html?: string; error?: string }>(
+          '/advisory-template-render',
+          input,
+          'POST',
+        );
+        if (result.success && typeof result.html === 'string') return { ok: true, html: result.html };
+        return { ok: false, error: result.error || 'Template could not be rendered' };
+      } catch (renderError) {
+        return { ok: false, error: renderError instanceof Error ? renderError.message : String(renderError) };
+      }
+    },
     sessionTimeRemainingSec: session
       ? Math.max(0, Math.floor((new Date(session.expiresAt).getTime() - clock) / 1000))
       : 0,

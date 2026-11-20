@@ -50,6 +50,7 @@ import { checkPassword, passwordHash, decrypt, encryptionKeys, randomToken, secu
 import { createRequester, resolvePublic } from './network';
 import type { Requester, ResponseData } from './network';
 import { queueRun, stopRun, renderAdvisory } from './pipeline';
+import { resolveAdvisoryTemplate } from './deliveryDocument';
 import { formatAdvisoryId } from '../src/utils/executionName';
 import { recoveryAt, isPermanentFeedFailure } from './feedRecovery';
 import { computeFeedRecoveryDelay, getMlRuntime } from './ml/integration.ts';
@@ -387,6 +388,81 @@ export interface AppOptions {
    */
   hangDetection?: boolean;
 }
+/**
+ * Sample advisory + findings for the Template Studio preview.
+ *
+ * Deliberately covers the schema the shipped template addresses: three CVEs at
+ * three severities (so every per-item severity branch renders at least once),
+ * vendor/product identity, per-CVE mitigations, and a vendor advisory link.
+ * Without multi-severity, mixed data an operator cannot tell a template that is
+ * broken from one that is merely taking an untested branch.
+ */
+function sampleAdvisoryForPreview(): { advisory: Advisory; findings: Finding[] } {
+  const make = (n: number, severity: Advisory['severity'], score: number): Finding =>
+    ({
+      id: `preview-finding-${n}`,
+      cveId: `CVE-2026-000${n}`,
+      cve: {
+        cveId: `CVE-2026-000${n}`,
+        title: 'Template preview sample record',
+        description:
+          'A remotely exploitable vulnerability affects the listed product versions. This text is sample data used only for template preview.',
+        cvss: { score, severity, vector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H', version: '3.1' },
+        cpeMatches: [],
+        cwe: [],
+        sourceFeeds: ['preview'],
+        publishedDate: '2026-11-19T09:00:00.000Z',
+        modifiedDate: '2026-11-19T09:00:00.000Z',
+        remediation: {
+          vendorAdvisoryRef: 'https://example.com/vendor-advisory',
+          immediateActions: [
+            'Apply the vendor security update once tested in your environment.',
+            'Restrict network access to affected systems until remediation is validated.',
+          ],
+        },
+      },
+      matchedAssetId: `preview-asset-${n}`,
+      matchedAssetName: `example-asset-0${n} (VendorCorp ProductSuite)`,
+      matchedAssetVendor: 'VendorCorp',
+      matchedAssetProduct: 'ProductSuite',
+      matchedCpe: '',
+      matchingMethod: 'CPE',
+      matchingEvidence: 'Sample data for template preview',
+      confidence: 95,
+      exposure: 'INTERNAL',
+      exploitRisk: 'STANDARD',
+      dispatchDeferred: false,
+      notificationStatus: 'QUEUED_FOR_DISPATCH',
+      status: 'MONITORED',
+      autoDispatchedAt: null,
+      advisoryId: null,
+      reviewNotifiedAt: null,
+      timeline: [],
+    }) as unknown as Finding;
+
+  const findings = [
+    make(1, 'CRITICAL', 9.8),
+    make(2, 'HIGH', 7.5),
+    make(3, 'MEDIUM', 5.3),
+  ];
+  const advisory: Advisory = {
+    id: 'ADV-TEMPLATE-PREVIEW',
+    title: 'Example advisory - template preview only',
+    severity: 'CRITICAL',
+    cveIds: findings.map((finding) => finding.cveId),
+    findingIds: findings.map((finding) => finding.id),
+    createdDate: '2026-11-19T09:00:00.000Z',
+    deliveryStatus: 'PENDING',
+    recipientCount: 1,
+    executiveSummary:
+      'This advisory covers <strong>3 vulnerabilities</strong> affecting the monitored estate. This is sample content used only for template preview.',
+    remediationInstructions: 'Validate vendor guidance and deploy tested updates through change control.',
+    affectedSystems: findings.map((finding) => finding.matchedAssetName),
+    vendorLink: 'https://example.com/vendor-advisory',
+  };
+  return { advisory, findings };
+}
+
 export function createApp(
   pool: pg.Pool,
   config: Config,
@@ -2302,6 +2378,45 @@ export function createApp(
           );
         });
         res.json({ success: false, latency, error: 'Connection failed; see feed test log for details' });
+      }
+    }),
+  );
+  // Renders an advisory template with sample data using the SAME renderer the
+  // delivery path uses. The Template Studio used to preview with a second,
+  // client-side engine that only knew the built-in placeholder set, so an
+  // operator template (nested {{#each}}/{{#if}}, cves[], per-item severity
+  // flags) previewed as empty chrome and never matched the email that shipped.
+  // One renderer means the preview cannot diverge from the delivered document.
+  app.post(
+    '/api/advisory-template-render',
+    requireRole('ADMIN', 'OPERATOR'),
+    asyncRoute(async (req, res) => {
+      const body = z
+        .object({
+          // Optional: preview whatever is in the editor, saved or not.
+          template: z.string().min(1).max(200_000).optional(),
+          contactTeam: z.string().max(200).optional(),
+          contactEmail: z.string().max(254).optional(),
+          tlpClassification: z.string().max(120).optional(),
+        })
+        .parse(req.body ?? {});
+      const template = body.template ?? resolveAdvisoryTemplate(await get(pool, 'settings', 'main'));
+      const sample = sampleAdvisoryForPreview();
+      try {
+        const html = renderAdvisory(template, sample.advisory, sample.findings, {
+          generatedAt: new Date(),
+          contactTeam: body.contactTeam,
+          contactEmail: body.contactEmail,
+          tlpClassification: body.tlpClassification,
+        });
+        res.json({ success: true, html });
+      } catch (error) {
+        // A malformed template must surface as a preview error, not a 500: the
+        // operator needs to know which block is unbalanced.
+        res.status(422).json({
+          success: false,
+          error: error instanceof Error ? error.message : 'Template could not be rendered',
+        });
       }
     }),
   );

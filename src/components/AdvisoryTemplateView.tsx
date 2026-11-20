@@ -40,6 +40,7 @@ export const AdvisoryTemplateView: React.FC = () => {
     updateTemplateCustomization,
     sendTestEmail,
     saveTemplate,
+    renderAdvisoryPreview,
     error,
     clearError,
   } = useApp();
@@ -55,6 +56,18 @@ export const AdvisoryTemplateView: React.FC = () => {
   const [savingTemplate, setSavingTemplate] = useState(false);
   const [confirmSendTest, setConfirmSendTest] = useState(false);
   const [sendingTest, setSendingTest] = useState(false);
+  /**
+   * Server-rendered preview.
+   *
+   * The local `getRenderedHtml()` path is a second, client-side template engine
+   * that only understands the built-in placeholders. Any template the server
+   * renders correctly but the client does not (nested `{{#each}}`, `{{else}}`
+   * chains, `cves[]` items with per-item flags) previewed as empty chrome, so
+   * the Studio showed something the email would never contain. This holds the
+   * server's output for exactly the template now in the editor.
+   */
+  const [serverPreview, setServerPreview] = useState<{ template: string; html: string } | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   // Enterprise Live Rendering & Scroll Management
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -211,6 +224,39 @@ const handleInsertToken = (token: string) => {
     const timer = setTimeout(syncIframeHeight, 100);
     return () => clearTimeout(timer);
   }, [templateCustomization, previewDevice, advisoryTemplate, syncIframeHeight]);
+  // Ask the server to render the template currently in the editor.
+  //
+  // Debounced because the editor calls this on every keystroke; skipped while the
+  // operator is not on the preview pane. A failure is surfaced rather than
+  // silently falling back, because "my template shows nothing" is exactly the
+  // symptom this replaces - but the local renderer still supplies the iframe so
+  // the pane is never blank.
+  useEffect(() => {
+    const source = customAdvisoryTemplate || advisoryTemplate;
+    if (!source) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      // No contact/TLP overrides: the template carries its own footer values, and
+      // rendering with defaults would preview a footer the operator never wrote.
+      void renderAdvisoryPreview({ template: source }).then((result) => {
+        if (cancelled) return;
+        if (result.ok) {
+          setServerPreview({ template: source, html: result.html });
+          setPreviewError(null);
+        } else {
+          setPreviewError(result.error);
+        }
+      });
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // `settings` is intentionally omitted: only the three display fields are read
+    // and re-fetching on every unrelated settings change would re-render a large
+    // document for nothing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customAdvisoryTemplate, advisoryTemplate, renderAdvisoryPreview]);
 
   const scrollToIframeTop = () => {
     try {
@@ -411,6 +457,20 @@ const handleInsertToken = (token: string) => {
       )
       .replace(/{{references_link}}/g, 'https://example.com/vendor-advisory');
   };
+
+  /**
+   * What the preview pane shows.
+   *
+   * The server render is authoritative when it is available for the template
+   * currently in the editor. `getRenderedHtml()` stays as the fallback so the
+   * pane is never blank (first paint, a request in flight, or the server
+   * rejecting a template the operator is mid-way through editing).
+   */
+  const currentTemplateSource = customAdvisoryTemplate || advisoryTemplate;
+  const previewHtml =
+    serverPreview && serverPreview.template === currentTemplateSource
+      ? serverPreview.html
+      : getRenderedHtml();
 
   // Matches the server's strict templateSchema hex check (server/validation.ts).
   // The color swatches pair a <input type="color"> (always a valid 6-digit
@@ -1270,13 +1330,21 @@ const handleInsertToken = (token: string) => {
                 <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-900/80 border-b border-zinc-800 text-xs font-mono text-zinc-400">
                   <span>Live Rendered Preview</span>
                   <div className="flex items-center space-x-1">
-                    <span className="text-zinc-500">{getRenderedHtml().length} chars</span>
+                    <span className="text-zinc-500">
+                      {previewHtml.length} chars
+                      {previewError ? ' — preview error' : serverPreview?.html ? ' — server-rendered' : ''}
+                    </span>
                   </div>
                 </div>
+                {previewError && (
+                  <div className="px-3 py-2 bg-red-950/60 border-b border-red-900 text-[11px] font-mono text-red-300 whitespace-pre-wrap">
+                    Template could not be rendered: {previewError}
+                  </div>
+                )}
                 <div className="flex-1 overflow-auto bg-zinc-950/80">
                   <div className="w-[720px] max-w-full mx-auto py-4">
                     <iframe
-                      srcDoc={getRenderedHtml()}
+                      srcDoc={previewHtml}
                       onLoad={syncIframeHeight}
                       scrolling="no"
                       style={{
