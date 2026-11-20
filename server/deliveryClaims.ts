@@ -106,7 +106,12 @@ export async function claimItems(
              AND o.status IN ('QUEUED','SENDING')
         )
         -- A FAILED job holds its claim whenever the finalize path has NOT
-        -- released it (the failure may still turn out to be a delivery).
+        -- released it. The failure may still turn out to be a delivery, and an
+        -- UNKNOWN outcome (the transport may have accepted the message) is
+        -- exactly the case a resend would duplicate. Releasing on a recorded
+        -- outcome therefore re-sent alerts that had already been delivered.
+        -- The finalize path is the only thing that may release these claims:
+        -- it does so on a provable non-delivery (REJECTED or NOT_ATTEMPTED).
         AND NOT EXISTS (
           SELECT 1 FROM outbox o
            WHERE o.id = delivery_claims.job_id

@@ -57,3 +57,15 @@ export async function acknowledgePendingExcept(
     WHERE id=ANY($1::text[]) AND lease_token=$2 AND lease_until>now()`, [done, batch.token]));
   return result.rowCount || 0;
 }
+
+/**
+ * Removes exhausted rows that have exceeded MAX_PENDING_ATTEMPTS.
+ * These are poisoned advisories that cannot be processed and should be
+ * removed from the queue so they don't block the drain loop.
+ * Returns the count of removed rows.
+ */
+export async function sweepExhaustedPending(db: Db): Promise<number> {
+  const result = await db.query(timedQuery(`DELETE FROM correlation_pending
+    WHERE attempts >= $1`, [MAX_PENDING_ATTEMPTS]));
+  return result.rowCount || 0;
+}

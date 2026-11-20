@@ -47,7 +47,7 @@ const RECOVERY_RETRY_MS = 10 * 60_000;
 /** Max feeds recovered per tick to avoid a thundering herd of re-probes. */
 const FEED_RECOVERY_PER_TICK = 3;
 
-interface ComponentAlertState {
+interface AlertStateEntry {
   lastAlertAt?: string;
   /** Incident identity; a change re-arms the alert even inside the cooldown. */
   incident?: string;
@@ -55,8 +55,19 @@ interface ComponentAlertState {
 }
 
 interface AlertState {
-  [component: string]: ComponentAlertState;
+  [key: string]: AlertStateEntry;
 }
+
+// Separator for the composite alert key.
+//
+// This was `\u0000` (a literal NUL byte). JSON.stringify does not escape NUL, so
+// every write of this state serialised an invalid JSON string and PostgreSQL
+// rejected it with "unsupported Unicode escape sequence". `::` cannot appear in
+// a component name (they are the fixed Component literals) and an incident is
+// free text, so `${component}::${incident}` stays unambiguous.
+const ALERT_KEY_SEPARATOR = '::';
+const alertKey = (component: Component, incident: string) =>
+  `${component}${ALERT_KEY_SEPARATOR}${incident}`;
 
 const cooldownMs = (minutes?: number): number =>
   Math.max(1, Number.isFinite(Number(minutes)) ? Number(minutes) : DEFAULT_COOLDOWN_MINUTES) * 60_000;
@@ -85,18 +96,19 @@ async function claimAlertSlot(
   cooldown: number,
 ): Promise<boolean> {
   const now = Date.now();
+  const key = alertKey(component, incident);
   const row = await db.query<{ data: AlertState | null }>(
     `SELECT data FROM records WHERE kind='systemState' AND id='selfHealing' FOR UPDATE`,
   );
   const state: AlertState = row.rows[0]?.data ?? {};
-  const stored = state[component];
+  const stored = state[key];
   if (stored?.lastAlertAt && stored.incident === incident) {
     const last = Date.parse(stored.lastAlertAt);
     if (Number.isFinite(last) && now - last < cooldown) return false;
   }
   const next: AlertState = {
     ...state,
-    [component]: { ...stored, lastAlertAt: new Date(now).toISOString(), incident },
+    [key]: { ...stored, lastAlertAt: new Date(now).toISOString(), incident },
   };
   await db.query(
     `INSERT INTO records(kind,id,data) VALUES('systemState','selfHealing',$1::jsonb)
@@ -119,13 +131,14 @@ async function claimRecoverySlot(pool: Pool, component: Component, retryMs: numb
         `SELECT data FROM records WHERE kind='systemState' AND id='selfHealing' FOR UPDATE`,
       );
       const state: AlertState = row.rows[0]?.data ?? {};
-      const stored = state[component];
+      const recoveryKey = alertKey(component, 'recovery');
+      const stored = state[recoveryKey];
       const now = Date.now();
       const last = stored?.lastRecoveryAt ? Date.parse(stored.lastRecoveryAt) : NaN;
       if (Number.isFinite(last) && now - last < retryMs) return false;
       const next: AlertState = {
         ...state,
-        [component]: { ...stored, lastRecoveryAt: new Date(now).toISOString() },
+        [recoveryKey]: { ...stored, lastRecoveryAt: new Date(now).toISOString() },
       };
       await db.query(
         `INSERT INTO records(kind,id,data) VALUES('systemState','selfHealing',$1::jsonb)
@@ -269,7 +282,11 @@ export async function runSelfHealCheck(pool: Pool): Promise<void> {
           ['QUEUED', 'RUNNING'].includes(other.status) &&
           Date.parse(other.startTime) > Date.parse(execution.endTime!),
       ) ||
-        alertState?.PIPELINE?.incident !== `pipeline:${execution.id}`),
+        // Alert state is keyed by `component\0incident`. This reader used the
+        // old `state[component]` shape, so after the re-keying it always read
+        // `undefined` and treated EVERY already-alerted failure as new.
+        alertState?.[alertKey('PIPELINE', `pipeline:${execution.id}`)]?.incident !==
+          `pipeline:${execution.id}`),
   );
   if (unresolvedFailures.length) {
     const latest = unresolvedFailures.reduce((a, b) =>

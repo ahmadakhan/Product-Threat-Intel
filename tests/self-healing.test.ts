@@ -95,7 +95,12 @@ test('concurrent self-healing ticks queue one job per recipient and one recovery
     await Promise.all(Array.from({ length: 4 }, () => runSelfHealCheck(pool)));
     assert.equal((await pool.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, 2);
     assert.equal((await list<PipelineExecution>(pool, 'executions')).filter((run) => run.status === 'QUEUED').length, 1);
-    assert.ok((await get<Record<string, { lastRecoveryAt?: string }>>(pool, 'systemState', 'selfHealing'))?.PIPELINE.lastRecoveryAt);
+    assert.ok(
+      (await get<Record<string, { lastRecoveryAt?: string }>>(pool, 'systemState', 'selfHealing'))?.[
+        'PIPELINE::recovery'
+      ]?.lastRecoveryAt,
+      'the recovery slot is recorded under the component-scoped key',
+    );
   }));
 
 test('self-healing queue failures roll back alert claims and retry after recovery is queued', { skip: !process.env.TEST_DATABASE_URL }, async () =>
@@ -106,7 +111,13 @@ test('self-healing queue failures roll back alert claims and retry after recover
       CREATE TRIGGER reject_alert BEFORE INSERT ON outbox FOR EACH STATEMENT EXECUTE FUNCTION reject_alert()`);
     await assert.rejects(runSelfHealCheck(pool), /injected queue failure/);
     assert.equal((await pool.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, 0);
-    assert.equal((await get<Record<string, { lastAlertAt?: string }>>(pool, 'systemState', 'selfHealing'))?.PIPELINE.lastAlertAt, undefined);
+    assert.equal(
+      (await get<Record<string, { lastAlertAt?: string }>>(pool, 'systemState', 'selfHealing'))?.[
+        'PIPELINE::incident'
+      ]?.lastAlertAt,
+      undefined,
+      'the rollback must also clear the alert claim',
+    );
     await pool.query('DROP TRIGGER reject_alert ON outbox');
     await runSelfHealCheck(pool);
     assert.equal((await pool.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, 1);

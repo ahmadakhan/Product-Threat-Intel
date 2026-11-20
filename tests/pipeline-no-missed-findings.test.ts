@@ -372,10 +372,11 @@ test('the candidate index includes criteria absent from cpeMatchDetails', async 
   await syncMatchIndex(db, [cve], [assetRecord()]);
   const insert = statements.find((statement) => statement.sql.includes('INSERT INTO match_cve_index'));
   assert.ok(insert, 'the CVE index is written');
-  const identities = insert!.values.filter(Array.isArray).flat();
+  const rows = JSON.parse(String(insert!.values[0])) as { criterion_id: string; identities: string[] }[];
+  const identities = rows.flatMap((row) => row.identities);
   assert.ok(identities.includes('cpe:acme\u001fgateway'), 'detail criterion is indexed');
   assert.ok(identities.includes('cpe:acme\u001fwidget'), 'extra criterion is indexed');
-  assert.ok(insert!.values.includes('cpe-extra-0'), 'the extra criterion gets its own row');
+  assert.ok(rows.some((row) => row.criterion_id === 'cpe-extra-0'), 'the extra criterion gets its own row');
 });
 
 test('a statement timeout inside a transaction is retried from a savepoint', async () => {
@@ -442,7 +443,9 @@ test('the asset candidate index includes the declared vendor/product beside the 
   await syncMatchIndex(db, [cveRecord({ cpeMatches: [cpe('1.5', 'acme', 'widget')] })], [asset]);
   const insert = statements.find((statement) => statement.sql.includes('INSERT INTO match_asset_index'));
   assert.ok(insert, 'the asset index is written');
-  const identities = insert!.values.filter(Array.isArray).flat();
+  // Rows travel as one JSON payload (node-pg cannot serialise a text[]
+  // array-of-arrays), so the identities are read from the recordset.
+  const identities = JSON.parse(String(insert!.values[0])).flatMap((row: { identities: string[] }) => row.identities);
   assert.ok(identities.includes('cpe:acme\u001fwidget'), 'the declared identity is indexed');
   assert.ok(identities.includes('cpe:acme\u001fgateway'), 'the CPE identity is still indexed');
 });

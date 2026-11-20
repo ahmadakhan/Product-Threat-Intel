@@ -47,9 +47,11 @@ export function recoveryAt(feed: ThreatFeed, failures: number, now = Date.now(),
   // Exponential backoff capped at one hour, floored at the configured base delay
   // so the per-feed recoveryDelayMinutes is never undercut while backing off.
   const backoff = Math.min(3600000, fallback * Math.pow(2, Math.min(6, Math.max(0, failures - 1))));
-  const delay = learned === null
-    ? Math.max(fallback, backoff)
-    : Math.max(fallback, Math.min(3600000, learned));
+  // Apply 1-hour hard cap AFTER taking max of all components to prevent ML delay
+  // from exceeding the cap even when fallback is large.
+  const candidates = [fallback, backoff];
+  if (learned !== null) candidates.push(learned);
+  const delay = Math.min(3600000, Math.max(...candidates));
   return new Date(now + Math.max(60000, delay)).toISOString();
 }
 

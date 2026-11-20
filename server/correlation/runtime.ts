@@ -8,7 +8,7 @@ import { DeadLetterQueue } from './deadLetter.ts';
 import { AdvisoryIngestor } from './ingest.ts';
 import { PipelineSupervisor } from './supervisor.ts';
 import { AdvisoryStreamProcessor } from './stream.ts';
-import { claimPending, renewPending, acknowledgePending, acknowledgePendingExcept, MAX_PENDING_ATTEMPTS } from './pending.ts';
+import { claimPending, renewPending, acknowledgePending, acknowledgePendingExcept, MAX_PENDING_ATTEMPTS, sweepExhaustedPending } from './pending.ts';
 
 /** Structural equality for pending payloads (plain JSON values only). */
 const samePayload = (left: unknown, right: unknown): boolean => {
@@ -178,6 +178,11 @@ export class CorrelationRuntime {
       );
       if (retained) this.lastMaintenance = Date.now();
     }
+    // Sweep exhausted pending rows to prevent poison advisories from blocking the queue
+    const swept = await sweepExhaustedPending(this.pool).catch(() => 0);
+    if (swept) {
+      this.supervisor.ingestor.telemetry.log('INFO', 'pending.exhausted_swept', { count: swept });
+    }
     while (!this.stopped && this.supervisor.health === 'HEALTHY') {
       // Leased SKIP LOCKED claims survive crashes; final ingestion is idempotent.
       // Claim at most concurrency slots, so leases don't expire behind a local queue.
@@ -186,9 +191,25 @@ export class CorrelationRuntime {
       let renewing: Promise<unknown> | undefined;
       const heartbeat = setInterval(() => {
         if (renewing) return;
-        renewing = renewPending(this.pool, batch).catch(() => {
-          this.supervisor.ingestor.telemetry.log('WARN', 'pending.lease_renewal_failed');
-        }).finally(() => { renewing = undefined; });
+        // Add timeout to prevent hung renewals from piling up
+        const timeoutMs = 10_000;
+        renewing = (async () => {
+          try {
+            await Promise.race([
+              renewPending(this.pool, batch),
+              new Promise<never>((_, reject) => setTimeout(() => reject(new Error('LEASE_RENEWAL_TIMEOUT')), timeoutMs)),
+            ]);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (msg === 'LEASE_RENEWAL_TIMEOUT') {
+              this.supervisor.ingestor.telemetry.log('WARN', 'pending.lease_renewal_timeout');
+            } else {
+              this.supervisor.ingestor.telemetry.log('WARN', 'pending.lease_renewal_failed', { count: 1 });
+            }
+          } finally {
+            renewing = undefined;
+          }
+        })();
       }, 20_000);
       heartbeat.unref();
       try {

@@ -1911,6 +1911,12 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       const finalProductAliases = buildAliasMap(finalAliasEntries, 'PRODUCT');
       // AUDIT FIX: Apply pipeline-news integration correction
       // Derive and calculate final alias maps immediately for both CVE and news matching
+      // The index refresh is a full-corpus rewrite and must not share the short
+      // statement budget used by interactive work. Measured on a 15,000-CVE
+      // corpus: the set-based refresh finishes in seconds when idle, but a
+      // concurrent run can multiply that several times over. A 60s ceiling
+      // aborted mid-refresh and rolled the run back; the retry helper now has a
+      // budget that matches the work, so this is the outer guard, not the plan.
       const finalPairs = await transaction(
         pool,
         (db) =>
@@ -1919,7 +1925,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             productAliases: finalProductAliases,
           }),
         undefined,
-      { locks: ['match-index'], statementTimeoutMs: 60000 },
+        { locks: ['match-index'], statementTimeoutMs: config.MATCH_INDEX_STATEMENT_TIMEOUT_MS },
       );
       const correlated = runVulnerabilityPipeline(
         feeds,

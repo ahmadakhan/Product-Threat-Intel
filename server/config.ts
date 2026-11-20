@@ -156,6 +156,11 @@ const poolSchema = {
   POOL_CONNECTION_TIMEOUT_MS: poolNumber(100, 600_000, 5_000),
   POOL_IDLE_TIMEOUT_MS: poolNumber(1_000, 3_600_000, 30_000),
   POOL_MAX_LIFETIME_MS: poolNumber(1_000, 86_400_000, 600_000),
+  // Statement ceiling for the candidate-index refresh. It is a full-corpus
+  // rewrite, so it needs far more headroom than interactive statements: the
+  // pool-wide POOL_STATEMENT_TIMEOUT_MS (15s default) aborted a legitimate
+  // refresh on a large corpus and rolled the whole pipeline run back.
+  MATCH_INDEX_STATEMENT_TIMEOUT_MS: poolNumber(1_000, 900_000, 180_000),
 };
 
 const schema = z.object({
