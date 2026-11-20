@@ -28,6 +28,7 @@ import { deriveInventoryAliases } from '../utils/aliasLifecycle';
 import { formatExecutionName } from '../utils/executionName';
 import { isPublicAddress } from '../utils/ipSafety';
 import ipaddr from 'ipaddr.js';
+import { randomUUID } from 'node:crypto';
 import { shouldAutoDispatch } from '../../server/ml/integration.ts';
 import { classifyFinding } from './classification';
 
@@ -269,7 +270,7 @@ export function runVulnerabilityPipeline(
   const newFindings: Finding[] = [];
   const alreadyNotified = new Set(existing.filter((f) => f.reviewNotifiedAt || f.autoDispatchedAt)
     .map((f) => `${normalizeCveId(f.cveId)}:${f.matchedAssetId}`));
-  const executionId = crypto.randomUUID();
+  const executionId = randomUUID();
   const feedAuthority = new Map(
     _feeds.map((f) => [f.id, AUTHORITATIVE_FEED_TYPES.has(f.type) || f.authoritative === true]),
   );
@@ -282,7 +283,7 @@ export function runVulnerabilityPipeline(
   const newAuditLogs: AuditLog[] = [];
   const addAudit = (event: string, details: string, level: 'INFO' | 'WARNING' = 'INFO') => {
     newAuditLogs.push({
-      id: crypto.randomUUID(),
+      id: randomUUID(),
       timestamp: new Date(nowMs).toISOString(),
       category: 'PIPELINE',
       level,
@@ -651,7 +652,7 @@ export function runVulnerabilityPipeline(
             : `Structured package/version correlation${confidenceNote}`
         : `Product correlation; package identifiers disagree with CPE match; excluded as false positive`;
       const rawFinding: Finding = {
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         cveId: canonical,
         cve,
         matchedAssetId: asset.id,

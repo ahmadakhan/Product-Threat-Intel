@@ -2,6 +2,7 @@ import type { Advisory, Finding, ReviewEdits } from '../src/types/index.ts';
 import { parseCPE23 } from '../src/utils/cpeMatcher.ts';
 import { formatDate } from '../src/utils/dateTime.ts';
 import { stripGeneratedExecutiveSummaryMarkup } from '../src/utils/templateCompiler.ts';
+import { renderEmailTemplate } from '../src/utils/emailTemplate.ts';
 import { mlComposeAdvisoryEmail } from './ml/integration';
 
 const SEVERITY_COLORS: Record<string, string> = {
@@ -484,10 +485,76 @@ export function renderAdvisory(
       title: escape(`Vendor advisory for ${f.cve.cveId}`),
     })) || [];
 
+  const cves = [...advisory.cveIds]
+    .sort((a, b) => severityRank(b, advisory, findings) - severityRank(a, advisory, findings) || a.localeCompare(b))
+    .flatMap((id) => {
+      const cveFindings = findings?.filter((finding) => finding.cveId === id) || [];
+      const severity = cveSeverity(id, advisory, findings);
+      const records: Array<Finding | undefined> = cveFindings.length ? cveFindings : [undefined];
+      return records.map((primary) => {
+        const parsedCpe = parseCPE23(primary?.matchedCpe || '');
+        const vendor = primary?.matchedAssetVendor || (parsedCpe.isValid ? parsedCpe.vendor : '') || 'Unavailable';
+        const product = primary?.matchedAssetProduct || (parsedCpe.isValid ? parsedCpe.product : '') ||
+          primary?.matchedAssetName || 'Unavailable';
+        const version = primary ? affectedVersionLabel(primary) : undefined;
+        const remediation = primary?.cve.remediation;
+        const mitigations = [
+          ...(remediation?.immediateActions || []),
+          ...(remediation?.stepByStep || []),
+          ...(remediation?.workarounds || []),
+        ].filter((action) => action.trim()).map((action) => escape(action));
+        const score = typeof primary?.cve.cvss.score === 'number' ? primary.cve.cvss.score.toFixed(1) : 'N/A';
+        const descriptionText = primary?.cve.description || cveFindings.find((finding) => finding.cve.description)?.cve.description ||
+          'No vendor description published.';
+        return {
+          id: escape(id),
+          url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`,
+          nvd_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`,
+          severity,
+          is_critical: severity === 'CRITICAL',
+          is_high: severity === 'HIGH',
+          is_medium: severity === 'MEDIUM',
+          cvss_score: score,
+          vendor: escape(vendor),
+          product: escape(product),
+          description: escape(descriptionText),
+          affected_versions: escape(version || 'Confirm with vendor'),
+          mitigations: mitigations.length ? mitigations : [escape('Confirm affected versions and follow current vendor guidance before remediation.')],
+        };
+      });
+    });
+  const correlationCount = findings?.length ?? advisory.affectedSystems.length;
+  const topSeverity = advisory.severity || 'UNKNOWN';
+  const latestModified = findings
+    ?.map((finding) => finding.cve.modifiedDate)
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .slice(-1)[0];
+
   const values: Record<string, string | unknown> = {
     severity: advisory.severity,
     severity_text,
     severity_color,
+    top_severity_label: topSeverity,
+    is_top_critical: topSeverity === 'CRITICAL',
+    is_top_high: topSeverity === 'HIGH',
+    is_top_medium: topSeverity === 'MEDIUM',
+    cve_count: advisory.cveIds.length,
+    correlation_count: correlationCount,
+    is_single_correlation: correlationCount === 1,
+    subject: advisory.title,
+    published_date: formattedDate(advisory.createdDate),
+    updated_date: formattedDate(latestModified || advisory.createdDate),
+    inventory_status: correlationCount ? `${correlationCount} current inventory correlation${correlationCount === 1 ? '' : 's'}` : 'No current inventory correlations',
+    contact_team: 'BA Security Operations',
+    contact_email: 'DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com',
+    tlp_classification: 'TLP:AMBER // INTERNAL',
+    honeywell_actions: [
+      { title: 'Confirm scope', detail: escape('Validate affected assets and versions against current vendor guidance.') },
+      { title: 'Plan remediation', detail: escape('Apply documented remediation through the established change management process.') },
+      { title: 'Verify recovery', detail: escape('Rescan affected systems and confirm service health after remediation.') },
+    ],
+    cves,
     advisory_id: advisory.id,
     advisory_title: advisory.title,
     dispatch_date: (options.generatedAt ?? new Date()).toLocaleString('en-GB', {
@@ -618,17 +685,9 @@ export function renderAdvisory(
     // second time.
     'executive_summary_html',
   ]);
-  // A proper recursive renderer replaced three chained regexes.
-  //
-  // The regex approach could not express the template ship set: `{{#if}}` was
-  // matched non-greedily against the first `{{/if}}`, so a three-level nested
-  // chain (critical/high/medium) closed at the wrong place and emitted raw
-  // block text; `{{#if}}` inside `{{#each}}` handled exactly one level; and an
-  // item's array field (`mitigations`) could not be iterated at all. The result
-  // was a template that rendered as static chrome with no content. This walks
-  // the blocks with a real stack, so nesting is unbounded and each block sees
-  // its own scope.
-  return renderTemplateBlocks(template, [values], { escape, rawHtmlTokens });
+  // The shared renderer handles nested conditions and loops identically in
+  // the advisory email, PDF attachment source, and Template Studio preview.
+  return renderEmailTemplate(template, values, { rawHtmlKeys: rawHtmlTokens });
 }
 
 interface TemplateRenderContext {
