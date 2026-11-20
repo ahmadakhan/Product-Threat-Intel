@@ -85,3 +85,25 @@ test('non-retryable errors fail immediately instead of consuming the budget', as
   );
   assert.equal(calls, 1, 'a permission error is not transient');
 });
+
+test('a caller abort during an attempt is terminal, not a retryable failure', async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const reason = new Error('Worker leadership lost');
+  const started = Date.now();
+  const run = withRetry(
+    async (signal) => {
+      calls++;
+      // Stay in flight until the caller aborts, then reject the way a real
+      // aborted operation does: with an AbortError, which `isRetryable` treats as
+      // transient. The loop must still stop, and must not sleep the backoff.
+      await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve()));
+      throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+    },
+    { maxAttempts: 8, baseDelayMs: 500, signal: controller.signal },
+  );
+  setTimeout(() => controller.abort(reason), 10);
+  await assert.rejects(run, (error: unknown) => error === reason);
+  assert.equal(calls, 1, 'no further attempts are made after a caller abort');
+  assert.ok(Date.now() - started < 400, 'it does not sleep through the backoff first');
+});

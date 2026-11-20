@@ -168,6 +168,12 @@ export async function withRetry<T>(
     } catch (error) {
       lastError = error;
 
+      // A caller abort is terminal: the whole retry loop is being cancelled, not
+      // this attempt. Checked first so an AbortError surfaced by `fn` (which
+      // `isRetryable` treats as transient) cannot consume the remaining attempts
+      // or sleep through the backoff before finally noticing.
+      throwIfAborted(opts.signal);
+
       // Don't retry on last attempt
       if (attempt === opts.maxAttempts - 1) break;
 

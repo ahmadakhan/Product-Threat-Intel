@@ -739,13 +739,20 @@ export async function stopRunWithClient(
       await appendAudit(db, 'Pipeline stop requested', `Execution ${id}`, actor, 'PIPELINE');
       return run;
     },
+    // The client is never handed to `transaction()`: the abort path may release
+    // it mid-transaction and that would desynchronise the pool (see the note
+    // above). A fresh connection is taken instead, and the lock decision below
+    // is what keeps it safe.
     undefined,
-    // A worker-owned stop is already inside the `pipeline-queue` critical
-    // section: taking the lock again on a fresh connection would wait on the
-    // in-flight worker transaction and deadlock. Declaring it acquired keeps
-    // the same contract while the write still runs on a connection the abort
-    // path does not own.
-    workerLockClient ? { locks: [], lockAcquired: ['pipeline-queue'] } : { locks: ['pipeline-queue'] },
+    // `workerLockClient` means the caller already holds the run lock, so this
+    // write must not wait on it. Without one, the lock MUST be taken: an earlier
+    // version declared it acquired with no client at all, so an operator stop
+    // wrote the execution row with no mutual exclusion - measured completing in
+    // 13ms while another session held `pipeline-queue` exclusively - which let a
+    // stop interleave with a live run and have its CANCELLED overwritten.
+    workerLockClient
+      ? { locks: [], lockAcquired: ['pipeline-queue'] }
+      : { locks: ['pipeline-queue'] },
   );
 }
 /** How often a running pipeline proves it is still alive. */
@@ -1454,6 +1461,27 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     execution.phases[1].status = 'RUNNING';
     execution.phases[1].details = 'Canonicalizing records and resolving source revisions';
     execution.phases[2].details = 'Waiting for normalized CVEs';
+    // Phase transitions are operational events, not just phase-object updates.
+    // The execution row is only read by whoever opens the run detail; a stuck
+    // run between `pipeline.started` and `pipeline.finished` used to leave NO
+    // trace in the operational log, so an operator could not tell whether it was
+    // still ingesting or wedged. Each boundary now emits one event carrying the
+    // phase name and the elapsed time of the phase that just ended.
+    await writeEvent(pool, {
+      category: 'PIPELINE',
+      code: 'pipeline.phase_completed',
+      message: `Phase completed: Feed ingestion`,
+      runId: execution!.id,
+      context: {
+        phase: 'Feed ingestion',
+        status: execution.phases[0].status,
+        durationMs: ingestionDuration,
+        feedsSucceeded: succeeded,
+        feedsTotal: feeds.length,
+        recordsRead: rawCount,
+        next: execution.phases[1].name,
+      },
+    }).catch(() => undefined);
     await lockedTransaction(async (db) => {
       await checkpoint(db);
       await saveActiveExecution(db, execution!);
@@ -1968,6 +1996,23 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         cpeChangedCveIds,
       );
       const previousInventory = await get<Record<string, string>>(db, 'systemState', 'matched-inventory-v1');
+      // The matching phase is the one operators most often ask about after a
+      // slow run, and it previously had no operational event. Emit its duration
+      // and match counts at the boundary so a run can be profiled from the event
+      // log alone, without opening the execution record.
+      await writeEvent(pool, {
+        category: 'PIPELINE',
+        code: 'pipeline.phase_completed',
+        message: 'Phase completed: Product matching',
+        runId: execution!.id,
+        context: {
+          phase: 'Product matching',
+          durationMs: correlated.execution.phases[1]?.durationMs ?? 0,
+          cvesMatched: correlated.newFindings.length,
+          inventoryAssets: snapshot.watchlist.length,
+          next: 'Delivery queue',
+        },
+      }).catch(() => undefined);
       const inventoryFingerprints: Record<string, string> = Object.create(null);
       const changedInventory = snapshot.watchlist.filter((asset) => {
         const fingerprint = createHash('sha256').update(JSON.stringify({
