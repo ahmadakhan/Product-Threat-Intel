@@ -1,9 +1,10 @@
 import type { Advisory, Finding, ReviewEdits } from '../src/types/index.ts';
 import { parseCPE23 } from '../src/utils/cpeMatcher.ts';
+import { displayName } from '../src/utils/displayName.ts';
 import { formatDate } from '../src/utils/dateTime.ts';
 import { stripGeneratedExecutiveSummaryMarkup } from '../src/utils/templateCompiler.ts';
 import { renderEmailTemplate } from '../src/utils/emailTemplate.ts';
-import { mlComposeAdvisoryEmail } from './ml/integration';
+import { mlComposeAdvisoryEmail, mlSummarizeAdvisoryEmail } from './ml/integration';
 
 const SEVERITY_COLORS: Record<string, string> = {
   CRITICAL: '#ef4444',
@@ -12,9 +13,23 @@ const SEVERITY_COLORS: Record<string, string> = {
   LOW: '#10b981',
   UNKNOWN: '#6b7280',
 };
+/**
+ * Per-severity colour sets the shipped template paints directly (no `{{#if}}`
+ * inside table cells, per the Outlook Word-engine constraint):
+ *  - `top`   the accent strip and the hero severity pill
+ *  - `bg` / `border` / `text`  the summary-matrix pill
+ *  - `badge` the CVE card header badge (white text on a solid colour)
+ */
+const SEVERITY_PILL: Record<string, { bg: string; border: string; text: string; badge: string; top: string }> = {
+  CRITICAL: { bg: '#fef2f2', border: '#fecaca', text: '#991b1b', badge: '#991b1b', top: '#991b1b' },
+  HIGH: { bg: '#fff7ed', border: '#fed7aa', text: '#c2410c', badge: '#dc2626', top: '#dc2626' },
+  MEDIUM: { bg: '#fefce8', border: '#fde047', text: '#a16207', badge: '#d97706', top: '#d97706' },
+  LOW: { bg: '#f0f9ff', border: '#bae6fd', text: '#0369a1', badge: '#0284c7', top: '#0284c7' },
+  UNKNOWN: { bg: '#f0f9ff', border: '#bae6fd', text: '#0369a1', badge: '#0284c7', top: '#0284c7' },
+};
 const SEVERITY_BADGE = (severity: string, suffix = '') => {
-  const color = SEVERITY_COLORS[severity] || SEVERITY_COLORS.UNKNOWN;
   const label = severity || 'UNKNOWN';
+  const color = SEVERITY_COLORS[label] || SEVERITY_COLORS.UNKNOWN;
   const escapedLabel = label.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch] ?? ch);
   return `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:${color};color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">${escapedLabel}${suffix}</span>`;
 };
@@ -134,13 +149,21 @@ function affectedVersionLabel(finding: Finding): string | undefined {
 
 function findingProductLabel(finding?: Finding): string {
   if (!finding) return 'Unavailable';
+  const { vendor, product } = findingDisplayNames(finding);
+  if (vendor && product) return `${vendor} - ${product}`;
+  return product || finding.matchedAssetName || 'Unavailable';
+}
+
+/** Display vendor/product for a finding, preferring the matched asset data. */
+function findingDisplayNames(finding?: Finding): { vendor: string; product: string } {
+  if (!finding) return { vendor: '', product: '' };
   const parsed = parseCPE23(finding.matchedCpe || '');
   const cpeVendor = parsed.isValid && !['*', '-'].includes(parsed.vendor) ? parsed.vendor : '';
   const cpeProduct = parsed.isValid && !['*', '-'].includes(parsed.product) ? parsed.product : '';
-  const vendor = finding.matchedAssetVendor || cpeVendor;
-  const product = finding.matchedAssetProduct || cpeProduct;
-  if (vendor && product) return `${vendor} - ${product}`;
-  return product || finding.matchedAssetName || 'Unavailable';
+  return {
+    vendor: displayName(finding.matchedAssetVendor || cpeVendor),
+    product: displayName(finding.matchedAssetProduct || cpeProduct),
+  };
 }
 
 function formattedDate(value?: string | null): string {
@@ -277,8 +300,21 @@ function enterpriseTemplateValues(
       ),
     ].filter((action) => action.trim());
     const sourceUrl = `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(cveId)}`;
+    // Pill and badge palettes are used directly as CSS/bgcolor values, so the
+    // template needs plain strings rather than {{#if}} branches (an `if` inside
+    // a table cell is exactly what the Outlook Word engine hoists). Colours
+    // follow the same ladder as SEVERITY_COLORS but at the lighter badge tints
+    // the matrix and card headers use.
+    const pill = SEVERITY_PILL[severity] ?? SEVERITY_PILL.UNKNOWN;
     return {
       id: cveId,
+      // `cve_id` is the name the shipped template addresses inside `cves`; `id`
+      // is kept for templates written against the older key.
+      cve_id: cveId,
+      pill_bg: pill.bg,
+      pill_border: pill.border,
+      pill_text: pill.text,
+      badge_bg: pill.badge,
       // The canonical enterprise template addresses `url` and `nvd_url`; keep
       // `source_url` for templates that use the older name. These objects are
       // the last `cves` assignment, so omitting the aliases made every CVE and
@@ -292,8 +328,8 @@ function enterpriseTemplateValues(
       is_medium: severity === 'MEDIUM',
       is_low: severity === 'LOW' || severity === 'UNKNOWN',
       cvss_score: typeof primary?.cve.cvss.score === 'number' ? primary.cve.cvss.score.toFixed(1) : 'N/A',
-      vendor: primary?.matchedAssetVendor || 'Unknown',
-      product: primary?.matchedAssetProduct || findingProductLabel(primary),
+      vendor: findingDisplayNames(primary).vendor || 'Unknown',
+      product: findingDisplayNames(primary).product || findingProductLabel(primary),
       affected_versions: versionLines.length ? versionLines.join(', ') : 'All unpatched releases',
       // `{{{description}}}` in the template, so escape here: the value is CVE
       // prose from an external source, never markup we intend to honour.
@@ -313,6 +349,9 @@ function enterpriseTemplateValues(
   const commissioned = new Date(advisory.createdDate);
   return {
     top_severity_label: topSeverityLabel,
+    // Solid accent colour for the top strip and hero pill; the template paints it
+    // directly so no conditional sits inside a table cell.
+    top_severity_color: (SEVERITY_PILL[worst] ?? SEVERITY_PILL.UNKNOWN).top,
     is_top_critical: worst === 'CRITICAL',
     is_top_high: worst === 'HIGH',
     is_top_medium: worst === 'MEDIUM',
@@ -329,7 +368,11 @@ function enterpriseTemplateValues(
       { title: 'Apply Remediation:', detail: ' Deploy vendor-supplied updates through your change control process.' },
     ],
     contact_team: options.contactTeam || 'Security Operations',
-    contact_email: options.contactEmail || '',
+    // Never the empty string: the shipped template writes this straight into
+    // `<a href="mailto:{{contact_email}}">`, so a blank value produced an empty
+    // `mailto:` link with no address. Fall back to the operations mailbox and
+    // let the enterprise block below apply the deployment default first.
+    contact_email: options.contactEmail || 'DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com',
     tlp_classification: options.tlpClassification || 'TLP:AMBER // INTERNAL',
   };
 }
@@ -346,6 +389,10 @@ export function renderAdvisory(
       `Cannot render advisory email with empty required fields: ${validation.missingFields.join(', ')}`,
     );
   }
+  // `template` is untrusted operator source. Enforce the renderer's nesting cap
+  // up front so a pathological template is rejected with a clear message before
+  // any expensive value assembly runs (the renderer re-checks the same limit).
+  assertTemplateBlockDepth(template);
   const escape = (v: string) =>
     v.replace(
       /[&<>"']/g,
@@ -363,8 +410,10 @@ export function renderAdvisory(
   if (findings?.length) {
     try {
       const composed = mlComposeAdvisoryEmail(findings, advisory);
-      if (!edits.customBodyOverride && composed.executiveSummary)
-        composedSummary = composed.executiveSummary;
+      if (!edits.customBodyOverride && composed.executiveSummary) {
+        const summarized = mlSummarizeAdvisoryEmail(findings, composed.executiveSummary);
+        composedSummary = summarized.summary || composed.executiveSummary;
+      }
     } catch {
       // Rendering must never fail because the ML layer is unavailable.
     }
@@ -395,7 +444,9 @@ export function renderAdvisory(
       const actionList = actions.length
         ? actions
         : [
-            `Confirm the affected versions of ${targetLabel} against current vendor guidance for ${cveId}. ${patchHref || vendorHref ? 'Follow only remediation steps documented by the vendor after confirming applicability.' : 'No vendor patch or fix guidance is supplied for this finding, so availability must not be assumed.'}`,
+            // Compare with `Boolean(...)`: a precedence slip here would make the
+            // sentence a ternary of its own or print an empty href reference.
+            `Confirm the affected versions of ${targetLabel} against current vendor guidance for ${cveId}. ${Boolean(patchHref || vendorHref) ? 'Follow only remediation steps documented by the vendor after confirming applicability.' : 'No vendor patch or fix guidance is supplied for this finding, so availability must not be assumed.'}`,
             'Use documented compensating controls only where appropriate, and monitor for further vendor guidance.',
           ];
       const actionHtml = actionList
@@ -557,9 +608,13 @@ export function renderAdvisory(
     published_date: formattedDate(advisory.createdDate),
     updated_date: formattedDate(latestModified || advisory.createdDate),
     inventory_status: correlationCount ? `${correlationCount} current inventory correlation${correlationCount === 1 ? '' : 's'}` : 'No current inventory correlations',
-    contact_team: 'BA Security Operations',
-    contact_email: 'DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com',
-    tlp_classification: 'TLP:AMBER // INTERNAL',
+    // Honour an explicit render option; otherwise the studio/deployment default.
+    // These used to be hard-coded here, and because this object is spread last
+    // in renderAdvisory it silently overrode the same keys set above, so a test
+    // email or an override could never change the contact line.
+    contact_team: options.contactTeam || 'BA Security Operations',
+    contact_email: options.contactEmail || 'DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com',
+    tlp_classification: options.tlpClassification || 'TLP:AMBER // INTERNAL',
     honeywell_actions: [
       { title: 'Confirm scope', detail: escape('Validate affected assets and versions against current vendor guidance.') },
       { title: 'Plan remediation', detail: escape('Apply documented remediation through the established change management process.') },
@@ -698,178 +753,60 @@ export function renderAdvisory(
   ]);
   // The shared renderer handles nested conditions and loops identically in
   // the advisory email, PDF attachment source, and Template Studio preview.
-  return renderEmailTemplate(template, values, { rawHtmlKeys: rawHtmlTokens });
-}
-
-interface TemplateRenderContext {
-  escape: (value: string) => string;
-  rawHtmlTokens: ReadonlySet<string>;
-}
-
-/** Thrown to abandon an unsafe template without emitting a partial document. */
-class TemplateRenderError extends Error {}
-
-/**
- * Resolves one placeholder against the scope stack (innermost scope first).
- *
- * Returns `undefined` when the name is not in scope, which is what lets a
- * template omit optional fields without leaking literal `{{name}}` text into a
- * recipient's inbox.
- */
-function lookupTemplateValue(
-  name: string,
-  scopes: readonly Record<string, unknown>[],
-): unknown {
-  if (name === 'this' || name === '.') {
-    const top = scopes[scopes.length - 1];
-    // A primitive loop item is stored as `{ this: value }`, so `{{this}}` must
-    // yield the value. Returning the wrapper object produced "[object Object]"
-    // for every string item (e.g. each mitigation) and made the entry vanish.
-    return Object.prototype.hasOwnProperty.call(top, 'this') ? top.this : top;
-  }
-  for (let i = scopes.length - 1; i >= 0; i--) {
-    const scope = scopes[i];
-    if (Object.prototype.hasOwnProperty.call(scope, name)) return scope[name];
-  }
-  return undefined;
-}
-
-/** Block truthiness: empty strings, empty arrays, false and undefined are false. */
-function templateTruthy(value: unknown): boolean {
-  if (value === undefined || value === null || value === false) return false;
-  if (value === '') return false;
-  if (Array.isArray(value)) return value.length > 0;
-  return true;
-}
-
-function stringifyTemplateValue(value: unknown): string {
-  if (value === undefined || value === null) return '';
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-  return '';
+  return renderAdvisoryTemplate(template, values, rawHtmlTokens);
 }
 
 /**
- * Renders `{{#if}}`, `{{#each}}` (including nested blocks and nested `{{#if}}`
- * inside them) and `{{{raw}}}` / `{{escaped}}` placeholders.
+ * Upper bound on how deeply `{{#if}}` / `{{#each}}` blocks may nest.
  *
- * Iterative with an explicit block stack rather than recursion per token, so a
- * deeply nested template cannot grow the JS stack. A template whose blocks are
- * unbalanced throws instead of emitting half a document, and the caller falls
- * back to the built-in template.
+ * The shared renderer walks a parsed tree recursively, so nesting is JS stack
+ * depth. A template is operator-supplied and up to 200,000 characters
+ * (`/api/advisory-template-render`, the saved template record), so without a
+ * cap a few thousand nested `{{#if}}` tags exhaust the stack mid-render. Render
+ * happens on the dispatch path, so the failure would take down a delivery, not
+ * just a preview.
  */
-function renderTemplateBlocks(
-  template: string,
-  scopes: Record<string, unknown>[],
-  context: TemplateRenderContext,
-): string {
-  const token = /\{\{\{?\s*(#if\s+[^}\s]+|#each\s+[^}\s]+|\/[a-z]+|[^}]+?)\s*\}?\}\}/g;
-  let out = '';
-  let cursor = 0;
+const MAX_TEMPLATE_BLOCK_DEPTH = 100;
 
-  for (let match = token.exec(template); match; match = token.exec(template)) {
-    // Emit the literal text before this tag.
-    out += template.slice(cursor, match.index);
-    cursor = match.index + match[0].length;
-    const inner = match[1].trim();
-    const isTriple = match[0].startsWith('{{{');
-
-    if (inner.startsWith('#if ')) {
-      // Split the block on a TOP-LEVEL {{else}}: a nested if inside the true
-      // branch owns its own else, so a plain indexOf would pick the wrong one.
-      const end = findBlockEnd(template, cursor, 'if');
-      if (!end) throw new TemplateRenderError('Unclosed {{#if}} block');
-      const wholeBlock = template.slice(cursor, end.start);
-      cursor = end.after;
-      token.lastIndex = cursor;
-      const split = splitOnElse(wholeBlock);
-      const truthy = templateTruthy(lookupTemplateValue(inner.slice(4).trim(), scopes));
-      if (truthy) out += renderTemplateBlocks(split.yes, scopes, context);
-      else if (split.no) out += renderTemplateBlocks(split.no, scopes, context);
-      continue;
-    }
-
-    if (inner.startsWith('#each ')) {
-      const end = findBlockEnd(template, cursor, 'each');
-      if (!end) throw new TemplateRenderError('Unclosed {{#each}} block');
-      const body = template.slice(cursor, end.start);
-      cursor = end.after;
-      token.lastIndex = cursor;
-      const value = lookupTemplateValue(inner.slice(6).trim(), scopes);
-      if (Array.isArray(value))
-        for (const item of value)
-          out += renderTemplateBlocks(
-            body,
-            // A primitive item (e.g. a list of strings) is exposed as `this`;
-            // an object item becomes its own scope so `{{title}}` resolves.
-            item !== null && typeof item === 'object'
-              ? [...scopes, item as Record<string, unknown>]
-              : [...scopes, { this: item }],
-            context,
-          );
-      continue;
-    }
-
-    if (inner.startsWith('/')) throw new TemplateRenderError(`Unexpected {{${inner}}}`);
-
-    const text = stringifyTemplateValue(lookupTemplateValue(inner, scopes));
-    out += isTriple || context.rawHtmlTokens.has(inner) ? text : context.escape(text);
-  }
-
-  return out + template.slice(cursor);
-}
-
-/**
- * Splits an `#if` body at its top-level `{{else}}`.
- *
- * A nested block may contain its own `{{else}}`, so the split walks the block
- * tags and only accepts an `{{else}}` seen at depth 0. Without this the template's
- * `{{#if}}...{{else}}{{#if}}...{{/if}}{{/if}}` chains paired the wrong tags and
- * the whole conditional collapsed to one branch.
- */
-function splitOnElse(body: string): { yes: string; no: string | null } {
-  const pattern = /\{\{\s*(#[a-z]+|\/[a-z]+|else)\s*\}\}/g;
+/** Throws when block nesting exceeds the renderer's stack budget. */
+function assertTemplateBlockDepth(template: string): void {
+  // Count real block tags only. A stray `{{` (an operator mid-edit, or CVE
+  // prose containing braces) is not a tag and must not consume the budget.
+  const block = /\{\{\s*(#[a-z]+|\/[a-z]+|else)\b/g;
   let depth = 0;
-  for (let match = pattern.exec(body); match; match = pattern.exec(body)) {
+  for (let match = block.exec(template); match; match = block.exec(template)) {
     const tag = match[1];
-    if (tag.startsWith('#')) depth++;
-    else if (tag.startsWith('/')) depth--;
-    else if (tag === 'else' && depth === 0)
-      return { yes: body.slice(0, match.index), no: body.slice(match.index + match[0].length) };
+    if (tag.startsWith('/')) depth = Math.max(0, depth - 1);
+    else if (tag.startsWith('#')) {
+      depth += 1;
+      if (depth > MAX_TEMPLATE_BLOCK_DEPTH)
+        throw new Error(
+          `Template blocks nest deeper than ${MAX_TEMPLATE_BLOCK_DEPTH} levels; flatten the template`,
+        );
+    }
   }
-  return { yes: body, no: null };
 }
 
-/** Finds the matching close tag for a block starting at `from`, honouring nesting. */
-function findBlockEnd(
+/**
+ * Renders the advisory document with the shared Handlebars-subset engine.
+ *
+ * Every template construct the advisory/PDF/preview pipeline supports goes
+ * through `renderEmailTemplate`; this function only supplies the values and the
+ * set of keys whose content is already HTML. An earlier revision kept a second,
+ * hand-rolled block engine here that matched blocks by regex, only accepted a
+ * bare `{{else}}`, and treated close tags as extra array items. It drifted from
+ * the shared engine (the same template previewed differently in Studio and
+ * shipped differently to the recipient), so it is gone: a divergence here is a
+ * delivery bug, not a preview bug.
+ *
+ * A template whose blocks are unbalanced, or nested deeper than
+ * `MAX_TEMPLATE_BLOCK_DEPTH`, throws before any output is produced.
+ */
+function renderAdvisoryTemplate(
   template: string,
-  from: number,
-  kind: 'each' | 'if',
-): { start: number; after: number } | null {
-  // Open tags carry an argument (`{{#if x}}`), close tags do not, so the
-  // opener alternative must consume the rest of the tag. Matching only
-  // `#[a-z]+` silently skipped every opener and left the scanner seeing nothing
-  // but closes. `{{else}}` is a body separator, not a block, and must not change
-  // the nesting depth.
-  const pattern = /\{\{\s*(#[a-z]+(?:\s+[^}]*)?|\/[a-z]+)\s*\}\}/g;
-  pattern.lastIndex = from;
-  // Track a stack of open block kinds, not a single counter: `{{#if}}` and
-  // `{{#each}}` nest inside each other, so a counter that increments on any
-  // opener and decrements on any closer would let an inner close match an outer
-  // open and report the wrong body.
-  const open: string[] = [kind];
-  for (let match = pattern.exec(template); match; match = pattern.exec(template)) {
-    const tag = match[1];
-    if (tag.startsWith('#')) {
-      // Keep only the block kind, not its argument: `#if x` and `#if y` are the
-      // same kind of block for matching purposes.
-      open.push(tag.slice(1).split(/\s+/)[0]);
-      continue;
-    }
-    const closing = tag.slice(1);
-    if (open[open.length - 1] !== closing) continue;
-    open.pop();
-    if (!open.length) return { start: match.index, after: match.index + match[0].length };
-  }
-  return null;
+  values: Record<string, unknown>,
+  rawHtmlKeys: ReadonlySet<string>,
+): string {
+  assertTemplateBlockDepth(template);
+  return renderEmailTemplate(template, values, { rawHtmlKeys });
 }

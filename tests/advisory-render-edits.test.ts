@@ -298,7 +298,7 @@ test('renderAdvisory uses cautious remediation fallback and explicit unavailable
   assert.ok(html.includes('No vendor patch or fix guidance is supplied for this finding, so availability must not be assumed.'));
   assert.ok(html.includes('Published:</strong> Unavailable'));
   assert.ok(html.includes('Last modified:</strong> Unavailable'));
-  assert.ok(html.includes('Product:</strong> vendor - product'));
+  assert.ok(html.includes('Product:</strong> Vendor - Product'), 'raw CPE tokens render as display names');
   assert.ok(html.includes('Affected version(s):</strong> &gt;= 1.2.0 and &lt; 2.0.0'));
   assert.ok(html.includes('Operator-provided note (unverified)'));
   assert.ok(!html.includes('Apply a vendor-supported fix'));
