@@ -131,7 +131,7 @@ export async function rebuildLegacyDeliveryPayload(db: pg.Pool | pg.PoolClient, 
       const asset = await get<WatchListItem>(db, 'watchlist', finding.matchedAssetId);
       const cve = await get<NormalizedCVE>(db, 'cveData', finding.cveId);
       const withdrawal = await get<{ modifiedDate: string }>(db, 'cveWithdrawals', finding.cveId);
-      if (!asset?.active || !cve || ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
+      if (!asset || asset.active === false || !cve || ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
           (withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate))) return false;
       current.push(finding);
     }
@@ -166,7 +166,7 @@ export async function rebuildLegacyDeliveryPayload(db: pg.Pool | pg.PoolClient, 
     const asset = await get<WatchListItem>(db, 'watchlist', finding.matchedAssetId);
     const cve = await get<NormalizedCVE>(db, 'cveData', finding.cveId);
     const withdrawal = await get<{ modifiedDate: string }>(db, 'cveWithdrawals', finding.cveId);
-    if (!asset?.active || !cve || ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
+    if (!asset || asset.active === false || !cve || ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
         (withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate))) return false;
     const match = runVulnerabilityPipeline([], [cve], [asset], [], [], { ...DEFAULT_SETTINGS, ...settings, scopeHours: 0 },
       'Server worker', false, buildAliasMap(aliases, 'VENDOR'), buildAliasMap(aliases, 'PRODUCT'), undefined, aliases).newFindings[0];
@@ -448,7 +448,7 @@ export async function regroupStaleAdvisory(
         // the new bundle; a review-held or unverifiable finding stays in place and
         // is finalized by the caller's FAILED update.
         const withdrawal = await get<{ modifiedDate: string }>(db, 'cveWithdrawals', finding.cveId);
-        if (!asset?.active || !cve || ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
+        if (!asset || asset.active === false || !cve || ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
             (withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate))) {
           continue;
         }

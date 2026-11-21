@@ -2047,17 +2047,18 @@ export async function deliverNext(
       const cveIds = [...new Set(findings.map((f) => f.cveId))];
       // Only inventory that is still active can confirm a finding. A paused,
       // disabled or deleted asset must not let a queued advisory pass the
-      // applicability recheck and reach the transport, so inactive rows are
-      // dropped here and the finding is reported as no longer matching below.
+      // applicability recheck and reach the transport; the finding is reported
+      // as no longer applicable below. Assets are looked up in full so the
+      // revalidation can distinguish a deleted asset from one paused via
+      // `active: false`.
       const [storedAssets, cveMap, withdrawalMap] = await Promise.all([
         getMany<WatchListItem>(pool, 'watchlist', assetIds),
         getMany<NormalizedCVE>(pool, 'cveData', cveIds),
         getMany<{ modifiedDate: string }>(pool, 'cveWithdrawals', cveIds),
       ]);
-      const assetMap = new Map([...storedAssets].filter(([, asset]) => asset.active !== false));
       for (const id of declaredFindingIds) {
         const finding = findingMap.get(id);
-        const asset = finding ? assetMap.get(finding.matchedAssetId) : undefined;
+        const asset = finding ? storedAssets.get(finding.matchedAssetId) : undefined;
         const cachedCve = finding ? cveMap.get(finding.cveId) : undefined;
         const withdrawal = finding ? withdrawalMap.get(finding.cveId) : undefined;
         // Retention may delete the regenerable threat-cache record while a
@@ -2113,8 +2114,10 @@ export async function deliverNext(
         const reason = !finding
           ? 'a finding was removed'
           : !asset
-            ? 'the matched inventory item is no longer active'
-            : ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status)
+            ? 'a finding was removed because its matched inventory item was deleted'
+            : asset.active === false
+              ? 'the matched inventory item is no longer active'
+              : ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status)
               ? 'a finding was resolved or dismissed'
               : cve && withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate)
                 ? 'a CVE was withdrawn'
