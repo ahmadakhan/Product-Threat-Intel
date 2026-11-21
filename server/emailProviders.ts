@@ -339,8 +339,22 @@ function lookupUrl(provider: EmailConfiguration['provider'], config: EmailConfig
   if (provider === 'MAILJET_API')
     return `https://api.mailjet.com/v3/REST/messages/${id}`;
   if (provider === 'MAILTRAP')
-    return `https://mailtrap.io/api/v1/inboxes/${encodeURIComponent(config.mailtrapInboxId || '')}/messages/${id}`;
+    return config.mailtrapMode === 'SANDBOX'
+      ? `https://sandbox.api.mailtrap.io/api/inboxes/${encodeURIComponent(config.mailtrapInboxId || '')}/messages/${id}`
+      : `https://mailtrap.io/api/sending_domains/messages/${id}`;
   return `https://api.postmarkapp.com/messages/outbound/${id}/details`;
+}
+
+/** Fixed send hosts paired with the fixed status endpoints above. */
+function expectedSendHost(provider: EmailConfiguration['provider'], config: EmailConfiguration): string | null {
+  switch (provider) {
+    case 'SENDGRID': return 'api.sendgrid.com';
+    case 'POSTMARK': return 'api.postmarkapp.com';
+    case 'MAILJET_API': return 'api.mailjet.com';
+    case 'MAILTRAP':
+      return config.mailtrapMode === 'SANDBOX' ? 'sandbox.api.mailtrap.io' : 'send.api.mailtrap.io';
+    default: return null;
+  }
 }
 
 function lookupHeaders(
@@ -355,8 +369,14 @@ function lookupHeaders(
       authorization: `Basic ${Buffer.from(`${token}:${config.mailjetApiSecret}`).toString('base64')}`,
       accept: 'application/json',
     };
-  // Mailtrap's v2 API takes a per-inbox API token.
-  if (provider === 'MAILTRAP') return { 'Api-Token': token, accept: 'application/json' };
+  // Mailtrap authenticates with a bearer credential.
+  if (provider === 'MAILTRAP') {
+    // The stored Mailtrap key is a bare token. Accept a caller-supplied bearer
+    // value, but never emit a non-bearer Authorization scheme: `Api-Token:` is a
+    // JS SDK convenience, not a wire header.
+    const value = /^(?:bearer|token)\s+/i.test(token) ? token : `Bearer ${token}`;
+    return { authorization: value, accept: 'application/json' };
+  }
   return { authorization: `Bearer ${token}`, accept: 'application/json' };
 }
 
@@ -420,9 +440,27 @@ export async function lookupProviderDelivery(
   if (!supportsDeliveryLookup(config.provider) || !messageId) return 'unknown';
   const url = lookupUrl(config.provider, config, messageId);
   const endpoint = emailEndpoint(config);
-  // Defence in depth: a lookup must stay on the host that sends for this
-  // provider, so a malformed configuration can never point it elsewhere.
-  if (!endpoint || new URL(endpoint).hostname !== new URL(url).hostname) return 'unknown';
+  // Defence in depth: both URLs are provider-owned fixed endpoints. The
+  // configuration must still point the send endpoint at the host we expect
+  // for the provider, and the lookup must stay on a host that belongs to the
+  // provider. Mailtrap deliberately exposes its status API at mailtrap.io
+  // while it sends through send.api.mailtrap.io or sandbox.api.mailtrap.io,
+  // so requiring lookupHost === sendHost made every Mailtrap lookup return
+  // unknown before any request. Every other provider keeps the strict match.
+  const expectedHost = expectedSendHost(config.provider, config);
+  if (!endpoint || !expectedHost) return 'unknown';
+  let sendHost: string;
+  let lookupHost: string;
+  try {
+    sendHost = new URL(endpoint).hostname;
+    lookupHost = new URL(url).hostname;
+  } catch {
+    return 'unknown';
+  }
+  if (sendHost !== expectedHost) return 'unknown';
+  const allowedLookupHosts =
+    config.provider === 'MAILTRAP' ? new Set([expectedHost, 'mailtrap.io']) : new Set([expectedHost]);
+  if (!allowedLookupHosts.has(lookupHost)) return 'unknown';
   try {
     const response = await request(url, {
       method: 'GET',

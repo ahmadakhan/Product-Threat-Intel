@@ -55,6 +55,7 @@ export const DEFAULT_EGRESS_HOSTS = [
   // Mail providers
   'send.api.mailtrap.io',
   'sandbox.api.mailtrap.io',
+  'mailtrap.io', // message-status lookup host for recovery of ambiguous Mailtrap sends
   'api.sendgrid.com',
   'smtp.sendgrid.net',
   'api.postmarkapp.com',

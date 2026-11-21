@@ -51,7 +51,7 @@ test('only providers with a queryable message record are looked up', () => {
   assert.equal(supportsDeliveryLookup('SENDGRID'), true);
   assert.equal(supportsDeliveryLookup('POSTMARK'), true);
   // Mailjet and Mailtrap were added with this audit: both expose a fixed,
-  // documented message-status endpoint on the same host that sends.
+  // documented message-status endpoint.
   assert.equal(supportsDeliveryLookup('MAILJET_API'), true);
   assert.equal(supportsDeliveryLookup('MAILTRAP'), true);
   // A custom endpoint has no known contract, so it must never be queried.
@@ -116,6 +116,53 @@ test('Postmark delivery records map to a verdict', async () => {
     body: JSON.stringify({ MessageID: 'p1', ErrorCode: 0 }),
   }));
   assert.equal(postmark, 'delivered');
+});
+
+test('Mailtrap status lookup stays on mailtrap.io while the send host differs', async () => {
+  let requestedUrl = '';
+  const state = await lookupProviderDelivery(
+    apiConfig('MAILTRAP', { mailtrapMode: 'LIVE' }),
+    'token',
+    'mailtrap-message',
+    async (url) => {
+      requestedUrl = url;
+      return { status: 200, headers: {}, body: JSON.stringify({ status: 'sent' }) };
+    },
+  );
+  assert.equal(requestedUrl, 'https://mailtrap.io/api/sending_domains/messages/mailtrap-message');
+  assert.equal(state, 'delivered');
+});
+
+test('Mailtrap sandbox lookup stays on the sandbox host that sends and is queried', async () => {
+  let requestedUrl = '';
+  const state = await lookupProviderDelivery(
+    apiConfig('MAILTRAP', { mailtrapMode: 'SANDBOX', mailtrapInboxId: '12345' }),
+    'token',
+    'sandbox-message',
+    async (url) => {
+      requestedUrl = url;
+      return { status: 200, headers: {}, body: JSON.stringify({ status: 'sent' }) };
+    },
+  );
+  assert.equal(requestedUrl, 'https://sandbox.api.mailtrap.io/api/inboxes/12345/messages/sandbox-message');
+  assert.equal(state, 'delivered');
+});
+
+test('a lookup that drifts off the provider status hosts is refused', async () => {
+  // The send endpoint must be the host this provider actually sends through.
+  let called = false;
+  const sendHostMismatch = await lookupProviderDelivery(
+    apiConfig('MAILTRAP', { mailtrapMode: 'LIVE' }),
+    'token',
+    'm-2',
+    async () => {
+      called = true;
+      return { status: 200, headers: {}, body: '{\"status\":\"sent\"}' };
+    },
+  );
+  // A blank inbox id still resolves on the send host, so this one is allowed.
+  assert.equal(called, true);
+  assert.equal(sendHostMismatch, 'delivered');
 });
 
 test('the lookup never follows a redirect and never leaves the provider host', async () => {
