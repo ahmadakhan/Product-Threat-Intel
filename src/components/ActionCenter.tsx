@@ -533,7 +533,18 @@ export const ActionCenter: React.FC = () => {
 
   // HTML Editor Functions
   const commitVisualBody = useCallback((bodyHtml: string) => {
-    const updatedHtml = emailDocumentWithBody(htmlContent, bodyHtml);
+    // The editor body is whatever the browser put in the contenteditable: typed
+    // keys, pasted markup, or anything execCommand inserted. That body is saved
+    // as customBodyOverride and is what the recipient receives, so it crosses
+    // the trust boundary here just like the preview does. Reparse it and run it
+    // through the same sanitizer as the preview, never string-patch, so a
+    // `<style>@import`, `javascript:` link or `onerror` handler cannot survive.
+    const parsed = new DOMParser().parseFromString(bodyHtml, 'text/html');
+    const sanitizedBody = new DOMParser().parseFromString(
+      sanitizeEmailHtml(parsed.body.innerHTML),
+      'text/html',
+    ).body.innerHTML;
+    const updatedHtml = emailDocumentWithBody(htmlContent, sanitizedBody);
     const updatedEdits = { ...edits, customBodyOverride: updatedHtml };
     setHtmlContent(updatedHtml);
     setEdits(updatedEdits);
