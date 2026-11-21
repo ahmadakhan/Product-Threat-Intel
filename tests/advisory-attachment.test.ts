@@ -34,10 +34,9 @@ test('the attachment body is byte-identical to the emailed HTML', () => {
   const attachment = findingHtmlAttachment(job())!;
   assert.ok(attachment, 'a finding email carries the HTML attachment');
   assert.equal(attachment.contentType, 'text/html; charset=utf-8');
-  // withUtf8Charset only adds a charset when the document lacks one; this
-  // document does not, so the attachment is the body plus one <meta> tag and
-  // nothing else.
-  assert.equal(attachment.content.toString('utf8'), withUtf8Charset(html));
+  // The attachment is the exact body bytes: no charset declaration, no escape,
+  // no time-dependent value may diverge it from what the recipient receives.
+  assert.equal(attachment.content.toString('utf8'), html);
 });
 
 test('the attachment never diverges from the body by re-rendering', () => {

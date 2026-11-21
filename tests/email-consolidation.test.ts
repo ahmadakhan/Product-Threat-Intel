@@ -444,12 +444,12 @@ test('the attached document declares UTF-8 without changing the body', () => {
   const file = attachment.content.toString('utf8');
   assert.match(file, /<meta charset="utf-8">/i);
   assert.equal(file, doc.html, 'an existing charset declaration is preserved and the body is unchanged');
-  // A body without a declaration gains exactly one in its head.
+  // A body without a declaration stays unchanged: nothing is added to the file.
   const plain = findingHtmlAttachment(job('FINDINGS:b', '<html><head><title>x</title></head><body>x</body></html>'));
   assert.ok(plain);
   assert.equal(
     plain.content.toString('utf8'),
-    '<html><head><meta charset="utf-8"><title>x</title></head><body>x</body></html>',
+    '<html><head><title>x</title></head><body>x</body></html>',
   );
 });
 

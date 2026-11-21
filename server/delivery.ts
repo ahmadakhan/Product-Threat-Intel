@@ -281,9 +281,9 @@ export function emailAttachmentFilename(subject: string | undefined, fallbackSte
 
 /**
  * Builds the HTML attachment for a findings email from the exact body being
- * sent — the same string the transport receives as `html`, with only a UTF-8
- * charset declaration added — so the recipient keeps a faithful copy of what
- * was delivered and can open it without a mail client.
+ * sent — the same string the transport receives as `html`, byte for byte — so
+ * the recipient keeps a faithful copy of what was delivered and can open it
+ * without a mail client.
  *
  * Every finding email carries it on every automatic delivery. It is not tied to
  * an operator edit flag: the Action Center checkbox used to persist
@@ -307,7 +307,7 @@ export function findingHtmlAttachment(job: Job): EmailAttachment | undefined {
     );
   return {
     filename: emailAttachmentFilename(job.payload.subject, deliveryAttachmentStem(job)),
-    content: Buffer.from(withUtf8Charset(html), 'utf8'),
+    content: Buffer.from(html, 'utf8'),
     contentType: 'text/html; charset=utf-8',
   };
 }
