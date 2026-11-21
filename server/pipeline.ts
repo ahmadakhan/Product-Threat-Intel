@@ -550,7 +550,10 @@ export async function regroupStaleAdvisory(
 }
 class PipelineStopped extends Error {
   constructor() {
-    super('Pipeline stopped by operator; uncommitted results discarded');
+    // This sentinel means the worker observed a cancellation state. The database
+    // stop marker is the source of truth for whether an operator requested it;
+    // the exception itself must not claim an actor.
+    super('Pipeline cancellation observed; uncommitted results discarded');
   }
 }
 
@@ -2658,55 +2661,95 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       throw e;
     }
     if (execution) {
-      // Cancellation is an intentional operator action; only a real failure
-      // carries an error payload into the event and the audit trail.
-      const failure: Record<string, unknown> = e instanceof PipelineStopped ? {} : describeError(e);
+      const stopped = e instanceof PipelineStopped;
       await lockedTransaction(async (db) => {
         const current = await getForUpdate<PipelineExecution>(db, 'executions', execution!.id);
+        // The row may have been deleted or made terminal while this worker was
+        // unwinding. Never recreate a missing execution or overwrite a newer
+        // completion/failure with this stale worker's local snapshot.
+        if (!current) {
+          await writeEvent(db, {
+            category: 'ISSUE',
+            level: 'ERROR',
+            code: 'pipeline.execution_missing',
+            message: 'Pipeline worker could not finalize because the execution record disappeared',
+            runId: execution!.id,
+          });
+          await appendAudit(
+            db,
+            'Pipeline execution record missing',
+            `Execution ${execution!.id} could not be finalized by the worker`,
+            'worker',
+            'PIPELINE',
+            'ERROR',
+          );
+          return;
+        }
+        if (['COMPLETED', 'FAILED', 'QUARANTINED'].includes(current.status)) {
+          await writeEvent(db, {
+            category: 'PIPELINE',
+            level: 'WARNING',
+            code: 'pipeline.stale_worker_result_discarded',
+            message: 'Discarded stale worker finalization because the execution is already terminal',
+            runId: execution!.id,
+            context: { observedStatus: current.status },
+          });
+          return;
+        }
+
+        const stopRequested = Boolean(current.stopRequestedAt);
+        const cancelled = stopRequested || current.status === 'CANCELLED';
+        // A PipelineStopped sentinel without a persisted cancellation state is
+        // a broken state transition, not evidence of an operator stop. Surface
+        // it as a failure so the execution cannot be silently misclassified.
+        const failure: Record<string, unknown> = cancelled
+          ? {}
+          : stopped
+            ? { error: 'Worker observed cancellation without a persisted stop request or CANCELLED status' }
+            : describeError(e);
+        const finalStatus = cancelled ? 'CANCELLED' : 'FAILED';
+        const finalPhases = current.phases.map((phase) =>
+          phase.status === 'RUNNING' || phase.status === 'PENDING'
+            ? { ...phase, status: cancelled ? 'CANCELLED' as const : 'FAILED' as const }
+            : phase,
+        );
         await put(db, 'executions', execution!.id, {
-          ...execution,
-          status: e instanceof PipelineStopped ? 'CANCELLED' : 'FAILED',
-          stopRequestedAt: current?.stopRequestedAt,
-          phases: execution!.phases.map((phase) =>
-            phase.status === 'RUNNING' || phase.status === 'PENDING'
-              ? { ...phase, status: e instanceof PipelineStopped ? 'CANCELLED' : 'FAILED' }
-              : phase,
-          ),
+          ...current,
+          status: finalStatus,
+          stopRequestedAt: current.stopRequestedAt,
+          phases: finalPhases,
           endTime: new Date().toISOString(),
-          // Audit F-1 (merge side): the running array is capped but `current`
-          // holds the previously persisted (also capped) record, so the union
-          // here could still exceed EXECUTION_LOG_LIMIT on a long run. Route
-          // through the same bound so a persisted execution record stays
-          // bounded on every write path. Recovery state is unaffected either
-          // way: it lives in stats.recoveryAttempts, not in these lines.
-          // NOTE: assign `logs:` (not a bare spread) — spreading an array into
-          // the object literal produced indexed keys and wiped the field, which
-          // erased the operator's stop marker on every cancellation.
           logs: boundExecutionLogs([
             ...new Set([...(current?.logs || []), ...execution!.logs]),
-            e instanceof Error ? e.message : 'Worker failed',
+            cancelled
+              ? stopRequested
+                ? 'Operator requested stop; uncommitted results discarded'
+                : 'Execution was already marked CANCELLED; uncommitted results discarded'
+              : e instanceof Error
+                ? e.message
+                : 'Worker failed',
           ]),
         });
         await writeEvent(db, {
-          category: e instanceof PipelineStopped ? 'PIPELINE' : 'ISSUE',
-          level: e instanceof PipelineStopped ? 'INFO' : 'ERROR',
-          code: e instanceof PipelineStopped ? 'pipeline.cancelled' : 'pipeline.failed',
+          category: cancelled ? 'PIPELINE' : 'ISSUE',
+          level: cancelled ? 'INFO' : 'ERROR',
+          code: cancelled ? 'pipeline.cancelled' : 'pipeline.failed',
           message:
-            e instanceof PipelineStopped
-              ? 'Pipeline stopped by operator'
+            cancelled
+              ? 'Pipeline cancelled; uncommitted results discarded'
               : 'Pipeline failed; inspect execution details',
           runId: execution!.id,
-          context: failure,
+          context: { ...failure, stopRequested, observedStatus: current.status },
         });
         await appendAudit(
           db,
-          e instanceof PipelineStopped ? 'Pipeline stopped' : 'Pipeline failed',
+          cancelled ? 'Pipeline cancelled' : 'Pipeline failed',
           `Execution ${execution!.id}${
             typeof failure.error === 'string' ? `; ${failure.error.slice(0, 500)}` : ''
           }`,
           'worker',
           'PIPELINE',
-          e instanceof PipelineStopped ? undefined : 'ERROR',
+          cancelled ? undefined : 'ERROR',
         );
       });
     } else throw e;

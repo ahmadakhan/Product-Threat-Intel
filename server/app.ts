@@ -938,6 +938,17 @@ export function createApp(
     const route = `${req.baseUrl}${req.path}`.replace(/\/+$/, '') || '/';
     if (req.method === 'POST' && NON_MUTATING_POSTS.has(route)) return next();
     try {
+      // Starting the pipeline is idempotent while a run is queued or running:
+      // queueRun returns that active execution instead of creating another.
+      // Let duplicate start requests reach that deduplication path without
+      // draining the operator's general mutation quota (which otherwise made
+      // repeated clicks report 429 while the original run kept working).
+      if (req.method === 'POST' && route === '/api/pipeline') {
+        const activeExecution = await pool.query(
+          "SELECT 1 FROM records WHERE kind='executions' AND data->>'status' IN ('QUEUED','RUNNING') LIMIT 1",
+        );
+        if (activeExecution.rowCount) return next();
+      }
       const identifier = req.operator?.id || req.ip || '';
       const result = await mutationLimiter(`rl:${identifier}`);
       if (!result.allowed) {
