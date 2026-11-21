@@ -196,7 +196,11 @@ test('a findings document renders from the operator template, not the built-in d
   assert.ok(branded.html.includes('#123456'));
   assert.ok(branded.html.includes('ACME SOC'));
   assert.ok(!plain.html.includes('ACME SOC'));
-  assert.ok(plain.html.includes('#073b5c'), 'default findings email uses the new template header');
+  // The supplied header gradient: the solid base colour webmail falls back to
+  // and the VML gradient pair Outlook desktop paints instead.
+  assert.ok(plain.html.includes('#DFCDF7'), 'default findings email uses the supplied lavender header');
+  assert.ok(plain.html.includes('color2="#F9F9FA"'), 'Outlook gradient fill matches the CSS gradient');
+  assert.ok(plain.html.includes('<v:rect'), 'Outlook desktop VML fallback is preserved');
   assert.ok(plain.html.includes('ENTERPRISE VULNERABILITY NOTIFICATION'));
   assert.ok(!plain.html.includes('THREAT INTELLIGENCE &amp; BA CYBER SECURITY OPERATIONS'));
   assert.ok(!plain.html.includes('{{'), 'nested template conditionals and placeholders are fully rendered');

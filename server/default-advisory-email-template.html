@@ -1,12 +1,13 @@
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml"
+  xmlns:o="urn:schemas-microsoft-com:office:office">
+
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="x-apple-disable-message-reformatting">
-  <meta http-equiv="x-ua-compatible" content="ie=edge">
-  <title>Enterprise Vulnerability Notification</title>
-  <!--[if mso]>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>{{advisory_id}} | {{advisory_title}}</title>
+  <!--[if gte mso 9]>
   <xml>
     <o:OfficeDocumentSettings>
       <o:AllowPNG/>
@@ -14,126 +15,427 @@
     </o:OfficeDocumentSettings>
   </xml>
   <![endif]-->
-  <style>
-    html, body { width: 100% !important; margin: 0 !important; padding: 0 !important; }
-    body { background-color: #f1f5f9; -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
-    table { border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
-    a { color: #075985; }
-    @media screen and (max-width: 640px) {
-      .shell { width: 100% !important; }
-      .gutter { padding: 8px !important; }
-      .pad { padding-left: 16px !important; padding-right: 16px !important; }
-      .stack { display: block !important; width: 100% !important; box-sizing: border-box !important; }
-      .stack-gap { padding-top: 9px !important; }
-      .matrix-label { display: block !important; width: 100% !important; padding-bottom: 1px !important; border-bottom: 0 !important; }
-      .matrix-value { display: block !important; width: 100% !important; padding-top: 1px !important; }
-      .matrix-head { display: none !important; }
-      .cell-label { display: inline !important; font-weight: bold !important; color: #526477 !important; }
-      .title { font-size: 22px !important; line-height: 28px !important; }
+  <!--
+    OUTLOOK-HARDENED HANDLEBARS / MUSTACHE TEMPLATE (FINAL)
+    - Zero {{#if}} / {{else}} blocks inside VML or table structures (prevents Outlook Word engine tag hoisting)
+    - Uses direct color & string placeholders for single-pass rendering
+  -->
+  <style type="text/css">
+    body,
+    table,
+    td,
+    p,
+    a,
+    li,
+    div {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      -webkit-text-size-adjust: 100%;
+      -ms-text-size-adjust: 100%;
+    }
+
+    table,
+    td {
+      mso-table-lspace: 0pt;
+      mso-table-rspace: 0pt;
+      border-collapse: collapse;
+    }
+
+    a {
+      color: #1d4ed8;
+      text-decoration: none;
     }
   </style>
 </head>
-<body style="margin:0;padding:0;background-color:#f1f5f9;font-family:Arial,Helvetica,sans-serif;color:#172033;">
-  <div style="display:none!important;visibility:hidden;opacity:0;color:transparent;height:0;width:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;">
-    ENTERPRISE VULNERABILITY NOTIFICATION · {{advisory_id}} · {{advisory_title}} · Tracked Records: {{cve_count}} CVEs
-  </div>
 
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9" style="width:100%;background-color:#f1f5f9;">
+<body
+  style="margin: 0; padding: 0; background-color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: #1e293b;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f1f5f9"
+    style="background-color: #f1f5f9;">
     <tr>
-      <td align="center" class="gutter" style="padding:20px 12px;">
-        <!--[if mso]><table role="presentation" width="680" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->
-        <table role="presentation" class="shell" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="width:100%;max-width:680px;background-color:#ffffff;border:1px solid #dbe3ec;">
+      <td align="center" style="padding: 16px 8px;">
+        <!--[if mso]>
+        <table role="presentation" width="680" cellspacing="0" cellpadding="0" border="0" align="center" style="width:680px;">
+        <tr>
+        <td width="680" valign="top">
+        <![endif]-->
+        <table role="presentation" width="680" cellspacing="0" cellpadding="0" border="0" bgcolor="#ffffff"
+          style="width: 680px; max-width: 680px; background-color: #ffffff; border: 1px solid #cbd5e1;">
+
+          <!-- TOP SEVERITY ACCENT STRIP -->
           <tr>
-            <td class="pad" bgcolor="#073b5c" style="padding:22px 28px;background-color:#073b5c;">
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-                <tr><td style="font-size:11px;line-height:16px;font-weight:bold;letter-spacing:1.1px;color:#c7e6f5;">ENTERPRISE VULNERABILITY NOTIFICATION&nbsp; &middot;&nbsp; {{advisory_id}}</td></tr>
-                <tr><td class="title" style="padding-top:9px;font-size:27px;line-height:34px;font-weight:bold;color:#ffffff;">
-                  {{#if is_top_critical}}<span style="color:#ffb4ad;">{{top_severity_label}}</span>{{else}}{{#if is_top_high}}<span style="color:#ffd18a;">{{top_severity_label}}</span>{{else}}{{#if is_top_medium}}<span style="color:#ffe58a;">{{top_severity_label}}</span>{{else}}<span style="color:#c8e6d5;">{{top_severity_label}}</span>{{/if}}{{/if}}{{/if}}
-                </td></tr>
-                <tr><td style="padding-top:5px;font-size:17px;line-height:24px;font-weight:bold;color:#ffffff;word-break:break-word;">{{advisory_title}}</td></tr>
-                <tr><td style="padding-top:7px;font-size:12px;line-height:18px;color:#d5e8f2;">Tracked Records: <strong style="color:#ffffff;">{{cve_count}} CVEs</strong></td></tr>
-              </table>
+            <td height="4" bgcolor="{{top_severity_color}}"
+              style="height: 4px; line-height: 4px; font-size: 4px; background-color: {{top_severity_color}};">&nbsp;
             </td>
           </tr>
 
+          <!-- HERO HEADER (VML SOFT LAVENDER GRADIENT + FLUSH-RIGHT SEVERITY PILL) -->
           <tr>
-            <td class="pad" style="padding:14px 28px;background-color:#eaf2f7;border-bottom:1px solid #dbe3ec;">
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+            <td background="https://via.placeholder.com/680x96/DFCDF7/DFCDF7.png" bgcolor="#DFCDF7"
+              style="background-color: #DFCDF7; background-image: linear-gradient(135deg, #F9F9FA 0%, #DFCDF7 100%); border-bottom: 1px solid #cbd5e1;">
+              <!--[if gte mso 9]>
+              <v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:678px;height:94px;">
+                <v:fill type="gradient" color="#DFCDF7" color2="#F9F9FA" angle="135" />
+                <v:textbox inset="0,0,0,0">
+              <![endif]-->
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+                style="width: 100%; table-layout: fixed;">
                 <tr>
-                  <td class="stack" width="25%" valign="top" style="width:25%;padding-right:8px;font-size:11px;line-height:16px;color:#526477;"><strong style="display:block;color:#172033;">ADVISORY ID</strong>{{advisory_id}}</td>
-                  <td class="stack stack-gap" width="25%" valign="top" style="width:25%;padding-right:8px;font-size:11px;line-height:16px;color:#526477;"><strong style="display:block;color:#172033;">PUBLISHED</strong>{{published_date}}</td>
-                  <td class="stack stack-gap" width="25%" valign="top" style="width:25%;padding-right:8px;font-size:11px;line-height:16px;color:#526477;"><strong style="display:block;color:#172033;">LAST MODIFIED</strong>{{updated_date}}</td>
-                  <td class="stack stack-gap" width="25%" valign="top" style="width:25%;font-size:11px;line-height:16px;color:#526477;"><strong style="display:block;color:#172033;">INVENTORY STATUS</strong>{{inventory_status}}</td>
+                  <td style="padding: 14px 22px 14px 22px;">
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+                      style="width: 100%; table-layout: fixed;">
+                      <tr>
+                        <td width="424" valign="middle"
+                          style="width: 424px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: #475569; mso-line-height-rule: exactly; line-height: 14px;">
+                          ENTERPRISE VULNERABILITY NOTIFICATION &middot; {{advisory_id}}
+                        </td>
+                        <td width="210" align="right" valign="middle" style="width: 210px; text-align: right;">
+                          <table role="presentation" cellspacing="0" cellpadding="0" border="0" align="right"
+                            style="margin-left: auto; margin-right: 0;">
+                            <tr>
+                              <td bgcolor="{{top_severity_color}}"
+                                style="background-color: {{top_severity_color}}; color: #ffffff; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; padding: 4px 10px; mso-padding-alt: 4px 10px; mso-line-height-rule: exactly; line-height: 12px; white-space: nowrap;">
+                                {{top_severity_label}}
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td colspan="2"
+                          style="padding-top: 8px; font-size: 19px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly; line-height: 24px;">
+                          {{advisory_title}}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td colspan="2"
+                          style="padding-top: 3px; font-size: 11px; font-weight: 600; color: #334155; mso-line-height-rule: exactly; line-height: 15px;">
+                          {{advisory_id}} &nbsp;&bull;&nbsp; Tracked Records: {{cve_count}} CVEs
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+              <!--[if gte mso 9]>
+                </v:textbox>
+              </v:rect>
+              <![endif]-->
+            </td>
+          </tr>
+
+          <!-- 4-COLUMN TELEMETRY BAR -->
+          <tr>
+            <td bgcolor="#f8fafc" style="background-color: #f8fafc; border-bottom: 1px solid #cbd5e1; padding: 0;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+                style="width: 100%; table-layout: fixed;">
+                <tr>
+                  <td width="178" valign="top"
+                    style="width: 178px; padding: 9px 12px 9px 22px; border-right: 1px solid #e2e8f0;">
+                    <div
+                      style="font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #64748b; mso-line-height-rule: exactly; line-height: 12px;">
+                      ADVISORY ID</div>
+                    <div
+                      style="padding-top: 2px; font-size: 11px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly; line-height: 15px;">
+                      {{advisory_id}}</div>
+                  </td>
+                  <td width="145" valign="top"
+                    style="width: 145px; padding: 9px 12px; border-right: 1px solid #e2e8f0;">
+                    <div
+                      style="font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #64748b; mso-line-height-rule: exactly; line-height: 12px;">
+                      PUBLISHED</div>
+                    <div
+                      style="padding-top: 2px; font-size: 11px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly; line-height: 15px;">
+                      {{published_date}}</div>
+                  </td>
+                  <td width="145" valign="top"
+                    style="width: 145px; padding: 9px 12px; border-right: 1px solid #e2e8f0;">
+                    <div
+                      style="font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #64748b; mso-line-height-rule: exactly; line-height: 12px;">
+                      LAST MODIFIED</div>
+                    <div
+                      style="padding-top: 2px; font-size: 11px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly; line-height: 15px;">
+                      {{updated_date}}</div>
+                  </td>
+                  <td width="210" valign="top" style="width: 210px; padding: 9px 22px 9px 12px;">
+                    <div
+                      style="font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #64748b; mso-line-height-rule: exactly; line-height: 12px;">
+                      INVENTORY STATUS</div>
+                    <div
+                      style="padding-top: 2px; font-size: 11px; font-weight: 700; color: #b91c1c; mso-line-height-rule: exactly; line-height: 15px;">
+                      {{inventory_status}}</div>
+                  </td>
                 </tr>
               </table>
             </td>
           </tr>
 
-          <tr><td class="pad" style="padding:22px 28px 8px;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-              <tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">01&nbsp; Executive Summary</td></tr>
-              <tr><td style="padding-top:9px;font-size:14px;line-height:22px;color:#263445;">
-                {{#if executive_summary}}{{{executive_summary}}}{{else}}{{#if is_single_correlation}}1 current inventory correlation.{{else}}{{correlation_count}} current inventory correlations.{{/if}} Top severity: {{top_severity_label}}. Confirm applicability and consult the vendor before remediation.{{/if}}
-              </td></tr>
-            </table>
-          </td></tr>
+          <!-- MAIN BODY -->
+          <tr>
+            <td bgcolor="#ffffff" style="background-color: #ffffff; padding: 18px 22px 16px 22px;">
 
-          <tr><td class="pad" style="padding:22px 28px 8px;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">02&nbsp; Vulnerability Summary Matrix</td></tr></table>
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:10px;border:1px solid #cbd5e1;">
-              <tr bgcolor="#eaf2f7">
-                <th class="matrix-head" align="left" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">CVE Identifier</th>
-                <th class="matrix-head" align="left" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">Severity</th>
-                <th class="matrix-head" align="left" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">Vendor</th>
-                <th class="matrix-head" align="left" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">Affected Product</th>
-              </tr>
-              {{#each cves}}
-              <tr>
-                <td class="matrix-label" style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:17px;"><span class="cell-label" style="display:none;">CVE Identifier: </span><a href="{{url}}" style="color:#075985;text-decoration:underline;word-break:break-word;">{{id}} &#8599;</a></td>
-                <td class="matrix-value" style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:17px;font-weight:bold;"><span class="cell-label" style="display:none;">Severity: </span>{{#if is_critical}}<span style="color:#b42318;">CRITICAL ({{cvss_score}})</span>{{else}}{{#if is_high}}<span style="color:#b54708;">HIGH ({{cvss_score}})</span>{{else}}{{#if is_medium}}<span style="color:#8a6500;">MEDIUM ({{cvss_score}})</span>{{else}}<span style="color:#16794b;">LOW ({{cvss_score}})</span>{{/if}}{{/if}}{{/if}}</td>
-                <td class="matrix-value" style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:17px;word-break:break-word;"><span class="cell-label" style="display:none;">Vendor: </span>{{vendor}}</td>
-                <td class="matrix-value" style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:17px;word-break:break-word;"><span class="cell-label" style="display:none;">Affected Product: </span>{{product}}</td>
-              </tr>
-              {{/each}}
-            </table>
-          </td></tr>
+              <!-- 01 EXECUTIVE SUMMARY (UNSHADED WHITE) -->
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width: 100%;">
+                <tr>
+                  <td
+                    style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px; color: #0f172a; padding-bottom: 6px; mso-line-height-rule: exactly; line-height: 15px;">
+                    <span style="color: #6d28d9;">01</span> &nbsp;EXECUTIVE SUMMARY
+                  </td>
+                </tr>
+                <tr>
+                  <td
+                    style="font-size: 12px; color: #334155; mso-line-height-rule: at-least; line-height: 18px; padding-bottom: 16px;">
+                    {{{executive_summary}}}
+                  </td>
+                </tr>
+              </table>
 
-          <tr><td class="pad" style="padding:22px 28px 8px;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">03&nbsp; Technical Record Breakdown &amp; Required Mitigation</td></tr></table>
-            {{#each cves}}
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f8fafc" data-pdf-cve="{{id}}" data-pdf-severity="{{severity}}" style="margin-top:10px;border:1px solid #dbe3ec;background-color:#f8fafc;">
-              <tr><td style="padding:12px 14px 0;font-size:14px;line-height:20px;font-weight:bold;color:#172033;word-break:break-word;">{{id}}&nbsp; &middot;&nbsp; {{vendor}} / {{product}}</td></tr>
-              <tr><td style="padding:5px 14px 0;font-size:12px;line-height:18px;font-weight:bold;">{{#if is_critical}}<span style="color:#b42318;">CRITICAL</span>{{else}}{{#if is_high}}<span style="color:#b54708;">HIGH</span>{{else}}{{#if is_medium}}<span style="color:#8a6500;">MEDIUM</span>{{else}}<span style="color:#16794b;">LOW</span>{{/if}}{{/if}}{{/if}} &middot; {{cvss_score}}</td></tr>
-              <tr><td style="padding:10px 14px 0;font-size:12px;line-height:18px;color:#344256;"><strong>Description:</strong> {{{description}}}</td></tr>
-              <tr><td style="padding:8px 14px 0;font-size:12px;line-height:18px;color:#344256;word-break:break-word;"><strong>Affected Versions:</strong> {{affected_versions}} &nbsp;|&nbsp; <a href="{{nvd_url}}" style="color:#075985;text-decoration:underline;">NVD Source &#8599;</a></td></tr>
-              <tr><td style="padding:11px 14px 0;font-size:12px;line-height:18px;font-weight:bold;color:#172033;">Required Actions &amp; Mitigation</td></tr>
-              <tr><td style="padding:4px 14px 13px;font-size:12px;line-height:19px;color:#344256;">
-                {{#each mitigations}}<div style="padding-top:4px;">&#8226;&nbsp; {{{this}}}</div>{{/each}}
-              </td></tr>
-            </table>
-            {{/each}}
-          </td></tr>
+              <!-- 02 VULNERABILITY SUMMARY MATRIX -->
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width: 100%;">
+                <tr>
+                  <td bgcolor="#f1f5f9"
+                    style="background-color: #f1f5f9; border: 1px solid #cbd5e1; padding: 7px 12px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px; color: #0f172a; mso-line-height-rule: exactly; line-height: 15px;">
+                    <span style="color: #6d28d9;">02</span> &nbsp;VULNERABILITY SUMMARY MATRIX
+                  </td>
+                </tr>
+                <tr>
+                  <td height="6" style="height: 6px; line-height: 6px; font-size: 6px;">&nbsp;</td>
+                </tr>
+              </table>
 
-          <tr><td class="pad" style="padding:22px 28px 22px;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">04&nbsp; Honeywell Recommended Actions</td></tr></table>
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:8px;">
-              {{#each honeywell_actions}}
-              <tr><td valign="top" width="18" style="width:18px;padding:4px 0;font-size:14px;line-height:20px;color:#075985;">&#8226;</td><td style="padding:4px 0;font-size:13px;line-height:20px;color:#263445;"><strong>{{title}}:</strong> {{{detail}}}</td></tr>
-              {{/each}}
-            </table>
-          </td></tr>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+                style="width: 100%; table-layout: fixed; border: 1px solid #cbd5e1;">
+                <thead>
+                  <tr bgcolor="#1e293b" style="background-color: #1e293b;">
+                    <th width="165" align="left"
+                      style="width: 165px; padding: 7px 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #ffffff; border-right: 1px solid #334155; text-align: left;">
+                      CVE Identifier</th>
+                    <th width="130" align="left"
+                      style="width: 130px; padding: 7px 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #ffffff; border-right: 1px solid #334155; text-align: left;">
+                      Severity</th>
+                    <th width="135" align="left"
+                      style="width: 135px; padding: 7px 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #ffffff; border-right: 1px solid #334155; text-align: left;">
+                      Vendor</th>
+                    <th width="204" align="left"
+                      style="width: 204px; padding: 7px 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #ffffff; text-align: left;">
+                      Affected Product</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {{#each cves}}
+                  <tr>
+                    <td valign="middle"
+                      style="padding: 7px 10px; border-top: 1px solid #cbd5e1; border-right: 1px solid #e2e8f0; font-size: 11px; font-weight: 700; white-space: nowrap;">
+                      <a href="{{source_url}}" target="_blank" style="color: #1d4ed8; text-decoration: none;">{{cve_id}}
+                        &#8599;</a>
+                    </td>
+                    <td valign="middle"
+                      style="padding: 7px 10px; border-top: 1px solid #cbd5e1; border-right: 1px solid #e2e8f0;">
+                      <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+                        <tr>
+                          <td bgcolor="{{pill_bg}}"
+                            style="background-color: {{pill_bg}}; border: 1px solid {{pill_border}}; color: {{pill_text}}; font-size: 10px; font-weight: 700; padding: 2px 6px; mso-padding-alt: 2px 6px; mso-line-height-rule: exactly; line-height: 12px; white-space: nowrap;">
+                            {{severity}} ({{cvss_score}})
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                    <td valign="middle"
+                      style="padding: 7px 10px; border-top: 1px solid #cbd5e1; border-right: 1px solid #e2e8f0; font-size: 11px; color: #334155;">
+                      {{vendor}}</td>
+                    <td valign="middle"
+                      style="padding: 7px 10px; border-top: 1px solid #cbd5e1; font-size: 11px; font-weight: 600; color: #0f172a;">
+                      {{product}}</td>
+                  </tr>
+                  {{/each}}
+                </tbody>
+              </table>
 
-          <tr><td class="pad" bgcolor="#eaf2f7" style="padding:14px 28px;background-color:#eaf2f7;border-top:1px solid #cbd5e1;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-              <tr><td style="font-size:12px;line-height:18px;color:#263445;"><strong>{{#if contact_team}}{{contact_team}}{{else}}BA Security Operations{{/if}}:</strong> <a href="mailto:{{#if contact_email}}{{contact_email}}{{else}}DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com{{/if}}" style="color:#075985;text-decoration:underline;">{{#if contact_email}}{{contact_email}}{{else}}DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com{{/if}}</a></td></tr>
-              <tr><td style="padding-top:4px;font-size:11px;line-height:17px;color:#526477;">{{#if tlp_classification}}{{tlp_classification}}{{else}}TLP:AMBER // INTERNAL{{/if}}</td></tr>
-              <tr><td style="padding-top:10px;font-size:11px;line-height:17px;color:#526477;">This advisory ({{advisory_id}}) is compiled from vendor disclosures and vulnerability intelligence sources. Verify environment applicability prior to deploying remediation.</td></tr>
-            </table>
-          </td></tr>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                <tr>
+                  <td height="16" style="height: 16px; line-height: 16px; font-size: 16px;">&nbsp;</td>
+                </tr>
+              </table>
+
+              <!-- 03 TECHNICAL RECORD BREAKDOWN & REQUIRED MITIGATION -->
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width: 100%;">
+                <tr>
+                  <td bgcolor="#f3effb"
+                    style="background-color: #f3effb; border: 1px solid #ddd6fe; padding: 7px 12px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px; color: #0f172a; mso-line-height-rule: exactly; line-height: 15px;">
+                    <span style="color: #6d28d9;">03</span> &nbsp;TECHNICAL RECORD BREAKDOWN &amp; REQUIRED MITIGATION
+                  </td>
+                </tr>
+                <tr>
+                  <td height="8" style="height: 8px; line-height: 8px; font-size: 8px;">&nbsp;</td>
+                </tr>
+              </table>
+
+              <!-- LOOP-SAFE CVE DETAIL CARDS -->
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width: 100%;">
+                {{#each cves}}
+                <tr>
+                  <td style="padding-bottom: 10px;">
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+                      style="width: 100%; border: 1px solid #cbd5e1;">
+                      <tr>
+                        <td bgcolor="#f8fafc"
+                          style="background-color: #f8fafc; padding: 7px 12px; border-bottom: 1px solid #e2e8f0;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+                            style="width: 100%; table-layout: fixed;">
+                            <tr>
+                              <td width="480" valign="middle"
+                                style="width: 480px; font-size: 12px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly; line-height: 16px;">
+                                <a href="{{source_url}}" target="_blank"
+                                  style="color: #1d4ed8; text-decoration: none;">{{cve_id}}</a>
+                                <span style="color: #94a3b8; font-weight: 400;"> &middot; </span>
+                                <span style="color: #0f172a;">{{vendor}}</span>
+                                <span style="color: #64748b; font-weight: 400;"> / {{product}}</span>
+                              </td>
+                              <td width="130" align="right" valign="middle" style="width: 130px; text-align: right;">
+                                <table role="presentation" cellspacing="0" cellpadding="0" border="0" align="right"
+                                  style="margin-left: auto; margin-right: 0;">
+                                  <tr>
+                                    <td bgcolor="{{badge_bg}}"
+                                      style="background-color: {{badge_bg}}; color: #ffffff; font-size: 10px; font-weight: 700; padding: 2px 7px; mso-padding-alt: 2px 7px; mso-line-height-rule: exactly; line-height: 12px; white-space: nowrap;">
+                                      {{severity}} &middot; {{cvss_score}}
+                                    </td>
+                                  </tr>
+                                </table>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td bgcolor="#ffffff" style="background-color: #ffffff; padding: 9px 12px;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+                            style="width: 100%;">
+                            <tr>
+                              <td
+                                style="font-size: 11px; color: #334155; mso-line-height-rule: at-least; line-height: 16px; padding-bottom: 5px;">
+                                <strong style="color: #0f172a;">Description:</strong> {{{description}}}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td
+                                style="font-size: 11px; color: #475569; mso-line-height-rule: at-least; line-height: 15px; padding-bottom: 7px;">
+                                <strong style="color: #0f172a;">Affected Versions:</strong> {{affected_versions}}
+                                &nbsp;|&nbsp; <a href="{{source_url}}" target="_blank"
+                                  style="color: #1d4ed8; font-weight: 700; text-decoration: none;">NVD Source
+                                  &#8599;</a>
+                              </td>
+                            </tr>
+                            <tr>
+                              <td>
+                                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+                                  bgcolor="#fffbeb"
+                                  style="width: 100%; background-color: #fffbeb; border: 1px solid #fde68a;">
+                                  <tr>
+                                    <td style="padding: 7px 10px;">
+                                      <div
+                                        style="font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #92400e; mso-line-height-rule: exactly; line-height: 14px; padding-bottom: 3px;">
+                                        REQUIRED ACTIONS &amp; MITIGATION
+                                      </div>
+                                      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+                                        style="width: 100%;">
+                                        {{#each mitigations}}
+                                        <tr>
+                                          <td width="12" valign="top"
+                                            style="width: 12px; font-size: 11px; font-weight: 700; color: #92400e; mso-line-height-rule: exactly; line-height: 16px; padding-top: 1px;">
+                                            &bull;</td>
+                                          <td valign="top"
+                                            style="font-size: 11px; color: #1e293b; mso-line-height-rule: exactly; line-height: 16px; padding-top: 1px;">
+                                            {{{this}}}</td>
+                                        </tr>
+                                        {{/each}}
+                                      </table>
+                                    </td>
+                                  </tr>
+                                </table>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                {{/each}}
+              </table>
+
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                <tr>
+                  <td height="6" style="height: 6px; line-height: 6px; font-size: 6px;">&nbsp;</td>
+                </tr>
+              </table>
+
+              <!-- 04 HONEYWELL RECOMMENDED ACTIONS -->
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width: 100%;">
+                <tr>
+                  <td bgcolor="#f1f5f9"
+                    style="background-color: #f1f5f9; border: 1px solid #cbd5e1; padding: 7px 12px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px; color: #0f172a; mso-line-height-rule: exactly; line-height: 15px;">
+                    <span style="color: #6d28d9;">04</span> &nbsp;HONEYWELL RECOMMENDED ACTIONS
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding: 8px 4px 0 4px;">
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+                      style="width: 100%;">
+                      {{#each honeywell_actions}}
+                      <tr>
+                        <td width="12" valign="top"
+                          style="width: 12px; font-size: 11px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly; line-height: 16px; padding-top: 2px;">
+                          &bull;</td>
+                        <td valign="top"
+                          style="font-size: 11px; color: #334155; mso-line-height-rule: at-least; line-height: 16px; padding-top: 2px;">
+                          <strong style="color: #0f172a;">{{title}}:</strong> {{{detail}}}
+                        </td>
+                      </tr>
+                      {{/each}}
+                    </table>
+                  </td>
+                </tr>
+              </table>
+
+            </td>
+          </tr>
+
+          <!-- FOOTER -->
+          <tr>
+            <td bgcolor="#f8fafc" style="background-color: #f8fafc; border-top: 1px solid #cbd5e1; padding: 11px 22px;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+                style="width: 100%; table-layout: fixed;">
+                <tr>
+                  <td width="466" valign="middle"
+                    style="width: 466px; font-size: 11px; color: #334155; mso-line-height-rule: exactly; line-height: 15px;">
+                    <strong style="color: #0f172a;">{{contact_team}}:</strong>
+                    <a href="mailto:{{contact_email}}"
+                      style="color: #1d4ed8; font-weight: 600; text-decoration: none;">{{contact_email}}</a>
+                  </td>
+                  <td width="168" align="right" valign="middle"
+                    style="width: 168px; text-align: right; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #64748b; mso-line-height-rule: exactly; line-height: 15px;">
+                    {{tlp_classification}}
+                  </td>
+                </tr>
+                <tr>
+                  <td colspan="2"
+                    style="padding-top: 3px; font-size: 10px; color: #64748b; mso-line-height-rule: exactly; line-height: 14px;">
+                    This advisory ({{advisory_id}}) is compiled from vendor disclosures and vulnerability intelligence
+                    sources. Verify environment applicability prior to deploying remediation.
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
         </table>
-        <!--[if mso]></td></tr></table><![endif]-->
+        <!--[if mso]>
+        </td>
+        </tr>
+        </table>
+        <![endif]-->
       </td>
     </tr>
   </table>
 </body>
+
 </html>
