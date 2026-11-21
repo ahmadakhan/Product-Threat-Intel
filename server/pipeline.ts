@@ -683,11 +683,16 @@ function boundExecutionLogs(logs: string[]): string[] {
   return logs;
 }
 /** Atomically reject a stale worker write after an operator has stopped a run.
- * A checkpoint read alone leaves a race before the following JSON upsert. */
+ * A checkpoint read alone leaves a race before the following JSON upsert.
+ *
+ * The first write promotes the execution from QUEUED to RUNNING, so the guard
+ * must accept both states: requiring RUNNING here made the very first save a
+ * no-op and surfaced as a phantom cancellation. Later writes still only land
+ * while the row is active and has no stop request. */
 async function saveActiveExecution(db: pg.PoolClient, execution: PipelineExecution) {
   const saved = await db.query(
     `UPDATE records SET data=$2::jsonb,updated_at=now()
-     WHERE kind='executions' AND id=$1 AND data->>'status'='RUNNING'
+     WHERE kind='executions' AND id=$1 AND data->>'status' IN ('QUEUED','RUNNING')
        AND COALESCE(data->>'stopRequestedAt','')='' RETURNING id`,
     [execution.id, JSON.stringify(execution)],
   );

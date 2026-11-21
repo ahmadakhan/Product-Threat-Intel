@@ -113,8 +113,8 @@ test('the email body is the document attached to it', () => {
   const view = deliveryAdvisoryView(advisory, findings);
   const generatedAt = new Date('2026-01-01T12:34:00Z');
   const document = renderFindingsDocument({ advisory: view, findings, generatedAt });
-  assert.ok(document.html.includes('Security Advisory'));
-  assert.match(document.html, /Generated:/);
+  assert.ok(document.html.includes('Enterprise Vulnerability Notification'));
+  assert.match(document.html, /ADVISORY ID/);
   assert.equal(deliveryHtmlIsAttachable(document.html), true);
   // Re-rendering with the pinned instant is byte-identical: the attachment render
   // can never drift from the body.
@@ -443,7 +443,14 @@ test('the attached document declares UTF-8 without changing the body', () => {
   assert.ok(attachment);
   const file = attachment.content.toString('utf8');
   assert.match(file, /<meta charset="utf-8">/i);
-  assert.equal(file.replace('<meta charset="utf-8">', ''), doc.html, 'only the charset declaration is added');
+  assert.equal(file, doc.html, 'an existing charset declaration is preserved and the body is unchanged');
+  // A body without a declaration gains exactly one in its head.
+  const plain = findingHtmlAttachment(job('FINDINGS:b', '<html><head><title>x</title></head><body>x</body></html>'));
+  assert.ok(plain);
+  assert.equal(
+    plain.content.toString('utf8'),
+    '<html><head><meta charset="utf-8"><title>x</title></head><body>x</body></html>',
+  );
 });
 
 test('an oversized findings body fails loudly instead of silently dropping the attachment', () => {

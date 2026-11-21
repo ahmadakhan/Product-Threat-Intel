@@ -276,9 +276,16 @@ function enterpriseTemplateValues(
         ]),
       ),
     ].filter((action) => action.trim());
+    const sourceUrl = `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(cveId)}`;
     return {
       id: cveId,
-      source_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(cveId)}`,
+      // The canonical enterprise template addresses `url` and `nvd_url`; keep
+      // `source_url` for templates that use the older name. These objects are
+      // the last `cves` assignment, so omitting the aliases made every CVE and
+      // NVD link in the default advisory render with an empty href.
+      source_url: sourceUrl,
+      url: sourceUrl,
+      nvd_url: sourceUrl,
       severity,
       is_critical: severity === 'CRITICAL',
       is_high: severity === 'HIGH',

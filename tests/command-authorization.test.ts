@@ -317,9 +317,10 @@ test('newsTemplate.save is reachable and preserves custom HTML when visual setti
   assert.equal(template.newsDigestTemplate, compileNewsTemplate(DEFAULT_TEMPLATE_CUSTOMIZATION));
 });
 
-test('pipeline state uses saved custom advisory HTML and falls back to generated customization', async () => {
+test('pipeline state uses saved custom advisory HTML and falls back to the canonical product template', async () => {
   const { pipelineState } = await import('../server/db.ts');
-  const { DEFAULT_TEMPLATE_CUSTOMIZATION, compileCustomizedTemplate } = await import('../src/utils/templateCompiler.ts');
+  const { DEFAULT_TEMPLATE_CUSTOMIZATION } = await import('../src/utils/templateCompiler.ts');
+  const { DEFAULT_ADVISORY_EMAIL_TEMPLATE } = await import('../src/utils/defaultAdvisoryEmailTemplate.ts');
   const customHtml = '<html><body><h1>Saved custom advisory</h1></body></html>';
   const makeDb = (customAdvisoryTemplate: string | null) => ({
     query: async () => ({
@@ -333,5 +334,5 @@ test('pipeline state uses saved custom advisory HTML and falls back to generated
   const customState = await pipelineState(makeDb(customHtml));
   assert.equal(customState.advisoryTemplate, customHtml);
   const defaultState = await pipelineState(makeDb(null));
-  assert.equal(defaultState.advisoryTemplate, compileCustomizedTemplate(DEFAULT_TEMPLATE_CUSTOMIZATION));
+  assert.equal(defaultState.advisoryTemplate, DEFAULT_ADVISORY_EMAIL_TEMPLATE);
 });

@@ -101,7 +101,7 @@
           <tr><td class="pad" style="padding:22px 28px 8px;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">03&nbsp; Technical Record Breakdown &amp; Required Mitigation</td></tr></table>
             {{#each cves}}
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f8fafc" style="margin-top:10px;border:1px solid #dbe3ec;background-color:#f8fafc;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f8fafc" data-pdf-cve="{{id}}" data-pdf-severity="{{severity}}" style="margin-top:10px;border:1px solid #dbe3ec;background-color:#f8fafc;">
               <tr><td style="padding:12px 14px 0;font-size:14px;line-height:20px;font-weight:bold;color:#172033;word-break:break-word;">{{id}}&nbsp; &middot;&nbsp; {{vendor}} / {{product}}</td></tr>
               <tr><td style="padding:5px 14px 0;font-size:12px;line-height:18px;font-weight:bold;">{{#if is_critical}}<span style="color:#b42318;">CRITICAL</span>{{else}}{{#if is_high}}<span style="color:#b54708;">HIGH</span>{{else}}{{#if is_medium}}<span style="color:#8a6500;">MEDIUM</span>{{else}}<span style="color:#16794b;">LOW</span>{{/if}}{{/if}}{{/if}} &middot; {{cvss_score}}</td></tr>
               <tr><td style="padding:10px 14px 0;font-size:12px;line-height:18px;color:#344256;"><strong>Description:</strong> {{{description}}}</td></tr>
