@@ -509,7 +509,13 @@ const handleInsertToken = (token: string) => {
         `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:${previewSeverityColor};color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">${previewSeverity}</span>`,
       )
       .replace(/{{advisory_id}}/g, previewId)
-      .replace(/{{advisory_title}}/g, 'Example advisory — template preview only');
+      // Use the current advisory title, as the server preview does. Escaping is
+      // required here because this replacement runs before the template
+      // renderer's normal escaping pass.
+      .replace(
+        /{{advisory_title}}/g,
+        escapeTemplateValue(previewAdvisory?.title || 'Example advisory — template preview only'),
+      );
 
     processed = renderEmailTemplate(processed, previewValues);
 

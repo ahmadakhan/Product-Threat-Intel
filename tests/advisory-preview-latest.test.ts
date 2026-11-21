@@ -147,8 +147,8 @@ test('the Studio preview renders the current canonical template', async () => {
     assert.ok(!rendered.includes('bgcolor=""'), 'no unresolved bgcolor');
     assert.ok(!rendered.includes('href="mailto:"'), 'footer address resolved');
     assert.ok(rendered.includes(cveId), 'CVE id rendered');
-    // CRITICAL palette from SEVERITY_PILL.
-    assert.ok(rendered.includes('#991b1b'), 'severity accent colour painted');
+    // CRITICAL palette from the canonical Outlook-safe header.
+    assert.ok(rendered.includes('#ffb4ad'), 'severity accent colour painted');
 
     await act(async () => root.unmount());
   } finally {
