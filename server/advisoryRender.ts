@@ -363,9 +363,9 @@ function enterpriseTemplateValues(
     cve_count: cves.length,
     cves,
     honeywell_actions: [
-      { title: 'Inventory & Scope:', detail: ' Identify all instances of the listed vendor products in your environment.' },
-      { title: 'Validate Exposure:', detail: ' Confirm the deployed versions fall within the affected ranges before remediation.' },
-      { title: 'Apply Remediation:', detail: ' Deploy vendor-supplied updates through your change control process.' },
+      { title: 'Inventory & Scope', detail: ' Identify all instances of the listed vendor products in your environment.' },
+      { title: 'Validate Exposure', detail: ' Confirm the deployed versions fall within the affected ranges before remediation.' },
+      { title: 'Apply Remediation', detail: ' Deploy vendor-supplied updates through your change control process.' },
     ],
     contact_team: options.contactTeam || 'Security Operations',
     // Never the empty string: the shipped template writes this straight into

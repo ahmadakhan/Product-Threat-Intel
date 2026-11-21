@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { renderAdvisory } from '../server/advisoryRender.ts';
 import type { Advisory, Finding } from '../src/types/index.ts';
+import { DEFAULT_ADVISORY_EMAIL_TEMPLATE } from '../src/utils/defaultAdvisoryEmailTemplate.ts';
 
 /**
  * Template engine correctness for the enterprise notification template.
@@ -93,7 +93,7 @@ test('top-level values are escaped exactly once', () => {
 });
 
 test('the shipped enterprise template renders with no unresolved placeholders', () => {
-  const template = readFileSync('./enterprise-vulnerability-notification-handlebars.html', 'utf8');
+  const template = DEFAULT_ADVISORY_EMAIL_TEMPLATE;
   const findings = [finding(1, 'CRITICAL', 9.8), finding(2, 'HIGH', 7.5)];
   const out = renderAdvisory(template, advisory(findings), findings, { generatedAt: new Date('2026-11-19T11:12:00Z') });
   const leftover = out.match(/\{\{[^}]+\}\}/g) ?? [];
@@ -105,8 +105,8 @@ test('the shipped enterprise template renders with no unresolved placeholders', 
   assert.ok(out.includes('CVE-2026-0002'));
   assert.ok(out.includes('CRITICAL (9.8)'), 'critical badge in the matrix');
   assert.ok(out.includes('HIGH (7.5)'), 'high badge in the matrix');
-  assert.ok(out.includes('acme'), 'vendor column populated');
-  assert.ok(out.includes('widget'), 'product column populated');
+  assert.ok(out.includes('Acme'), 'vendor column populated');
+  assert.ok(out.includes('Widget'), 'product column populated');
   assert.ok(out.includes('Patch immediately.'), 'per-CVE mitigation populated');
 });
 

@@ -136,7 +136,7 @@ test('the Studio preview renders the current canonical template', async () => {
 
     // Current template, not a legacy one: these structures only exist in the
     // canonical document.
-    for (const marker of ['TOP SEVERITY ACCENT STRIP', 'CVE Identifier', 'ENTERPRISE VULNERABILITY NOTIFICATION'])
+    for (const marker of ['Executive Summary', 'CVE Identifier', 'ENTERPRISE VULNERABILITY NOTIFICATION'])
       assert.ok(rendered.includes(marker), `current template section present: ${marker}`);
     assert.ok(!rendered.includes('NEXT STEPS'), 'no legacy section from an older template');
 

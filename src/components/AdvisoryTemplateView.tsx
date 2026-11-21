@@ -396,8 +396,10 @@ const handleInsertToken = (token: string) => {
               const remediation = finding.cve.remediation;
               return {
                 id: finding.cveId,
+                cve_id: finding.cveId,
                 url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(finding.cveId)}`,
                 nvd_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(finding.cveId)}`,
+                source_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(finding.cveId)}`,
                 is_critical: severity === 'CRITICAL',
                 is_high: severity === 'HIGH',
                 is_medium: severity === 'MEDIUM',
@@ -415,8 +417,10 @@ const handleInsertToken = (token: string) => {
             })
           : previewAdvisory.cveIds.map((id) => ({
               id,
+              cve_id: id,
               url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`,
               nvd_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`,
+              source_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`,
               is_critical: previewAdvisory.severity === 'CRITICAL',
               is_high: previewAdvisory.severity === 'HIGH',
               is_medium: previewAdvisory.severity === 'MEDIUM',
@@ -489,9 +493,11 @@ const handleInsertToken = (token: string) => {
     const previewSeverityLabel = previewSeverity.charAt(0) + previewSeverity.slice(1).toLowerCase();
 
     let processed = (!hasExistingHeader ? headerBanner + html : html);
-    processed = renderEmailTemplate(processed, previewValues, { preserveUnknown: true });
 
-    return processed
+    // Resolve tokens the renderer's value map doesn't cover, before the
+    // renderer runs. Any token that still has no value after this is blanked
+    // (matching the server render) instead of leaking as a literal placeholder.
+    processed = processed
       .replace(/{{severity}}/g, previewSeverity)
       .replace(/{{severity_text}}/g, previewSeverityLabel)
       .replace(
@@ -504,6 +510,10 @@ const handleInsertToken = (token: string) => {
       )
       .replace(/{{advisory_id}}/g, previewId)
       .replace(/{{advisory_title}}/g, 'Example advisory — template preview only');
+
+    processed = renderEmailTemplate(processed, previewValues);
+
+    return processed;
   };
 
   /**

@@ -41,10 +41,15 @@
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9" style="width:100%;background-color:#f1f5f9;">
     <tr>
       <td align="center" class="gutter" style="padding:20px 12px;">
-        <!--[if mso]><table role="presentation" width="680" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->
-        <table role="presentation" class="shell" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="width:100%;max-width:680px;background-color:#ffffff;border:1px solid #dbe3ec;">
+        <!--[if mso]><table role="presentation" width="680" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td width="680"><![endif]-->
+        <table role="presentation" class="shell" width="680" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="width: 680px; max-width: 680px; background-color:#ffffff;border:1px solid #dbe3ec;">
           <tr>
             <td class="pad" bgcolor="#073b5c" style="padding:22px 28px;background-color:#073b5c;">
+              <!--[if gte mso 9]>
+              <v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:680px;height:142px;">
+                <v:fill type="gradient" color="#073b5c" color2="#0b5b7f" angle="90"/>
+                <v:textbox inset="0,0,0,0">
+              <![endif]-->
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
                 <tr><td style="font-size:11px;line-height:16px;font-weight:bold;letter-spacing:1.1px;color:#c7e6f5;">ENTERPRISE VULNERABILITY NOTIFICATION&nbsp; &middot;&nbsp; {{advisory_id}}</td></tr>
                 <tr><td class="title" style="padding-top:9px;font-size:27px;line-height:34px;font-weight:bold;color:#ffffff;">
@@ -53,6 +58,10 @@
                 <tr><td style="padding-top:5px;font-size:17px;line-height:24px;font-weight:bold;color:#ffffff;word-break:break-word;">{{advisory_title}}</td></tr>
                 <tr><td style="padding-top:7px;font-size:12px;line-height:18px;color:#d5e8f2;">Tracked Records: <strong style="color:#ffffff;">{{cve_count}} CVEs</strong></td></tr>
               </table>
+              <!--[if gte mso 9]>
+                </v:textbox>
+              </v:rect>
+              <![endif]-->
             </td>
           </tr>
 
@@ -72,7 +81,7 @@
           <tr><td class="pad" style="padding:22px 28px 8px;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
               <tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">01&nbsp; Executive Summary</td></tr>
-              <tr><td style="padding-top:9px;font-size:14px;line-height:22px;color:#263445;">
+              <tr><td style="padding-top:9px;font-size:14px;line-height:22px;mso-line-height-rule: at-least;color:#263445;">
                 {{#if executive_summary}}{{{executive_summary}}}{{else}}{{#if is_single_correlation}}1 current inventory correlation.{{else}}{{correlation_count}} current inventory correlations.{{/if}} Top severity: {{top_severity_label}}. Confirm applicability and consult the vendor before remediation.{{/if}}
               </td></tr>
             </table>
@@ -104,10 +113,10 @@
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f8fafc" data-pdf-cve="{{id}}" data-pdf-severity="{{severity}}" style="margin-top:10px;border:1px solid #dbe3ec;background-color:#f8fafc;">
               <tr><td style="padding:12px 14px 0;font-size:14px;line-height:20px;font-weight:bold;color:#172033;word-break:break-word;">{{id}}&nbsp; &middot;&nbsp; {{vendor}} / {{product}}</td></tr>
               <tr><td style="padding:5px 14px 0;font-size:12px;line-height:18px;font-weight:bold;">{{#if is_critical}}<span style="color:#b42318;">CRITICAL</span>{{else}}{{#if is_high}}<span style="color:#b54708;">HIGH</span>{{else}}{{#if is_medium}}<span style="color:#8a6500;">MEDIUM</span>{{else}}<span style="color:#16794b;">LOW</span>{{/if}}{{/if}}{{/if}} &middot; {{cvss_score}}</td></tr>
-              <tr><td style="padding:10px 14px 0;font-size:12px;line-height:18px;color:#344256;"><strong>Description:</strong> {{{description}}}</td></tr>
-              <tr><td style="padding:8px 14px 0;font-size:12px;line-height:18px;color:#344256;word-break:break-word;"><strong>Affected Versions:</strong> {{affected_versions}} &nbsp;|&nbsp; <a href="{{nvd_url}}" style="color:#075985;text-decoration:underline;">NVD Source &#8599;</a></td></tr>
+              <tr><td style="padding:10px 14px 0;font-size:12px;line-height:18px;mso-line-height-rule: at-least;color:#344256;"><strong>Description:</strong> {{{description}}}</td></tr>
+              <tr><td style="padding:8px 14px 0;font-size:12px;line-height:18px;mso-line-height-rule: at-least;color:#344256;word-break:break-word;"><strong>Affected Versions:</strong> {{affected_versions}} &nbsp;|&nbsp; <a href="{{nvd_url}}" style="color:#075985;text-decoration:underline;">NVD Source &#8599;</a></td></tr>
               <tr><td style="padding:11px 14px 0;font-size:12px;line-height:18px;font-weight:bold;color:#172033;">Required Actions &amp; Mitigation</td></tr>
-              <tr><td style="padding:4px 14px 13px;font-size:12px;line-height:19px;color:#344256;">
+              <tr><td style="padding:4px 14px 13px;font-size:12px;line-height:19px;mso-line-height-rule: at-least;color:#344256;">
                 {{#each mitigations}}<div style="padding-top:4px;">&#8226;&nbsp; {{{this}}}</div>{{/each}}
               </td></tr>
             </table>
