@@ -34,7 +34,6 @@ import {
   stripGeneratedExecutiveSummaryMarkup,
 } from '../utils/templateCompiler';
 import { renderEmailTemplate } from '../utils/emailTemplate';
-import { displayName } from '../utils/displayName';
 
 const escapeTemplateValue = (value: string) =>
   value.replace(/[&<>"']/g, (char) => ({
@@ -44,34 +43,6 @@ const escapeTemplateValue = (value: string) =>
     '"': '&quot;',
     "'": '&#39;',
   })[char]!);
-
-/**
- * Colour fields the shipped template paints directly, mirroring
- * `SEVERITY_PILL` in server/advisoryRender.ts.
- *
- * The canonical template deliberately contains no `{{#if}}` inside a table cell
- * (the Outlook Word engine hoists them), so severity is expressed as colour
- * strings. The preview's fallback renderer has to supply the same keys or it
- * renders an unstyled pill and a blank accent strip while the delivered email
- * is correct.
- */
-const SEVERITY_PILL: Record<string, { bg: string; border: string; text: string; badge: string; top: string }> = {
-  CRITICAL: { bg: '#fef2f2', border: '#fecaca', text: '#991b1b', badge: '#991b1b', top: '#991b1b' },
-  HIGH: { bg: '#fff7ed', border: '#fed7aa', text: '#c2410c', badge: '#dc2626', top: '#dc2626' },
-  MEDIUM: { bg: '#fefce8', border: '#fde047', text: '#a16207', badge: '#d97706', top: '#d97706' },
-  LOW: { bg: '#f0f9ff', border: '#bae6fd', text: '#0369a1', badge: '#0284c7', top: '#0284c7' },
-  UNKNOWN: { bg: '#f0f9ff', border: '#bae6fd', text: '#0369a1', badge: '#0284c7', top: '#0284c7' },
-};
-const severityPalette = (severity: string) => {
-  const pill = SEVERITY_PILL[String(severity).toUpperCase()] ?? SEVERITY_PILL.UNKNOWN;
-  return {
-    pill_bg: pill.bg,
-    pill_border: pill.border,
-    pill_text: pill.text,
-    badge_bg: pill.badge,
-    top_severity_color: pill.top,
-  };
-};
 
 export const AdvisoryTemplateView: React.FC = () => {
   const {
@@ -425,24 +396,14 @@ const handleInsertToken = (token: string) => {
               const remediation = finding.cve.remediation;
               return {
                 id: finding.cveId,
-                cve_id: finding.cveId,
-                ...severityPalette(severity),
-                // Mirror the server's `cves` contract exactly (see
-                // server/advisoryRender.ts): `source_url` is the older alias the
-                // shipped template still addresses, and without it the preview
-                // surfaced a literal `{{source_url}}` because this renderer runs
-                // with preserveUnknown. `is_low` covers LOW and UNKNOWN, matching
-                // the server's severity ladder so neither branch renders blank.
-                source_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(finding.cveId)}`,
                 url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(finding.cveId)}`,
                 nvd_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(finding.cveId)}`,
                 is_critical: severity === 'CRITICAL',
                 is_high: severity === 'HIGH',
                 is_medium: severity === 'MEDIUM',
-                is_low: severity === 'LOW' || severity === 'UNKNOWN',
                 cvss_score: typeof finding.cve.cvss.score === 'number' ? finding.cve.cvss.score.toFixed(1) : 'N/A',
-                vendor: displayName(finding.matchedAssetVendor) || 'Unavailable',
-                product: displayName(finding.matchedAssetProduct || finding.matchedAssetName) || 'Unavailable',
+                vendor: finding.matchedAssetVendor || 'Unavailable',
+                product: finding.matchedAssetProduct || finding.matchedAssetName || 'Unavailable',
                 description: escapeTemplateValue(finding.cve.description || 'No vendor description published.'),
                 affected_versions: versions || 'Confirm with vendor',
                 mitigations: [
@@ -454,16 +415,11 @@ const handleInsertToken = (token: string) => {
             })
           : previewAdvisory.cveIds.map((id) => ({
               id,
-              cve_id: id,
-              ...severityPalette(previewAdvisory.severity),
-              // Same contract as the findings branch above and the server.
-              source_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`,
               url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`,
               nvd_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`,
               is_critical: previewAdvisory.severity === 'CRITICAL',
               is_high: previewAdvisory.severity === 'HIGH',
               is_medium: previewAdvisory.severity === 'MEDIUM',
-              is_low: previewAdvisory.severity === 'LOW' || previewAdvisory.severity === 'UNKNOWN',
               cvss_score: 'N/A',
               vendor: 'Unavailable',
               product: 'Unavailable',
@@ -473,8 +429,6 @@ const handleInsertToken = (token: string) => {
             })))
       : [];
     const previewSeverity = previewAdvisory?.severity || 'UNKNOWN';
-    // Declared before `previewValues` because the per-CVE entries above read it.
-    const topSeverityColor = severityPalette(previewSeverity).top_severity_color;
     const previewCorrelationCount = previewFindings.length || previewAdvisory?.affectedSystems.length || 0;
     const previewModifiedDate = previewFindings
       .map((finding) => finding.cve.modifiedDate)
@@ -487,17 +441,6 @@ const handleInsertToken = (token: string) => {
         : `${previewCorrelationCount} current inventory correlations.`) +
         ` Top severity: ${previewSeverity}. Confirm applicability and consult the vendor before remediation.`;
 
-    // Severity badge colours mirror the server (server/advisoryRender.ts
-    // SEVERITY_COLORS) so severity badges are driven by criticality, never by
-    // the link colour setting. Declared before `previewValues` because the
-    // per-CVE vulnerability entries below read it.
-    const SEVERITY_COLORS: Record<string, string> = {
-      CRITICAL: '#dc2626',
-      HIGH: '#ea580c',
-      MEDIUM: '#ca8a04',
-      LOW: '#10b981',
-      UNKNOWN: '#6b7280',
-    };
     // Use the selected advisory, or the newest available advisory, so the
     // Studio preview shows production data instead of sample CVEs.
     const previewValues: Record<string, unknown> = {
@@ -509,40 +452,7 @@ const handleInsertToken = (token: string) => {
       is_top_critical: previewSeverity === 'CRITICAL',
       is_top_high: previewSeverity === 'HIGH',
       is_top_medium: previewSeverity === 'MEDIUM',
-      is_top_low: previewSeverity === 'LOW' || previewSeverity === 'UNKNOWN',
-      // The per-CVE list the server exposes as `vulnerabilities` (built in the
-      // same register as `cves`). Without it a template addressing `{{cve_id}}`
-      // inside a `vulnerabilities` loop rendered a blank cell, because the
-      // renderer blanks an unknown token exactly as the server does.
-      // Fall back to the advisory's CVE ids when its findings are not loaded,
-      // so the preview never renders an empty list where `cves` has entries.
-      vulnerabilities: (previewFindings.length
-        ? previewFindings
-        : (previewAdvisory?.cveIds ?? []).map((cveId) => ({
-            cveId,
-            cve: { cvss: { severity: previewSeverity, score: undefined }, description: '', publishedDate: '', modifiedDate: '' },
-          }))
-      ).map((finding: { cveId: string; cve: { cvss?: { severity?: string; score?: number }; description?: string; publishedDate?: string; modifiedDate?: string } }) => ({
-        cve_id: finding.cveId,
-        cve_url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(finding.cveId)}`,
-        severity: finding.cve.cvss?.severity || previewSeverity,
-        severity_color: SEVERITY_COLORS[String(finding.cve.cvss?.severity || previewSeverity)] ?? SEVERITY_COLORS.UNKNOWN,
-        cvss_score:
-          typeof finding.cve.cvss?.score === 'number' ? finding.cve.cvss.score.toFixed(1) : 'N/A',
-        description: finding.cve.description || '',
-        published_date: finding.cve.publishedDate
-          ? new Date(finding.cve.publishedDate).toLocaleDateString('en-GB')
-          : '',
-        last_modified_date: finding.cve.modifiedDate
-          ? new Date(finding.cve.modifiedDate).toLocaleDateString('en-GB')
-          : '',
-        product_metadata: '',
-        ...severityPalette(finding.cve.cvss?.severity || previewSeverity),
-      })),
       cve_count: previewAdvisory?.cveIds.length || 0,
-      // Accent strip + hero pill colour. The server supplies this from the worst
-      // severity; the preview must agree or the two documents differ in colour.
-      top_severity_color: topSeverityColor,
       published_date: previewAdvisory?.createdDate
         ? new Date(previewAdvisory.createdDate).toLocaleDateString('en-GB')
         : 'Unavailable',
@@ -565,19 +475,21 @@ const handleInsertToken = (token: string) => {
       tlp_classification: 'TLP:AMBER // INTERNAL',
     };
 
+    // Severity badge colours mirror the server (server/advisoryRender.ts
+    // SEVERITY_COLORS) so severity badges are driven by criticality, never by
+    // the link colour setting.
+    const SEVERITY_COLORS: Record<string, string> = {
+      CRITICAL: '#dc2626',
+      HIGH: '#ea580c',
+      MEDIUM: '#ca8a04',
+      LOW: '#10b981',
+      UNKNOWN: '#6b7280',
+    };
     const previewSeverityColor = SEVERITY_COLORS[String(previewValues.severity)] ?? SEVERITY_COLORS.UNKNOWN;
     const previewSeverityLabel = previewSeverity.charAt(0) + previewSeverity.slice(1).toLowerCase();
 
     let processed = (!hasExistingHeader ? headerBanner + html : html);
-    // Render exactly like the server does: an unknown token resolves to the
-    // empty string, never to its own literal text. With `preserveUnknown` the
-    // preview kept e.g. a bare `{{cve_id}}` (valid only inside
-    // `{{#each vulnerabilities}}`) while the delivered email silently dropped
-    // it, so the operator saw a token the recipient never would - and the
-    // send-test-email warning then blocked on a difference the server never
-    // produced. A genuinely unknown token is reported by the token audit below
-    // against the known-placeholder list instead.
-    processed = renderEmailTemplate(processed, previewValues);
+    processed = renderEmailTemplate(processed, previewValues, { preserveUnknown: true });
 
     return processed
       .replace(/{{severity}}/g, previewSeverity)
@@ -716,10 +628,7 @@ const handleInsertToken = (token: string) => {
     setSendingTest(true);
     try {
       const rendered = getRenderedHtml();
-      // Same token shape the renderer recognises, including triple-brace and
-      // mixed-case names, so a `{{{raw}}}` or `{{CVE_ID}}` left in the body is
-      // caught too rather than being emailed to the recipient as text.
-      const unrenderedTokens = rendered.match(/\{\{\{?\s*[^{}]+?\s*\}?\}\}/g);
+      const unrenderedTokens = rendered.match(/\{\{[a-z_]+\}\}/g);
       if (unrenderedTokens && unrenderedTokens.length > 0) {
         setTestResult({
           success: false,

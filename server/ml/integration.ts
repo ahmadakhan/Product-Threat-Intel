@@ -25,6 +25,7 @@ import { findingFeatures } from './findingFeatures.ts';
 import type { RemediationFeatures, RemediationPrediction } from './models/advisoryRemediationHelper.ts';
 import {
   EmailSummarizerModel,
+  extractiveSummaryText,
   type EmailSummaryFeatures,
   type EmailSummaryPrediction,
 } from './models/emailSummarizer.ts';
@@ -640,8 +641,8 @@ export function mlOrderFindingsByImportance(findings: Finding[]): Finding[] {
  * Takes the already-composed advisory text (executive summary + remediation
  * instructions + severity summary) and finding metadata, then produces a
  * condensed extractive summary suitable for email body previews, notification
- * digests, or mobile alerts. Falls back to rule-based truncation when the
- * summarizer model is untrained.
+ * digests, or mobile alerts. Uses evidence-ranked extractive selection while
+ * the summarizer model has no validated artifact.
  */
 export function mlSummarizeAdvisoryEmail(
   findings: Finding[],
@@ -716,9 +717,33 @@ export function mlSummarizeAdvisoryEmail(
     recipientCount: 1,
   };
 
+  const summarySeverity = buildSeverityLineInline(features);
+  const assetCount = new Set(findings.map((finding) => finding.matchedAssetName).filter(Boolean)).size;
+  const overview = `${total} finding${total === 1 ? '' : 's'} across ${assetCount} monitored asset${assetCount === 1 ? '' : 's'}: ${summarySeverity}.`;
+  const severityRank: Record<string, number> = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, UNKNOWN: 0 };
+  const exploitRank = (finding: Finding) => finding.cve.exploitStatus === 'Active Weaponized' ? 3
+    : finding.cve.exploitStatus === 'Reported In Wild' ? 2
+      : finding.cve.exploitStatus === 'POC Available' ? 1 : 0;
+  const priorityFinding = [...findings].sort((a, b) =>
+    Number(Boolean(b.cve.cisaKev?.isKev)) - Number(Boolean(a.cve.cisaKev?.isKev)) ||
+    exploitRank(b) - exploitRank(a) ||
+    (severityRank[b.cve.cvss.severity] ?? 0) - (severityRank[a.cve.cvss.severity] ?? 0) ||
+    (b.cve.cvss.score ?? 0) - (a.cve.cvss.score ?? 0) ||
+    a.cveId.localeCompare(b.cveId),
+  )[0];
+  const priorityLine = priorityFinding
+    ? `Highest priority: ${priorityFinding.cveId} is ${(priorityFinding.cve.cvss.severity || 'unknown').toLowerCase()}${typeof priorityFinding.cve.cvss.score === 'number' ? ` (CVSS ${priorityFinding.cve.cvss.score.toFixed(1)})` : ''} for ${priorityFinding.matchedAssetProduct || priorityFinding.matchedAssetName || 'an affected asset'}${priorityFinding.cve.cisaKev?.isKev ? '; listed in CISA KEV' : ''}${priorityFinding.cve.exploitStatus === 'Active Weaponized' ? '; active weaponized exploitation is reported' : priorityFinding.cve.exploitStatus === 'Reported In Wild' ? '; exploitation in the wild is reported' : priorityFinding.cve.exploitStatus === 'POC Available' ? '; a proof of concept is available' : ''}.`
+    : '';
+  const summaryInput = [
+    overview,
+    priorityLine,
+    advisoryText.trim(),
+    'Confirm affected versions and environment applicability, then follow current vendor guidance before remediation.',
+  ].filter(Boolean).join(' ');
+
   if (model?.isTrained()) {
     try {
-      const { text, prediction } = model.summarize(advisoryText, features);
+      const { text, prediction } = model.summarize(summaryInput, features);
       void logMlEvent('ml.email_summarize', 'Advisory summarized by ML', {
         summaryStyle: prediction.summaryStyle,
         summaryLength: prediction.summaryLength,
@@ -742,13 +767,10 @@ export function mlSummarizeAdvisoryEmail(
     }
   }
 
-  // Rule-based fallback: truncate advisory text to first N sentences.
-  const ruleSentences = advisoryText
-    .split(/(?<=[.!?])\s+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
-    .slice(0, 3);
-  const ruleSummary = ruleSentences.length ? ruleSentences.join(' ') : advisoryText.slice(0, 300);
+  // Keep useful output available while the supervised presentation model has
+  // no validated artifact. Rank extractive evidence instead of blindly
+  // truncating the opening sentences, and never generate unsupported claims.
+  const ruleSummary = extractiveSummaryText(summaryInput, 3) || advisoryText.slice(0, 300);
   const topSev = features.criticalCount > 0 ? 'Critical' : features.highCount > 0 ? 'High' : features.mediumCount > 0 ? 'Medium' : 'Low';
   void logMlEvent('ml.email_summarize.fallback', 'Advisory summarized by rule-based fallback', {
     findingCount: findings.length,

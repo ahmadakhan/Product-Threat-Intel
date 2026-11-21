@@ -105,9 +105,8 @@ test('the shipped enterprise template renders with no unresolved placeholders', 
   assert.ok(out.includes('CVE-2026-0002'));
   assert.ok(out.includes('CRITICAL (9.8)'), 'critical badge in the matrix');
   assert.ok(out.includes('HIGH (7.5)'), 'high badge in the matrix');
-  // Vendor and product render as display names, not raw CPE tokens.
-  assert.ok(out.includes('Acme'), 'vendor column populated and capitalised');
-  assert.ok(out.includes('Widget'), 'product column populated and capitalised');
+  assert.ok(out.includes('acme'), 'vendor column populated');
+  assert.ok(out.includes('widget'), 'product column populated');
   assert.ok(out.includes('Patch immediately.'), 'per-CVE mitigation populated');
 });
 

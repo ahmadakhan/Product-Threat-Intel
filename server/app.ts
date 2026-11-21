@@ -2017,7 +2017,8 @@ export function createApp(
           : null,
       };
     });
-    const feedbackWindowDays = 30;
+    // Report the same effective lookback used by the scheduled trainer.
+    const feedbackWindowDays = config.ML_LOOKBACK_DAYS;
     const feedbackRows = await pool.query<{ source: string; count: number }>(
       `SELECT COALESCE(context->>'source','unknown') AS source, count(*)::int AS count
        FROM operational_events
@@ -3123,11 +3124,30 @@ export function createApp(
       if (data.recipientMode === 'SINGLE_EMAIL' && !data.customEmail)
         throw new HttpError(400, 'A recipient email address is required for a single-recipient resend');
       await transaction(pool, async (db) => {
+        // Bug fix: this used to select without `status` or `FOR UPDATE`, unlike
+        // the sibling `/follow-up` route just above. A job that is still
+        // `REVIEW`/`QUEUED`/`SENDING` (e.g. a slow SMTP send, or one sitting in
+        // retry backoff) is not actually failed - the Action Center UI can be
+        // stale for up to its 30s auto-refresh window and still offer "Resend"
+        // on it. Resend always mints a brand-new advisory id and a fresh
+        // `randomUUID()` dispatch key (by design, so an intentional resend is
+        // never deduped away - see the comment on `advisoryRevision()`), so
+        // nothing in `enqueue`'s `ON CONFLICT(dedupe_key)` guard could catch
+        // this case either: an operator resending a job that was never
+        // actually dead queued a second, independent email job for the same
+        // recipients, and if the original then completed on its own the
+        // recipient got the same advisory twice. Lock the row and reject a
+        // resend of anything still in flight, exactly like `/follow-up` does.
         const row = await db.query(
-          `SELECT advisory_id, edits, payload FROM outbox WHERE id=$1 AND channel='email'`,
+          `SELECT advisory_id, edits, payload, status FROM outbox WHERE id=$1 AND channel='email' FOR UPDATE`,
           [id],
         );
         if (!row.rowCount) throw new HttpError(404, 'Email delivery not found');
+        if (['REVIEW', 'QUEUED', 'SENDING'].includes(String(row.rows[0].status)))
+          throw new HttpError(
+            409,
+            'This delivery is still queued or sending. Wait for it to finish, or cancel it before resending.',
+          );
         const advisoryId = row.rows[0].advisory_id;
         // Edits saved through the Action Center editor must travel with the
         // resend. Building new jobs from the original template silently threw

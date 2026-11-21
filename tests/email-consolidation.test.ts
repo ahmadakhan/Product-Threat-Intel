@@ -113,10 +113,7 @@ test('the email body is the document attached to it', () => {
   const view = deliveryAdvisoryView(advisory, findings);
   const generatedAt = new Date('2026-01-01T12:34:00Z');
   const document = renderFindingsDocument({ advisory: view, findings, generatedAt });
-  // The banner copy is styled in upper case in the shipped template; assert the
-  // text case-insensitively so a presentation change to the shipped document
-  // does not fail this attachment-fidelity check.
-  assert.match(document.html, /enterprise vulnerability notification/i);
+  assert.ok(document.html.includes('Enterprise Vulnerability Notification'));
   assert.match(document.html, /ADVISORY ID/);
   assert.equal(deliveryHtmlIsAttachable(document.html), true);
   // Re-rendering with the pinned instant is byte-identical: the attachment render

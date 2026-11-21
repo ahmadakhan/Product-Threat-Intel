@@ -206,11 +206,11 @@ export const MlOperationsView: React.FC = () => {
             icon: Clock3,
           },
           {
-            label: 'Training samples',
+            label: 'Feedback events',
             value: status
               ? String(Object.values(status.feedbackCounts).reduce((sum, count) => sum + count, 0))
               : '—',
-            detail: `Analyst-derived samples in the last ${status?.feedbackWindowDays ?? 30} days`,
+            detail: `Analyst feedback events in the last ${status?.feedbackWindowDays ?? 30} days`,
             icon: Database,
           },
         ].map((card) => {

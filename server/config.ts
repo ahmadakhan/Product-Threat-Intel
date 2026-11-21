@@ -275,7 +275,10 @@ const schema = z.object({
     (value) => (value === '' ? undefined : value),
     z.string().min(32, 'ML_SIGNING_KEY must contain at least 32 characters').optional(),
   ),
-  ML_LOOKBACK_DAYS: z.coerce.number().int().min(1).max(90).default(7),
+  // Keep the default aligned with the ML Operations feedback window. Labeled
+  // outcomes are sparse in normal operation, so a one-week window needlessly
+  // starves supervised models of otherwise valid recent history.
+  ML_LOOKBACK_DAYS: z.coerce.number().int().min(1).max(90).default(30),
   // Controls stdout verbosity for structured operational logs. 'standard' keeps
   // output to lifecycle and error events; 'verbose' adds per-tick detail for
   // pipeline, ingestion, delivery, and retention steps to aid troubleshooting.

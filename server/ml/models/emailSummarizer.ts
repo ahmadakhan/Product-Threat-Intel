@@ -11,8 +11,8 @@
  * All output is deterministic extractive text — sentences are scored and
  * selected from the input advisory, never free-form generated from untrusted
  * input. ML only selects summary style, length, key-action emphasis, and
- * subject template. Falls back to rule-based truncation when untrained —
- * zero risk of degrading summary quality.
+ * subject template. When untrained, deterministic evidence ranking still
+ * produces a useful summary without inventing claims.
  *
  * Summary targets:
  *   - summaryStyle     → URGENT | STANDARD | INFORMATIONAL  (classification)
@@ -23,8 +23,9 @@
  * Text is produced by extractive sentence selection (position + keyword +
  * length scoring), so output is always a verbatim subset of the input advisory.
  *
- * Training labels come from delivery outcomes: whether recipients opened,
- * clicked through to the full advisory, or dismissed as not actionable.
+ * A model artifact may learn presentation choices from validated labels. Until
+ * then, the shared extractive fallback preserves the overview and selects the
+ * most actionable evidence without inventing claims.
  */
 
 import { LogisticRegression } from '../algorithms/logisticRegression.ts';
@@ -165,7 +166,17 @@ function buildSeverityLine(features: EmailSummaryFeatures): string {
 /** Split advisory text into sentences, trimming whitespace. */
 function splitIntoSentences(text: string): string[] {
   return text
-    .split(/(?<=[.!?])\s+/)
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;|&#160;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/\s+/g, ' ')
+    // Keep decimal CVSS values intact; split at punctuation only when the
+    // following token looks like a new sentence.
+    .split(/(?<=[.!?])\s+(?=[A-Z0-9])/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 }
@@ -232,20 +243,34 @@ function scoreSentences(sentences: string[]): number[] {
   return scores;
 }
 
+/** Shared deterministic extractive fallback used without a validated artifact. */
+export function extractiveSummaryText(advisoryText: string, maxSentences = 3): string {
+  const sentences = splitIntoSentences(advisoryText);
+  if (!sentences.length) return '';
+  const scores = scoreSentences(sentences);
+  // Always keep the overview sentence, then choose the strongest evidence or
+  // mitigation sentences while preserving their original order.
+  const limit = Math.max(1, Math.min(4, Math.floor(maxSentences)));
+  const ranked = sentences
+    .map((sentence, index) => ({ sentence, index, score: scores[index] ?? 0 }))
+    .filter((entry) => entry.index !== 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, limit - 1)
+    .sort((a, b) => a.index - b.index);
+  return [sentences[0], ...ranked.map((entry) => entry.sentence)].join(' ');
+}
+
 /**
  * Select top sentences for the extractive summary, capped by target length.
  * Preserves original sentence order.
  */
 function selectSentences(
   sentences: string[],
-  scores: number[],
   targetLength: SummaryLength,
 ): string[] {
   const maxSentences = targetLength === 'SHORT' ? 2 : targetLength === 'MEDIUM' ? 3 : 4;
-  const indexed = scores.map((score, idx) => ({ score, idx, sentence: sentences[idx] }));
-  indexed.sort((a, b) => b.score - a.score || a.idx - b.idx);
-  const selected = indexed.slice(0, maxSentences).sort((a, b) => a.idx - b.idx);
-  return selected.map((entry) => entry.sentence);
+  const summary = extractiveSummaryText(sentences.join(' '), maxSentences);
+  return splitIntoSentences(summary);
 }
 
 export class EmailSummarizerModel extends BaseModel {
@@ -390,8 +415,7 @@ export class EmailSummarizerModel extends BaseModel {
     const subjectTemplate = SUBJECT_TEMPLATES[Math.max(0, Math.min(subjectIdx, SUBJECT_TEMPLATES.length - 1))];
 
     const sentences = splitIntoSentences(advisoryText);
-    const scores = scoreSentences(sentences);
-    const selected = selectSentences(sentences, scores, summaryLength);
+    const selected = selectSentences(sentences, summaryLength);
 
     let summary = selected.join(' ');
     if (!summary && sentences.length > 0) {

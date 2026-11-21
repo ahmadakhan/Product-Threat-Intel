@@ -162,12 +162,26 @@ export class CorrelationRuntime {
     } catch {
       // Metrics on a missing column (pre-032 database) must not block draining.
     }
-    // The maintenance clock advanced even when the run failed, so a failing
-    // sweep (for example a lock timeout while the table is being vacuumed) was
-    // not retried for a full minute while its errors filled the log. Back off
-    // for the full interval only after success; retry sooner after a failure,
-    // bounded so a broken sweep cannot spin.
-    if (Date.now() - this.lastMaintenanceAttempt >= 60_000 || Date.now() - this.lastMaintenance >= 10_000) {
+    // Back off for the full interval only after success; retry sooner after a
+    // failure, bounded so a broken sweep cannot spin.
+    //
+    // Bug fix: this used to be `now - lastMaintenanceAttempt >= 60_000 || now -
+    // lastMaintenance >= 10_000`. `lastMaintenance` only advances on SUCCESS,
+    // so once a sweep starts failing it stops advancing altogether, and "now -
+    // lastMaintenance >= 10_000" becomes true on every tick for the rest of the
+    // outage (the drain loop runs every 1000ms) rather than once every 10s -
+    // the opposite of "bounded so a broken sweep cannot spin". It hammered the
+    // database with a retry roughly once a second for as long as the failure
+    // persisted, piling extra load onto whatever (e.g. a lock timeout during a
+    // VACUUM) was already causing the failure.
+    //
+    // Fix: pick ONE floor per tick, based on whether the last attempt actually
+    // succeeded - 60s after a success, 10s after a failure - and gate on the
+    // time since the last attempt either way, so retries are throttled no
+    // matter which branch applies.
+    const failingSweep = this.lastMaintenanceAttempt > this.lastMaintenance;
+    const maintenanceFloorMs = failingSweep ? 10_000 : 60_000;
+    if (Date.now() - this.lastMaintenanceAttempt >= maintenanceFloorMs) {
       this.lastMaintenanceAttempt = Date.now();
       const retained = await transaction(this.pool, (db) => retainCorrelationData(db)).then(
         () => true,

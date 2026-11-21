@@ -1289,14 +1289,23 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
               consecutiveFailures: 0,
               circuitOpenUntil: null,
             });
-            // Feed completeness verification: if the source returned items but
-            // none appear in the pipeline corpus, the feed may be silently
-            // dropping records. Flag it for operator review.
-            if (
-              result.count > 0 &&
-              !result.notModified &&
-              results.some((r) => r.sourceId === feed.id && r.count === 0)
-            ) {
+            // Feed completeness verification: if the source reports items but
+            // none of them actually survived into this feed's own result
+            // (cves + articles), the feed may be silently dropping records.
+            // Flag it for operator review.
+            //
+            // Bug fix: this used to search `results` for a *second* entry with
+            // the same `sourceId` and a zero count. `ingestSources` runs each
+            // feed id at most once per invocation (and the primary/EPSS
+            // invocations touch disjoint feed sets), and the only entry ever
+            // pushed for this feed id is the one added immediately above with
+            // this exact `result.count` — which the surrounding guard already
+            // requires to be greater than zero. No second, zero-count entry
+            // for the same id can ever exist, so the check could never fire.
+            // The actual signal is a mismatch between what the provider
+            // reported and what this feed itself produced.
+            const producedCount = result.cves.length + (result.articles?.length ?? 0);
+            if (result.count > 0 && !result.notModified && producedCount === 0) {
               pushExecutionLog(execution!, `Feed ${feed.id}: returned ${result.count} items but zero CVEs entered the pipeline — possible ingestion filter issue`);
               await writeEvent(pool, {
                 category: 'FEED',
@@ -1856,10 +1865,28 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           context: { cveId: cve.cveId, title: cve.title },
         }).catch(() => undefined);
       }
-      // Persist the CPE-changed set so the next run can re-evaluate even if
+      // Persist the CPE-changed set so a later run can re-evaluate even if
       // this run's scopeHours window excludes them.
+      //
+      // Bug fix: the backlog MUST be read before it is overwritten. `db` is
+      // the single connection/transaction for this whole commit phase, so a
+      // `put` here followed by a `get` of the same key further below (as this
+      // code used to do) only ever observes what THIS run just wrote
+      // (read-your-own-writes) — it can never see what a previous run left
+      // behind. That silently discarded any CVE a prior run had queued for
+      // re-evaluation but that still had not matched an asset, defeating the
+      // "next run can re-evaluate" guarantee this comment describes. Reading
+      // first and persisting the union (the same pattern already used for
+      // `correlation-deferred-binds` just below) is what actually carries the
+      // backlog forward across runs.
+      const previousCpeChangedState = await get<{ cveIds: string[] }>(
+        db,
+        'systemState',
+        'cpe-changed-cves',
+      ).catch(() => undefined);
+      const cpeChangedBacklog = new Set([...(previousCpeChangedState?.cveIds ?? []), ...cpeChangedCveIdsSet]);
       await put(db, 'systemState', 'cpe-changed-cves', {
-        cveIds: [...cpeChangedCveIdsSet],
+        cveIds: [...cpeChangedBacklog],
         updatedAt: new Date().toISOString(),
       });
       // Bind published CVEs to their pre-CVE clusters so early-intelligence
@@ -1968,13 +1995,13 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       // data may now match assets that previously had no CPE data. The matching
       // engine still applies scopeHours to the run, but these CVEs are always
       // eligible for re-correlation.
-      const cpeChangedState = await get<{ cveIds: string[] }>(
-        db,
-        'systemState',
-        'cpe-changed-cves',
-      ).catch(() => undefined);
-      // Combine previously persisted CPE changes with any detected in this run.
-      const cpeChangedCveIds = new Set([...(cpeChangedState?.cveIds ?? []), ...cpeChangedCveIdsSet]);
+      //
+      // `cpeChangedBacklog` already IS the union of whatever was persisted by
+      // earlier runs plus what this run just detected (computed above, before
+      // the backlog was overwritten) — re-reading the key here would only
+      // return the value this same transaction already wrote, not add
+      // anything new.
+      const cpeChangedCveIds = cpeChangedBacklog;
       const cpeChangedCves = finalCves.filter((cve) => cpeChangedCveIds.has(cve.cveId));
       if (cpeChangedCves.length > 0) {
         execution!.logs.push(
