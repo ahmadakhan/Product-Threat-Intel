@@ -69,7 +69,7 @@
             <td class="pad" style="padding:14px 28px;background-color:#eaf2f7;border-bottom:1px solid #dbe3ec;">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
                 <tr>
-                  <td class="stack" width="25%" valign="top" style="width:25%;padding-right:8px;font-size:11px;line-height:16px;color:#526477;"><strong style="display:block;color:#172033;">ADVISORY ID</strong>{{advisory_id}}</td>
+                  <td class="stack" width="25%" valign="top" style="width:25%;padding-right:8px;font-size:11px;line-height:16px;color:#526477;word-break:break-word;overflow-wrap:anywhere;"><strong style="display:block;color:#172033;">ADVISORY ID</strong>{{advisory_id}}</td>
                   <td class="stack stack-gap" width="25%" valign="top" style="width:25%;padding-right:8px;font-size:11px;line-height:16px;color:#526477;"><strong style="display:block;color:#172033;">PUBLISHED</strong>{{published_date}}</td>
                   <td class="stack stack-gap" width="25%" valign="top" style="width:25%;padding-right:8px;font-size:11px;line-height:16px;color:#526477;"><strong style="display:block;color:#172033;">LAST MODIFIED</strong>{{updated_date}}</td>
                   <td class="stack stack-gap" width="25%" valign="top" style="width:25%;font-size:11px;line-height:16px;color:#526477;"><strong style="display:block;color:#172033;">INVENTORY STATUS</strong>{{inventory_status}}</td>
@@ -117,7 +117,7 @@
               <tr><td style="padding:8px 14px 0;font-size:12px;line-height:18px;mso-line-height-rule: at-least;color:#344256;word-break:break-word;"><strong>Affected Versions:</strong> {{affected_versions}} &nbsp;|&nbsp; <a href="{{nvd_url}}" style="color:#075985;text-decoration:underline;">NVD Source &#8599;</a></td></tr>
               <tr><td style="padding:11px 14px 0;font-size:12px;line-height:18px;font-weight:bold;color:#172033;">Required Actions &amp; Mitigation</td></tr>
               <tr><td style="padding:4px 14px 13px;font-size:12px;line-height:19px;mso-line-height-rule: at-least;color:#344256;">
-                {{#each mitigations}}<div style="padding-top:4px;">&#8226;&nbsp; {{{this}}}</div>{{/each}}
+                {{#if mitigations}}{{#each mitigations}}<div style="padding-top:4px;">&#8226;&nbsp; {{{this}}}</div>{{/each}}{{else}}<div style="padding-top:4px;">&#8226;&nbsp; Apply vendor-supplied updates through your change control process.</div><div style="padding-top:4px;">&#8226;&nbsp; Validate affected versions against current inventory before remediation.</div><div style="padding-top:4px;">&#8226;&nbsp; Confirm applicability and consult the vendor before deploying.</div>{{/if}}
               </td></tr>
             </table>
             {{/each}}

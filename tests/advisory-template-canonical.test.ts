@@ -39,6 +39,7 @@ test('the canonical document declares exactly the expected placeholder set', () 
     '{{#if is_top_critical}}',
     '{{#if is_top_high}}',
     '{{#if is_top_medium}}',
+    '{{#if mitigations}}',
     '{{#if tlp_classification}}',
     '{{/each}}',
     '{{/if}}',
