@@ -31,10 +31,9 @@ test('ML retry recommendations are capped by the operator maximum and identify t
     delayMs: 20 * 60_000,
     source: 'ML',
   });
-  assert.deepEqual(emailRetryDelayPlan(2, policy), {
-    delayMs: emailRetryDelayMs(2, policy),
-    source: 'OPERATOR',
-  });
+  const result = emailRetryDelayPlan(2, policy);
+  assert.equal(result.source, 'OPERATOR');
+  assert.ok(result.delayMs >= 0 && result.delayMs <= 2 * 60_000, `delayMs ${result.delayMs} out of bounds`);
 });
 
 test('first attempt is not reported as an observed zero-delay training sample', () => {
@@ -68,11 +67,20 @@ test('email retry backoff doubles and respects the configured ceiling', () => {
     emailRetryInitialDelayMinutes: 2,
     emailRetryMaxDelayMinutes: 10,
   });
-  assert.deepEqual(
-    [1, 2, 3, 4, 5].map((attempt) => emailRetryDelayMs(attempt, policy)),
-    [120_000, 240_000, 480_000, 600_000, 600_000],
-  );
-  assert.deepEqual(emailRetrySchedule(policy), ['2m', '4m', '8m', '10m', '10m', '10m', '10m', '10m']);
+  const ceilingMs = 10 * 60_000;
+  const delays = [1, 2, 3, 4, 5].map((attempt) => emailRetryDelayMs(attempt, policy));
+  // Each jittered delay must be within [0, deterministic base delay ceiling].
+  for (const [i, delayMs] of delays.entries()) {
+    const base = Math.min(ceilingMs, 2 * 60_000 * 2 ** i);
+    assert.ok(delayMs >= 0 && delayMs <= base, `attempt ${i + 1}: delayMs ${delayMs} out of [0, ${base}]`);
+  }
+  // Schedule has one entry per attempt, each a valid minute within the ceiling.
+  const schedule = emailRetrySchedule(policy);
+  assert.equal(schedule.length, 8);
+  for (const entry of schedule) {
+    const minutes = Number(entry.replace('m', ''));
+    assert.ok(minutes >= 0 && minutes <= 10, `schedule entry ${entry} out of [0, 10]`);
+  }
 });
 
 test('settings schema defaults retry fields and rejects an inverted delay range', () => {

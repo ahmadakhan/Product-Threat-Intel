@@ -91,6 +91,24 @@ import { HttpError } from './validation';
 import { advisoryEmail } from './advisoryEmail';
 import { currentAdvisoryView, currentAdvisoryBody } from './advisoryRebuild';
 export { renderAdvisory } from './advisoryRender';
+
+/**
+ * Input captured inside the commit transaction so delivery queueing can run
+ * post-commit without holding the pipeline-queue advisory lock. All fields are
+ * snapshotted inside the transaction; the post-commit step reads them here.
+ */
+interface PostCommitDeliveryInput {
+  rateLimitedMatches: IntelligenceMatch[];
+  articles: IntelligenceArticle[];
+  snapshot: Awaited<ReturnType<typeof pipelineState>>;
+  settings: AppSettings;
+  dispatchFindings: Finding[];
+  zeroDayDigestNotificationsQueued: number;
+  executionId: string;
+  queueStarted: number;
+}
+
+let postCommitDelivery: PostCommitDeliveryInput | undefined;
 /**
  * Rebuilds a queued job's stored payload from current intelligence.
  *
@@ -388,6 +406,13 @@ function cveClusterIdentities(cve: NormalizedCVE): { vendor: string; product: st
 
 /** Bounded retries for a pre-CVE disposition bind that lost its lock race. */
 const DEFERRED_BIND_MAX_ATTEMPTS = 5;
+
+/**
+ * Backoff (ms) between pipeline lock-loss recovery requeues. Grows linearly
+ * with the recovery attempt so a repeatedly-flaky worker stops thrashing the
+ * pool and the advisory lock.
+ */
+const recoveryBackoffMs = (attempt: number) => attempt * 30_000;
 
 export async function queueRun(
   pool: pg.Pool,
@@ -1241,6 +1266,11 @@ export async function processPipeline(
     }
     await pool.query('UPDATE scheduler_state SET heartbeat=now() WHERE id=1');
     if (!execution) return false;
+    if (execution.stats?.recoveryBackoffUntil && execution.stats.recoveryBackoffUntil > Date.now()) {
+      // Lock-loss recovery backoff not yet expired. Leave it QUEUED; the next
+      // scheduler tick will retry once the cooldown has elapsed.
+      return false;
+    }
     const checkpoint = async (db: pg.Pool | pg.PoolClient = pool) => {
       signal?.throwIfAborted();
       if (connectionLost) throw new Error('Pipeline worker lost its database lock connection');
@@ -2817,91 +2847,28 @@ export async function processPipeline(
         advisoriesQueued = 0,
         newsNotificationsQueued = 0,
         newsArticlesQueued = 0;
+      // Snapshot all data needed for post-commit delivery queueing so the
+      // pipeline-queue advisory lock can be released before delivery enqueues.
+      postCommitDelivery = {
+        rateLimitedMatches,
+        articles,
+        snapshot,
+        settings,
+        dispatchFindings,
+        zeroDayDigestNotificationsQueued,
+        executionId: execution!.id,
+        queueStarted,
+      };
       // Security news is consolidated into ONE email per recipient per run, and an
       // article already delivered to a recipient is never delivered again. The
       // per-match queue could not guarantee that: the matcher re-keys a match on
       // `hash(cveId || articleId)`, so the same story produced new rows (and new
       // emails) whenever it was re-correlated or syndicated through another feed.
-      if (rateLimitedMatches.length) {
-        const securityRecipients = await loadNewsRecipients(db);
-        if (securityRecipients.length) {
-          const articleMap = new Map(
-            articles.map((article) => [article.id, article] as [string, IntelligenceArticle]),
-          );
-          const news = await queueConsolidatedNews(db, rateLimitedMatches, articleMap, securityRecipients, {
-            // News findings are delivered in the News Template Studio document,
-            // not a hard-coded body: the saved studio template applies to every
-            // consolidated news email from this run onward.
-            template: {
-              customization: snapshot.newsDigestCustomization,
-              customTemplate: snapshot.newsDigestCustomTemplate,
-              timezone: settings.timezone,
-            },
-            enqueue: async (input) =>
-              enqueue(
-                input.db,
-                'email',
-                input.recipient.id,
-                input.advisoryId,
-                {
-                  subject: input.subject,
-                  text: input.text,
-                  html: input.html,
-                  cveIds: input.cveIds,
-                  newsEvidence: {
-                    matchId: input.articles.flatMap((item) => item.matchIds).sort()[0] || input.advisoryId,
-                    article: {
-                      id: input.articles[0].article.id,
-                      title: input.articles[0].article.title,
-                      url: input.articles[0].article.url,
-                      sourceFeeds: [...input.articles[0].article.sourceFeeds],
-                      publishedDate: input.articles[0].article.publishedDate,
-                    },
-                    articles: input.articles.map((item) => ({
-                      id: item.article.id,
-                      title: item.article.title,
-                      url: item.article.url,
-                      sourceFeeds: [...item.article.sourceFeeds],
-                      publishedDate: item.article.publishedDate,
-                    })),
-                    assets: [...new Set(input.articles.flatMap((item) => item.assets))].sort(),
-                    asset: {
-                      name: input.articles.flatMap((item) => item.assets).sort()[0] || 'unknown asset',
-                    },
-                    cveIds: input.cveIds,
-                    evidence: input.articles.flatMap((item) => item.evidence).join(' | '),
-                    zeroDay: input.articles.some((item) => item.zeroDay),
-                    credibilityScore: input.articles.reduce<number | undefined>(
-                      (best, item) =>
-                        typeof item.credibilityScore === 'number'
-                          ? Math.max(best ?? 0, item.credibilityScore)
-                          : best,
-                      undefined,
-                    ),
-                  },
-                  contentRevision: input.contentRevision,
-                  recipientEmail: input.recipient.email,
-                },
-                `${input.identity}:email:${input.recipient.id}`,
-                'QUEUED',
-              ),
-          });
-          newsNotificationsQueued += news.emailsQueued;
-          newsArticlesQueued += news.articlesIncluded;
-          await writeEvent(db, {
-            category: 'MATCHING',
-            code: 'matching.news_dispatched',
-            message: 'Consolidated security-news email dispatched to the security team',
-            runId: execution!.id,
-            context: {
-              matches: rateLimitedMatches.length,
-              recipientsNotified: news.emailsQueued,
-              articlesIncluded: news.articlesIncluded,
-              articlesAlreadySent: news.articlesSuppressed,
-            },
-          });
-        }
-      }
+      // Security news and finding delivery are queued POST-COMMIT (below), after
+      // this transaction releases the pipeline-queue advisory lock. This keeps
+      // advisory-lock hold time bounded to correlation work: delivery enqueue
+      // failures cannot roll back correlation results or extend lock hold time.
+      // Delivery results are merged into the execution record post-commit.
       // Include limited-confidence findings in the SAME recipient email as
       // confirmed findings. The renderer explains the confidence and its reason.
       //
@@ -2915,29 +2882,9 @@ export async function processPipeline(
       // The input is the zero-day-capped set, not the raw persisted set: a finding
       // withheld by the cap is delivered through its digest and must never also
       // be queued for individual delivery.
-      const pending = dispatchFindings.filter(
-        (f) =>
-          // Status and advisoryId are global bookkeeping. A DELIVERED finding
-          // can still be new to a recipient added later. Only a recipient's
-          // durable delivery claim determines whether that mailbox is notified.
-          !f.dispatchDeferred &&
-          !['NOT_APPLICABLE', 'SUPPRESSED_VEX_NOT_AFFECTED', 'SECURITY_REJECTED', 'REVIEW_REQUIRED'].includes(
-            f.notificationStatus,
-          ) &&
-          !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(f.status),
-      );
-      // ML-guided finding order: use the trained importance ranker when
-      // available, falling back to the natural (severity) order.
-      const mlOrdered = mlOrderFindingsByImportance(pending);
-      pending.length = 0;
-      pending.push(...mlOrdered);
-      // Never gate findings on operator review or split the recipient's batch
-      // by confidence, severity tier, or an arbitrary page size.
-      // Subscription filtering happens inside the consolidated queue.
-      if (pending.length) {
-        notificationsQueued += await queueConsolidatedFindingNotifications(db, pending);
-        advisoriesQueued = notificationsQueued ? 1 : 0;
-      }
+      // Finding delivery is queued POST-COMMIT (below). The pending set below
+      // is reconstructed post-commit with the same filter logic so delivery
+      // enqueue failures cannot roll back correlation results.
       const zeroDayLog = zeroDayDigestNotificationsQueued
         ? `; ${zeroDayDigestNotificationsQueued} zero-day digest notifications queued`
         : '';
@@ -2987,9 +2934,9 @@ export async function processPipeline(
           },
           {
             name: 'Delivery queue',
-            status: 'SUCCESS',
+            status: 'PENDING',
             durationMs: Date.now() - queueStarted,
-            details: `${notificationsQueued} jobs queued${newsNotificationsQueued ? `; ${newsNotificationsQueued} consolidated news emails queued (${newsArticlesQueued} articles)` : ''}${zeroDayLog}; transport acceptance is tracked separately`,
+            details: `Queued post-commit; zero-day digests: ${zeroDayDigestNotificationsQueued}`,
           },
         ],
       };
@@ -3037,17 +2984,191 @@ export async function processPipeline(
         execution.status === 'FAILED' ? 'ERROR' : undefined,
       );
     });
+    // Post-commit delivery queueing: no pipeline-queue advisory lock is held,
+    // so delivery enqueue failures cannot roll back correlation work or extend
+    // advisory-lock hold time. Delivery results are merged into the execution
+    // record below.
+    try {
+      let notificationsQueued = 0;
+      let advisoriesQueued = 0;
+      let newsNotificationsQueued = 0;
+      let newsArticlesQueued = 0;
+
+      const delivery = await transaction(pool, async (db) => {
+        const {
+          rateLimitedMatches,
+          articles,
+          snapshot,
+          settings,
+          dispatchFindings,
+          zeroDayDigestNotificationsQueued,
+          executionId,
+          queueStarted,
+        } = postCommitDelivery!;
+
+        // Security news consolidation
+        if (rateLimitedMatches.length) {
+          const securityRecipients = await loadNewsRecipients(db);
+          if (securityRecipients.length) {
+            const articleMap = new Map(
+              articles.map((article) => [article.id, article] as [string, IntelligenceArticle]),
+            );
+            const news = await queueConsolidatedNews(db, rateLimitedMatches, articleMap, securityRecipients, {
+              template: {
+                customization: snapshot.newsDigestCustomization,
+                customTemplate: snapshot.newsDigestCustomTemplate,
+                timezone: settings.timezone,
+              },
+              enqueue: async (input) =>
+                enqueue(
+                  input.db,
+                  'email',
+                  input.recipient.id,
+                  input.advisoryId,
+                  {
+                    subject: input.subject,
+                    text: input.text,
+                    html: input.html,
+                    cveIds: input.cveIds,
+                    newsEvidence: {
+                      matchId: input.articles.flatMap((item) => item.matchIds).sort()[0] || input.advisoryId,
+                      article: {
+                        id: input.articles[0].article.id,
+                        title: input.articles[0].article.title,
+                        url: input.articles[0].article.url,
+                        sourceFeeds: [...input.articles[0].article.sourceFeeds],
+                        publishedDate: input.articles[0].article.publishedDate,
+                      },
+                      articles: input.articles.map((item) => ({
+                        id: item.article.id,
+                        title: item.article.title,
+                        url: item.article.url,
+                        sourceFeeds: [...item.article.sourceFeeds],
+                        publishedDate: item.article.publishedDate,
+                      })),
+                      assets: [...new Set(input.articles.flatMap((item) => item.assets))].sort(),
+                      asset: {
+                        name: input.articles.flatMap((item) => item.assets).sort()[0] || 'unknown asset',
+                      },
+                      cveIds: input.cveIds,
+                      evidence: input.articles.flatMap((item) => item.evidence).join(' | '),
+                      zeroDay: input.articles.some((item) => item.zeroDay),
+                      credibilityScore: input.articles.reduce<number | undefined>(
+                        (best, item) =>
+                          typeof item.credibilityScore === 'number'
+                            ? Math.max(best ?? 0, item.credibilityScore)
+                            : best,
+                        undefined,
+                      ),
+                    },
+                    contentRevision: input.contentRevision,
+                    recipientEmail: input.recipient.email,
+                  },
+                  `${input.identity}:email:${input.recipient.id}`,
+                  'QUEUED',
+                ),
+            });
+            newsNotificationsQueued += news.emailsQueued;
+            newsArticlesQueued += news.articlesIncluded;
+            await writeEvent(db, {
+              category: 'MATCHING',
+              code: 'matching.news_dispatched',
+              message: 'Consolidated security-news email dispatched to the security team',
+              runId: execution!.id,
+              context: {
+                matches: rateLimitedMatches.length,
+                recipientsNotified: news.emailsQueued,
+                articlesIncluded: news.articlesIncluded,
+              },
+            }).catch(() => undefined);
+          }
+        }
+
+        // Finding notifications
+        const pending = dispatchFindings.filter(
+          (f) =>
+            !f.dispatchDeferred &&
+            !['NOT_APPLICABLE', 'SUPPRESSED_VEX_NOT_AFFECTED', 'SECURITY_REJECTED', 'REVIEW_REQUIRED'].includes(
+              f.notificationStatus,
+            ) &&
+            !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(f.status),
+        );
+        const mlOrdered = mlOrderFindingsByImportance(pending);
+        pending.length = 0;
+        pending.push(...mlOrdered);
+        if (pending.length) {
+          notificationsQueued += await queueConsolidatedFindingNotifications(db, pending);
+          advisoriesQueued = notificationsQueued ? 1 : 0;
+        }
+
+        return {
+          notificationsQueued,
+          advisoriesQueued,
+          newsNotificationsQueued,
+          newsArticlesQueued,
+          zeroDayDigestNotificationsQueued,
+          queueStarted,
+        };
+      });
+
+      notificationsQueued = delivery.notificationsQueued;
+      advisoriesQueued = delivery.advisoriesQueued;
+      newsNotificationsQueued = delivery.newsNotificationsQueued;
+      newsArticlesQueued = delivery.newsArticlesQueued;
+      const { zeroDayDigestNotificationsQueued, queueStarted } = delivery;
+
+      // Merge delivery results into the persisted execution record.
+      await transaction(pool, async (db) => {
+        const current = await get<PipelineExecution>(db, 'executions', execution!.id);
+        if (!current) return;
+        current.stats = {
+          ...current.stats,
+          notificationsQueued,
+          advisoriesQueued,
+          newsNotificationsQueued,
+          zeroDayDigestNotificationsQueued,
+        };
+        current.logs = boundExecutionLogs([
+          ...current.logs.filter((l) => !l.startsWith('Delivery queue:')),
+          `Delivery queue: ${notificationsQueued} jobs queued${newsNotificationsQueued ? `; ${newsNotificationsQueued} consolidated news emails queued` : ''}${zeroDayDigestNotificationsQueued ? `; ${zeroDayDigestNotificationsQueued} zero-day digest notifications queued` : ''}`,
+        ]);
+        current.phases = current.phases.map((phase) =>
+          phase.name === 'Delivery queue'
+            ? {
+                ...phase,
+                status: 'SUCCESS',
+                durationMs: Date.now() - queueStarted,
+                details: `${notificationsQueued} jobs queued${newsNotificationsQueued ? `; ${newsNotificationsQueued} consolidated news emails queued (${newsArticlesQueued} articles)` : ''}${zeroDayDigestNotificationsQueued ? `; ${zeroDayDigestNotificationsQueued} zero-day digest notifications queued` : ''}; transport acceptance is tracked separately`,
+              }
+            : phase,
+        );
+        await put(db, 'executions', execution!.id, current);
+      });
+    } catch (error) {
+      // Delivery queueing failures are non-fatal: correlation work is committed.
+      const reason = error instanceof Error ? error.message : String(error);
+      execution!.logs.push(`Delivery queueing failed: ${reason}`);
+      pendingOperatorAlerts.push({
+        incident: 'delivery-queue-failed',
+        subject: 'Delivery queueing failed',
+        text: `Delivery queueing failed for run ${execution!.id}: ${reason}`,
+      });
+    }
     // The run is durably committed. Only now may a fault it detected be mailed:
     // an alert sent before the commit would report a failure that a rollback
     // then erased. Alerting is best-effort and cannot fail the run.
     for (const alert of pendingOperatorAlerts) {
-      await queueOperatorAlert(pool, {
-        component: 'PIPELINE',
-        incident: alert.incident,
-        subject: alert.subject,
-        text: alert.text,
-        cooldownMinutes: 30,
-      });
+      try {
+        await queueOperatorAlert(pool, {
+          component: 'PIPELINE',
+          incident: alert.incident,
+          subject: alert.subject,
+          text: alert.text,
+          cooldownMinutes: 30,
+        });
+      } catch {
+        // Best-effort alerting: one failed alert must not suppress subsequent alerts.
+      }
     }
     return true;
   } catch (e) {
@@ -3105,7 +3226,11 @@ export async function processPipeline(
                 ? { ...phase, status: 'FAILED' as const }
                 : phase,
             ),
-            stats: { ...current.stats, recoveryAttempts: nextAttempt },
+          stats: {
+            ...current.stats,
+            recoveryAttempts: nextAttempt,
+            recoveryBackoffUntil: Date.now() + recoveryBackoffMs(nextAttempt),
+          },
             logs: boundExecutionLogs([
               ...new Set([
                 ...current.logs,
@@ -3143,7 +3268,11 @@ export async function processPipeline(
           // budget the crash path uses, so a genuinely broken worker still
           // parks the run instead of looping forever.
           status: 'QUEUED',
-          stats: { ...current.stats, recoveryAttempts: nextAttempt },
+          stats: {
+            ...current.stats,
+            recoveryAttempts: nextAttempt,
+            recoveryBackoffUntil: Date.now() + recoveryBackoffMs(nextAttempt),
+          },
           phases: current.phases.map((phase) =>
             phase.status === 'RUNNING' ? { ...phase, status: 'PENDING' } : phase,
           ),

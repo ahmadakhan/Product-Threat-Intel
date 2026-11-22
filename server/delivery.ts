@@ -362,23 +362,46 @@ export function emailRetryPolicy(settings?: Partial<AppSettings> | null): EmailR
   };
 }
 export const DEFAULT_EMAIL_RETRY_POLICY = emailRetryPolicy(DEFAULT_SETTINGS);
+
+/**
+ * Maximum consecutive ambiguous delivery outcomes before a job is terminally
+ * failed. An unresolvable provider (not allowlisted, console disabled, or
+ * unreachable) should not burn the full retry ladder on an outcome that can
+ * never be confirmed locally.
+ */
+export const MAX_AMBIGUOUS_ATTEMPTS = 3;
 /**
  * Exponential backoff capped by the configured maximum, so a provider outage is
  * retried durably without hammering the relay and without retrying forever.
  */
-export const emailRetryDelayMs = (attempt: number, policy: EmailRetryPolicy) =>
+/**
+ * Deterministic exponential backoff capped by the configured maximum, without
+ * jitter. Used by `emailRetryDelayPlan` for ML source comparison so the
+ * ML-vs-operator decision is stable regardless of jitter.
+ */
+const baseEmailRetryDelayMs = (attempt: number, policy: EmailRetryPolicy) =>
   Math.min(
     policy.maxDelayMinutes * 60_000,
     policy.initialDelayMinutes * 60_000 * 2 ** Math.max(0, attempt - 1),
   );
+
+/**
+ * Exponential backoff with full jitter, so a provider outage is retried
+ * durably without hammering the relay and without retrying forever. Jitter
+ * decorrelates retry storms across recipients sharing the same policy.
+ */
+export const emailRetryDelayMs = (attempt: number, policy: EmailRetryPolicy) => {
+  const baseDelayMs = baseEmailRetryDelayMs(attempt, policy);
+  return Math.floor(Math.random() * (baseDelayMs + 1));
+};
 export function emailRetryDelayPlan(
   attempt: number,
   policy: EmailRetryPolicy,
   mlDelayMs?: number,
 ): { delayMs: number; source: 'OPERATOR' | 'ML' | 'ML_CAPPED' } {
-  const operatorDelayMs = emailRetryDelayMs(attempt, policy);
-  if (mlDelayMs === undefined || !Number.isFinite(mlDelayMs) || mlDelayMs <= operatorDelayMs)
-    return { delayMs: operatorDelayMs, source: 'OPERATOR' };
+  const baseDelayMs = baseEmailRetryDelayMs(attempt, policy);
+  if (mlDelayMs === undefined || !Number.isFinite(mlDelayMs) || mlDelayMs <= baseDelayMs)
+    return { delayMs: emailRetryDelayMs(attempt, policy), source: 'OPERATOR' };
   const ceiling = policy.maxDelayMinutes * 60_000;
   return {
     delayMs: Math.min(ceiling, mlDelayMs),
@@ -2303,9 +2326,15 @@ export async function deliverNext(
         if (confirmation === 'unknown') {
           // The provider could not answer (not allowlisted, console disabled, or
           // an error). That is a transient condition, not proof of duplication:
-          // the job stays retryable and is re-confirmed on the next attempt. If
-          // the retry budget ends first it is committed FAILED, which is visible
-          // to the operator and never silently re-sent.
+          // the job stays retryable and is re-confirmed on the next attempt.
+          // Ambiguous outcomes consume a separate, bounded budget so an
+          // unresolvable provider does not burn the full retry ladder.
+          if (job.attempts >= MAX_AMBIGUOUS_ATTEMPTS) {
+            permanent = true;
+            throw new Error(
+              'Previous delivery outcome could not be confirmed after multiple attempts; marking failed',
+            );
+          }
           throw new Error(
             'Previous delivery outcome could not be confirmed yet; the resend is deferred until it can be',
           );

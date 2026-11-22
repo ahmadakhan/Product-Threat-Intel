@@ -891,6 +891,12 @@ export interface PipelineExecution {
      * counted via the historical marker for one deploy cycle.
      */
     recoveryAttempts?: number;
+    /**
+     * Epoch-ms until which a lock-loss-recovered execution must stay QUEUED.
+     * `queueRun` skips it until the backoff expires, so a repeatedly-flaky
+     * worker cannot thrash the advisory lock by re-running immediately.
+     */
+    recoveryBackoffUntil?: number;
     /** IntelligenceMatch records auto-sent to the Security team this run. */
     newsNotificationsQueued?: number;
     /**
