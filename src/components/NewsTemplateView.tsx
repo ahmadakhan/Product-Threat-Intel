@@ -32,7 +32,7 @@ import {
 } from 'lucide-react';
 import {
   DEFAULT_NEWS_EMAIL_CUSTOMIZATION,
-  compileNewsTemplate,
+  DEFAULT_NEWS_EMAIL_TEMPLATE,
   renderNewsTemplate,
   type NewsSource,
 } from '../utils/templateCompiler';
@@ -83,6 +83,7 @@ export const NewsTemplateView: React.FC = () => {
     updateNewsDigestCustomization,
     saveNewsDigestTemplate,
     setNewsDigestCustomTemplate,
+    sendTestEmail,
   } = useApp();
 
   const [testEmail, setTestEmail] = useState('');
@@ -204,7 +205,7 @@ export const NewsTemplateView: React.FC = () => {
    */
   const activeTemplateSource = (): string => {
     if (isCustomTemplate && customTemplate.trim()) return customTemplate;
-    return newsDigestTemplate || compileNewsTemplate(newsDigestCustomization);
+    return newsDigestTemplate || DEFAULT_NEWS_EMAIL_TEMPLATE;
   };
 
   /**
@@ -364,13 +365,23 @@ export const NewsTemplateView: React.FC = () => {
 
   const confirmReset = () => {
     // Reset restores the NEWS studio defaults, not the daily-digest ones: the
-    // two templates have different stock colours and fonts.
+    // two templates have different stock colours and fonts. Seeding from the
+    // digest's palette recoloured the news document (slate/blue shipping
+    // layout became the digest's theme) and kept the unsaved draft dirty, so a
+    // "reset" immediately asked to be saved again.
     updateNewsDigestCustomization(DEFAULT_NEWS_EMAIL_CUSTOMIZATION);
     setShowResetConfirm(false);
   };
 
   const handleSendTest = async (e: React.FormEvent) => {
     e.preventDefault();
+    // The server validates the address (`z.email()`), and the confirmation text
+    // used to read "test email to recipient" when the field was empty. Reject it
+    // here so the operator gets the reason instead of a 400 from the API.
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(testEmail.trim())) {
+      setTestResult({ success: false, message: 'Enter a valid email address to receive the test.' });
+      return;
+    }
     const rendered = getRenderedHtml();
     const unrenderedTokens = rendered.match(/\{\{[a-z_]+\}\}/g);
     if (unrenderedTokens && unrenderedTokens.length > 0) {
@@ -381,22 +392,26 @@ export const NewsTemplateView: React.FC = () => {
       return;
     }
     setShowTestModal(false);
-    setConfirmSendTest({ action: 'send-test', label: `test email to ${testEmail || 'recipient'}` });
+    setConfirmSendTest({ action: 'send-test', label: `test email to ${testEmail.trim()}` });
   };
 
   const executeSendTest = async () => {
     if (!confirmSendTest) return;
     try {
-      const res = await fetch('/api/test-news-email', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-csrf-token': '' },
-        body: JSON.stringify({ email: testEmail, html: getRenderedHtml() }),
-      }).then((r) => r.json());
+      // Route through the app context, exactly like the advisory and digest
+      // studios. The previous implementation posted to `/api/test-news-email`,
+      // an endpoint that does not exist on the server, with an empty CSRF
+      // token: the request always failed (404 / CSRF rejection), the CSS-only
+      // result banner stayed blank, and no test email was ever queued. The
+      // context action attaches the session CSRF token, surfaces request errors
+      // through the shared error banner, and hits the real `/api/test-email`
+      // endpoint that accepts a pre-rendered News Studio document.
+      const res = await sendTestEmail(testEmail.trim(), false, getRenderedHtml());
       setTestResult(res);
       if (res.success) {
         setTimeout(() => {
           setTestResult(null);
-        }, 1500);
+        }, 2500);
       }
     } finally {
       setConfirmSendTest(null);

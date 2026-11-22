@@ -7,10 +7,12 @@ import { build } from 'esbuild';
 import { JSDOM } from 'jsdom';
 import React, { act } from 'react';
 import {
+  DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
   DEFAULT_NEWS_EMAIL_CUSTOMIZATION,
   DEFAULT_NEWS_EMAIL_TEMPLATE,
   compileNewsTemplate,
 } from '../src/utils/templateCompiler.ts';
+import { emptyState } from '../shared/state.ts';
 
 /**
  * The News Template Studio must show one document.
@@ -28,6 +30,15 @@ import {
  * This renders the real component with a customized context and asserts the
  * rendered pane reflects it, and that the source pane is the template itself.
  */
+test('the news studio state defaults to the news palette, not the digest one', () => {
+  // The initial snapshot seeded `newsDigestCustomization` from the daily digest
+  // palette, so an untouched install showed the news document in the digest's
+  // colours while the delivered email used the news defaults.
+  const state = emptyState();
+  assert.deepEqual(state.newsDigestCustomization, DEFAULT_NEWS_EMAIL_CUSTOMIZATION);
+  assert.notDeepEqual(state.newsDigestCustomization, DEFAULT_DAILY_DIGEST_CUSTOMIZATION);
+});
+
 test('the news studio preview renders the live customization, not a stale template', async () => {
   const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost' });
   const globals = globalThis as any;
@@ -53,6 +64,9 @@ test('the news studio preview renders the live customization, not a stale templa
     updateNewsDigestCustomization() { },
     saveNewsDigestTemplate: async () => true,
     setNewsDigestCustomTemplate() { },
+    // The studio routes its test send through the app context so it gets the
+    // session CSRF token and the real `/api/test-email` endpoint.
+    sendTestEmail: async () => ({ success: true, message: 'queued' }),
   };
   globals.__newsStudioPreviewContext = context;
 

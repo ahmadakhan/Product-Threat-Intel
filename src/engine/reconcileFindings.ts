@@ -48,7 +48,16 @@ export function reconcileFindings(
     const old = previous.get(findingIdentity(candidate));
     if (!old) return candidate;
     let notificationStatus = candidate.notificationStatus;
-    if (notificationStatus !== 'REVIEW_REQUIRED' && old.advisoryId) {
+    // A zero-day withheld by the run's rate cap is delivered only through its
+    // digest. That decision belongs to *this* run: the matcher rebuilds a fresh
+    // `QUEUED_FOR_DISPATCH` candidate, so carrying the stored `DIGEST_BATCHED`
+    // forward would silence the finding permanently once the cap no longer
+    // applies. It must be carried through only when this run's cap withheld it
+    // again (the same reason `DIGEST_BATCHED` is not part of the branches below).
+    const digestBatchedNow = notificationStatus === 'DIGEST_BATCHED';
+    if (digestBatchedNow) {
+      // Keep this run's verdict.
+    } else if (notificationStatus !== 'REVIEW_REQUIRED' && old.advisoryId) {
       notificationStatus = old.autoDispatchedAt
         ? 'AUTO_DISPATCHED'
         : ['QUEUED_FOR_DISPATCH', 'DELIVERY_FAILED', 'SECURITY_REJECTED'].includes(old.notificationStatus)

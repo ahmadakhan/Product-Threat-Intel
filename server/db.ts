@@ -79,12 +79,14 @@ export const createPool = (url: string) => {
 
   // Monitor connection pool health
   pool.on('connect', () => {
-    console.log(JSON.stringify({
-      level: 'info',
-      event: 'database-pool-connected',
-      timestamp: new Date().toISOString(),
-      totalCount: pool.totalCount,
-    }));
+    console.log(
+      JSON.stringify({
+        level: 'info',
+        event: 'database-pool-connected',
+        timestamp: new Date().toISOString(),
+        totalCount: pool.totalCount,
+      }),
+    );
   });
 
   // 'acquire' fires once per query checkout, so logging it at standard level
@@ -93,15 +95,17 @@ export const createPool = (url: string) => {
   // diagnostics; pool health is already visible through connect/remove/error.
   if (process.env.LOG_LEVEL === 'verbose') {
     pool.on('acquire', () => {
-      console.log(JSON.stringify({
-        level: 'info',
-        event: 'database-pool-acquired',
-        timestamp: new Date().toISOString(),
-        idleCount: pool.idleCount,
-      }));
+      console.log(
+        JSON.stringify({
+          level: 'info',
+          event: 'database-pool-acquired',
+          timestamp: new Date().toISOString(),
+          idleCount: pool.idleCount,
+        }),
+      );
     });
   }
-  
+
   // The 'remove' event is emitted when the pool disposes a client (for
   // example on timeout or when forced to shrink).  Logging this gives deeper
   // operational visibility than the generic `pg` error handler and preserves
@@ -115,20 +119,22 @@ export const createPool = (url: string) => {
         totalCount: pool.totalCount,
         idleCount: pool.idleCount,
         activeCount: pool.totalCount - pool.idleCount,
-      })
+      }),
     );
   });
-  
+
   pool.on('error', (error) => {
-    console.error(JSON.stringify({
-      level: 'error',
-      event: 'database-pool-error',
-      error: (error as any).message,
-      code: (error as any).code,
-      timestamp: new Date().toISOString(),
-    }));
+    console.error(
+      JSON.stringify({
+        level: 'error',
+        event: 'database-pool-error',
+        error: (error as any).message,
+        code: (error as any).code,
+        timestamp: new Date().toISOString(),
+      }),
+    );
   });
-  
+
   return pool;
 };
 /**
@@ -237,26 +243,35 @@ const indexName = (statement: string): string | null =>
  * wraps that unlock with structured logging so a failed release — which can
  * pin the lock until the connection dies — is visible in the process log.
  */
-export async function safeAdvisoryUnlock(client: pg.PoolClient, lockClass: number | string, schemaKey: string, lockKey: string): Promise<boolean> {
+export async function safeAdvisoryUnlock(
+  client: pg.PoolClient,
+  lockClass: number | string,
+  schemaKey: string,
+  lockKey: string,
+): Promise<boolean> {
   try {
     await client.query('SELECT pg_advisory_unlock($1, $2)', [lockClass, schemaKey]);
-    console.log(JSON.stringify({
-      level: 'info',
-      event: 'advisory_unlock_success',
-      lockClass,
-      lockKey,
-      timestamp: new Date().toISOString(),
-    }));
+    console.log(
+      JSON.stringify({
+        level: 'info',
+        event: 'advisory_unlock_success',
+        lockClass,
+        lockKey,
+        timestamp: new Date().toISOString(),
+      }),
+    );
     return true;
   } catch (error) {
-    console.error(JSON.stringify({
-      level: 'error',
-      event: 'advisory_unlock_failed',
-      lockClass,
-      lockKey,
-      error: (error as Error).message,
-      timestamp: new Date().toISOString(),
-    }));
+    console.error(
+      JSON.stringify({
+        level: 'error',
+        event: 'advisory_unlock_failed',
+        lockClass,
+        lockKey,
+        error: (error as Error).message,
+        timestamp: new Date().toISOString(),
+      }),
+    );
     return false;
   }
 }
@@ -332,15 +347,17 @@ async function buildIndex(client: pg.PoolClient, statement: string, file: string
       )
       .catch(() => ({ rows: [] as { invalid: boolean }[] }));
     if (invalid.rows[0]?.invalid) {
-    if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(name)) throw new Error(`Unsafe migration index name: ${name}`);
+      if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(name)) throw new Error(`Unsafe migration index name: ${name}`);
       await client.query(`DROP INDEX CONCURRENTLY IF EXISTS "${name}"`);
-      console.log(JSON.stringify({
-        level: 'warn',
-        event: 'index.invalid_rebuilt',
-        index: name,
-        file,
-        timestamp: new Date().toISOString(),
-      }));
+      console.log(
+        JSON.stringify({
+          level: 'warn',
+          event: 'index.invalid_rebuilt',
+          index: name,
+          file,
+          timestamp: new Date().toISOString(),
+        }),
+      );
     }
   }
   // pg_trgm is optional, and migration 019 revoked the fuzzy helpers from
@@ -365,27 +382,31 @@ async function buildIndex(client: pg.PoolClient, statement: string, file: string
       )
       .catch(() => ({ rows: [{ available: false }] }));
     if (!available.rows[0]?.available) {
-      console.warn(JSON.stringify({
-        level: 'warn',
-        event: 'index.skipped',
-        index: name,
-        file,
-        reason: 'gin_trgm_ops-unavailable',
-        timestamp: new Date().toISOString(),
-      }));
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          event: 'index.skipped',
+          index: name,
+          file,
+          reason: 'gin_trgm_ops-unavailable',
+          timestamp: new Date().toISOString(),
+        }),
+      );
       return;
     }
   }
   for (let attempt = 0; attempt <= 2; attempt++) {
     try {
       await client.query(statement);
-      console.log(JSON.stringify({
-        level: 'info',
-        event: 'index.build_success',
-        index: name,
-        file,
-        timestamp: new Date().toISOString(),
-      }));
+      console.log(
+        JSON.stringify({
+          level: 'info',
+          event: 'index.build_success',
+          index: name,
+          file,
+          timestamp: new Date().toISOString(),
+        }),
+      );
       return;
     } catch (error) {
       const code = String((error as { code?: string }).code ?? '');
@@ -407,14 +428,16 @@ async function buildIndex(client: pg.PoolClient, statement: string, file: string
       // integration. Record the miss and let the preflight report the absent
       // relation when a code path that needs it actually runs.
       if (code === '42P01') {
-        console.warn(JSON.stringify({
-          level: 'warn',
-          event: 'index.skipped',
-          index: name,
-          file,
-          reason: 'relation-absent',
-          timestamp: new Date().toISOString(),
-        }));
+        console.warn(
+          JSON.stringify({
+            level: 'warn',
+            event: 'index.skipped',
+            index: name,
+            file,
+            reason: 'relation-absent',
+            timestamp: new Date().toISOString(),
+          }),
+        );
         return;
       }
       throw Object.assign(new Error(`Index build failed (${file}, ${name ?? 'unnamed'}): ${code}`), {
@@ -633,9 +656,9 @@ export async function transaction<T>(
     // serialization that operators actually need. CRITICAL: acquire locks in
     // global alphabetical order to prevent deadlocks from inconsistent ordering
     // across different callers (e.g., schemaLockKey before pipeline-queue).
-    for (const lock of [...(options.locks ?? [])].filter(
-      (name) => !options.lockAcquired?.includes(name),
-    ).sort())
+    for (const lock of [...(options.locks ?? [])]
+      .filter((name) => !options.lockAcquired?.includes(name))
+      .sort())
       await db.query(`SELECT pg_advisory_xact_lock(hashtext($1), ${schemaLockKey})`, [lock]);
     const result = await fn(db);
     if (connectionError) throw connectionError;
@@ -665,7 +688,10 @@ export async function put(db: Db, kind: string, id: string, data: unknown) {
 export async function putMany(db: Db, kind: string, items: { id: string; data: unknown }[]) {
   // PostgreSQL permits at most 65,535 bind parameters. Bound statement size as
   // well, and coalesce repeated IDs so a batch never updates one row twice.
-  const unique = [...new Map(items.map((item) => [item.id, item])).values()];
+  // Sort by id to guarantee deterministic row lock acquisition order across concurrent transactions.
+  const unique = [...new Map(items.map((item) => [item.id, item])).values()].sort((a, b) =>
+    a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+  );
   for (let offset = 0; offset < unique.length; offset += 1000) {
     const values: unknown[] = [];
     const params = unique.slice(offset, offset + 1000).map((item, index) => {
@@ -704,7 +730,8 @@ export async function getForUpdate<T>(db: Db, kind: string, id: string): Promise
     ?.data;
 }
 export async function list<T>(db: Db, kind: string, limit?: number): Promise<T[]> {
-  const safeLimit = typeof limit === 'number' && Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : null;
+  const safeLimit =
+    typeof limit === 'number' && Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : null;
   return (
     await db.query(
       safeLimit !== null
@@ -724,8 +751,9 @@ export async function remove(db: Db, kind: string, id: string) {
 export async function removeMany(db: Db, kind: string, ids: readonly string[]): Promise<number> {
   if (!ids.length) return 0;
   return (
-    await db.query('DELETE FROM records WHERE kind=$1 AND id = ANY($2::text[])', [kind, [...ids]])
-  ).rowCount ?? 0;
+    (await db.query('DELETE FROM records WHERE kind=$1 AND id = ANY($2::text[])', [kind, [...ids]]))
+      .rowCount ?? 0
+  );
 }
 export async function appendAudit(
   db: Db,
@@ -740,7 +768,9 @@ export async function appendAudit(
   // Outside a transaction, wrap the read/insert pair so the audit lock is held
   // for the whole operation instead of being released after the lock statement.
   if (db instanceof pg.Pool)
-    return transaction(db, (tx) => appendAudit(tx, event, details, actor, category, level, ipAddress, context));
+    return transaction(db, (tx) =>
+      appendAudit(tx, event, details, actor, category, level, ipAddress, context),
+    );
   // The audit chain is a single linked list; a dedicated named lock serializes
   // only audit appends instead of every state mutation in the installation.
   await db.query(`SELECT pg_advisory_xact_lock(hashtext($1), ${schemaLockKey})`, ['audit-chain']);
@@ -778,37 +808,46 @@ export interface StateOptions {
 }
 
 export async function verifyStoredAudit(pool: pg.Pool, signal?: AbortSignal) {
-  return transaction(pool, async (db) => {
-    await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
-    await db.query('DECLARE audit_chain_cursor NO SCROLL CURSOR FOR SELECT data FROM audit ORDER BY seq ASC');
-    let previousHash: string | undefined;
-    let verified = true;
-    let logCount = 0;
-    while (true) {
-      signal?.throwIfAborted();
-      const batch = await db.query<{ data: AuditLog }>('FETCH FORWARD 256 FROM audit_chain_cursor');
-      if (!batch.rowCount) break;
-      for (const { data: log } of batch.rows) {
-        verified = /^[a-f0-9]{64}$/.test(log.hash) &&
-          log.hash === hashAuditLog(log) &&
-          (previousHash === undefined || log.prevHash === previousHash) && verified;
-        previousHash = log.hash;
-        logCount++;
+  return transaction(
+    pool,
+    async (db) => {
+      await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      await db.query(
+        'DECLARE audit_chain_cursor NO SCROLL CURSOR FOR SELECT data FROM audit ORDER BY seq ASC',
+      );
+      let previousHash: string | undefined;
+      let verified = true;
+      let logCount = 0;
+      while (true) {
+        signal?.throwIfAborted();
+        const batch = await db.query<{ data: AuditLog }>('FETCH FORWARD 256 FROM audit_chain_cursor');
+        if (!batch.rowCount) break;
+        for (const { data: log } of batch.rows) {
+          verified =
+            /^[a-f0-9]{64}$/.test(log.hash) &&
+            log.hash === hashAuditLog(log) &&
+            (previousHash === undefined || log.prevHash === previousHash) &&
+            verified;
+          previousHash = log.hash;
+          logCount++;
+        }
       }
-    }
-    await db.query('CLOSE audit_chain_cursor');
-    await db.query(`DECLARE audit_hash_cursor NO SCROLL CURSOR FOR
+      await db.query('CLOSE audit_chain_cursor');
+      await db.query(`DECLARE audit_hash_cursor NO SCROLL CURSOR FOR
       SELECT data->>'hash' AS hash FROM audit ORDER BY (data->>'hash') COLLATE "C",seq`);
-    const root = new SortedMerkleAccumulator();
-    while (true) {
-      signal?.throwIfAborted();
-      const batch = await db.query<{ hash: string }>('FETCH FORWARD 256 FROM audit_hash_cursor');
-      if (!batch.rowCount) break;
-      for (const row of batch.rows) root.add(String(row.hash ?? ''));
-    }
-    await db.query('CLOSE audit_hash_cursor');
-    return { verified, merkleRoot: root.root(), logCount };
-  }, undefined, { signal });
+      const root = new SortedMerkleAccumulator();
+      while (true) {
+        signal?.throwIfAborted();
+        const batch = await db.query<{ hash: string }>('FETCH FORWARD 256 FROM audit_hash_cursor');
+        if (!batch.rowCount) break;
+        for (const row of batch.rows) root.add(String(row.hash ?? ''));
+      }
+      await db.query('CLOSE audit_hash_cursor');
+      return { verified, merkleRoot: root.root(), logCount };
+    },
+    undefined,
+    { signal },
+  );
 }
 
 const recordOrder = "ORDER BY CASE WHEN kind='feeds' THEN created_at ELSE updated_at END DESC,id";
@@ -883,13 +922,10 @@ export async function state(db: Db, options: StateOptions = {}): Promise<AppStat
   snapshot.watchlist = orderWatchlist(snapshot.watchlist);
   // Keep a hand-authored template authoritative; installations without one use
   // the canonical product HTML shared with Template Studio.
-  snapshot.advisoryTemplate =
-    snapshot.customAdvisoryTemplate || DEFAULT_ADVISORY_EMAIL_TEMPLATE;
+  snapshot.advisoryTemplate = snapshot.customAdvisoryTemplate || DEFAULT_ADVISORY_EMAIL_TEMPLATE;
   snapshot.dailyDigestTemplate =
     snapshot.dailyDigestCustomTemplate ||
-    compileDailyDigestTemplate(
-      snapshot.dailyDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
-    );
+    compileDailyDigestTemplate(snapshot.dailyDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION);
   snapshot.newsDigestTemplate =
     snapshot.newsDigestCustomTemplate ||
     compileNewsTemplate(snapshot.newsDigestCustomization || DEFAULT_NEWS_EMAIL_CUSTOMIZATION);
@@ -942,13 +978,10 @@ export async function pipelineState(db: Db, opts?: { skipCveData?: boolean }): P
     else if (row.kind === 'settings') snapshot.settings = row.data;
     else if (row.kind === 'template') Object.assign(snapshot, row.data);
   }
-  snapshot.advisoryTemplate =
-    snapshot.customAdvisoryTemplate || DEFAULT_ADVISORY_EMAIL_TEMPLATE;
+  snapshot.advisoryTemplate = snapshot.customAdvisoryTemplate || DEFAULT_ADVISORY_EMAIL_TEMPLATE;
   snapshot.dailyDigestTemplate =
     snapshot.dailyDigestCustomTemplate ||
-    compileDailyDigestTemplate(
-      snapshot.dailyDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
-    );
+    compileDailyDigestTemplate(snapshot.dailyDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION);
   snapshot.newsDigestTemplate =
     snapshot.newsDigestCustomTemplate ||
     compileNewsTemplate(snapshot.newsDigestCustomization || DEFAULT_NEWS_EMAIL_CUSTOMIZATION);

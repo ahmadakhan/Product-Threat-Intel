@@ -66,6 +66,7 @@ import {
 import { bindClusterToCve, clusterSuppressedAssets } from './correlation/clusters.ts';
 import { refreshCandidatePairs } from './versionIndex';
 import { recoveryDue, recoveryAt, isPermanentFeedFailure, shouldStartAutomaticRun } from './feedRecovery';
+import { queueOperatorAlert } from './selfHealing';
 import { ingestionWindow, type FeedCursor } from './ingestionState';
 import { persistIngestionRejections, rejectionOccurrences } from './ingestionRejections';
 import type { Requester } from './network';
@@ -80,8 +81,10 @@ import {
   queueZeroDayDigestNotification,
   recipientAllows,
   revision,
+  consolidatedFindingsDocument,
   type Job,
 } from './delivery';
+import { attachClaimsToJob, claimsForJob } from './deliveryClaims';
 import { loadNewsRecipients, queueConsolidatedNews, newsArticleIdentity } from './newsQueue';
 import { renderAdvisory } from './advisoryRender';
 import { HttpError } from './validation';
@@ -108,11 +111,7 @@ export { renderAdvisory } from './advisoryRender';
 export async function rebuildLegacyDeliveryPayload(db: pg.Pool | pg.PoolClient, job: Job): Promise<boolean> {
   if (job.payload.nativeCorrelation) return false;
   const advisory = await get<Advisory>(db, 'advisories', job.advisory_id);
-  if (
-    !advisory &&
-    typeof job.advisory_id === 'string' &&
-    job.advisory_id.startsWith('FINDINGS:')
-  ) {
+  if (!advisory && typeof job.advisory_id === 'string' && job.advisory_id.startsWith('FINDINGS:')) {
     // A consolidated finding batch has no advisory row by design: the batch
     // identity is its content. A legacy copy of it (queued without revision
     // evidence) is rebuilt in place from its declared finding rows — the same
@@ -131,8 +130,14 @@ export async function rebuildLegacyDeliveryPayload(db: pg.Pool | pg.PoolClient, 
       const asset = await get<WatchListItem>(db, 'watchlist', finding.matchedAssetId);
       const cve = await get<NormalizedCVE>(db, 'cveData', finding.cveId);
       const withdrawal = await get<{ modifiedDate: string }>(db, 'cveWithdrawals', finding.cveId);
-      if (!asset || asset.active === false || !cve || ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
-          (withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate))) return false;
+      if (
+        !asset ||
+        asset.active === false ||
+        !cve ||
+        ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
+        (withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate))
+      )
+        return false;
       current.push(finding);
     }
     const payload = {
@@ -153,7 +158,7 @@ export async function rebuildLegacyDeliveryPayload(db: pg.Pool | pg.PoolClient, 
   if (!advisory) return false;
   const declaredCves = job.payload.cveIds ?? advisory.cveIds;
   const evidence = job.payload.cveRevisions ?? {};
-  if (declaredCves.every(cveId => evidence[cveId])) return false;
+  if (declaredCves.every((cveId) => evidence[cveId])) return false;
   const findingIds = job.payload.includedFindingIds ?? advisory.findingIds;
   const findingMap = await getMany<Finding>(db, 'findings', findingIds);
   if (!findingIds.length || findingMap.size !== new Set(findingIds).size) return false;
@@ -166,18 +171,40 @@ export async function rebuildLegacyDeliveryPayload(db: pg.Pool | pg.PoolClient, 
     const asset = await get<WatchListItem>(db, 'watchlist', finding.matchedAssetId);
     const cve = await get<NormalizedCVE>(db, 'cveData', finding.cveId);
     const withdrawal = await get<{ modifiedDate: string }>(db, 'cveWithdrawals', finding.cveId);
-    if (!asset || asset.active === false || !cve || ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
-        (withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate))) return false;
-    const match = runVulnerabilityPipeline([], [cve], [asset], [], [], { ...DEFAULT_SETTINGS, ...settings, scopeHours: 0 },
-      'Server worker', false, buildAliasMap(aliases, 'VENDOR'), buildAliasMap(aliases, 'PRODUCT'), undefined, aliases).newFindings[0];
+    if (
+      !asset ||
+      asset.active === false ||
+      !cve ||
+      ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
+      (withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate))
+    )
+      return false;
+    const match = runVulnerabilityPipeline(
+      [],
+      [cve],
+      [asset],
+      [],
+      [],
+      { ...DEFAULT_SETTINGS, ...settings, scopeHours: 0 },
+      'Server worker',
+      false,
+      buildAliasMap(aliases, 'VENDOR'),
+      buildAliasMap(aliases, 'PRODUCT'),
+      undefined,
+      aliases,
+    ).newFindings[0];
     if (match?.notificationStatus !== 'QUEUED_FOR_DISPATCH') return false;
     current.push({ ...finding, ...match, id: finding.id });
   }
   const view = currentAdvisoryView(advisory, current);
-  if (view.cveIds.length !== new Set(declaredCves).size || declaredCves.some(id => !view.cveIds.includes(id))) return false;
+  if (
+    view.cveIds.length !== new Set(declaredCves).size ||
+    declaredCves.some((id) => !view.cveIds.includes(id))
+  )
+    return false;
   const payload = {
     ...job.payload,
-    ...await currentAdvisoryBody(db, view, current),
+    ...(await currentAdvisoryBody(db, view, current)),
     cveIds: view.cveIds,
     includedFindingIds: view.findingIds,
     // Single canonical evidence-builder (audit L-6): the same revision maps are
@@ -266,6 +293,75 @@ function cveApplicabilitySignature(cve: NormalizedCVE): string {
   return createHash('sha256').update(cveApplicabilityView(cve)).digest('hex');
 }
 
+/** One pending CPE-applicability re-evaluation. */
+type CpeRematchEntry = { cveId: string; firstSeen: string; runs: number };
+
+/** Durable shape of the `cpe-changed-cves` system state (newest format). */
+export type CpeRematchState = {
+  cveIds?: string[];
+  entries?: CpeRematchEntry[];
+  updatedAt?: string;
+};
+
+/**
+ * How long a CPE applicability change stays eligible for an out-of-window
+ * re-match, and how many runs it may occupy before it is considered settled.
+ *
+ * Both bounds exist because the backlog is otherwise a per-run cost that grows
+ * with deployment age: every entry makes a run re-evaluate that CVE against the
+ * full inventory regardless of scope. Five scheduled runs (or a week, whichever
+ * ends first) gives a provider's delayed CPE publication ample opportunity to
+ * reach an asset while keeping the set proportional to recent changes rather
+ * than to history.
+ */
+export const CPE_REMATCH_MAX_RUNS = 5;
+export const CPE_REMATCH_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Merges this run's CPE changes into the persisted re-match backlog and drops
+ * entries that have been re-evaluated often enough or are too old to keep.
+ *
+ * Only CVEs still present in the corpus and still unmatched after a bounded
+ * number of re-evaluations are dropped; a genuinely new applicability change is
+ * always re-added by the caller, so pruning never loses detection.
+ */
+export function carryCpeRematchBacklog(
+  previous: CpeRematchState | undefined,
+  changedThisRun: ReadonlySet<string>,
+  nowIso: string,
+  nowMs: number,
+): { entries: CpeRematchEntry[]; dropped: number } {
+  const previousEntries = new Map<string, CpeRematchEntry>();
+  for (const entry of previous?.entries ?? []) if (entry?.cveId) previousEntries.set(entry.cveId, entry);
+  // Legacy shape: a bare id list with no per-entry counter. Treat each id as
+  // first seen now so the bound applies from this run onward instead of
+  // stranding it in the backlog forever.
+  for (const cveId of previous?.cveIds ?? [])
+    if (cveId && !previousEntries.has(cveId))
+      previousEntries.set(cveId, { cveId, firstSeen: nowIso, runs: 0 });
+  const entries: CpeRematchEntry[] = [];
+  let dropped = 0;
+  const ids = new Set([...previousEntries.keys(), ...changedThisRun]);
+  for (const cveId of ids) {
+    // A change detected in this run restarts the budget: this is new evidence,
+    // not a stale carry-over.
+    if (changedThisRun.has(cveId)) {
+      entries.push({ cveId, firstSeen: nowIso, runs: 1 });
+      continue;
+    }
+    const previousEntry = previousEntries.get(cveId)!;
+    const runs = (Number.isFinite(previousEntry.runs) ? previousEntry.runs : 0) + 1;
+    const firstSeenMs = Date.parse(previousEntry.firstSeen);
+    const expired = Number.isFinite(firstSeenMs) && nowMs - firstSeenMs > CPE_REMATCH_MAX_AGE_MS;
+    if (runs > CPE_REMATCH_MAX_RUNS || expired) {
+      dropped++;
+      continue;
+    }
+    entries.push({ cveId, firstSeen: previousEntry.firstSeen, runs });
+  }
+  return { entries, dropped };
+}
+
 /**
  * (vendor, product) identities a CVE asserts, used to join pre-CVE clusters.
  * Derived only from non-wildcard CPE criteria; a CVE with no parseable
@@ -293,13 +389,19 @@ function cveClusterIdentities(cve: NormalizedCVE): { vendor: string; product: st
 /** Bounded retries for a pre-CVE disposition bind that lost its lock race. */
 const DEFERRED_BIND_MAX_ATTEMPTS = 5;
 
- export async function queueRun(
+export async function queueRun(
   pool: pg.Pool,
   scope: number | undefined,
   actor: string,
-  incrementalFeeds = true,
+  incrementalFeeds?: boolean,
   client?: pg.PoolClient,
 ): Promise<PipelineExecution> {
+  // `incrementalFeeds === undefined` means "the caller expressed no preference"
+  // and must never be coerced to `true` before the active-run check: doing so
+  // turned a generic POST or a scheduler queue into an explicit "source
+  // checkpoints on" that overwrote the operator's choice on the queued run.
+  // A brand-new run still needs a concrete value, which is the `?? true` at the
+  // construction site below.
   return transaction(
     pool,
     async (db) => {
@@ -307,11 +409,70 @@ const DEFERRED_BIND_MAX_ATTEMPTS = 5;
       // every run ever recorded and de-serialised it in JavaScript, which on a
       // long-lived installation grew past the 15 s pool statement timeout and
       // turned "queue a run" into a 500. The JSONB status is indexed.
+      // The row is locked because this call may now rewrite the active run's
+      // scope and checkpoint settings; an unlocked read-then-write could race a
+      // worker that is promoting the same execution from QUEUED to RUNNING.
       const active = await db.query<{ data: PipelineExecution }>(
-        "SELECT data FROM records WHERE kind='executions' AND data->>'status' IN ('QUEUED','RUNNING') ORDER BY updated_at DESC LIMIT 1",
+        "SELECT data FROM records WHERE kind='executions' AND data->>'status' IN ('QUEUED','RUNNING') ORDER BY updated_at DESC LIMIT 1 FOR UPDATE",
       );
+      // Deduplication is about not running two pipelines at once, but the
+      // operator's request still carries intent the active run may not have:
+      // their explicit scope and their "use source checkpoints" choice. The
+      // previous version returned the active row untouched, so unticking
+      // "Use source checkpoints" while a run was queued/running silently did
+      // nothing, and an operator who asked for a wider window got the active
+      // run's window with no indication either value was ignored.
       const existing = active.rows[0]?.data;
-      if (existing) return existing;
+      if (existing) {
+        const requestedScope = scope === undefined ? existing.scopeHours : scope;
+        const requestedIncremental = incrementalFeeds ?? existing.incrementalFeeds ?? true;
+        if (
+          existing.scopeHours === requestedScope &&
+          (existing.incrementalFeeds ?? true) === requestedIncremental
+        )
+          return existing;
+        // Only apply the request to a run that has not started ingesting. A
+        // RUNNING execution's window is already in use by live feed cursors;
+        // rewriting it mid-flight would make the recorded scope disagree with
+        // the data the run actually collected.
+        if (existing.status === 'RUNNING') {
+          await writeEvent(db, {
+            category: 'PIPELINE',
+            level: 'WARNING',
+            code: 'pipeline.request_ignored_while_running',
+            message:
+              'Requested scope/checkpoint settings were not applied because a run is already in progress',
+            runId: existing.id,
+            context: {
+              requestedScopeHours: requestedScope,
+              activeScopeHours: existing.scopeHours,
+              requestedIncrementalFeeds: requestedIncremental,
+              activeIncrementalFeeds: existing.incrementalFeeds ?? true,
+            },
+          });
+          return existing;
+        }
+        const updated: PipelineExecution = structuredClone({
+          ...existing,
+          scopeHours: requestedScope,
+          incrementalFeeds: requestedIncremental,
+          logs: [
+            ...(existing.logs ?? []),
+            `Queued-run settings updated by ${actor}: ingestion window ${existing.scopeHours}h -> ${requestedScope}h; source checkpoints ${(existing.incrementalFeeds ?? true) ? 'on' : 'off'} -> ${requestedIncremental ? 'on' : 'off'}`,
+          ],
+          // Same reason as the worker path: the success path must not hand the
+          // caller (or the shared active-row object) the mutable row by reference.
+        });
+        await put(db, 'executions', existing.id, updated);
+        await appendAudit(
+          db,
+          'Queued pipeline settings updated',
+          `Execution ${existing.id}; window ${existing.scopeHours}h -> ${requestedScope}h; checkpoints ${requestedIncremental ? 'on' : 'off'}`,
+          actor,
+          'PIPELINE',
+        );
+        return updated;
+      }
       const settings = (await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
       const id = randomUUID();
       const execution: PipelineExecution = {
@@ -321,7 +482,7 @@ const DEFERRED_BIND_MAX_ATTEMPTS = 5;
         endTime: null,
         status: 'QUEUED',
         scopeHours: scope ?? settings.scopeHours,
-        incrementalFeeds,
+        incrementalFeeds: incrementalFeeds ?? true,
         phases: [],
         stats: {
           rawIngested: 0,
@@ -347,9 +508,7 @@ const DEFERRED_BIND_MAX_ATTEMPTS = 5;
       return execution;
     },
     client,
-    client
-      ? { locks: [], lockAcquired: ['pipeline-queue'] }
-      : { locks: ['pipeline-queue'] },
+    client ? { locks: [], lockAcquired: ['pipeline-queue'] } : { locks: ['pipeline-queue'] },
   );
 }
 /** Recover an unsent stale advisory after its failed attempt is committed.
@@ -379,20 +538,32 @@ export async function rebuildFromCurrentInventory(
     regrouped: false,
     holdGated: false,
   }));
-  await transaction(pool, async db => {
+  await transaction(pool, async (db) => {
     const invalidated = await db.query<{ id: string; channel: string; attempts: number }>(
       `UPDATE outbox
-         SET status='FAILED', error=$1, next_attempt=now(),
+         SET status='FAILED', delivery_outcome='NOT_ATTEMPTED', error=$1, next_attempt=now(),
              locked_at=NULL, lock_token=NULL, updated_at=now()
        WHERE advisory_id=$2 AND status='QUEUED'
          AND id::text <> ALL($3::text[])
        RETURNING id,channel,attempts`,
       [reason, advisoryId, rebuiltInPlace],
     );
+    if (invalidated.rows.length > 0) {
+      await db.query(`DELETE FROM delivery_claims WHERE job_id = ANY($1::uuid[]) AND state='CLAIMED'`, [
+        invalidated.rows.map((r) => r.id),
+      ]);
+    }
     for (const row of invalidated.rows) {
       if (row.channel === 'email') {
         const log = await getForUpdate<EmailDeliveryLog>(db, 'emailLogs', row.id);
-        if (log) await put(db, 'emailLogs', row.id, { ...log, status: 'FAILED', attemptCount: row.attempts, nextRetryTime: null, errorMessage: reason });
+        if (log)
+          await put(db, 'emailLogs', row.id, {
+            ...log,
+            status: 'FAILED',
+            attemptCount: row.attempts,
+            nextRetryTime: null,
+            errorMessage: reason,
+          });
       } else {
         const log = await getForUpdate<WebhookDeliveryLog>(db, 'webhookLogs', row.id);
         if (log) await put(db, 'webhookLogs', row.id, { ...log, status: 'FAILED', errorMessage: reason });
@@ -413,16 +584,28 @@ export async function regroupStaleAdvisory(
   advisoryId: string,
 ): Promise<{ regrouped: boolean; holdGated: boolean }> {
   return transaction(pool, async (db) => {
-    const advisory = await get<Advisory>(db, 'advisories', advisoryId);
-    if (!advisory) return { regrouped: false, holdGated: false };
-    const settings = (await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
+    let advisory = await get<Advisory>(db, 'advisories', advisoryId);
     const jobs = (
       await db.query<Job>(
-        "SELECT * FROM outbox WHERE advisory_id=$1 AND (status='QUEUED' OR (status='FAILED' AND COALESCE(error,'') LIKE '%no longer applicable%')) AND payload->'nativeCorrelation' IS NULL FOR UPDATE",
+        "SELECT * FROM outbox WHERE advisory_id=$1 AND (status='QUEUED' OR (status='FAILED' AND COALESCE(error,'') LIKE '%no longer applicable%')) AND payload->'nativeCorrelation' IS NULL ORDER BY id ASC FOR UPDATE",
         [advisoryId],
       )
     ).rows;
     if (!jobs.length) return { regrouped: false, holdGated: false };
+
+    if (!advisory && typeof advisoryId === 'string' && advisoryId.startsWith('FINDINGS:')) {
+      const findingIds = (jobs[0]?.payload?.includedFindingIds ?? []) as string[];
+      const findingMap = await getMany<Finding>(db, 'findings', findingIds);
+      const findings = findingIds.map((id) => findingMap.get(id)).filter((f): f is Finding => !!f);
+      if (findings.length > 0) {
+        const generatedAt = jobs[0]?.payload?.generatedAt
+          ? new Date(jobs[0].payload.generatedAt)
+          : new Date();
+        advisory = consolidatedFindingsDocument(findings, generatedAt).advisory;
+      }
+    }
+    if (!advisory) return { regrouped: false, holdGated: false };
+    const settings = (await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
     const aliasEntries = await list<AliasEntry>(db, 'aliases');
     const vendorAliases = buildAliasMap(aliasEntries, 'VENDOR');
     const productAliases = buildAliasMap(aliasEntries, 'PRODUCT');
@@ -436,7 +619,9 @@ export async function regroupStaleAdvisory(
       const findingIds = job.payload.includedFindingIds ?? advisory.findingIds;
       const findings = [...(await getMany<Finding>(db, 'findings', findingIds)).values()];
       const cves = await getMany<NormalizedCVE>(db, 'cveData', [...new Set(findings.map((f) => f.cveId))]);
-      const assets = await getMany<WatchListItem>(db, 'watchlist', [...new Set(findings.map((f) => f.matchedAssetId))]);
+      const assets = await getMany<WatchListItem>(db, 'watchlist', [
+        ...new Set(findings.map((f) => f.matchedAssetId)),
+      ]);
       const cveRevisions: Record<string, string> = {};
       const findingRevisions: Record<string, string> = {};
       const current: Finding[] = [];
@@ -448,8 +633,13 @@ export async function regroupStaleAdvisory(
         // the new bundle; a review-held or unverifiable finding stays in place and
         // is finalized by the caller's FAILED update.
         const withdrawal = await get<{ modifiedDate: string }>(db, 'cveWithdrawals', finding.cveId);
-        if (!asset || asset.active === false || !cve || ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
-            (withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate))) {
+        if (
+          !asset ||
+          asset.active === false ||
+          !cve ||
+          ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status) ||
+          (withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate))
+        ) {
           continue;
         }
         const match = runVulnerabilityPipeline(
@@ -468,7 +658,10 @@ export async function regroupStaleAdvisory(
         ).newFindings[0];
         // Limited-confidence matches are dispatched too (the email states the
         // limitation), so they are admitted exactly like QUEUED_FOR_DISPATCH.
-        if (match?.notificationStatus !== 'QUEUED_FOR_DISPATCH' && match?.notificationStatus !== 'REVIEW_REQUIRED') {
+        if (
+          match?.notificationStatus !== 'QUEUED_FOR_DISPATCH' &&
+          match?.notificationStatus !== 'REVIEW_REQUIRED'
+        ) {
           continue;
         }
         const fresh = { ...finding, ...match, id: finding.id };
@@ -480,9 +673,15 @@ export async function regroupStaleAdvisory(
     }
     const regroup = jobs.filter((job) => deliverability.get(job.id));
     if (!regroup.length) return { regrouped: false, holdGated };
-    const isDigest = Boolean(jobs[0].payload.digestKey) && jobs.every((job) => job.payload.digestKey === jobs[0].payload.digestKey);
+    const isDigest =
+      Boolean(jobs[0].payload.digestKey) &&
+      jobs.every((job) => job.payload.digestKey === jobs[0].payload.digestKey);
     const replacement: Advisory = {
-      ...currentAdvisoryView(advisory, [...new Map(regroup.flatMap(job => evidence.get(job.id)!.findings.map(f => [f.id, f] as const))).values()]),
+      ...currentAdvisoryView(advisory, [
+        ...new Map(
+          regroup.flatMap((job) => evidence.get(job.id)!.findings.map((f) => [f.id, f] as const)),
+        ).values(),
+      ]),
       id: formatAdvisoryId(settings.advisoryPrefix),
       createdDate: new Date().toISOString(),
       deliveryStatus: 'PENDING',
@@ -491,12 +690,16 @@ export async function regroupStaleAdvisory(
     let emailJobs = 0;
     for (const job of regroup) {
       const { cveRevisions, findingRevisions, findings: groupedFindings } = evidence.get(job.id)!;
-      const included = groupedFindings.map(f => f.id);
-      const body = await currentAdvisoryBody(db, currentAdvisoryView(replacement, groupedFindings), groupedFindings);
+      const included = groupedFindings.map((f) => f.id);
+      const body = await currentAdvisoryBody(
+        db,
+        currentAdvisoryView(replacement, groupedFindings),
+        groupedFindings,
+      );
       const payload = {
         ...job.payload,
         ...body,
-        cveIds: Array.from(new Set(groupedFindings.map(f => f.cveId))).sort(),
+        cveIds: Array.from(new Set(groupedFindings.map((f) => f.cveId))).sort(),
         includedFindingIds: included,
         // Canonical evidence-builder (audit L-6); `findingRevisions` from the
         // scan loop is keyed identically, so it is replaced wholesale.
@@ -509,32 +712,45 @@ export async function regroupStaleAdvisory(
       // per retrying row and send the same content repeatedly.
       if ((job as Job & { status?: string }).status === 'FAILED') {
         const fingerprint = createHash('sha256')
-          .update(stableJson({
-            cveRevisions: payload.cveRevisions,
-            findingRevisions,
-            included,
-          }))
+          .update(
+            stableJson({
+              cveRevisions: payload.cveRevisions,
+              findingRevisions,
+              included,
+            }),
+          )
           .digest('hex');
-        const inserted = await enqueue(db, job.channel, job.target_id, replacement.id, payload,
-          `rebuild:${job.channel}:${job.target_id}:${fingerprint}`, 'QUEUED', job.priority || 0);
+        const inserted = await enqueue(
+          db,
+          job.channel,
+          job.target_id,
+          replacement.id,
+          payload,
+          `rebuild:${job.channel}:${job.target_id}:${fingerprint}`,
+          'QUEUED',
+          job.priority || 0,
+        );
         if (!inserted) continue;
+        if (job.channel === 'email') {
+          await attachClaimsToJob(db, inserted, claimsForJob(job.target_id, 'finding', included));
+        }
       } else {
-      await db.query(
-        `UPDATE outbox
+        await db.query(
+          `UPDATE outbox
             SET advisory_id=$2, payload=$3::jsonb, review_approved=false, status='QUEUED', attempts=0,
                 locked_at=NULL, lock_token=NULL, next_attempt=now(), error=NULL, updated_at=now()
           WHERE id=$1 AND (status='QUEUED' OR (status='FAILED' AND COALESCE(error,'') LIKE '%no longer applicable%'))`,
-        [
-          job.id,
-          replacement.id,
-          JSON.stringify(payload),
-        ],
-      );
+          [job.id, replacement.id, JSON.stringify(payload)],
+        );
       }
       regroupedJobs++;
       if (job.channel === 'email') emailJobs++;
       for (const finding of groupedFindings) {
-        await put(db, 'findings', finding.id, { ...finding, advisoryId: replacement.id, notificationStatus: 'QUEUED_FOR_DISPATCH' });
+        await put(db, 'findings', finding.id, {
+          ...finding,
+          advisoryId: replacement.id,
+          notificationStatus: 'QUEUED_FOR_DISPATCH',
+        });
       }
     }
     if (!regroupedJobs) return { regrouped: true, holdGated };
@@ -614,10 +830,10 @@ export function setAbortReason(controller: AbortController): void {
   // Built from the tagged name, without importing the class: some Node/type
   // combinations do not export `TimeoutError` from `node:util`, yet the tag it
   // appends is stable. Callers classify on `name`, never on the constructor.
-  const deadlineReason = Object.assign(
-    new Error('Operation exceeded its deadline'),
-    { name: TIMEOUT_REASON_NAME, [ABORT_REASON]: true },
-  );
+  const deadlineReason = Object.assign(new Error('Operation exceeded its deadline'), {
+    name: TIMEOUT_REASON_NAME,
+    [ABORT_REASON]: true,
+  });
   controller.abort(deadlineReason);
 }
 /**
@@ -664,7 +880,10 @@ const LEGACY_RECOVERY_MARKER = 'Recovered interrupted worker';
 const PINNED_LOG_MARKERS = [LEGACY_RECOVERY_MARKER, 'Operator requested stop'] as const;
 const isPinnedLogLine = (line: string) => PINNED_LOG_MARKERS.some((marker) => line.includes(marker));
 function countRecoveries(execution: PipelineExecution): number {
-  return Math.max(Number.isFinite(Number(execution.stats.recoveryAttempts)) ? Number(execution.stats.recoveryAttempts) : 0, 0);
+  return Math.max(
+    Number.isFinite(Number(execution.stats.recoveryAttempts)) ? Number(execution.stats.recoveryAttempts) : 0,
+    0,
+  );
 }
 function pushExecutionLog(execution: PipelineExecution, line: string) {
   execution.logs.push(line);
@@ -758,9 +977,7 @@ export async function stopRunWithClient(
     // wrote the execution row with no mutual exclusion - measured completing in
     // 13ms while another session held `pipeline-queue` exclusively - which let a
     // stop interleave with a live run and have its CANCELLED overwritten.
-    workerLockClient
-      ? { locks: [], lockAcquired: ['pipeline-queue'] }
-      : { locks: ['pipeline-queue'] },
+    workerLockClient ? { locks: [], lockAcquired: ['pipeline-queue'] } : { locks: ['pipeline-queue'] },
   );
 }
 /** How often a running pipeline proves it is still alive. */
@@ -799,7 +1016,13 @@ export function pipelineHeartbeat(
   };
 }
 
-export async function processPipeline(pool: pg.Pool, config: Config, request: Requester, signal?: AbortSignal, onProgress?: () => void): Promise<boolean> {
+export async function processPipeline(
+  pool: pg.Pool,
+  config: Config,
+  request: Requester,
+  signal?: AbortSignal,
+  onProgress?: () => void,
+): Promise<boolean> {
   signal?.throwIfAborted();
   // The session advisory lock needs its own connection for the whole run.
   // `pool.connect()` rejects after `connectionTimeoutMs` when every slot is
@@ -853,6 +1076,10 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
 
   let locked = false,
     execution: PipelineExecution | undefined;
+  // Alerts for faults found inside this run's commit. They are dispatched only
+  // AFTER the transaction succeeds: an alert sent from inside a transaction that
+  // then rolls back would report a failure that never happened.
+  const pendingOperatorAlerts: { incident: string; subject: string; text: string }[] = [];
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let released = false;
   // CVEs streamed from ingestFeed via onBatch are accumulated here so the
@@ -975,29 +1202,35 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
       const last = (await pool.query('SELECT last_run FROM scheduler_state WHERE id=1')).rows[0];
       const schedulerNow = Date.now();
-      const catchUpDue = settings.schedulerEnabled && (await list<FeedCursor>(pool, 'feedCursors')).some((cursor) => {
-        if (!cursor.hasMore) return false;
-        // `next_catchup_at` is a cooldown: "earliest time the next catch-up
-        // window may run". A cursor that is mid-catch-up but has no cooldown
-        // recorded (a legacy record, or a worker that stopped between the
-        // cursor write and the scheduler update) therefore has no reason to
-        // wait — treating a missing cooldown as "elapsed" is what lets an
-        // interrupted catch-up resume once scheduling is enabled instead of
-        // being stranded behind the interval gate forever.
-        if (!cursor.next_catchup_at) return true;
-        const nextCatchupAt = Date.parse(cursor.next_catchup_at);
-        return !Number.isFinite(nextCatchupAt) || nextCatchupAt <= schedulerNow;
-      });
-      const recoveryProbeDue = !settings.schedulerEnabled &&
+      const catchUpDue =
+        settings.schedulerEnabled &&
+        (await list<FeedCursor>(pool, 'feedCursors')).some((cursor) => {
+          if (!cursor.hasMore) return false;
+          // `next_catchup_at` is a cooldown: "earliest time the next catch-up
+          // window may run". A cursor that is mid-catch-up but has no cooldown
+          // recorded (a legacy record, or a worker that stopped between the
+          // cursor write and the scheduler update) therefore has no reason to
+          // wait — treating a missing cooldown as "elapsed" is what lets an
+          // interrupted catch-up resume once scheduling is enabled instead of
+          // being stranded behind the interval gate forever.
+          if (!cursor.next_catchup_at) return true;
+          const nextCatchupAt = Date.parse(cursor.next_catchup_at);
+          return !Number.isFinite(nextCatchupAt) || nextCatchupAt <= schedulerNow;
+        });
+      const recoveryProbeDue =
+        !settings.schedulerEnabled &&
         (await list<ThreatFeed>(pool, 'feeds')).some((feed) => recoveryDue(feed, schedulerNow));
       if (
-        shouldStartAutomaticRun({
-          schedulerEnabled: settings.schedulerEnabled,
-          recoveryProbeDue,
-          catchUpDue,
-          lastRun: last?.last_run ? new Date(last.last_run).toISOString() : null,
-          intervalMinutes: settings.schedulerIntervalMinutes,
-        }, schedulerNow)
+        shouldStartAutomaticRun(
+          {
+            schedulerEnabled: settings.schedulerEnabled,
+            recoveryProbeDue,
+            catchUpDue,
+            lastRun: last?.last_run ? new Date(last.last_run).toISOString() : null,
+            intervalMinutes: settings.schedulerIntervalMinutes,
+          },
+          schedulerNow,
+        )
       )
         // `queueRun` must own a fresh connection: `lock` carries the run's
         // session advisory lock and must never be used as a transaction client
@@ -1032,18 +1265,21 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     }));
     execution.startTime = new Date().toISOString();
     let heartbeatPending = false;
-    heartbeat = setInterval(pipelineHeartbeat(onProgress, {
-      onBeat: () => {
-        if (heartbeatPending) return;
-        heartbeatPending = true;
-        void pool
-          .query('UPDATE scheduler_state SET heartbeat=now() WHERE id=1')
-          .catch(() => console.error(JSON.stringify({ level: 'error', event: 'pipeline-heartbeat' })))
-          .finally(() => {
-            heartbeatPending = false;
-          });
-      },
-    }), PIPELINE_HEARTBEAT_MS);
+    heartbeat = setInterval(
+      pipelineHeartbeat(onProgress, {
+        onBeat: () => {
+          if (heartbeatPending) return;
+          heartbeatPending = true;
+          void pool
+            .query('UPDATE scheduler_state SET heartbeat=now() WHERE id=1')
+            .catch(() => console.error(JSON.stringify({ level: 'error', event: 'pipeline-heartbeat' })))
+            .finally(() => {
+              heartbeatPending = false;
+            });
+        },
+      }),
+      PIPELINE_HEARTBEAT_MS,
+    );
     heartbeat.unref();
     await lockedTransaction(async (db) => {
       await checkpoint(db);
@@ -1079,7 +1315,10 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     // without credentials the feed is auto-disabled by bootstrap.
     const feeds = allFeeds.filter((feed) => feed.enabled && SUPPORTED_FEED_ADAPTERS.has(feed.type));
     for (const skipped of allFeeds.filter((f) => f.enabled && !SUPPORTED_FEED_ADAPTERS.has(f.type))) {
-      pushExecutionLog(execution!, `Feed ${skipped.id}: skipped — unsupported feed adapter (${skipped.type})`);
+      pushExecutionLog(
+        execution!,
+        `Feed ${skipped.id}: skipped — unsupported feed adapter (${skipped.type})`,
+      );
     }
     const feedTypesById = new Map(allFeeds.map((feed) => [feed.id, feed.type]));
     const [cachedCves, cachedWithdrawals, inventory, aliasEntries] = await Promise.all([
@@ -1149,9 +1388,12 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           // the configured limit for all other feeds.
           const maxDurationSeconds = config.FEED_MAX_DURATION_SECONDS;
           const deadline = start + maxDurationSeconds * 1000;
-          const configuredFeedHosts = config.EGRESS_ALLOWED_HOSTS.split(',').map((host) => host.trim()).filter(Boolean);
-          const additionalAllowedHosts = feedEgressHosts(feed.type, feed.url, configuredFeedHosts)
-            .filter((host) => !configuredFeedHosts.includes(host));
+          const configuredFeedHosts = config.EGRESS_ALLOWED_HOSTS.split(',')
+            .map((host) => host.trim())
+            .filter(Boolean);
+          const additionalAllowedHosts = feedEgressHosts(feed.type, feed.url, configuredFeedHosts).filter(
+            (host) => !configuredFeedHosts.includes(host),
+          );
           const sourceCheckpoint = async () => {
             await checkpoint();
             if (Date.now() >= deadline) throw new FeedDeadlineExceeded();
@@ -1160,18 +1402,23 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             const checkedRequest: Requester = async (url, options) => {
               await sourceCheckpoint();
               const remaining = Math.max(1, deadline - Date.now());
-              const requestSignal = signal && options?.signal
-                ? AbortSignal.any([signal, options.signal]) : signal ?? options?.signal;
-              const response = await withAbortSignal(request(url, {
-                ...options,
-                additionalAllowedHosts,
-                // Publishers routinely move between the apex and www spelling;
-                // follow that hop when the target still passes the SSRF check.
-                sameSiteRedirects: true,
-                signal: requestSignal,
-                timeoutMs: Math.min(options?.timeoutMs ?? 20000, remaining),
-                socketTimeoutMs: Math.min(options?.socketTimeoutMs ?? 15000, remaining),
-              }), requestSignal);
+              const requestSignal =
+                signal && options?.signal
+                  ? AbortSignal.any([signal, options.signal])
+                  : (signal ?? options?.signal);
+              const response = await withAbortSignal(
+                request(url, {
+                  ...options,
+                  additionalAllowedHosts,
+                  // Publishers routinely move between the apex and www spelling;
+                  // follow that hop when the target still passes the SSRF check.
+                  sameSiteRedirects: true,
+                  signal: requestSignal,
+                  timeoutMs: Math.min(options?.timeoutMs ?? 20000, remaining),
+                  socketTimeoutMs: Math.min(options?.socketTimeoutMs ?? 15000, remaining),
+                }),
+                requestSignal,
+              );
               await sourceCheckpoint();
               return response;
             };
@@ -1194,10 +1441,13 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
                     activeSignal?.removeEventListener('abort', onAbort);
                     reject(activeSignal?.reason ?? new Error('Operation aborted'));
                   };
-                  timer = setTimeout(() => {
-                    activeSignal?.removeEventListener('abort', onAbort);
-                    resolve();
-                  }, Math.min(500, delay));
+                  timer = setTimeout(
+                    () => {
+                      activeSignal?.removeEventListener('abort', onAbort);
+                      resolve();
+                    },
+                    Math.min(500, delay),
+                  );
                   activeSignal?.addEventListener('abort', onAbort, { once: true });
                   if (activeSignal?.aborted) onAbort();
                 });
@@ -1227,9 +1477,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
               rejectedOccurrences: await rejectionOccurrences(pool, feed.id),
               ...(feed.type === 'OSV_API'
                 ? {
-                    targetPurls: inventory
-                      .filter((item) => item.active)
-                      .flatMap((item) => item.purls || []),
+                    targetPurls: inventory.filter((item) => item.active).flatMap((item) => item.purls || []),
                   }
                 : {}),
             };
@@ -1288,6 +1536,13 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
               etag: result.syncState?.pageCursor ? feed.etag : result.etag,
               consecutiveFailures: 0,
               circuitOpenUntil: null,
+              // A successful run proves the recovery probe worked. Leaving the
+              // old probe timestamp behind let `recoveryDue` keep refusing the
+              // next probe for up to its 30-40s minimum interval after a fresh
+              // failure, during which the scheduler could decide no run was due
+              // and leave the source unprobed. The write below reads
+              // `lastRecoveryAttemptAt` forward from this update.
+              lastRecoveryAttemptAt: null,
             });
             // Feed completeness verification: if the source reports items but
             // none of them actually survived into this feed's own result
@@ -1311,7 +1566,10 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
               (result.exploited ? Object.keys(result.exploited).length : 0) +
               (result.epss ? Object.keys(result.epss).length : 0);
             if (result.count > 0 && !result.notModified && producedCount === 0) {
-              pushExecutionLog(execution!, `Feed ${feed.id}: returned ${result.count} items but zero CVEs entered the pipeline — possible ingestion filter issue`);
+              pushExecutionLog(
+                execution!,
+                `Feed ${feed.id}: returned ${result.count} items but zero CVEs entered the pipeline — possible ingestion filter issue`,
+              );
               await writeEvent(pool, {
                 category: 'FEED',
                 level: 'WARNING',
@@ -1361,7 +1619,10 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
                 consecutiveFailures: feed.consecutiveFailures || 0,
                 circuitOpenUntil: null,
               });
-              pushExecutionLog(execution!, `Feed ${feed.id}: configuration error, retry disabled — ${message}`);
+              pushExecutionLog(
+                execution!,
+                `Feed ${feed.id}: configuration error, retry disabled — ${message}`,
+              );
               await writeEvent(pool, {
                 category: 'FEED',
                 level: 'ERROR',
@@ -1406,27 +1667,37 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
                 latencyMs: Date.now() - start,
                 errorLog: message,
                 consecutiveFailures,
-                circuitOpenUntil: recoveryAt(feed, consecutiveFailures, Date.now(), computeFeedRecoveryDelay(consecutiveFailures)),
+                circuitOpenUntil: recoveryAt(
+                  feed,
+                  consecutiveFailures,
+                  Date.now(),
+                  computeFeedRecoveryDelay(consecutiveFailures),
+                ),
                 lastRecoveryAttemptAt: new Date().toISOString(),
               });
               pushExecutionLog(execution!, `Feed ${feed.id}: ${message}`);
             }
           }
-          await transaction(pool, async (db) => {
-            // A dead lock connection means the write cannot land; the checkpoint
-            // throws at once (fails the feed) instead of waiting out the
-            // statement timeout on a backend that is already gone.
-            await checkpoint(db);
-            // Audit L-3: `rawCount`/`results`/`feedUpdates` are mutated by every
-            // concurrent worker, so the intermediate progress line raced and
-            // could report a count that went backwards. Publish from the
-            // execution object's own monotonic counter, and only ever raise it.
-            const seen = Number(execution!.stats.rawIngested) || 0;
-            execution!.phases[0].durationMs = Date.now() - Date.parse(execution!.startTime);
-            execution!.phases[0].details = `${feeds.length} sources processed; ${Math.max(seen, rawCount)} records read`;
-            execution!.stats.rawIngested = Math.max(seen, rawCount);
-            await saveActiveExecution(db, execution!);
-          }, undefined, { locks: ['pipeline-queue'], signal });
+          await transaction(
+            pool,
+            async (db) => {
+              // A dead lock connection means the write cannot land; the checkpoint
+              // throws at once (fails the feed) instead of waiting out the
+              // statement timeout on a backend that is already gone.
+              await checkpoint(db);
+              // Audit L-3: `rawCount`/`results`/`feedUpdates` are mutated by every
+              // concurrent worker, so the intermediate progress line raced and
+              // could report a count that went backwards. Publish from the
+              // execution object's own monotonic counter, and only ever raise it.
+              const seen = Number(execution!.stats.rawIngested) || 0;
+              execution!.phases[0].durationMs = Date.now() - Date.parse(execution!.startTime);
+              execution!.phases[0].details = `${feeds.length} sources processed; ${Math.max(seen, rawCount)} records read`;
+              execution!.stats.rawIngested = Math.max(seen, rawCount);
+              await saveActiveExecution(db, execution!);
+            },
+            undefined,
+            { locks: ['pipeline-queue'], signal },
+          );
         }
       };
       const workers = await Promise.allSettled(Array.from({ length: concurrency }, worker));
@@ -1453,7 +1724,7 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           productAliases,
         }),
       undefined,
-        { locks: ['match-index'], statementTimeoutMs: 60000 },
+      { locks: ['match-index'], statementTimeoutMs: 60000 },
     );
     // Audit M-2/M-3: the preliminary pass used to run the *entire* matcher over
     // the whole corpus solely to decide which CVEs need EPSS scores. That is the
@@ -1476,10 +1747,11 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       if (!canonical) continue;
       const unbounded =
         !cve.cpeMatchDetails?.length &&
-        (!cve.cpeMatches.length || cve.cpeMatches.some((criteria) => {
-          const parsed = parseCPE23(criteria);
-          return !parsed.isValid || /[?*]/.test(parsed.vendor) || /[?*]/.test(parsed.product);
-        }));
+        (!cve.cpeMatches.length ||
+          cve.cpeMatches.some((criteria) => {
+            const parsed = parseCPE23(criteria);
+            return !parsed.isValid || /[?*]/.test(parsed.vendor) || /[?*]/.test(parsed.product);
+          }));
       if (unbounded) epssTargets.add(canonical);
     }
     const epssFeeds = feeds.filter((feed) => feed.type === 'EPSS_API');
@@ -1557,8 +1829,13 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         // A feed the operator disabled while ingestion was running, or whose
         // source changed, is no longer ours to describe: writing the run's
         // health/etag back would resurrect a stale `enabled=true` or overwrite
-        // the newly configured source's state.
-        if (!current || !validSources.has(feed.id)) continue;
+        // the newly configured source's state. A successful probe against the
+        // still-configured endpoint is the exception: its cleared failure state
+        // is evidence about the current source, not about the obsolete request,
+        // and discarding it strands a recovered feed as DOWN with an open
+        // circuit. Retryable health (DOWN/DEGRADED) keeps the original rule.
+        const healthy = feed.healthStatus === 'HEALTHY';
+        if (!current || (!healthy && !validSources.has(feed.id))) continue;
         await put(db, 'feeds', feed.id, {
           ...current,
           healthStatus: feed.healthStatus,
@@ -1567,14 +1844,17 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           itemCountLastRun: feed.itemCountLastRun,
           errorLog: feed.errorLog,
           ssrfValidated: feed.ssrfValidated,
-          etag: feed.etag,
+          etag: healthy ? (feed.etag ?? current.etag) : feed.etag,
           consecutiveFailures: feed.consecutiveFailures,
           circuitOpenUntil: feed.circuitOpenUntil,
-          // This update previously dropped these fields silently (only the
-          // listed keys were merged onto `current`, so they survived) but the
-          // explicit carry-forward documents the invariant and keeps a future
-          // refactor from resetting the recovery clock.
-          lastRecoveryAttemptAt: feed.lastRecoveryAttemptAt ?? current.lastRecoveryAttemptAt,
+          // The explicit carry-forward keeps a future refactor from resetting
+          // the recovery clock. A healthy probe clears it: it records the last
+          // *failed* recovery attempt, and `recoveryDue` refuses a new probe for
+          // its minimum interval whenever it is set, so keeping it after a
+          // recovery delayed the next one.
+          lastRecoveryAttemptAt: healthy
+            ? null
+            : (feed.lastRecoveryAttemptAt ?? current.lastRecoveryAttemptAt ?? null),
           enabled: current.enabled,
         });
       }
@@ -1593,8 +1873,13 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       for (const result of acceptedResults) {
         if (result.syncState?.hasMore) {
           // Remaining daily windows obey the configured automatic run frequency.
-          result.syncState = { ...result.syncState, catch_up: true,
-            next_catchup_at: new Date(Date.now() + catchupSettings.schedulerIntervalMinutes * 60000).toISOString() };
+          result.syncState = {
+            ...result.syncState,
+            catch_up: true,
+            next_catchup_at: new Date(
+              Date.now() + catchupSettings.schedulerIntervalMinutes * 60000,
+            ).toISOString(),
+          };
         }
         if (result.syncState) {
           const source = currentFeeds.get(result.sourceId!)!;
@@ -1681,7 +1966,9 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       // that was current when the run started, and a record current at commit
       // time is only replaced when the run's own revision is genuinely newer.
       const snapshot = await pipelineState(db);
-      const commitState = new Map(snapshot.cveData.map((cve) => [normalizeCveId(cve.cveId) || cve.cveId, cve]));
+      const commitState = new Map(
+        snapshot.cveData.map((cve) => [normalizeCveId(cve.cveId) || cve.cveId, cve]),
+      );
       const runStartedAt = Date.parse(execution!.startTime);
       // Re-read alias entries inside the commit transaction: operator alias
       // changes during ingestion (save/promote/revoke) must not be silently
@@ -1873,27 +2160,40 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       // Persist the CPE-changed set so a later run can re-evaluate even if
       // this run's scopeHours window excludes them.
       //
-      // Bug fix: the backlog MUST be read before it is overwritten. `db` is
-      // the single connection/transaction for this whole commit phase, so a
-      // `put` here followed by a `get` of the same key further below (as this
-      // code used to do) only ever observes what THIS run just wrote
-      // (read-your-own-writes) — it can never see what a previous run left
-      // behind. That silently discarded any CVE a prior run had queued for
-      // re-evaluation but that still had not matched an asset, defeating the
-      // "next run can re-evaluate" guarantee this comment describes. Reading
-      // first and persisting the union (the same pattern already used for
-      // `correlation-deferred-binds` just below) is what actually carries the
-      // backlog forward across runs.
-      const previousCpeChangedState = await get<{ cveIds: string[] }>(
-        db,
-        'systemState',
-        'cpe-changed-cves',
-      ).catch(() => undefined);
-      const cpeChangedBacklog = new Set([...(previousCpeChangedState?.cveIds ?? []), ...cpeChangedCveIdsSet]);
+      // The backlog MUST be read before it is overwritten. `db` is the single
+      // connection/transaction for this whole commit phase, so a `put` here
+      // followed by a `get` of the same key further below would only ever
+      // observe what THIS run just wrote (read-your-own-writes). Reading first
+      // is what carries a previous run's pending re-evaluations forward.
+      //
+      // The backlog is deliberately bounded. Every entry makes the next run
+      // re-evaluate that CVE against the whole inventory outside the
+      // publication window, so an ever-growing union turns into a per-run cost
+      // that never shrinks with deployment age. A CVE is therefore re-evaluated
+      // at most CPE_REMATCH_MAX_RUNS times (or for CPE_REMATCH_MAX_AGE_MS after
+      // the change) and is then dropped: an applicability change that produced
+      // no match after full-price re-matches in consecutive runs is settled, and
+      // a later provider revision re-adds it through the normal diff.
+      const previousCpeChangedState = await get<CpeRematchState>(db, 'systemState', 'cpe-changed-cves').catch(
+        () => undefined,
+      );
+      const cpeRematchNow = Date.now();
+      const cpeRematch = carryCpeRematchBacklog(
+        previousCpeChangedState,
+        cpeChangedCveIdsSet,
+        new Date(cpeRematchNow).toISOString(),
+        cpeRematchNow,
+      );
+      if (cpeRematch.dropped)
+        execution!.logs.push(
+          `CPE re-match backlog: ${cpeRematch.dropped} CVE(s) settled after ${CPE_REMATCH_MAX_RUNS} re-evaluation(s)`,
+        );
+      const cpeChangedBacklog = new Set(cpeRematch.entries.map((entry) => entry.cveId));
       await put(db, 'systemState', 'cpe-changed-cves', {
         cveIds: [...cpeChangedBacklog],
-        updatedAt: new Date().toISOString(),
-      });
+        entries: cpeRematch.entries,
+        updatedAt: new Date(cpeRematchNow).toISOString(),
+      } satisfies CpeRematchState);
       // Bind published CVEs to their pre-CVE clusters so early-intelligence
       // evidence and operator rulings travel with the canonical identifier.
       // Only CVEs that are new to the corpus (not merely re-versioned) can
@@ -2074,24 +2374,43 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       }).catch(() => undefined);
       const inventoryFingerprints: Record<string, string> = Object.create(null);
       const changedInventory = snapshot.watchlist.filter((asset) => {
-        const fingerprint = createHash('sha256').update(JSON.stringify({
-          vendor: asset.vendor, product: asset.product, version: asset.version,
-          cpes: [...asset.cpes].sort(), purls: [...(asset.purls ?? [])].sort(),
-          active: asset.active, assetTag: asset.assetTag,
-        })).digest('hex');
+        const fingerprint = createHash('sha256')
+          .update(
+            JSON.stringify({
+              vendor: asset.vendor,
+              product: asset.product,
+              version: asset.version,
+              cpes: [...asset.cpes].sort(),
+              purls: [...(asset.purls ?? [])].sort(),
+              active: asset.active,
+              assetTag: asset.assetTag,
+            }),
+          )
+          .digest('hex');
         inventoryFingerprints[asset.id] = fingerprint;
         return asset.active && previousInventory?.[asset.id] !== fingerprint;
       });
       if (changedInventory.length) {
         const historical = runVulnerabilityPipeline(
-          feeds, finalCves, changedInventory, snapshot.alertedCves, snapshot.findings,
-          { ...settings, scopeHours: 0 }, 'Inventory registration', true,
-          finalVendorAliases, finalProductAliases, finalPairs.size ? finalPairs : undefined, aliasEntries,
+          feeds,
+          finalCves,
+          changedInventory,
+          snapshot.alertedCves,
+          snapshot.findings,
+          { ...settings, scopeHours: 0 },
+          'Inventory registration',
+          true,
+          finalVendorAliases,
+          finalProductAliases,
+          finalPairs.size ? finalPairs : undefined,
+          aliasEntries,
           undefined,
           cpeChangedCveIds,
         );
         const known = new Set(correlated.newFindings.map(findingIdentity));
-        correlated.newFindings.push(...historical.newFindings.filter((finding) => !known.has(findingIdentity(finding))));
+        correlated.newFindings.push(
+          ...historical.newFindings.filter((finding) => !known.has(findingIdentity(finding))),
+        );
       }
       correlated.newFindings = assessFindings(correlated.newFindings, feedTypesById, settings);
       await put(db, 'systemState', 'matched-inventory-v1', inventoryFingerprints);
@@ -2114,11 +2433,13 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       // asset an operator ruled FALSE_POSITIVE/NOT_AFFECTED during the pre-CVE
       // window is created MONITORED with the ruling recorded, never queued.
       const existingFindingIdentities = new Set(snapshot.findings.map(findingIdentity));
-      const newFindingIds = new Set(
-        [...new Map(correlated.newFindings
-          .filter((finding) => !existingFindingIdentities.has(findingIdentity(finding)))
-          .map((finding) => [findingIdentity(finding), finding.id])).values()],
-      );
+      const newFindingIds = new Set([
+        ...new Map(
+          correlated.newFindings
+            .filter((finding) => !existingFindingIdentities.has(findingIdentity(finding)))
+            .map((finding) => [findingIdentity(finding), finding.id]),
+        ).values(),
+      ]);
       const suppressedNewFindings: Finding[] = [];
       const survivingNewFindings: Finding[] = [];
       {
@@ -2176,7 +2497,10 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
           auditLog.ipAddress,
           auditLog.context,
         );
-        if (auditLog.level === 'WARNING' && (auditLog.category === 'PIPELINE' || auditLog.category === 'FEED' || auditLog.category === 'EMAIL')) {
+        if (
+          auditLog.level === 'WARNING' &&
+          (auditLog.category === 'PIPELINE' || auditLog.category === 'FEED' || auditLog.category === 'EMAIL')
+        ) {
           await writeEvent(db, {
             category: auditLog.category,
             level: auditLog.level,
@@ -2207,7 +2531,11 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       // Batched, not per-row (audit finding #10): alias reconciliation can
       // touch hundreds of entries per run; putMany/removeMany issue one
       // parameterised statement each instead of one round trip per row.
-      await putMany(db, 'aliases', autoAliases.upserts.map((entry) => ({ id: entry.id, data: entry })));
+      await putMany(
+        db,
+        'aliases',
+        autoAliases.upserts.map((entry) => ({ id: entry.id, data: entry })),
+      );
       await removeMany(db, 'aliases', autoAliases.removals);
       const effectiveAliasEntries = autoAliases.aliases;
       const effectiveVendorAliases = buildAliasMap(effectiveAliasEntries, 'VENDOR');
@@ -2251,17 +2579,74 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       // The cap has two effects that must stay in lockstep: the suppressed
       // matches must not reach the ordinary news email, and their counterpart
       // findings must not reach the ordinary finding email. The digest below is
-      // the only delivery path for withheld evidence. Previously only the match
-      // set was consumed, so every capped finding was still dispatched
-      // individually and the digest was recorded but never sent.
-      const {
-        findings: rateLimitedFindings,
-        matches: rateLimitedMatches,
-        digests: zeroDayDigests,
-      } = rankAndRateLimitZeroDays(vexEnforced, intelligenceMatches, zeroDayCap);
+      // the only delivery path for withheld evidence.
+      //
+      // Eligible findings are the rows this run would actually queue. A row that
+      // neither applies nor is dispatchable (NOT_APPLICABLE, VEX-suppressed,
+      // security-rejected, resolved/dismissed) is never an outbound message, so
+      // it must not consume zero-day budget or become a digest candidate.
+      // An earlier version ran the cap over a set that was not the dispatch
+      // input, so a capped zero-day could be withheld from the news email,
+      // recorded in a digest, and still leave an individually deliverable
+      // finding behind -- the storm-to-duplicate failure the cap exists to stop.
+      const suppressedStatuses = new Set([
+        'NOT_APPLICABLE',
+        'SUPPRESSED_VEX_NOT_AFFECTED',
+        'SECURITY_REJECTED',
+      ]);
+      const dispatchableFindings = persistedFindings.filter(
+        (finding) =>
+          !suppressedStatuses.has(finding.notificationStatus) &&
+          !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status),
+      );
+      const dispatchableFindingIds = new Set(dispatchableFindings.map((finding) => finding.id));
+      const rateLimited = rankAndRateLimitZeroDays(dispatchableFindings, intelligenceMatches, zeroDayCap);
+      const rateLimitedMatches = rateLimited.matches;
+      const zeroDayDigests = rateLimited.digests;
+      // A digest may only claim findings the ordinary queue would have sent.
+      const withheldFindingIds = new Set(
+        zeroDayDigests.flatMap((digest) => digest.findingIds).filter((id) => dispatchableFindingIds.has(id)),
+      );
+      // Withheld findings stay persisted (the operator keeps seeing the exposure
+      // and the next run does not recreate the row) but leave the dispatch set.
+      const dispatchFindings = persistedFindings.filter(
+        (finding) => dispatchableFindingIds.has(finding.id) && !withheldFindingIds.has(finding.id),
+      );
+      // The digest is the only delivery path for withheld evidence, so those
+      // persisted rows must say so instead of claiming they are on the queue.
+      const withheldRows = persistedFindings.filter((finding) => withheldFindingIds.has(finding.id));
+      if (withheldRows.length) {
+        const digestByFinding = new Map<string, string>();
+        for (const digest of zeroDayDigests)
+          for (const findingId of digest.findingIds)
+            if (withheldFindingIds.has(findingId)) digestByFinding.set(findingId, digest.advisoryId);
+        const recordedAt = new Date().toISOString();
+        await putMany(
+          db,
+          'findings',
+          withheldRows.map((finding) => ({
+            id: finding.id,
+            data: {
+              ...finding,
+              notificationStatus: 'DIGEST_BATCHED' as const,
+              timeline: [
+                ...(finding.timeline ?? []),
+                {
+                  timestamp: recordedAt,
+                  action: 'Zero-day rate limited',
+                  system: 'Server correlation engine',
+                  details: `Consolidated into digest ${digestByFinding.get(finding.id) ?? 'unknown'} instead of an individual notification.`,
+                },
+              ],
+            },
+          })),
+        );
+      }
       // Declared with the other queue counters below; hoisted here because the
       // digest delivery happens before the ordinary dispatch block runs.
       let zeroDayDigestNotificationsQueued = 0;
+      // (declared once for the run, in `processPipeline`, so the post-commit
+      // alert flush below can see it)
       // Materialise each digest once: the persisted record and the queued email
       // must describe exactly the same withheld evidence.
       const allByMatchId = new Map(intelligenceMatches.map((match) => [match.id, match]));
@@ -2360,17 +2745,60 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       // Audit C-3: exceeding the cap must not silence the operator. Each digest
       // is delivered as one consolidated email per Security-team recipient, so
       // the cost bound the cap protects still holds. The findings themselves stay
-      // out of the normal dispatch path (see `rateLimitedFindings` below).
+      // out of the normal dispatch path (see `dispatchFindings` above).
       if (digestPayloads.length) {
         // The digest queue is idempotent per recipient and content revision, so
         // a retried commit cannot send the same digest twice.
-        const digestRecipients = await loadNewsRecipients(db);
+        //
+        // Queuing a digest is delivery work, not correlation work, and it sits
+        // in the middle of the run's only commit transaction (the ordinary
+        // finding/news emails are queued further down, in the same transaction).
+        // A digest failure that threw here therefore discarded the whole run:
+        // the digests, the capped findings and the correlation evidence were
+        // rolled back, the run reported FAILED, and the next run re-derived the
+        // same zero-days and hit the same failure. A digest that cannot be
+        // queued is recorded as an ERROR event; it stays persisted for the
+        // operator and must not invalidate the rest of the run.
+        const digestFailures: { digestId: string; reason: string }[] = [];
+        const digestRecipients = await loadNewsRecipients(db).catch((error: unknown) => {
+          const reason = error instanceof Error ? error.message : String(error);
+          execution!.logs.push(`Zero-day digests could not be queued: ${reason}`);
+          digestFailures.push({ digestId: 'recipients', reason });
+          return [];
+        });
         for (const { payload } of digestPayloads)
           zeroDayDigestNotificationsQueued += await queueZeroDayDigestNotification(
             db,
             payload,
             digestRecipients,
-          );
+          ).catch(async (error: unknown) => {
+            const reason = error instanceof Error ? error.message : String(error);
+            digestFailures.push({ digestId: payload.digestId, reason });
+            await writeEvent(db, {
+              category: 'EMAIL',
+              level: 'ERROR',
+              code: 'delivery.zero_day_digest_failed',
+              message: `Zero-day digest ${payload.digestId} was recorded but could not be queued`,
+              runId: execution!.id,
+              context: { digestId: payload.digestId, ...describeError(error) },
+            }).catch(() => undefined);
+            return 0;
+          });
+        // Swallowing the failure is what keeps the run's committed work, but a
+        // silent swallow would leave the operator with a digest that never
+        // arrives and an ERROR event nobody reads. Alert once per cooldown,
+        // keyed on the run/incident, through the same deduplicated path the
+        // self-healing watchdog uses. Alerting is scheduled only AFTER the
+        // digest loop so it cannot itself break the queuing it reports on.
+        if (digestFailures.length)
+          pendingOperatorAlerts.push({
+            incident: 'zero-day-digest-queue',
+            subject: 'Zero-day digest delivery failed',
+            text:
+              `${digestFailures.length} zero-day digest notification(s) could not be queued in run ${execution!.id}. ` +
+              `The evidence is recorded and visible to operators, but no digest email was sent. Reasons: ` +
+              digestFailures.map((failure) => `${failure.digestId}: ${failure.reason}`).join('; '),
+          });
         // Keep zero-day evidence available in the UI without sending a third
         // email repeating the same findings or source articles.
         await writeEvent(db, {
@@ -2437,7 +2865,9 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
                       publishedDate: item.article.publishedDate,
                     })),
                     assets: [...new Set(input.articles.flatMap((item) => item.assets))].sort(),
-                    asset: { name: input.articles.flatMap((item) => item.assets).sort()[0] || 'unknown asset' },
+                    asset: {
+                      name: input.articles.flatMap((item) => item.assets).sort()[0] || 'unknown asset',
+                    },
                     cveIds: input.cveIds,
                     evidence: input.articles.flatMap((item) => item.evidence).join(' | '),
                     zeroDay: input.articles.some((item) => item.zeroDay),
@@ -2481,13 +2911,19 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       // had not been told yet — including recipients added later. The
       // per-recipient `delivery_claims` record inside the consolidated queue is
       // what decides whether THIS recipient still needs THIS finding.
-      const pending = rateLimitedFindings.filter(
+      //
+      // The input is the zero-day-capped set, not the raw persisted set: a finding
+      // withheld by the cap is delivered through its digest and must never also
+      // be queued for individual delivery.
+      const pending = dispatchFindings.filter(
         (f) =>
           // Status and advisoryId are global bookkeeping. A DELIVERED finding
           // can still be new to a recipient added later. Only a recipient's
           // durable delivery claim determines whether that mailbox is notified.
           !f.dispatchDeferred &&
-          !['NOT_APPLICABLE', 'SUPPRESSED_VEX_NOT_AFFECTED', 'SECURITY_REJECTED', 'REVIEW_REQUIRED'].includes(f.notificationStatus) &&
+          !['NOT_APPLICABLE', 'SUPPRESSED_VEX_NOT_AFFECTED', 'SECURITY_REJECTED', 'REVIEW_REQUIRED'].includes(
+            f.notificationStatus,
+          ) &&
           !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(f.status),
       );
       // ML-guided finding order: use the trained importance ranker when
@@ -2601,6 +3037,18 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
         execution.status === 'FAILED' ? 'ERROR' : undefined,
       );
     });
+    // The run is durably committed. Only now may a fault it detected be mailed:
+    // an alert sent before the commit would report a failure that a rollback
+    // then erased. Alerting is best-effort and cannot fail the run.
+    for (const alert of pendingOperatorAlerts) {
+      await queueOperatorAlert(pool, {
+        component: 'PIPELINE',
+        incident: alert.incident,
+        subject: alert.subject,
+        text: alert.text,
+        cooldownMinutes: 30,
+      });
+    }
     return true;
   } catch (e) {
     signal?.throwIfAborted();
@@ -2622,49 +3070,71 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
       await transaction(pool, async (db) => {
         const current = await getForUpdate<PipelineExecution>(db, 'executions', execution!.id);
         if (!current || !['QUEUED', 'RUNNING'].includes(current.status)) return;
-      const nextAttempt = lostLockRecoveries + 1;
-      if (current.stopRequestedAt) {
-        const cancelled = {
+        const nextAttempt = lostLockRecoveries + 1;
+        if (current.stopRequestedAt) {
+          const cancelled = {
+            ...current,
+            status: 'CANCELLED' as const,
+            endTime: new Date().toISOString(),
+            phases: current.phases.map((phase) =>
+              phase.status === 'RUNNING' || phase.status === 'PENDING'
+                ? { ...phase, status: 'CANCELLED' as const }
+                : phase,
+            ),
+            logs: boundExecutionLogs([
+              ...new Set([...current.logs, 'Operator stop retained; worker did not restart after lock loss']),
+            ]),
+          };
+          await put(db, 'executions', execution!.id, cancelled);
+          await writeEvent(db, {
+            category: 'PIPELINE',
+            level: 'INFO',
+            code: 'pipeline.cancelled_after_lock_loss',
+            message: 'Pipeline cancelled during lock-loss recovery because stop was requested',
+            runId: execution!.id,
+          });
+          return;
+        }
+        if (nextAttempt >= 3) {
+          const failed = {
+            ...current,
+            status: 'FAILED' as const,
+            endTime: new Date().toISOString(),
+            phases: current.phases.map((phase) =>
+              phase.status === 'RUNNING' || phase.status === 'PENDING'
+                ? { ...phase, status: 'FAILED' as const }
+                : phase,
+            ),
+            stats: { ...current.stats, recoveryAttempts: nextAttempt },
+            logs: boundExecutionLogs([
+              ...new Set([
+                ...current.logs,
+                `Recovery limit exceeded (attempt ${nextAttempt}/3); pipeline failed after repeated lock loss`,
+              ]),
+            ]),
+          };
+          await put(db, 'executions', execution!.id, failed);
+          await writeEvent(db, {
+            category: 'ISSUE',
+            level: 'ERROR',
+            code: 'pipeline.recovery_limit_exceeded',
+            message: 'Pipeline recovery limit exceeded after repeated lock loss',
+            runId: execution!.id,
+            context: { recoveryAttempts: nextAttempt },
+          });
+          await appendAudit(
+            db,
+            'Pipeline recovery exhausted',
+            `Execution ${execution!.id}; repeated lock loss exhausted 3 recovery attempts`,
+            'worker',
+            'PIPELINE',
+            'ERROR',
+          );
+          return;
+        }
+        await put(db, 'executions', execution!.id, {
           ...current,
-          status: 'CANCELLED' as const,
-          endTime: new Date().toISOString(),
-          phases: current.phases.map((phase) =>
-            phase.status === 'RUNNING' || phase.status === 'PENDING' ? { ...phase, status: 'CANCELLED' as const } : phase,
-          ),
-          logs: boundExecutionLogs([...new Set([...current.logs, 'Operator stop retained; worker did not restart after lock loss'])]),
-        };
-        await put(db, 'executions', execution!.id, cancelled);
-        await writeEvent(db, {
-          category: 'PIPELINE', level: 'INFO', code: 'pipeline.cancelled_after_lock_loss',
-          message: 'Pipeline cancelled during lock-loss recovery because stop was requested', runId: execution!.id,
-        });
-        return;
-      }
-      if (nextAttempt >= 3) {
-        const failed = {
-          ...current,
-          status: 'FAILED' as const,
-          endTime: new Date().toISOString(),
-          phases: current.phases.map((phase) =>
-            phase.status === 'RUNNING' || phase.status === 'PENDING' ? { ...phase, status: 'FAILED' as const } : phase,
-          ),
-          stats: { ...current.stats, recoveryAttempts: nextAttempt },
-          logs: boundExecutionLogs([
-            ...new Set([...current.logs, `Recovery limit exceeded (attempt ${nextAttempt}/3); pipeline failed after repeated lock loss`]),
-          ]),
-        };
-        await put(db, 'executions', execution!.id, failed);
-        await writeEvent(db, {
-          category: 'ISSUE', level: 'ERROR', code: 'pipeline.recovery_limit_exceeded',
-          message: 'Pipeline recovery limit exceeded after repeated lock loss', runId: execution!.id,
-          context: { recoveryAttempts: nextAttempt },
-        });
-        await appendAudit(db, 'Pipeline recovery exhausted', `Execution ${execution!.id}; repeated lock loss exhausted 3 recovery attempts`, 'worker', 'PIPELINE', 'ERROR');
-        return;
-      }
-      await put(db, 'executions', execution!.id, {
-        ...current,
-        // Audit H-4: requeue instead of failing. The worker never reached the
+          // Audit H-4: requeue instead of failing. The worker never reached the
           // commit transaction, so no result was persisted and nothing is
           // half-applied — the run is exactly as resumable as an interrupted
           // one. Marking it FAILED made it unrecoverable, because the recovery
@@ -2707,96 +3177,103 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
     }
     if (execution) {
       const stopped = e instanceof PipelineStopped;
-      await lockedTransaction(async (db) => {
-        const current = await getForUpdate<PipelineExecution>(db, 'executions', execution!.id);
-        // The row may have been deleted or made terminal while this worker was
-        // unwinding. Never recreate a missing execution or overwrite a newer
-        // completion/failure with this stale worker's local snapshot.
-        if (!current) {
+      // Finalize the execution without the aborted signal so cleanup can write
+      // the CANCELLED or FAILED state to the database instead of being immediately
+      // aborted by transaction()'s signal check.
+      await transaction(
+        pool,
+        async (db) => {
+          const current = await getForUpdate<PipelineExecution>(db, 'executions', execution!.id);
+          // The row may have been deleted or made terminal while this worker was
+          // unwinding. Never recreate a missing execution or overwrite a newer
+          // completion/failure with this stale worker's local snapshot.
+          if (!current) {
+            await writeEvent(db, {
+              category: 'ISSUE',
+              level: 'ERROR',
+              code: 'pipeline.execution_missing',
+              message: 'Pipeline worker could not finalize because the execution record disappeared',
+              runId: execution!.id,
+            });
+            await appendAudit(
+              db,
+              'Pipeline execution record missing',
+              `Execution ${execution!.id} could not be finalized by the worker`,
+              'worker',
+              'PIPELINE',
+              'ERROR',
+            );
+            return;
+          }
+          if (['COMPLETED', 'FAILED', 'QUARANTINED'].includes(current.status)) {
+            await writeEvent(db, {
+              category: 'PIPELINE',
+              level: 'WARNING',
+              code: 'pipeline.stale_worker_result_discarded',
+              message: 'Discarded stale worker finalization because the execution is already terminal',
+              runId: execution!.id,
+              context: { observedStatus: current.status },
+            });
+            return;
+          }
+
+          const stopRequested = Boolean(current.stopRequestedAt);
+          const cancelled = stopRequested || current.status === 'CANCELLED';
+          // A PipelineStopped sentinel without a persisted cancellation state is
+          // a broken state transition, not evidence of an operator stop. Surface
+          // it as a failure so the execution cannot be silently misclassified.
+          const failure: Record<string, unknown> = cancelled
+            ? {}
+            : stopped
+              ? { error: 'Worker observed cancellation without a persisted stop request or CANCELLED status' }
+              : describeError(e);
+          const finalStatus = cancelled ? 'CANCELLED' : 'FAILED';
+          const finalPhases = current.phases.map((phase) =>
+            phase.status === 'RUNNING' || phase.status === 'PENDING'
+              ? { ...phase, status: cancelled ? ('CANCELLED' as const) : ('FAILED' as const) }
+              : phase,
+          );
+          await put(db, 'executions', execution!.id, {
+            ...current,
+            status: finalStatus,
+            stopRequestedAt: current.stopRequestedAt,
+            phases: finalPhases,
+            endTime: new Date().toISOString(),
+            logs: boundExecutionLogs([
+              ...new Set([...(current?.logs || []), ...execution!.logs]),
+              cancelled
+                ? stopRequested
+                  ? 'Operator requested stop; uncommitted results discarded'
+                  : 'Execution was already marked CANCELLED; uncommitted results discarded'
+                : e instanceof Error
+                  ? e.message
+                  : 'Worker failed',
+            ]),
+          });
           await writeEvent(db, {
-            category: 'ISSUE',
-            level: 'ERROR',
-            code: 'pipeline.execution_missing',
-            message: 'Pipeline worker could not finalize because the execution record disappeared',
+            category: cancelled ? 'PIPELINE' : 'ISSUE',
+            level: cancelled ? 'INFO' : 'ERROR',
+            code: cancelled ? 'pipeline.cancelled' : 'pipeline.failed',
+            message: cancelled
+              ? 'Pipeline cancelled; uncommitted results discarded'
+              : 'Pipeline failed; inspect execution details',
             runId: execution!.id,
+            context: { ...failure, stopRequested, observedStatus: current.status },
           });
           await appendAudit(
             db,
-            'Pipeline execution record missing',
-            `Execution ${execution!.id} could not be finalized by the worker`,
+            cancelled ? 'Pipeline cancelled' : 'Pipeline failed',
+            `Execution ${execution!.id}${
+              typeof failure.error === 'string' ? `; ${failure.error.slice(0, 500)}` : ''
+            }`,
             'worker',
             'PIPELINE',
-            'ERROR',
+            cancelled ? undefined : 'ERROR',
           );
-          return;
-        }
-        if (['COMPLETED', 'FAILED', 'QUARANTINED'].includes(current.status)) {
-          await writeEvent(db, {
-            category: 'PIPELINE',
-            level: 'WARNING',
-            code: 'pipeline.stale_worker_result_discarded',
-            message: 'Discarded stale worker finalization because the execution is already terminal',
-            runId: execution!.id,
-            context: { observedStatus: current.status },
-          });
-          return;
-        }
-
-        const stopRequested = Boolean(current.stopRequestedAt);
-        const cancelled = stopRequested || current.status === 'CANCELLED';
-        // A PipelineStopped sentinel without a persisted cancellation state is
-        // a broken state transition, not evidence of an operator stop. Surface
-        // it as a failure so the execution cannot be silently misclassified.
-        const failure: Record<string, unknown> = cancelled
-          ? {}
-          : stopped
-            ? { error: 'Worker observed cancellation without a persisted stop request or CANCELLED status' }
-            : describeError(e);
-        const finalStatus = cancelled ? 'CANCELLED' : 'FAILED';
-        const finalPhases = current.phases.map((phase) =>
-          phase.status === 'RUNNING' || phase.status === 'PENDING'
-            ? { ...phase, status: cancelled ? 'CANCELLED' as const : 'FAILED' as const }
-            : phase,
-        );
-        await put(db, 'executions', execution!.id, {
-          ...current,
-          status: finalStatus,
-          stopRequestedAt: current.stopRequestedAt,
-          phases: finalPhases,
-          endTime: new Date().toISOString(),
-          logs: boundExecutionLogs([
-            ...new Set([...(current?.logs || []), ...execution!.logs]),
-            cancelled
-              ? stopRequested
-                ? 'Operator requested stop; uncommitted results discarded'
-                : 'Execution was already marked CANCELLED; uncommitted results discarded'
-              : e instanceof Error
-                ? e.message
-                : 'Worker failed',
-          ]),
-        });
-        await writeEvent(db, {
-          category: cancelled ? 'PIPELINE' : 'ISSUE',
-          level: cancelled ? 'INFO' : 'ERROR',
-          code: cancelled ? 'pipeline.cancelled' : 'pipeline.failed',
-          message:
-            cancelled
-              ? 'Pipeline cancelled; uncommitted results discarded'
-              : 'Pipeline failed; inspect execution details',
-          runId: execution!.id,
-          context: { ...failure, stopRequested, observedStatus: current.status },
-        });
-        await appendAudit(
-          db,
-          cancelled ? 'Pipeline cancelled' : 'Pipeline failed',
-          `Execution ${execution!.id}${
-            typeof failure.error === 'string' ? `; ${failure.error.slice(0, 500)}` : ''
-          }`,
-          'worker',
-          'PIPELINE',
-          cancelled ? undefined : 'ERROR',
-        );
-      });
+        },
+        undefined,
+        { locks: ['pipeline-queue'] },
+      );
     } else throw e;
     return true;
   } finally {
@@ -2828,15 +3305,17 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             error: (unlockError as Error).message,
           },
         }).catch(() => undefined);
-        console.error(JSON.stringify({
-          level: 'error',
-          event: 'pipeline_lock_cleanup_failed',
-          message: 'Failed to release advisory lock',
-          context: {
-            connectionLost,
-            error: (unlockError as Error).message,
-          },
-        }));
+        console.error(
+          JSON.stringify({
+            level: 'error',
+            event: 'pipeline_lock_cleanup_failed',
+            message: 'Failed to release advisory lock',
+            context: {
+              connectionLost,
+              error: (unlockError as Error).message,
+            },
+          }),
+        );
       }
     }
     lock.removeListener('error', onError);

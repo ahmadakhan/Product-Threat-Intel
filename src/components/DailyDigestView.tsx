@@ -3,7 +3,34 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useApp } from '../context/AppContext';
 import { formatDateTime } from '../utils/dateTime';
 import { copyText } from '../utils/clipboard';
-import { FileCode, Send, RotateCcw, CheckCircle2, AlertCircle, Copy, Check, X, Type, Palette, Stamp, Sliders, Smartphone, Monitor, Maximize2, Minimize2, ZoomIn, ZoomOut, ArrowUp, ArrowDown, Eye, Code2, Download, CalendarDays, Edit3, Hash } from 'lucide-react';
+import {
+  FileCode,
+  Send,
+  RotateCcw,
+  CheckCircle2,
+  AlertCircle,
+  Copy,
+  Check,
+  X,
+  Type,
+  Palette,
+  Stamp,
+  Sliders,
+  Smartphone,
+  Monitor,
+  Maximize2,
+  Minimize2,
+  ZoomIn,
+  ZoomOut,
+  ArrowUp,
+  ArrowDown,
+  Eye,
+  Code2,
+  Download,
+  CalendarDays,
+  Edit3,
+  Hash,
+} from 'lucide-react';
 import {
   DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
   renderDailyFindingSummary,
@@ -19,11 +46,37 @@ import {
 } from '../utils/templateCompiler';
 
 const SAMPLE_FINDINGS: DigestFinding[] = [
-  { cveId: 'CVE-2026-0001', severity: 'CRITICAL', assetName: 'edge-router-01', vendor: 'VendorX', sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0001' },
-  { cveId: 'CVE-2026-0002', severity: 'CRITICAL', assetName: 'auth-service', sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0002' },
-  { cveId: 'CVE-2026-0003', severity: 'HIGH', assetName: 'portal-web', sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0003' },
-  { cveId: 'CVE-2026-0004', severity: 'MEDIUM', assetName: 'internal-api', sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0004' },
-  { cveId: 'CVE-2026-0005', severity: 'LOW', assetName: 'monitoring-agent', sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0005' },
+  {
+    cveId: 'CVE-2026-0001',
+    severity: 'CRITICAL',
+    assetName: 'edge-router-01',
+    vendor: 'VendorX',
+    sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0001',
+  },
+  {
+    cveId: 'CVE-2026-0002',
+    severity: 'CRITICAL',
+    assetName: 'auth-service',
+    sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0002',
+  },
+  {
+    cveId: 'CVE-2026-0003',
+    severity: 'HIGH',
+    assetName: 'portal-web',
+    sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0003',
+  },
+  {
+    cveId: 'CVE-2026-0004',
+    severity: 'MEDIUM',
+    assetName: 'internal-api',
+    sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0004',
+  },
+  {
+    cveId: 'CVE-2026-0005',
+    severity: 'LOW',
+    assetName: 'monitoring-agent',
+    sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0005',
+  },
 ];
 
 const SAMPLE_HEALTH: DigestHealth = {
@@ -70,9 +123,7 @@ export const DailyDigestView: React.FC = () => {
   // Rendered with the workspace timezone (not the browser's) and labelled with
   // its UTC offset, matching every other timestamp in the product.
   const displayTimezone = settings.timezone;
-  const previewDate = useRef(
-    formatDateTime(new Date(), displayTimezone).replace(',', ' |'),
-  ).current;
+  const previewDate = useRef(formatDateTime(new Date(), displayTimezone).replace(',', ' |')).current;
   const previewTimestamp = useRef(new Date().toISOString()).current;
   const [iframeHeight, setIframeHeight] = useState<number>(880);
   const [scrollMode, setScrollMode] = useState<'fit' | 'contained'>('fit');
@@ -193,7 +244,11 @@ export const DailyDigestView: React.FC = () => {
     return renderDailyDigest(
       dailyDigestCustomization,
       {
-        advisory_id: 'DAILY-PREVIEW',
+        // Carry the workspace advisory prefix, exactly as a real digest does:
+        // the preview ID must match the ID family in the delivered email (and in
+        // server/app.ts test-daily-digest), or the email path legitimately treats
+        // it as a different advisory and injects an identity line into the body.
+        advisory_id: `${settings.advisoryPrefix ?? ''}DAILY-PREVIEW`,
         advisory_title: 'Daily Vulnerability Notification',
         dispatch_date: previewTimestamp,
         severity: 'HIGH',
@@ -343,8 +398,13 @@ export const DailyDigestView: React.FC = () => {
 
   const handleSendTest = async (e: React.FormEvent) => {
     e.preventDefault();
+    const recipient = testEmail.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) {
+      setTestResult({ success: false, message: 'Enter a valid email address to receive the test.' });
+      return;
+    }
     const rendered = getRenderedHtml();
-    const unrenderedTokens = rendered.match(/\{\{[a-z_]+\}\}/g);
+    const unrenderedTokens = rendered.match(/\{\{\{?\s*[a-z_][a-z0-9_]*\s*\}?\}\}/gi);
     if (unrenderedTokens && unrenderedTokens.length > 0) {
       setTestResult({
         success: false,
@@ -353,14 +413,16 @@ export const DailyDigestView: React.FC = () => {
       return;
     }
     setShowTestModal(false);
-    setConfirmSendTest({ action: 'send-test', label: `test email to ${testEmail || 'recipient'}` });
+    setConfirmSendTest({ action: 'send-test', label: `test email to ${recipient}` });
   };
 
   const executeSendTest = async () => {
     if (!confirmSendTest) return;
     try {
-      const res = await sendTestDailyDigestEmail(testEmail);
-      setTestResult(res);
+      // Send the document the canvas and rendered pane are showing, not a
+      // second server render of saved state: the preview clock and any unsaved
+      // template edit must reach the mailbox byte for byte.
+      const res = await sendTestDailyDigestEmail(testEmail.trim(), getRenderedHtml());
       if (res.success) {
         setTimeout(() => {
           setTestResult(null);
@@ -383,9 +445,9 @@ export const DailyDigestView: React.FC = () => {
       {/* Top Header */}
       <div className="ui-page-header">
         <PageHeading page="daily-digest">
-          Design a customized daily digest. The digest sends an overall summary of daily findings and operational
-          health — never a PDF attachment. Preview desktop and mobile layouts, customize your branding, then save to
-          apply it to future daily digests.
+          Design a customized daily digest. The digest sends an overall summary of daily findings and
+          operational health — never a PDF attachment. Preview desktop and mobile layouts, customize your
+          branding, then save to apply it to future daily digests.
         </PageHeading>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -862,30 +924,30 @@ export const DailyDigestView: React.FC = () => {
                 <Eye className="w-3.5 h-3.5" />
                 <span>Visual Canvas</span>
               </button>
-  <button
-    type="button"
-    onClick={handleEnterEditor}
-    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition flex items-center space-x-1.5 ${
-      viewFormat === 'editor'
-        ? 'bg-zinc-800 dark:bg-zinc-800 light:bg-white text-zinc-100 dark:text-zinc-100 light:text-zinc-900 shadow-sm'
-        : 'text-zinc-400 hover:text-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 light:text-zinc-600 light:hover:text-zinc-900'
-    }`}
-  >
-    <Edit3 className="w-3.5 h-3.5" />
-    <span>Template Editor</span>
-  </button>
-  <button
-    type="button"
-    onClick={() => setViewFormat('html')}
-    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition flex items-center space-x-1.5 ${
-      viewFormat === 'html'
-        ? 'bg-zinc-800 dark:bg-zinc-800 light:bg-white text-zinc-100 dark:text-zinc-100 light:text-zinc-900 shadow-sm'
-        : 'text-zinc-400 hover:text-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 light:text-zinc-600 light:hover:text-zinc-900'
-    }`}
-  >
-    <Code2 className="w-3.5 h-3.5" />
-    <span>HTML Code</span>
-  </button>
+              <button
+                type="button"
+                onClick={handleEnterEditor}
+                className={`px-2.5 py-1 rounded-lg text-xs font-medium transition flex items-center space-x-1.5 ${
+                  viewFormat === 'editor'
+                    ? 'bg-zinc-800 dark:bg-zinc-800 light:bg-white text-zinc-100 dark:text-zinc-100 light:text-zinc-900 shadow-sm'
+                    : 'text-zinc-400 hover:text-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 light:text-zinc-600 light:hover:text-zinc-900'
+                }`}
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                <span>Template Editor</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewFormat('html')}
+                className={`px-2.5 py-1 rounded-lg text-xs font-medium transition flex items-center space-x-1.5 ${
+                  viewFormat === 'html'
+                    ? 'bg-zinc-800 dark:bg-zinc-800 light:bg-white text-zinc-100 dark:text-zinc-100 light:text-zinc-900 shadow-sm'
+                    : 'text-zinc-400 hover:text-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 light:text-zinc-600 light:hover:text-zinc-900'
+                }`}
+              >
+                <Code2 className="w-3.5 h-3.5" />
+                <span>HTML Code</span>
+              </button>
             </div>
           </div>
 
@@ -1028,7 +1090,9 @@ export const DailyDigestView: React.FC = () => {
                   </button>
                 </div>
               </span>
-              <span>{(htmlSubView === 'template' ? getTemplateSource() : getRenderedHtml()).length} characters</span>
+              <span>
+                {(htmlSubView === 'template' ? getTemplateSource() : getRenderedHtml()).length} characters
+              </span>
             </div>
             <p className="px-4 py-2 bg-zinc-950 border-b border-zinc-800 text-[11px] leading-relaxed text-zinc-500">
               {htmlSubView === 'template'
@@ -1049,7 +1113,10 @@ export const DailyDigestView: React.FC = () => {
               <div className="flex items-center space-x-1">
                 <span className="text-zinc-500">{customTemplate.length} characters</span>
                 {isCustomTemplate && (
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" title="Custom template active" />
+                  <span
+                    className="w-2 h-2 rounded-full bg-emerald-400 inline-block"
+                    title="Custom template active"
+                  />
                 )}
               </div>
             </div>
@@ -1132,7 +1199,9 @@ export const DailyDigestView: React.FC = () => {
                 <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-900/80 border-b border-zinc-800 text-xs font-mono text-zinc-400">
                   {/* The label follows the toggle: showing the raw template must
                       never be presented as a rendered preview. */}
-                  <span>{showTokensInCanvas ? 'Template With Tokens (unrendered)' : 'Live Rendered Preview'}</span>
+                  <span>
+                    {showTokensInCanvas ? 'Template With Tokens (unrendered)' : 'Live Rendered Preview'}
+                  </span>
                   <div className="flex items-center space-x-1">
                     <span className="text-zinc-500">
                       {(showTokensInCanvas ? getTemplateSource() : getRenderedHtml()).length} chars
@@ -1143,7 +1212,7 @@ export const DailyDigestView: React.FC = () => {
                   <div className="w-[720px] max-w-full mx-auto py-4">
                     <iframe
                       key={previewKey}
-                    srcDoc={showTokensInCanvas ? getTemplateSource() : getRenderedHtml()}
+                      srcDoc={showTokensInCanvas ? getTemplateSource() : getRenderedHtml()}
                       onLoad={syncIframeHeight}
                       scrolling="auto"
                       style={{
@@ -1216,7 +1285,7 @@ export const DailyDigestView: React.FC = () => {
                   ref={iframeRef}
                   key={previewKey}
                   title="Daily Digest Preview"
-                srcDoc={showTokensInCanvas ? getTemplateSource() : getRenderedHtml()}
+                  srcDoc={showTokensInCanvas ? getTemplateSource() : getRenderedHtml()}
                   onLoad={syncIframeHeight}
                   scrolling="auto"
                   style={{
@@ -1335,8 +1404,8 @@ export const DailyDigestView: React.FC = () => {
               Send Test Daily Digest
             </h2>
             <p className="text-xs text-zinc-400 mb-4">
-              Sends a sample daily digest email (overall summary, no PDF attachment) to verify rendering across client
-              mailboxes.
+              Sends a sample daily digest email (overall summary, no PDF attachment) to verify rendering
+              across client mailboxes.
             </p>
 
             {testResult && (
@@ -1394,8 +1463,8 @@ export const DailyDigestView: React.FC = () => {
           <div className="ui-panel bg-zinc-900 border border-zinc-800 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative">
             <h3 className="text-sm font-bold text-zinc-100 mb-2">Apply professional default?</h3>
             <p className="text-xs text-zinc-400 leading-relaxed mb-6">
-              Replace the preview with the professional navy-and-white preset. Save the template to apply it to
-              future daily digests.
+              Replace the preview with the professional navy-and-white preset. Save the template to apply it
+              to future daily digests.
             </p>
             <div className="flex justify-end space-x-2">
               <button
@@ -1427,19 +1496,35 @@ export const DailyDigestView: React.FC = () => {
 
       {/* Save Confirmation Modal */}
       {confirmSave && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setConfirmSave(null);
-        }}>
-          <section role="dialog" aria-modal="true" aria-labelledby="confirm-save-title" className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5">
-            <h2 id="confirm-save-title" className="text-sm font-semibold text-zinc-100">Save daily digest changes?</h2>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirmSave(null);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-save-title"
+            className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5"
+          >
+            <h2 id="confirm-save-title" className="text-sm font-semibold text-zinc-100">
+              Save daily digest changes?
+            </h2>
             <p className="mt-2 text-xs leading-relaxed text-zinc-400">
-              This will <span className="font-medium text-zinc-200 light:text-zinc-800">{confirmSave.label}</span>. The updated template will be applied to future daily digests.
+              This will{' '}
+              <span className="font-medium text-zinc-200 light:text-zinc-800">{confirmSave.label}</span>. The
+              updated template will be applied to future daily digests.
             </p>
             <div className="mt-5 flex justify-end gap-2">
               <button type="button" className="ui-secondary" onClick={() => setConfirmSave(null)}>
                 Cancel
               </button>
-              <button type="button" className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500" onClick={() => void executeSave()}>
+              <button
+                type="button"
+                className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500"
+                onClick={() => void executeSave()}
+              >
                 Confirm save
               </button>
             </div>
@@ -1449,19 +1534,35 @@ export const DailyDigestView: React.FC = () => {
 
       {/* Send Test Email Confirmation Modal */}
       {confirmSendTest && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setConfirmSendTest(null);
-        }}>
-          <section role="dialog" aria-modal="true" aria-labelledby="confirm-send-test-title" className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5">
-            <h2 id="confirm-send-test-title" className="text-sm font-semibold text-zinc-100">Send test email?</h2>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirmSendTest(null);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-send-test-title"
+            className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 shadow-sm light:border-zinc-200 light:bg-white w-full max-w-md p-5"
+          >
+            <h2 id="confirm-send-test-title" className="text-sm font-semibold text-zinc-100">
+              Send test email?
+            </h2>
             <p className="mt-2 text-xs leading-relaxed text-zinc-400">
-              This will <span className="font-medium text-zinc-200 light:text-zinc-800">{confirmSendTest.label}</span> using the current rendered template. A delivery audit record will be created.
+              This will{' '}
+              <span className="font-medium text-zinc-200 light:text-zinc-800">{confirmSendTest.label}</span>{' '}
+              using the current rendered template. A delivery audit record will be created.
             </p>
             <div className="mt-5 flex justify-end gap-2">
               <button type="button" className="ui-secondary" onClick={() => setConfirmSendTest(null)}>
                 Cancel
               </button>
-              <button type="button" className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500" onClick={() => void executeSendTest()}>
+              <button
+                type="button"
+                className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-sky-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500"
+                onClick={() => void executeSendTest()}
+              >
                 Confirm send
               </button>
             </div>

@@ -37,7 +37,17 @@ import {
   sessionCookieOptions,
   updateUser,
 } from './auth';
-import { transaction, state, get, getForUpdate, getMany, put, appendAudit, list, verifyStoredAudit } from './db';
+import {
+  transaction,
+  state,
+  get,
+  getForUpdate,
+  getMany,
+  put,
+  appendAudit,
+  list,
+  verifyStoredAudit,
+} from './db';
 import { queryCollection } from './collections';
 import { runRetention, previewRetention } from './retention';
 import { openRejectionCount } from './ingestionRejections';
@@ -46,7 +56,15 @@ import { runCpeSimulation } from '../src/utils/cpeSimulation.ts';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine.ts';
 import { feedSchema, HttpError, webhookSchema } from './validation';
 import { applyCommand, assertCommandRole } from './commands';
-import { checkPassword, passwordHash, decrypt, encryptionKeys, randomToken, secureEqual, tokenHash } from './secrets';
+import {
+  checkPassword,
+  passwordHash,
+  decrypt,
+  encryptionKeys,
+  randomToken,
+  secureEqual,
+  tokenHash,
+} from './secrets';
 import { createRequester, resolvePublic } from './network';
 import type { Requester, ResponseData } from './network';
 import { queueRun, stopRun, renderAdvisory } from './pipeline';
@@ -54,11 +72,7 @@ import { resolveAdvisoryTemplate } from './deliveryDocument';
 import { formatAdvisoryId } from '../src/utils/executionName';
 import { recoveryAt, isPermanentFeedFailure } from './feedRecovery';
 import { computeFeedRecoveryDelay, getMlRuntime } from './ml/integration.ts';
-import {
-  deriveFindingFeedbackSamples,
-  mlFeedbackSchema,
-  mlFindingFeedbackSchema,
-} from './ml/feedback.ts';
+import { deriveFindingFeedbackSamples, mlFeedbackSchema, mlFindingFeedbackSchema } from './ml/feedback.ts';
 import { mlMetrics } from './ml/metrics.ts';
 import { QUALITY_GATES } from './ml/train/qualityGates.ts';
 import {
@@ -104,7 +118,11 @@ import {
   isNvdRateLimitError,
   nvdRetryAfterSeconds,
 } from './cpeSearch';
-import { searchThreatIntelligence, ThreatSearchRateLimitError, ThreatSearchUpstreamError } from './threatSearch';
+import {
+  searchThreatIntelligence,
+  ThreatSearchRateLimitError,
+  ThreatSearchUpstreamError,
+} from './threatSearch';
 import {
   searchVulnerabilities,
   VulnerabilitySearchRateLimitError,
@@ -240,12 +258,10 @@ function resolveOperatorAudience(
   const enabled = recipients.filter((recipient) => recipient.enabled);
   let selected: EmailRecipient[];
   let validationError: string | null = null;
-  
+
   if (mode === 'SINGLE_EMAIL') {
     if (!customEmail) throw new HttpError(400, 'A recipient email address is required');
-    selected = enabled.filter(
-      (recipient) => recipient.email.toLowerCase() === customEmail.toLowerCase(),
-    );
+    selected = enabled.filter((recipient) => recipient.email.toLowerCase() === customEmail.toLowerCase());
     if (!selected.length)
       throw new HttpError(
         404,
@@ -262,11 +278,13 @@ function resolveOperatorAudience(
       );
     }
     // Additional security: verify recipients have proper permissions
-    const unauthorizedCount = selected.filter((recipient) => 
-      !recipient.deliveryGroup || recipient.deliveryGroup !== 'EVERYONE'
+    const unauthorizedCount = selected.filter(
+      (recipient) => !recipient.deliveryGroup || recipient.deliveryGroup !== 'EVERYONE',
     ).length;
     if (unauthorizedCount > 0) {
-      console.error(`SECURITY: Found ${unauthorizedCount} recipients with invalid deliveryGroup configuration for EVERYONE mode`);
+      console.error(
+        `SECURITY: Found ${unauthorizedCount} recipients with invalid deliveryGroup configuration for EVERYONE mode`,
+      );
     }
     validationError = `EVERYONE mode targets ${selected.length} enabled recipients`; // For audit logging
   } else {
@@ -278,13 +296,16 @@ function resolveOperatorAudience(
         'No enabled SECURITY_TEAM recipients configured. To send to security team, ensure at least one recipient has deliveryGroup="SECURITY_TEAM" or is enabled (undefined deliveryGroup defaults to SECURITY_TEAM).',
       );
     }
-    
+
     // Enterprise security: validate SECURITY_TEAM recipient configuration
     const securityTeamCount = selected.length;
-    const misconfiguredCount = selected.filter((recipient) => 
-      recipient.deliveryGroup && recipient.deliveryGroup !== 'SECURITY_TEAM' && recipient.deliveryGroup !== undefined
+    const misconfiguredCount = selected.filter(
+      (recipient) =>
+        recipient.deliveryGroup &&
+        recipient.deliveryGroup !== 'SECURITY_TEAM' &&
+        recipient.deliveryGroup !== undefined,
     ).length;
-    
+
     if (misconfiguredCount > 0) {
       console.error(`SECURITY: Found ${misconfiguredCount} misconfigured recipients in SECURITY_TEAM mode`);
       throw new HttpError(
@@ -292,12 +313,14 @@ function resolveOperatorAudience(
         'SECURITY_TEAM mode contains misconfigured recipients. All recipients must have deliveryGroup="SECURITY_TEAM" or no deliveryGroup specified.',
       );
     }
-    
+
     // Log audit information for enterprise compliance
     validationError = `SECURITY_TEAM mode targets ${securityTeamCount} configured security recipients`;
-    console.log(`AUDIT: Email delivery resolved to SECURITY_TEAM mode for advisory ${findings.map(f => f.advisoryId).join(',')}`);
+    console.log(
+      `AUDIT: Email delivery resolved to SECURITY_TEAM mode for advisory ${findings.map((f) => f.advisoryId).join(',')}`,
+    );
   }
-  
+
   // Final eligibility check
   if (!selected.length)
     throw new HttpError(400, 'No eligible recipients exist for the selected delivery group');
@@ -309,9 +332,9 @@ function resolveOperatorAudience(
       400,
       'The selected audience is not subscribed to every finding in this advisory. Adjust the recipient subscription or choose a different audience.',
     );
-    
+
   // Enterprise audit logging for recipient mode selection
-  console.log(`AUDIT: ${validationError} for findings ${findings.map(f => f.id).join(',')}`);
+  console.log(`AUDIT: ${validationError} for findings ${findings.map((f) => f.id).join(',')}`);
   return permitted;
 }
 
@@ -520,10 +543,8 @@ export function createApp(
     // Mutations must carry an Origin header (CSRF protection), but any origin
     // is allowed so threat-feed clients on any origin can write. Refusing
     // origin-less requests prevents CSRF without pinning to a single origin.
-    if (isMutation && !req.headers.origin)
-      return next(new HttpError(403, 'Origin not allowed'));
-    if (isMutation && !req.is('application/json'))
-      return next(new HttpError(415, 'JSON body required'));
+    if (isMutation && !req.headers.origin) return next(new HttpError(403, 'Origin not allowed'));
+    if (isMutation && !req.is('application/json')) return next(new HttpError(415, 'JSON body required'));
     next();
   });
   // --- Process liveness -----------------------------------------------------
@@ -606,99 +627,109 @@ export function createApp(
   // /healthz: comprehensive health for Kubernetes probes and load balancers.
   // Includes leader status, circuit breaker state, dead letter count, and
   // pipeline status so operators can see the full autonomy picture at a glance.
-  app.get('/healthz', asyncRoute(async (req, res) => {
-    const detailsAuthorized = Boolean(config.METRICS_TOKEN) &&
-      secureEqual(req.headers.authorization || '', `Bearer ${config.METRICS_TOKEN}`);
-    const started = Date.now();
-    await pool.query('SELECT 1');
-    const databaseLatencyMs = Date.now() - started;
-    const supervisor = options.correlation?.supervisor;
-    const cbState = await get<any>(pool, 'systemState', 'circuit-breaker-state').catch(() => undefined);
-    const leaderState = await get<any>(pool, 'systemState', 'leader-election').catch(() => undefined);
-    const deadLetterCount = await pool.query(
-      `SELECT count(*) FROM records
+  app.get(
+    '/healthz',
+    asyncRoute(async (req, res) => {
+      const detailsAuthorized =
+        Boolean(config.METRICS_TOKEN) &&
+        secureEqual(req.headers.authorization || '', `Bearer ${config.METRICS_TOKEN}`);
+      const started = Date.now();
+      await pool.query('SELECT 1');
+      const databaseLatencyMs = Date.now() - started;
+      const supervisor = options.correlation?.supervisor;
+      const cbState = await get<any>(pool, 'systemState', 'circuit-breaker-state').catch(() => undefined);
+      const leaderState = await get<any>(pool, 'systemState', 'leader-election').catch(() => undefined);
+      const deadLetterCount = await pool
+        .query(
+          `SELECT count(*) FROM records
         WHERE kind='delivery_dead_letters' AND COALESCE(data->>'resolvedAt','')=''`,
-    ).then((r) => Number(r.rows[0]?.count ?? 0));
-    // Records a feed delivered but that failed normalization: a lost finding,
-    // not a quality metric. Surfaced here so the probe that already watches the
-    // delivery queue also watches ingestion completeness.
-    const rejectionCount = await openRejectionCount(pool).catch(() => 0);
-    // The scheduler heartbeat is the only durable proof that *some* worker is
-    // actually running work. A cluster of healthy followers with no leader has
-    // an HTTP server that answers 200 on every replica while nothing runs, so
-    // readiness must be derived from this row, not from process liveness.
-    const scheduler = (
-      await pool
-        .query('SELECT heartbeat, EXTRACT(EPOCH FROM (now() - heartbeat)) * 1000 AS age_ms FROM scheduler_state WHERE id=1')
-        .catch(() => ({ rows: [] as { heartbeat: Date | null; age_ms: string | null }[] }))
-    ).rows[0];
-    const schedulerAgeMs = scheduler?.heartbeat ? Number(scheduler.age_ms) : null;
-    // 3x the worker tick (5s) plus slack for one long statement; the internal
-    // watchdog uses the same 3-minute threshold before it queues a catch-up.
-    const SCHEDULER_STALE_MS = 3 * 60_000;
-    const schedulerStale = schedulerAgeMs === null || !Number.isFinite(schedulerAgeMs) || schedulerAgeMs > SCHEDULER_STALE_MS;
-    const now = Date.now();
-    const leaderStale = !leaderState ||
-      !(leaderState.heartbeatAt && Date.parse(leaderState.heartbeatAt) > now - 30000);
-    const circuitOpen = cbState &&
-      cbState.cooldowns?.overallUntil &&
-      Date.parse(cbState.cooldowns.overallUntil) > now;
-    const healthChecks: Record<string, { status: 'ok' | 'degraded' | 'error'; message?: string }> = {
-      database: { status: 'ok', message: `SELECT 1 in ${databaseLatencyMs}ms` },
-      supervisor: {
-        status: supervisor?.health === 'HEALTHY' ? 'ok' : 'degraded',
-        message: supervisor?.health ?? 'unknown',
-      },
-      leader: {
-        status: leaderStale ? 'error' : 'ok',
-        message: leaderStale ? 'no leader or stale heartbeat' : `leader: ${leaderState?.leaderId ?? 'unknown'}`,
-      },
-      // Distinct from `leader`: a live leader that is not ticking is still
-      // broken (wedged pipeline, dead worker loop). Kubernetes should restart.
-      scheduler: {
-        status: schedulerStale ? 'error' : 'ok',
-        message: schedulerStale
-          ? schedulerAgeMs === null
-            ? 'scheduler heartbeat missing'
-            : `scheduler heartbeat stale (${Math.round(schedulerAgeMs / 1000)}s)`
-          : `scheduler ticked ${Math.round((schedulerAgeMs ?? 0) / 1000)}s ago`,
-      },
-      circuitBreaker: {
-        status: circuitOpen ? 'degraded' : 'ok',
-        message: circuitOpen ? 'overall dispatch cap tripped' : 'all dispatch paths open',
-      },
-      deadLetters: {
-        status: deadLetterCount > 50 ? 'degraded' : 'ok',
-        message: `${deadLetterCount} unresolved dead letter(s)`,
-      },
-      ingestionRejections: {
-        // Any open rejection means a delivered vulnerability never reached
-        // correlation. It degrades readiness for visibility without taking the
-        // node out of rotation for a single poisoned record.
-        status: rejectionCount > 0 ? 'degraded' : 'ok',
-        message: `${rejectionCount} open ingestion rejection(s)`,
-      },
-    };
-    const allOk = Object.values(healthChecks).every((c) => c.status === 'ok');
-    const anyError = Object.values(healthChecks).some((c) => c.status === 'error');
-    const overall = anyError ? 'unhealthy' : allOk ? 'healthy' : 'degraded';
-    if (!detailsAuthorized) {
-      res.status(anyError ? 503 : 200).json({ status: overall });
-      return;
-    }
-    res.status(anyError ? 503 : 200).json({
-      status: overall,
-      checks: healthChecks,
-      databaseLatencyMs,
-      leaderId: leaderState?.leaderId ?? null,
-      isLeader: !leaderStale && Boolean(leaderState),
-      circuitBreakerTripped: circuitOpen ?? false,
-      unresolvedDeadLetters: deadLetterCount,
-      openIngestionRejections: rejectionCount,
-      schedulerAgeMs,
-      uptimeMs: process.uptime() * 1000,
-    });
-  }));
+        )
+        .then((r) => Number(r.rows[0]?.count ?? 0));
+      // Records a feed delivered but that failed normalization: a lost finding,
+      // not a quality metric. Surfaced here so the probe that already watches the
+      // delivery queue also watches ingestion completeness.
+      const rejectionCount = await openRejectionCount(pool).catch(() => 0);
+      // The scheduler heartbeat is the only durable proof that *some* worker is
+      // actually running work. A cluster of healthy followers with no leader has
+      // an HTTP server that answers 200 on every replica while nothing runs, so
+      // readiness must be derived from this row, not from process liveness.
+      const scheduler = (
+        await pool
+          .query(
+            'SELECT heartbeat, EXTRACT(EPOCH FROM (now() - heartbeat)) * 1000 AS age_ms FROM scheduler_state WHERE id=1',
+          )
+          .catch(() => ({ rows: [] as { heartbeat: Date | null; age_ms: string | null }[] }))
+      ).rows[0];
+      const schedulerAgeMs = scheduler?.heartbeat ? Number(scheduler.age_ms) : null;
+      // 3x the worker tick (5s) plus slack for one long statement; the internal
+      // watchdog uses the same 3-minute threshold before it queues a catch-up.
+      const SCHEDULER_STALE_MS = 3 * 60_000;
+      const schedulerStale =
+        schedulerAgeMs === null || !Number.isFinite(schedulerAgeMs) || schedulerAgeMs > SCHEDULER_STALE_MS;
+      const now = Date.now();
+      const leaderStale =
+        !leaderState || !(leaderState.heartbeatAt && Date.parse(leaderState.heartbeatAt) > now - 30000);
+      const circuitOpen =
+        cbState && cbState.cooldowns?.overallUntil && Date.parse(cbState.cooldowns.overallUntil) > now;
+      const healthChecks: Record<string, { status: 'ok' | 'degraded' | 'error'; message?: string }> = {
+        database: { status: 'ok', message: `SELECT 1 in ${databaseLatencyMs}ms` },
+        supervisor: {
+          status: supervisor?.health === 'HEALTHY' ? 'ok' : 'degraded',
+          message: supervisor?.health ?? 'unknown',
+        },
+        leader: {
+          status: leaderStale ? 'error' : 'ok',
+          message: leaderStale
+            ? 'no leader or stale heartbeat'
+            : `leader: ${leaderState?.leaderId ?? 'unknown'}`,
+        },
+        // Distinct from `leader`: a live leader that is not ticking is still
+        // broken (wedged pipeline, dead worker loop). Kubernetes should restart.
+        scheduler: {
+          status: schedulerStale ? 'error' : 'ok',
+          message: schedulerStale
+            ? schedulerAgeMs === null
+              ? 'scheduler heartbeat missing'
+              : `scheduler heartbeat stale (${Math.round(schedulerAgeMs / 1000)}s)`
+            : `scheduler ticked ${Math.round((schedulerAgeMs ?? 0) / 1000)}s ago`,
+        },
+        circuitBreaker: {
+          status: circuitOpen ? 'degraded' : 'ok',
+          message: circuitOpen ? 'overall dispatch cap tripped' : 'all dispatch paths open',
+        },
+        deadLetters: {
+          status: deadLetterCount > 50 ? 'degraded' : 'ok',
+          message: `${deadLetterCount} unresolved dead letter(s)`,
+        },
+        ingestionRejections: {
+          // Any open rejection means a delivered vulnerability never reached
+          // correlation. It degrades readiness for visibility without taking the
+          // node out of rotation for a single poisoned record.
+          status: rejectionCount > 0 ? 'degraded' : 'ok',
+          message: `${rejectionCount} open ingestion rejection(s)`,
+        },
+      };
+      const allOk = Object.values(healthChecks).every((c) => c.status === 'ok');
+      const anyError = Object.values(healthChecks).some((c) => c.status === 'error');
+      const overall = anyError ? 'unhealthy' : allOk ? 'healthy' : 'degraded';
+      if (!detailsAuthorized) {
+        res.status(anyError ? 503 : 200).json({ status: overall });
+        return;
+      }
+      res.status(anyError ? 503 : 200).json({
+        status: overall,
+        checks: healthChecks,
+        databaseLatencyMs,
+        leaderId: leaderState?.leaderId ?? null,
+        isLeader: !leaderStale && Boolean(leaderState),
+        circuitBreakerTripped: circuitOpen ?? false,
+        unresolvedDeadLetters: deadLetterCount,
+        openIngestionRejections: rejectionCount,
+        schedulerAgeMs,
+        uptimeMs: process.uptime() * 1000,
+      });
+    }),
+  );
   app.post('/api/login', loginHandler(pool, config));
   // Reset endpoints are public: enforce shared IP and account quotas before
   // account lookup, mail delivery, code verification, or password hashing.
@@ -789,12 +820,24 @@ export function createApp(
         ]);
       });
       if (configured && config.NODE_ENV !== 'test') {
-        await createMailSender({ ...config, ATTACH_ADVISORY_PDF: 'false' }, pool, request)({
-          id: randomUUID(), dedupe_key: `password-reset:${username}`, channel: 'email',
-          target_id: 'password-reset', advisory_id: 'TEST', attempts: 1, lock_token: randomUUID(),
-          review_approved: false, priority: 0,
+        await createMailSender(
+          { ...config, ATTACH_ADVISORY_PDF: 'false' },
+          pool,
+          request,
+        )({
+          id: randomUUID(),
+          dedupe_key: `password-reset:${username}`,
+          channel: 'email',
+          target_id: 'password-reset',
+          advisory_id: 'TEST',
+          attempts: 1,
+          lock_token: randomUUID(),
+          review_approved: false,
+          priority: 0,
           payload: {
-            recipientEmail: user.email, cveIds: [], subject: 'Your password reset code',
+            recipientEmail: user.email,
+            cveIds: [],
+            subject: 'Your password reset code',
             text: `Your password reset code is: ${code}\n\nThis code expires in 10 minutes.\nIf you did not request this reset, you can safely ignore this email.`,
             html: `<p>Your password reset code is: <strong>${code}</strong></p><p>This code expires in 10 minutes. If you did not request this reset, you can safely ignore this email.</p>`,
           },
@@ -1330,10 +1373,20 @@ export function createApp(
           // Optional watchlist item IDs to filter results to monitored products.
           watchlistIds: z
             .string()
-            .transform((val) => (val ? val.split(',').map((id) => id.trim()).filter(Boolean) : []))
+            .transform((val) =>
+              val
+                ? val
+                    .split(',')
+                    .map((id) => id.trim())
+                    .filter(Boolean)
+                : [],
+            )
             .optional(),
           // Optional date filter: results from this date onward.
-          fromDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+          fromDate: z
+            .string()
+            .regex(/^\d{4}-\d{2}-\d{2}$/)
+            .optional(),
         })
         .refine((query) => query.query || query.package || query.cveId || query.version, {
           message: 'Enter a package, product, CVE identifier, or keyword to search',
@@ -1398,10 +1451,7 @@ export function createApp(
           throw new HttpError(429, error.message);
         }
         if (error instanceof VulnerabilitySearchUpstreamError)
-          throw new HttpError(
-            502,
-            'Vulnerability search is temporarily unavailable; retry shortly',
-          );
+          throw new HttpError(502, 'Vulnerability search is temporarily unavailable; retry shortly');
         throw error;
       }
     }),
@@ -1557,7 +1607,15 @@ export function createApp(
           email: accountEmail,
         })
         .parse(req.body);
-      await createUser(pool, data.username, data.password, data.role, req.ip || '', data.email, req.operator!.username);
+      await createUser(
+        pool,
+        data.username,
+        data.password,
+        data.role,
+        req.ip || '',
+        data.email,
+        req.operator!.username,
+      );
       res.status(201).json({ success: true });
     }),
   );
@@ -1727,9 +1785,10 @@ export function createApp(
       res.once('close', onClose);
       let result: Awaited<ReturnType<typeof verifyStoredAudit>>;
       try {
-        result = await verifyStoredAudit(pool, AbortSignal.any([
-          controller.signal, AbortSignal.timeout(60000),
-        ]));
+        result = await verifyStoredAudit(
+          pool,
+          AbortSignal.any([controller.signal, AbortSignal.timeout(60000)]),
+        );
       } finally {
         res.removeListener('close', onClose);
       }
@@ -1747,9 +1806,7 @@ export function createApp(
     '/api/audit/cleanup',
     requireRole('ADMIN'),
     asyncRoute(async (req, res) => {
-      const { days } = z
-        .object({ days: z.number().int().min(1).max(3650) })
-        .parse(req.body);
+      const { days } = z.object({ days: z.number().int().min(1).max(3650) }).parse(req.body);
       const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
       await transaction(pool, async (db) => {
         const deletedResult = await db.query(
@@ -1973,94 +2030,103 @@ export function createApp(
       res.json({ success: true, ...result });
     }),
   );
-  app.get('/api/ml/status', requireRole('ADMIN', 'OPERATOR', 'VIEWER'), asyncRoute(async (_req, res) => {
-    const runtime = getMlRuntime() ?? options.mlRuntime;
-    const training = await pool.query<{
-      occurred_at: string;
-      level: string;
-      context: Record<string, unknown> | null;
-    }>(
-      "SELECT occurred_at,level,context FROM operational_events WHERE code='ml.training.completed' ORDER BY id DESC LIMIT 1",
-    );
-    const latestRow = training.rows[0];
-    const latestContext = latestRow?.context && typeof latestRow.context === 'object' ? latestRow.context : {};
-    const latestResults = Array.isArray(latestContext.results)
-      ? latestContext.results.filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object')
-      : [];
-    const resultById = new Map(
-      latestResults
-        .filter((row) => typeof row.modelId === 'string')
-        .map((row) => [row.modelId as string, row]),
-    );
-    const models = Object.entries(QUALITY_GATES).map(([id, gate]) => {
-      const loaded = runtime?.registry.get(id);
-      const metadata = loaded?.metadata;
-      const latest = resultById.get(id);
-      return {
-        id,
-        status: loaded?.status ?? 'UNTRAINED',
-        trained: loaded?.model.isTrained?.() === true,
-        version: metadata?.version ?? null,
-        trainedAt: metadata?.trainedAt ?? null,
-        minimumSamples: gate.minimumSamples,
-        description: metadata?.description,
-        featureCount: metadata?.featureSchema.length ?? 0,
-        performance: metadata?.performance ?? null,
-        latestMetrics: mlMetrics.valuesForModel(id),
-        lastTraining: latest
-          ? {
-              status: String(latest.status ?? 'unknown'),
-              samplesCollected: Number(latest.samplesCollected ?? 0),
-              validationPassed:
-                typeof latest.validationPassed === 'boolean' ? latest.validationPassed : null,
-              failureReason:
-                typeof latest.failureReason === 'string' ? latest.failureReason : undefined,
-              saved: latest.saved === true,
-            }
-          : null,
-      };
-    });
-    // Report the same effective lookback used by the scheduled trainer.
-    const feedbackWindowDays = config.ML_LOOKBACK_DAYS;
-    const feedbackRows = await pool.query<{ source: string; count: number }>(
-      `SELECT COALESCE(context->>'source','unknown') AS source, count(*)::int AS count
+  app.get(
+    '/api/ml/status',
+    requireRole('ADMIN', 'OPERATOR', 'VIEWER'),
+    asyncRoute(async (_req, res) => {
+      const runtime = getMlRuntime() ?? options.mlRuntime;
+      const training = await pool.query<{
+        occurred_at: string;
+        level: string;
+        context: Record<string, unknown> | null;
+      }>(
+        "SELECT occurred_at,level,context FROM operational_events WHERE code='ml.training.completed' ORDER BY id DESC LIMIT 1",
+      );
+      const latestRow = training.rows[0];
+      const latestContext =
+        latestRow?.context && typeof latestRow.context === 'object' ? latestRow.context : {};
+      const latestResults = Array.isArray(latestContext.results)
+        ? latestContext.results.filter(
+            (row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object',
+          )
+        : [];
+      const resultById = new Map(
+        latestResults
+          .filter((row) => typeof row.modelId === 'string')
+          .map((row) => [row.modelId as string, row]),
+      );
+      const models = Object.entries(QUALITY_GATES).map(([id, gate]) => {
+        const loaded = runtime?.registry.get(id);
+        const metadata = loaded?.metadata;
+        const latest = resultById.get(id);
+        return {
+          id,
+          status: loaded?.status ?? 'UNTRAINED',
+          trained: loaded?.model.isTrained?.() === true,
+          version: metadata?.version ?? null,
+          trainedAt: metadata?.trainedAt ?? null,
+          minimumSamples: gate.minimumSamples,
+          description: metadata?.description,
+          featureCount: metadata?.featureSchema.length ?? 0,
+          performance: metadata?.performance ?? null,
+          latestMetrics: mlMetrics.valuesForModel(id),
+          lastTraining: latest
+            ? {
+                status: String(latest.status ?? 'unknown'),
+                samplesCollected: Number(latest.samplesCollected ?? 0),
+                validationPassed:
+                  typeof latest.validationPassed === 'boolean' ? latest.validationPassed : null,
+                failureReason: typeof latest.failureReason === 'string' ? latest.failureReason : undefined,
+                saved: latest.saved === true,
+              }
+            : null,
+        };
+      });
+      // Report the same effective lookback used by the scheduled trainer.
+      const feedbackWindowDays = config.ML_LOOKBACK_DAYS;
+      const feedbackRows = await pool.query<{ source: string; count: number }>(
+        `SELECT COALESCE(context->>'source','unknown') AS source, count(*)::int AS count
        FROM operational_events
        WHERE code='ml.training.feedback' AND occurred_at >= now() - ($1 * interval '1 day')
        GROUP BY 1 ORDER BY 1`,
-      [feedbackWindowDays],
-    );
-    const feedbackCounts: Record<string, number> = {
-      calibrationPairs: 0,
-      exploitRiskSamples: 0,
-      severityTierSamples: 0,
-      digestSelectionSamples: 0,
-      zeroDayRateLimitSamples: 0,
-      emailCompositionSamples: 0,
-    };
-    for (const row of feedbackRows.rows) feedbackCounts[row.source] = Number(row.count);
-    res.json({
-      initialized: Boolean(runtime),
-      models,
-      trainedModels: models.filter((model) => model.trained).length,
-      totalModels: models.length,
-      latestTraining: latestRow
-        ? { occurredAt: latestRow.occurred_at, level: latestRow.level, ...latestContext }
-        : null,
-      feedbackCounts,
-      feedbackWindowDays,
-    });
-  }));
+        [feedbackWindowDays],
+      );
+      const feedbackCounts: Record<string, number> = {
+        calibrationPairs: 0,
+        exploitRiskSamples: 0,
+        severityTierSamples: 0,
+        digestSelectionSamples: 0,
+        zeroDayRateLimitSamples: 0,
+        emailCompositionSamples: 0,
+      };
+      for (const row of feedbackRows.rows) feedbackCounts[row.source] = Number(row.count);
+      res.json({
+        initialized: Boolean(runtime),
+        models,
+        trainedModels: models.filter((model) => model.trained).length,
+        totalModels: models.length,
+        latestTraining: latestRow
+          ? { occurredAt: latestRow.occurred_at, level: latestRow.level, ...latestContext }
+          : null,
+        feedbackCounts,
+        feedbackWindowDays,
+      });
+    }),
+  );
   // Limited-confidence findings for analyst review. The finding gate was
   // removed, so this is no longer an operator approval queue: it surfaces the
   // matches whose correlation confidence is below the documented 90% review
   // bar (plus any finding explicitly marked REVIEW_REQUIRED, e.g. a package /
   // CPE contradiction) so analysts can inspect and correct them. The threshold
   // is a constant because `confirmedFindingThreshold` is no longer a setting.
-  app.get('/api/ml/review-queue', requireRole('ADMIN', 'OPERATOR', 'VIEWER'), asyncRoute(async (req, res) => {
-    const threshold = 90;
-    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 25));
-    const rows = await pool.query<{ data: Finding; total: number }>(
-      `SELECT data, count(*) OVER()::int AS total
+  app.get(
+    '/api/ml/review-queue',
+    requireRole('ADMIN', 'OPERATOR', 'VIEWER'),
+    asyncRoute(async (req, res) => {
+      const threshold = 90;
+      const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 25));
+      const rows = await pool.query<{ data: Finding; total: number }>(
+        `SELECT data, count(*) OVER()::int AS total
        FROM records
        WHERE kind='findings'
          AND data->>'status' NOT IN ('FALSE_POSITIVE','PATCH_APPLIED','RESOLVED')
@@ -2079,68 +2145,85 @@ export function createApp(
                 ) ASC,
                 updated_at DESC
        LIMIT $2`,
-      [threshold, limit],
-    );
-    res.json({
-      items: rows.rows.map((row) => row.data),
-      total: rows.rows[0]?.total ?? 0,
-      threshold,
-      limit,
-    });
-  }));
-  app.post('/api/ml/feedback', requireRole('ADMIN', 'OPERATOR'), asyncRoute(async (req, res) => {
-    const feedback = mlFeedbackSchema.parse(req.body);
-    await transaction(pool, async (db) => {
-      await writeEvent(db, {
-        category: 'ML', code: 'ml.training.feedback',
-        message: 'Analyst-verified ML training feedback recorded', context: feedback,
+        [threshold, limit],
+      );
+      res.json({
+        items: rows.rows.map((row) => row.data),
+        total: rows.rows[0]?.total ?? 0,
+        threshold,
+        limit,
       });
-      await appendAudit(db, 'ML training feedback recorded', feedback.source, req.operator!.username, 'PIPELINE');
-    });
-    res.status(201).json({ recorded: true, source: feedback.source, effect: 'next_training_run' });
-  }));
-  app.post('/api/ml/findings/:id/feedback', requireRole('ADMIN', 'OPERATOR'), asyncRoute(async (req, res) => {
-    const input = mlFindingFeedbackSchema.parse(req.body);
-    const findingId = req.params.id;
-    const result = await transaction(pool, async (db) => {
-      const finding = await getForUpdate<Finding>(db, 'findings', findingId);
-      if (!finding) throw new HttpError(404, 'Finding not found');
-      const samples = deriveFindingFeedbackSamples(finding, input);
-      for (const sample of samples) {
+    }),
+  );
+  app.post(
+    '/api/ml/feedback',
+    requireRole('ADMIN', 'OPERATOR'),
+    asyncRoute(async (req, res) => {
+      const feedback = mlFeedbackSchema.parse(req.body);
+      await transaction(pool, async (db) => {
         await writeEvent(db, {
           category: 'ML',
           code: 'ml.training.feedback',
           message: 'Analyst-verified ML training feedback recorded',
-          context: sample,
+          context: feedback,
         });
-      }
-      // Keep the analyst's disposition and any notes separate from the model
-      // samples so the sample event remains a strict, reusable data shape.
-      await writeEvent(db, {
-        category: 'ML',
-        code: 'ml.feedback.review',
-        message: 'Finding review label recorded for active learning',
-        context: {
-          findingId: finding.id,
-          cveId: finding.cveId,
-          disposition: input.disposition,
-          sources: samples.map((sample) => sample.source),
-          correctedExploitRisk: input.correctedExploitRisk,
-          correctedSeverityTier: input.correctedSeverityTier,
-          notes: input.notes,
-        },
+        await appendAudit(
+          db,
+          'ML training feedback recorded',
+          feedback.source,
+          req.operator!.username,
+          'PIPELINE',
+        );
       });
-      await appendAudit(
-        db,
-        'ML finding feedback recorded',
-        `${finding.cveId}: ${input.disposition}; ${samples.map((sample) => sample.source).join(', ')}`,
-        req.operator!.username,
-        'PIPELINE',
-      );
-      return { findingId: finding.id, sources: samples.map((sample) => sample.source) };
-    });
-    res.status(201).json({ recorded: result.sources.length, ...result, effect: 'next_training_run' });
-  }));
+      res.status(201).json({ recorded: true, source: feedback.source, effect: 'next_training_run' });
+    }),
+  );
+  app.post(
+    '/api/ml/findings/:id/feedback',
+    requireRole('ADMIN', 'OPERATOR'),
+    asyncRoute(async (req, res) => {
+      const input = mlFindingFeedbackSchema.parse(req.body);
+      const findingId = req.params.id;
+      const result = await transaction(pool, async (db) => {
+        const finding = await getForUpdate<Finding>(db, 'findings', findingId);
+        if (!finding) throw new HttpError(404, 'Finding not found');
+        const samples = deriveFindingFeedbackSamples(finding, input);
+        for (const sample of samples) {
+          await writeEvent(db, {
+            category: 'ML',
+            code: 'ml.training.feedback',
+            message: 'Analyst-verified ML training feedback recorded',
+            context: sample,
+          });
+        }
+        // Keep the analyst's disposition and any notes separate from the model
+        // samples so the sample event remains a strict, reusable data shape.
+        await writeEvent(db, {
+          category: 'ML',
+          code: 'ml.feedback.review',
+          message: 'Finding review label recorded for active learning',
+          context: {
+            findingId: finding.id,
+            cveId: finding.cveId,
+            disposition: input.disposition,
+            sources: samples.map((sample) => sample.source),
+            correctedExploitRisk: input.correctedExploitRisk,
+            correctedSeverityTier: input.correctedSeverityTier,
+            notes: input.notes,
+          },
+        });
+        await appendAudit(
+          db,
+          'ML finding feedback recorded',
+          `${finding.cveId}: ${input.disposition}; ${samples.map((sample) => sample.source).join(', ')}`,
+          req.operator!.username,
+          'PIPELINE',
+        );
+        return { findingId: finding.id, sources: samples.map((sample) => sample.source) };
+      });
+      res.status(201).json({ recorded: result.sources.length, ...result, effect: 'next_training_run' });
+    }),
+  );
   app.get(
     '/api/health',
     // Authenticated: the body carries queue backlog counts, worker heartbeat
@@ -2152,7 +2235,8 @@ export function createApp(
       const start = performance.now();
       await pool.query('SELECT 1');
       const dbMs = Math.round(performance.now() - start);
-      const worker = (await pool.query('SELECT last_run,heartbeat FROM scheduler_state WHERE id=1')).rows[0] ?? {};
+      const worker =
+        (await pool.query('SELECT last_run,heartbeat FROM scheduler_state WHERE id=1')).rows[0] ?? {};
       const appSettings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
       const backlog = (await pool.query('SELECT status,count(*)::int AS count FROM outbox GROUP BY status'))
         .rows;
@@ -2187,11 +2271,13 @@ export function createApp(
         heartbeatAgeSeconds,
         deliveryQueue,
         lastScheduledRun: worker.last_run,
-        nextScheduledRun: (appSettings.schedulerEnabled
-          ? (worker.last_run
+        nextScheduledRun:
+          (appSettings.schedulerEnabled
+            ? worker.last_run
               ? new Date(Date.parse(worker.last_run) + appSettings.schedulerIntervalMinutes * 60_000)
-              : new Date(Date.now()))
-          : null)?.toISOString() ?? null,
+              : new Date(Date.now())
+            : null
+          )?.toISOString() ?? null,
         schedulerEnabled: appSettings.schedulerEnabled,
         schedulerIntervalMinutes: appSettings.schedulerIntervalMinutes,
         backlog,
@@ -2214,7 +2300,10 @@ export function createApp(
       const data = z
         .object({
           scopeHours: z.number().int().min(1).max(2880).optional(),
-          incrementalFeeds: z.boolean().default(true),
+          // Absent, not `true`: a generic POST must not silently override an
+          // already-queued run's operator choice. An explicit `false` is the
+          // operator turning source checkpoints off.
+          incrementalFeeds: z.boolean().optional(),
         })
         .parse(req.body);
       res
@@ -2264,7 +2353,10 @@ export function createApp(
         const testUrl = new URL(feed.url);
         if (feed.type === 'OTX_API') {
           if (feed.url !== OTX_SUBSCRIBED_PULSES_URL || feed.authType !== 'API_KEY')
-            throw new HttpError(400, 'AlienVault OTX requires its subscribed-pulses API endpoint and an API key');
+            throw new HttpError(
+              400,
+              'AlienVault OTX requires its subscribed-pulses API endpoint and an API key',
+            );
           testUrl.searchParams.set('limit', '1');
         }
         // Probe large catalog/API endpoints with the smallest valid page so a
@@ -2281,8 +2373,9 @@ export function createApp(
         const configuredFeedHosts = config.EGRESS_ALLOWED_HOSTS.split(',')
           .map((host) => host.trim().toLowerCase())
           .filter(Boolean);
-        const additionalAllowedHosts = feedEgressHosts(feed.type, feed.url, configuredFeedHosts)
-          .filter((host) => !configuredFeedHosts.includes(host));
+        const additionalAllowedHosts = feedEgressHosts(feed.type, feed.url, configuredFeedHosts).filter(
+          (host) => !configuredFeedHosts.includes(host),
+        );
         const egressOptions = { additionalAllowedHosts, sameSiteRedirects: true };
         const requestOptions =
           feed.type === 'RSS_ATOM'
@@ -2296,18 +2389,19 @@ export function createApp(
                   maxResponseBytes: 8 * 1024 * 1024,
                 }
               : osvProbe
-                      ? {
-                          ...egressOptions,
-                          method: 'POST' as const,
-                          headers: { ...headers, 'content-type': 'application/json' },
-                          body: JSON.stringify({
-                            queries: [{ package: { purl: 'pkg:npm/vulnstream-connectivity-check@1.0.0' } }],
-                          }),
-                          timeoutMs: 25000,
-                          maxResponseBytes: 256 * 1024,
-                        }
-                      : { ...egressOptions, headers };
-        if (feed.type === 'MITRE_CVE') (requestOptions as { maxResponseBytes?: number }).maxResponseBytes = 64 * 1024 * 1024;
+                ? {
+                    ...egressOptions,
+                    method: 'POST' as const,
+                    headers: { ...headers, 'content-type': 'application/json' },
+                    body: JSON.stringify({
+                      queries: [{ package: { purl: 'pkg:npm/vulnstream-connectivity-check@1.0.0' } }],
+                    }),
+                    timeoutMs: 25000,
+                    maxResponseBytes: 256 * 1024,
+                  }
+                : { ...egressOptions, headers };
+        if (feed.type === 'MITRE_CVE')
+          (requestOptions as { maxResponseBytes?: number }).maxResponseBytes = 64 * 1024 * 1024;
         response = await request(testUrl.href, requestOptions);
         if (response.status >= 200 && response.status < 300) {
           if (feed.type === 'RSS_ATOM') parseSyndication(response.body, feed.id, 2880);
@@ -2327,7 +2421,12 @@ export function createApp(
             }
             if (osvProbe) {
               const result = (data as { results?: unknown })?.results;
-              if (!Array.isArray(result) || result.length !== 1 || !result[0] || typeof result[0] !== 'object')
+              if (
+                !Array.isArray(result) ||
+                result.length !== 1 ||
+                !result[0] ||
+                typeof result[0] !== 'object'
+              )
                 throw new Error('OSV querybatch returned an invalid response');
               const vulns = (result[0] as { vulns?: unknown }).vulns;
               if (vulns !== undefined && !Array.isArray(vulns))
@@ -2349,8 +2448,20 @@ export function createApp(
               errorLog: ok ? null : `HTTP ${response.status}`,
               ssrfValidated: ok ? true : current.ssrfValidated,
               consecutiveFailures: ok ? 0 : consecutiveFailures,
-              circuitOpenUntil: ok ? null : isPermanentFeedFailure({ status: response.status }) ? null : recoveryAt(current, consecutiveFailures, Date.now(), computeFeedRecoveryDelay(consecutiveFailures)),
-              lastRecoveryAttemptAt: !ok ? new Date().toISOString() : current.lastRecoveryAttemptAt,
+              circuitOpenUntil: ok
+                ? null
+                : isPermanentFeedFailure({ status: response.status })
+                  ? null
+                  : recoveryAt(
+                      current,
+                      consecutiveFailures,
+                      Date.now(),
+                      computeFeedRecoveryDelay(consecutiveFailures),
+                    ),
+              // A successful probe clears the recovery clock; leaving the last
+              // failed probe stamped keeps `recoveryDue` throttling the next
+              // automatic probe of a source that has just proven healthy.
+              lastRecoveryAttemptAt: !ok ? new Date().toISOString() : null,
             });
           }
           await appendAudit(
@@ -2373,18 +2484,25 @@ export function createApp(
         const latency = Math.round(performance.now() - start);
         await transaction(pool, async (db) => {
           const current = await getForUpdate<ThreatFeed>(db, 'feeds', feed.id);
-           if (current) {
-             const consecutiveFailures = (current.consecutiveFailures || 0) + 1;
-             await put(db, 'feeds', feed.id, {
-               ...current,
-               healthStatus: 'DOWN',
-               latencyMs: latency,
-               errorLog: message,
-               consecutiveFailures,
-               circuitOpenUntil: isPermanentFeedFailure(e) ? null : recoveryAt(current, consecutiveFailures, Date.now(), computeFeedRecoveryDelay(consecutiveFailures)),
-               lastRecoveryAttemptAt: new Date().toISOString(),
-             });
-           }
+          if (current) {
+            const consecutiveFailures = (current.consecutiveFailures || 0) + 1;
+            await put(db, 'feeds', feed.id, {
+              ...current,
+              healthStatus: 'DOWN',
+              latencyMs: latency,
+              errorLog: message,
+              consecutiveFailures,
+              circuitOpenUntil: isPermanentFeedFailure(e)
+                ? null
+                : recoveryAt(
+                    current,
+                    consecutiveFailures,
+                    Date.now(),
+                    computeFeedRecoveryDelay(consecutiveFailures),
+                  ),
+              lastRecoveryAttemptAt: new Date().toISOString(),
+            });
+          }
           await appendAudit(
             db,
             'Feed connectivity tested',
@@ -2511,7 +2629,13 @@ export function createApp(
       const socket = net.createConnection(smtpPort, smtpHost);
       let resolved = false;
       const promise = new Promise<{ ok: boolean; latency: number; error?: string }>((resolve, reject) => {
-        const timeout = setTimeout(() => { if (!resolved) { resolved = true; reject(new Error('Connection timed out')); socket.destroy(); } }, 10000);
+        const timeout = setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            reject(new Error('Connection timed out'));
+            socket.destroy();
+          }
+        }, 10000);
         socket.on('connect', () => {
           resolved = true;
           clearTimeout(timeout);
@@ -2544,7 +2668,16 @@ export function createApp(
     '/api/test-daily-digest',
     requireRole('ADMIN'),
     asyncRoute(async (req, res) => {
-      const { email } = z.object({ email: z.email().max(254) }).parse(req.body);
+      // `html` is the document the Daily Digest Studio already rendered on its
+      // canvas. Re-rendering here would make the test email a second document:
+      // it would miss an unsaved editor draft and could use a stale stored
+      // template. Callers that omit `html` still get the server-side render.
+      const { email, html: previewHtml } = z
+        .object({
+          email: z.email().max(254),
+          html: z.string().min(1).max(200_000).optional(),
+        })
+        .parse(req.body);
       const id = await transaction(pool, async (db) => {
         const emailConfig =
           (await getForUpdate<EmailConfiguration>(db, 'emailConfig', 'main')) || DEFAULT_EMAIL_CONFIG;
@@ -2557,11 +2690,37 @@ export function createApp(
         };
         const dailyDigestTemplate = data.dailyDigestCustomTemplate;
         const sampleFindings: DigestFinding[] = [
-          { cveId: 'CVE-2026-0001', severity: 'CRITICAL', assetName: 'edge-router-01', vendor: 'VendorX', sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0001' },
-          { cveId: 'CVE-2026-0002', severity: 'CRITICAL', assetName: 'auth-service', sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0002' },
-          { cveId: 'CVE-2026-0003', severity: 'HIGH', assetName: 'portal-web', sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0003' },
-          { cveId: 'CVE-2026-0004', severity: 'MEDIUM', assetName: 'internal-api', sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0004' },
-          { cveId: 'CVE-2026-0005', severity: 'LOW', assetName: 'monitoring-agent', sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0005' },
+          {
+            cveId: 'CVE-2026-0001',
+            severity: 'CRITICAL',
+            assetName: 'edge-router-01',
+            vendor: 'VendorX',
+            sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0001',
+          },
+          {
+            cveId: 'CVE-2026-0002',
+            severity: 'CRITICAL',
+            assetName: 'auth-service',
+            sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0002',
+          },
+          {
+            cveId: 'CVE-2026-0003',
+            severity: 'HIGH',
+            assetName: 'portal-web',
+            sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0003',
+          },
+          {
+            cveId: 'CVE-2026-0004',
+            severity: 'MEDIUM',
+            assetName: 'internal-api',
+            sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0004',
+          },
+          {
+            cveId: 'CVE-2026-0005',
+            severity: 'LOW',
+            assetName: 'monitoring-agent',
+            sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0005',
+          },
         ];
         const sampleHealth: DigestHealth = {
           database: 'connected',
@@ -2588,42 +2747,42 @@ export function createApp(
           minute: '2-digit',
         });
         const executiveSummary = formatExecutiveSummary(sampleFindings.length, severityCounts);
-         const parts: DailyDigestParts = {
-           advisory_id: `${data.settings.advisoryPrefix}DAILY-PREVIEW`,
-           // The rendered <title> and header read this value, so it has to match
-           // what a real digest is called. It previously said "Daily Vulnerability
-           // Digest — preview" while the header said "Daily Vulnerability
-           // Notification", which made the studio contradict the deliverable.
-           advisory_title: 'Daily Vulnerability Notification — preview',
-           dispatch_date: new Date().toISOString(),
-           severity: 'HIGH',
-           finding_count: sampleFindings.length,
-           severity_counts: '2 critical, 1 high, 1 medium, 1 low',
-           findings_summary: renderDailyFindingSummary(sampleFindings, dailyConfig),
-           health_report: renderDailyHealthReport(sampleHealth, dailyConfig),
-           recipient_name: email,
-           critical_count: severityCounts.CRITICAL,
-           high_count: severityCounts.HIGH,
-           medium_count: severityCounts.MEDIUM,
-           low_count: severityCounts.LOW,
-           asset_count: new Set(sampleFindings.map((f) => f.assetName)).size,
-           executive_summary: executiveSummary,
-           report_generated: reportGenerated,
-           // Was never supplied, so the Confidence Follow-up row rendered as an
-           // empty cell with no explanation of what the row is for. A real
-           // digest fills it from the finding set; the preview shows the
-           // zero-count wording so the row is visibly present and truthful.
-           held_for_review: renderHeldForReview(0, dailyConfig),
-           critical_summary: digestSeveritySummary('CRITICAL', severityCounts.CRITICAL, dailyConfig),
-           high_summary: digestSeveritySummary('HIGH', severityCounts.HIGH, dailyConfig),
-           medium_summary: digestSeveritySummary('MEDIUM', severityCounts.MEDIUM, dailyConfig),
-           low_summary: digestSeveritySummary('LOW', severityCounts.LOW, dailyConfig),
-           critical_kpi: digestSeverityKpi('CRITICAL', severityCounts.CRITICAL, dailyConfig),
-           high_kpi: digestSeverityKpi('HIGH', severityCounts.HIGH, dailyConfig),
-           medium_kpi: digestSeverityKpi('MEDIUM', severityCounts.MEDIUM, dailyConfig),
-           low_kpi: digestSeverityKpi('LOW', severityCounts.LOW, dailyConfig),
-         };
-          const html = renderDailyDigest(dailyConfig, parts, dailyDigestTemplate ?? undefined);
+        const parts: DailyDigestParts = {
+          advisory_id: `${data.settings.advisoryPrefix}DAILY-PREVIEW`,
+          // The rendered <title> and header read this value, so it has to match
+          // what a real digest is called. It previously said "Daily Vulnerability
+          // Digest — preview" while the header said "Daily Vulnerability
+          // Notification", which made the studio contradict the deliverable.
+          advisory_title: 'Daily Vulnerability Notification — preview',
+          dispatch_date: new Date().toISOString(),
+          severity: 'HIGH',
+          finding_count: sampleFindings.length,
+          severity_counts: '2 critical, 1 high, 1 medium, 1 low',
+          findings_summary: renderDailyFindingSummary(sampleFindings, dailyConfig),
+          health_report: renderDailyHealthReport(sampleHealth, dailyConfig),
+          recipient_name: email,
+          critical_count: severityCounts.CRITICAL,
+          high_count: severityCounts.HIGH,
+          medium_count: severityCounts.MEDIUM,
+          low_count: severityCounts.LOW,
+          asset_count: new Set(sampleFindings.map((f) => f.assetName)).size,
+          executive_summary: executiveSummary,
+          report_generated: reportGenerated,
+          // Was never supplied, so the Confidence Follow-up row rendered as an
+          // empty cell with no explanation of what the row is for. A real
+          // digest fills it from the finding set; the preview shows the
+          // zero-count wording so the row is visibly present and truthful.
+          held_for_review: renderHeldForReview(0, dailyConfig),
+          critical_summary: digestSeveritySummary('CRITICAL', severityCounts.CRITICAL, dailyConfig),
+          high_summary: digestSeveritySummary('HIGH', severityCounts.HIGH, dailyConfig),
+          medium_summary: digestSeveritySummary('MEDIUM', severityCounts.MEDIUM, dailyConfig),
+          low_summary: digestSeveritySummary('LOW', severityCounts.LOW, dailyConfig),
+          critical_kpi: digestSeverityKpi('CRITICAL', severityCounts.CRITICAL, dailyConfig),
+          high_kpi: digestSeverityKpi('HIGH', severityCounts.HIGH, dailyConfig),
+          medium_kpi: digestSeverityKpi('MEDIUM', severityCounts.MEDIUM, dailyConfig),
+          low_kpi: digestSeverityKpi('LOW', severityCounts.LOW, dailyConfig),
+        };
+        const html = previewHtml ?? renderDailyDigest(dailyConfig, parts, dailyDigestTemplate ?? undefined);
         const testAdvisory: Advisory = {
           id: parts.advisory_id,
           title: parts.advisory_title,
@@ -2743,9 +2902,10 @@ export function createApp(
       const content = editedJobContent(record, edits);
       // Normalize HTML preview so text (audience notice, reviewer comment) remains visible.
       if (!content.html || !content.html.includes('<body')) {
-        const bodyWrap = content.html && content.html.length > 0
-          ? `<html><head><meta charset="utf-8"><title>Email Preview</title></head><body>${content.html}</body></html>`
-          : '<html><head><meta charset="utf-8"><title>Email Preview</title></head><body></body></html>';
+        const bodyWrap =
+          content.html && content.html.length > 0
+            ? `<html><head><meta charset="utf-8"><title>Email Preview</title></head><body>${content.html}</body></html>`
+            : '<html><head><meta charset="utf-8"><title>Email Preview</title></head><body></body></html>';
         content.html = bodyWrap;
       }
       res.json({
@@ -2786,9 +2946,10 @@ export function createApp(
       const content = editedJobContent(record, mergedEdits);
       // Normalize HTML preview so text (audience notice, reviewer comment) remains visible.
       if (!content.html || !content.html.includes('<body')) {
-        const bodyWrap = content.html && content.html.length > 0
-          ? `<html><head><meta charset="utf-8"><title>Email Preview</title></head><body>${content.html}</body></html>`
-          : '<html><head><meta charset="utf-8"><title>Email Preview</title></head><body></body></html>';
+        const bodyWrap =
+          content.html && content.html.length > 0
+            ? `<html><head><meta charset="utf-8"><title>Email Preview</title></head><body>${content.html}</body></html>`
+            : '<html><head><meta charset="utf-8"><title>Email Preview</title></head><body></body></html>';
         content.html = bodyWrap;
       }
       res.json({ html: content.html, text: content.text, subject: content.subject, edits: mergedEdits });
@@ -2962,9 +3123,7 @@ export function createApp(
     requireRole('ADMIN', 'OPERATOR'),
     asyncRoute(async (req, res) => {
       const id = outboxId(req.params.id);
-      const data = z
-        .object({ reason: z.string().trim().max(500).optional() })
-        .parse(req.body ?? {});
+      const data = z.object({ reason: z.string().trim().max(500).optional() }).parse(req.body ?? {});
       await transaction(pool, async (db) => {
         const log = await getForUpdate<EmailDeliveryLog>(db, 'emailLogs', id);
         if (!log) throw new HttpError(404, 'Email delivery not found');
@@ -3029,18 +3188,11 @@ export function createApp(
             400,
             'Only advisory (finding) emails can be edited and re-dispatched from the Action Center',
           );
-        const findings = [
-          ...(await getMany<Finding>(db, 'findings', advisory.findingIds)).values(),
-        ];
+        const findings = [...(await getMany<Finding>(db, 'findings', advisory.findingIds)).values()];
         if (!findings.length)
           throw new HttpError(400, 'This advisory has no findings to include in a follow-up email');
         const recipients = await list<EmailRecipient>(db, 'recipients');
-        const selected = resolveOperatorAudience(
-          recipients,
-          data.recipientMode,
-          findings,
-          data.customEmail,
-        );
+        const selected = resolveOperatorAudience(recipients, data.recipientMode, findings, data.customEmail);
         // Merge the source job's saved edits with the operator's latest input so
         // a notice added earlier survives a follow-up that only changes the
         // audience. Undefined request fields never erase a saved value.
@@ -3170,7 +3322,8 @@ export function createApp(
         const vulnerabilitySeverityParts: string[] = [];
         for (const sev of ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as const) {
           const count = findings.filter((f) => f.cve.cvss.severity === sev).length;
-          if (count) vulnerabilitySeverityParts.push(count + ' ' + sev.charAt(0) + sev.slice(1).toLowerCase());
+          if (count)
+            vulnerabilitySeverityParts.push(count + ' ' + sev.charAt(0) + sev.slice(1).toLowerCase());
         }
         const vulnerabilitySeveritySummary = vulnerabilitySeverityParts.length
           ? vulnerabilitySeverityParts.join(', ')
@@ -3229,7 +3382,10 @@ export function createApp(
           executiveSummary: `${findings.length} correlated vulnerability finding(s) require investigation. Resent delivery.${data.reason ? ` ${data.reason}` : ''}`,
         };
         await put(db, 'advisories', reissued.id, reissued);
-        const editOptions = { edits: carriedEdits, subject: effectiveSubject(row.rows[0].payload?.subject, carriedEdits) };
+        const editOptions = {
+          edits: carriedEdits,
+          subject: effectiveSubject(row.rows[0].payload?.subject, carriedEdits),
+        };
         const queued = await queueBulkNotificationAdvisory(
           db,
           reissued,
@@ -3364,7 +3520,8 @@ export function createApp(
         const vulnerabilitySeverityParts: string[] = [];
         for (const sev of ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as const) {
           const count = findings.filter((f) => f.cve.cvss.severity === sev).length;
-          if (count) vulnerabilitySeverityParts.push(count + ' ' + sev.charAt(0) + sev.slice(1).toLowerCase());
+          if (count)
+            vulnerabilitySeverityParts.push(count + ' ' + sev.charAt(0) + sev.slice(1).toLowerCase());
         }
         const vulnerabilitySeveritySummary = vulnerabilitySeverityParts.length
           ? vulnerabilitySeverityParts.join(', ')
@@ -3372,7 +3529,9 @@ export function createApp(
         const recipients = await list<EmailRecipient>(db, 'recipients');
         let selectedRecipients: EmailRecipient[];
         if (data.recipientMode === 'SINGLE_EMAIL' && data.customEmail) {
-          selectedRecipients = recipients.filter((r) => r.enabled && r.email.toLowerCase() === data.customEmail!.toLowerCase());
+          selectedRecipients = recipients.filter(
+            (r) => r.enabled && r.email.toLowerCase() === data.customEmail!.toLowerCase(),
+          );
         } else if (data.recipientMode === 'EVERYONE') {
           selectedRecipients = recipients.filter((r) => r.enabled && r.deliveryGroup === 'EVERYONE');
         } else {
@@ -3380,7 +3539,8 @@ export function createApp(
             (r) => r.enabled && (r.deliveryGroup === 'SECURITY_TEAM' || r.deliveryGroup === undefined),
           );
         }
-        if (!selectedRecipients.length) throw new HttpError(400, 'No eligible recipients for the selected delivery group');
+        if (!selectedRecipients.length)
+          throw new HttpError(400, 'No eligible recipients for the selected delivery group');
         // Resend must honour the same subscription governance as a first send:
         // a recipient whose tier excludes any finding in this advisory must not
         // receive it merely because an operator clicked resend.
@@ -3403,11 +3563,16 @@ export function createApp(
           deliveryStatus: 'PENDING',
           recipientCount: selectedRecipients.length,
           executiveSummary: `${findings.length} correlated vulnerability finding(s) require investigation. ${data.reason}`,
-          remediationInstructions: 'Review vendor advisories and deploy tested remediation through your change process.',
+          remediationInstructions:
+            'Review vendor advisories and deploy tested remediation through your change process.',
           affectedSystems: Array.from(new Set(findings.map((f) => f.matchedAssetName))).sort(),
           vendorLink:
             Array.from(
-              new Set(findings.map((f) => f.cve.remediation.vendorAdvisoryRef || f.cve.remediation.patchUrl).filter(Boolean)),
+              new Set(
+                findings
+                  .map((f) => f.cve.remediation.vendorAdvisoryRef || f.cve.remediation.patchUrl)
+                  .filter(Boolean),
+              ),
             ).sort()[0] || '',
         };
         await put(db, 'advisories', advisory.id, advisory);
@@ -3459,9 +3624,7 @@ export function createApp(
         const url = feed?.url ?? webhook?.url;
         if (!url) throw new HttpError(400, 'URL required');
         const configuredHosts = config.EGRESS_ALLOWED_HOSTS.split(',').map((s) => s.trim().toLowerCase());
-        const allowedHosts = feed
-          ? feedEgressHosts(feed.type, feed.url, configuredHosts)
-          : configuredHosts;
+        const allowedHosts = feed ? feedEgressHosts(feed.type, feed.url, configuredHosts) : configuredHosts;
         try {
           await resolvePublic(new URL(url), allowedHosts);
         } catch {

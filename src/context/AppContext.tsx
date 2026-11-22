@@ -80,7 +80,7 @@ function useApplication() {
         return null;
       }
     }),
-[refreshVersion, setRefreshVersion] = useState(0),
+    [refreshVersion, setRefreshVersion] = useState(0),
     [pending, setPending] = useState(0);
   const sessionRef = useRef(session);
   sessionRef.current = session;
@@ -88,8 +88,11 @@ function useApplication() {
   const sessionRenewingRef = useRef(false);
   // Monotonic id so an older snapshot response can never overwrite a newer one.
   const refreshId = useRef(0);
-  const [activeExecutionId, setActiveExecutionId] = useState<string | null>(() =>
-    snapshot.executions.find((e) => ['RUNNING', 'QUEUED'].includes(e.status))?.id ?? snapshot.executions[0]?.id ?? null,
+  const [activeExecutionId, setActiveExecutionId] = useState<string | null>(
+    () =>
+      snapshot.executions.find((e) => ['RUNNING', 'QUEUED'].includes(e.status))?.id ??
+      snapshot.executions[0]?.id ??
+      null,
   );
   const inFlightMutations = new Set<string>();
   const request = useCallback(
@@ -279,7 +282,9 @@ function useApplication() {
     sessionRenewingRef.current = true;
     void request<{ expiresAt: string; csrfToken?: string }>('/session/renew', {})
       .then((result) => {
-        setSession((s) => (s ? { ...s, expiresAt: result.expiresAt, csrfToken: result.csrfToken ?? s.csrfToken } : null));
+        setSession((s) =>
+          s ? { ...s, expiresAt: result.expiresAt, csrfToken: result.csrfToken ?? s.csrfToken } : null,
+        );
       })
       .catch(() => {})
       .finally(() => {
@@ -387,8 +392,7 @@ function useApplication() {
     newsDigestDraft || snapshot.newsDigestCustomization || DEFAULT_NEWS_EMAIL_CUSTOMIZATION;
   // Compiled from the live customization, so the studio preview and the saved
   // template follow every colour and typography change.
-  const newsDigestTemplate =
-    newsDigestCustomTemplate || compileNewsTemplate(newsDigestCustomization);
+  const newsDigestTemplate = newsDigestCustomTemplate || compileNewsTemplate(newsDigestCustomization);
   const setDailyDigestCustomTemplatePersisted = (template: string | null) => {
     setDailyDigestCustomTemplate(template);
     try {
@@ -410,24 +414,27 @@ function useApplication() {
     } catch {}
   };
 
-  const renderAdvisoryPreview = useCallback(async (input: {
-    template: string;
-    contactTeam?: string;
-    contactEmail?: string;
-    tlpClassification?: string;
-  }): Promise<{ ok: true; html: string } | { ok: false; error: string }> => {
-    try {
-      const result = await request<{ success: boolean; html?: string; error?: string }>(
-        '/advisory-template-render',
-        input,
-        'POST',
-      );
-      if (result.success && typeof result.html === 'string') return { ok: true, html: result.html };
-      return { ok: false, error: result.error || 'Template could not be rendered' };
-    } catch (renderError) {
-      return { ok: false, error: renderError instanceof Error ? renderError.message : String(renderError) };
-    }
-  }, [request]);
+  const renderAdvisoryPreview = useCallback(
+    async (input: {
+      template: string;
+      contactTeam?: string;
+      contactEmail?: string;
+      tlpClassification?: string;
+    }): Promise<{ ok: true; html: string } | { ok: false; error: string }> => {
+      try {
+        const result = await request<{ success: boolean; html?: string; error?: string }>(
+          '/advisory-template-render',
+          input,
+          'POST',
+        );
+        if (result.success && typeof result.html === 'string') return { ok: true, html: result.html };
+        return { ok: false, error: result.error || 'Template could not be rendered' };
+      } catch (renderError) {
+        return { ok: false, error: renderError instanceof Error ? renderError.message : String(renderError) };
+      }
+    },
+    [request],
+  );
 
   return {
     ...snapshot,
@@ -477,7 +484,9 @@ function useApplication() {
     resetSessionTimeout: () =>
       safely(async () => {
         const result = await request<{ expiresAt: string; csrfToken?: string }>('/session/renew', {});
-        setSession((s) => (s ? { ...s, expiresAt: result.expiresAt, csrfToken: result.csrfToken ?? s.csrfToken } : null));
+        setSession((s) =>
+          s ? { ...s, expiresAt: result.expiresAt, csrfToken: result.csrfToken ?? s.csrfToken } : null,
+        );
       }),
     changePassword: (currentPassword: string, newPassword: string) =>
       safely(async () => {
@@ -566,7 +575,8 @@ function useApplication() {
       maxArchivedRecords: number;
       retentionMode: 'strict' | 'rolling' | 'checkpoints';
     }) => safely(() => request<RetentionPreview>('/retention/preview', policy)),
-    verifyAuditChainRemote: () => safely(() => request<{ verified: boolean; logCount: number; merkleRoot: string }>('/audit/verify')),
+    verifyAuditChainRemote: () =>
+      safely(() => request<{ verified: boolean; logCount: number; merkleRoot: string }>('/audit/verify')),
     simulateCorrelation: (asset: {
       vendor: string;
       product: string;
@@ -608,8 +618,7 @@ function useApplication() {
       if (params.limit) search.set('limit', String(params.limit));
       // Defaults to true on the server; only send the opt-out.
       if (params.includeOsint === false) search.set('includeOsint', 'false');
-      if (params.watchlistIds?.length)
-        search.set('watchlistIds', params.watchlistIds.join(','));
+      if (params.watchlistIds?.length) search.set('watchlistIds', params.watchlistIds.join(','));
       if (params.fromDate) search.set('fromDate', params.fromDate);
       return request<VulnerabilitySearchResponse>(`/vulnerabilities/search?${search}`);
     },
@@ -711,7 +720,11 @@ function useApplication() {
     retryEmailDelivery: (id: string) => call(`/email/${encodeURIComponent(id)}/retry`),
     resendEmailDelivery: (
       id: string,
-      data: { recipientMode: 'SINGLE_EMAIL' | 'SECURITY_TEAM' | 'EVERYONE'; customEmail?: string; reason?: string },
+      data: {
+        recipientMode: 'SINGLE_EMAIL' | 'SECURITY_TEAM' | 'EVERYONE';
+        customEmail?: string;
+        reason?: string;
+      },
     ) =>
       call<{ success: boolean; advisoryId: string; queued: number }>(
         `/email/${encodeURIComponent(id)}/resend`,
@@ -759,7 +772,8 @@ function useApplication() {
       ),
     listEmailQueue: () => safely(() => request<EmailQueueItem[]>('/email-queue')),
     deleteEmailQueueItem: (id: string) => call(`/email/${encodeURIComponent(id)}`, {}, 'DELETE'),
-    clearEmailQueue: () => call<{ success: boolean; removed: number; inFlight: number }>('/email-queue', {}, 'DELETE'),
+    clearEmailQueue: () =>
+      call<{ success: boolean; removed: number; inFlight: number }>('/email-queue', {}, 'DELETE'),
     isPipelineRunning: !!activeExecution,
     currentPipelinePhase: activeExecution ? `${activeExecution.status}: ${activeExecution.id}` : null,
     latestExecution: snapshot.executions[0] || null,
@@ -782,7 +796,10 @@ function useApplication() {
       return success;
     },
     setAdvisoryTemplate: (advisoryTemplate: string) =>
-      save('template.save', { templateCustomization: customization, customAdvisoryTemplate: advisoryTemplate }),
+      save('template.save', {
+        templateCustomization: customization,
+        customAdvisoryTemplate: advisoryTemplate,
+      }),
     dailyDigestCustomization,
     dailyDigestTemplate,
     setDailyDigestCustomTemplate: setDailyDigestCustomTemplatePersisted,
@@ -824,8 +841,11 @@ function useApplication() {
         success: false,
         message: 'Test could not be queued; see the error banner.',
       },
-    sendTestDailyDigestEmail: async (email: string) =>
-      (await call<{ success: boolean; message: string }>('/test-daily-digest', { email })) || {
+    sendTestDailyDigestEmail: async (email: string, html?: string) =>
+      (await call<{ success: boolean; message: string }>('/test-daily-digest', {
+        email,
+        ...(html !== undefined ? { html } : {}),
+      })) || {
         success: false,
         message: 'Test could not be queued; see the error banner.',
       },
@@ -835,7 +855,10 @@ function useApplication() {
       smtpPort: number;
       smtpSecurity?: string;
     }) =>
-      (await call<{ success: boolean; latency: number; error?: string }>('/test-email-connectivity', input)) || {
+      (await call<{ success: boolean; latency: number; error?: string }>(
+        '/test-email-connectivity',
+        input,
+      )) || {
         success: false,
         latency: 0,
         error: 'Connectivity test could not be completed; see the error banner.',

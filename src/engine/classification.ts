@@ -230,13 +230,21 @@ function versionIsConfirmedPatched(
 }
 
 /**
- * Determines match precision: EXACT when the inventory product is a concrete
- * name (not a wildcard), WILDCARD when the product is registered as `*`.
+ * Determines match precision: WILDCARD when the asset is registered as a
+ * wildcard product, EXACT otherwise.
+ *
+ * The declared `product` is the operator's registration and is authoritative.
+ * A `*` in some CPE entry does not make the asset a wildcard registration: an
+ * operator commonly registers `product: 'ios'` alongside a broad
+ * `cpe:2.3:a:cisco:*` entry to also watch every Cisco advisory. Treating that
+ * as WILDCARD relabelled a concrete product match as Case 2 and discarded the
+ * precision the operator declared. The CPE check therefore applies only when
+ * the asset declares no product at all (a CPE-only registration).
  */
 function matchPrecision(asset: WatchListItem): MatchPrecision {
   const product = (asset.product || '').trim().toLowerCase();
   if (product === '*' || product === '-') return 'WILDCARD';
-  // Also check CPE product wildcards.
+  if (product) return 'EXACT';
   for (const cpe of asset.cpes) {
     const parsed = parseCPE23(cpe);
     if (parsed.isValid && parsed.product === '*') return 'WILDCARD';

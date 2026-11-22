@@ -439,7 +439,8 @@ export interface ThreatFeed {
   etag?: string;
   consecutiveFailures?: number;
   circuitOpenUntil?: string | null;
-  lastRecoveryAttemptAt?: string;
+  /** Last *failed* automatic recovery probe; cleared when a run proves the source healthy. */
+  lastRecoveryAttemptAt?: string | null;
   /** When true, this feed's records are treated as authoritative for vendor/product autodispatch even if their feed type is not in the default authoritative set. */
   authoritative?: boolean;
 }

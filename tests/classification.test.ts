@@ -184,6 +184,27 @@ test('Case 2: wildcard product registration', () => {
   assert.equal(matchPrecision, 'WILDCARD');
 });
 
+test('a broad CPE entry does not downgrade a concrete product registration to WILDCARD', () => {
+  // Operators register the real product and also watch every vendor advisory by
+  // adding `cpe:2.3:a:acme:*`. The declared product is the registration, so the
+  // matched product must stay EXACT (Case 1), not Case 2.
+  const c = cve({ assignerShortName: 'mitre', sourceFeeds: [], cpeMatches: [] });
+  const a = asset({
+    product: 'gateway',
+    cpes: ['cpe:2.3:a:acme:gateway:1.2.3:*:*:*:*:*:*:*', 'cpe:2.3:a:acme:*:*:*:*:*:*:*:*:*'],
+  });
+  const { caseClassification, matchPrecision } = classifyMatch(c, a, feeds, 'VENDOR_PRODUCT_FALLBACK', 70);
+  assert.equal(matchPrecision, 'EXACT');
+  assert.equal(caseClassification, 'CASE_1_VENDOR_EXACT_PRODUCT');
+});
+
+test('a CPE-only wildcard registration is still WILDCARD', () => {
+  const c = cve({ assignerShortName: 'mitre', sourceFeeds: [], cpeMatches: [] });
+  const a = asset({ product: '', cpes: ['cpe:2.3:a:acme:*:*:*:*:*:*:*:*:*'] });
+  const { matchPrecision } = classifyMatch(c, a, feeds, 'VENDOR_PRODUCT_FALLBACK', 70);
+  assert.equal(matchPrecision, 'WILDCARD');
+});
+
 test('NO_MATCH: inventory version confirmed patched outside vulnerable range', () => {
   // Advisory affects < 1.2.0; asset is 2.0.0 → confirmed patched.
   const c = cve({

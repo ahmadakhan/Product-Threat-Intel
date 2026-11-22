@@ -22,6 +22,7 @@ import type {
   IntelligenceArticle,
   IntelligenceMatch,
 } from '../src/types/index.ts';
+import { FINDING_SUBSCRIPTIONS, recipientSubscriptions } from '../src/types/index.ts';
 import { recordNewsDeliveries } from './newsQueue.ts';
 /**
  * Payload carried by a consolidated news delivery job.
@@ -37,7 +38,11 @@ export interface NewsEvidencePayload {
   /** Primary article, retained for backwards-compatible consumers. */
   article: Pick<IntelligenceArticle, 'id' | 'title' | 'url' | 'sourceFeeds' | 'publishedDate'>;
   /** Every article carried by this consolidated email. */
-  articles: Array<Pick<IntelligenceArticle, 'id' | 'title' | 'url' | 'sourceFeeds' | 'publishedDate'> & {identity?: string}>;
+  articles: Array<
+    Pick<IntelligenceArticle, 'id' | 'title' | 'url' | 'sourceFeeds' | 'publishedDate'> & {
+      identity?: string;
+    }
+  >;
   /** Assets the articles were matched against. */
   assets: string[];
   /** @deprecated First matched asset; use `assets`. */
@@ -69,7 +74,6 @@ export interface ZeroDayDigestPayload {
   articles: Array<{ id: string; title: string; url: string; sourceFeeds: string[] }>;
 }
 
-
 import { buildAliasMap, parseCPE23 } from '../src/utils/cpeMatcher';
 import { randomUUID, createHmac, createHash } from 'node:crypto';
 import { mergeCveRecords, stableJson } from '../src/utils/deduplicator';
@@ -89,12 +93,7 @@ import {
   reconcileDuplicateOutboxClaims,
 } from './deliveryClaims.ts';
 import { newsArticleIdentity } from './newsEmail.ts';
-import {
-  effectiveSubject,
-  normalizeEmailSubject,
-  renderReviewEdits,
-  renderReviewText,
-} from './emailEdits';
+import { effectiveSubject, normalizeEmailSubject, renderReviewEdits, renderReviewText } from './emailEdits';
 import {
   EMAIL_PROVIDER_LABELS,
   EmailProviderError,
@@ -102,6 +101,7 @@ import {
   lookupProviderDelivery,
   sendProviderEmail,
 } from './emailProviders';
+import { uniqueEnabledEmailRecipients } from './emailRecipients';
 import { decrypt, encryptionKeys } from './secrets';
 import { isSmtpEmailProvider } from '../src/types/index.ts';
 import type {
@@ -131,9 +131,9 @@ export interface Job {
     nativeCorrelation?: NativeDelivery;
     cveRevisions?: Record<string, string>;
     findingRevisions?: Record<string, string>;
-      /** Provider-assigned message id of a prior attempt that could not be recorded. */
-      unconfirmedProviderId?: string;
-      /**
+    /** Provider-assigned message id of a prior attempt that could not be recorded. */
+    unconfirmedProviderId?: string;
+    /**
      * Digest jobs carry only the findings the target is subscribed to. Delivery
      * revalidation and receipt accounting must use this subset, not the union
      * advisory, or a KEV-only recipient would be blocked by unrelated findings.
@@ -201,6 +201,7 @@ export interface Job {
   review_approved?: boolean;
   edits?: ReviewEdits;
   priority?: number;
+  provider_id?: string;
 }
 export type MailSender = (
   job: Job,
@@ -603,12 +604,31 @@ const advisoryPriority = (findings: Finding[]) =>
             : 0,
     ),
   );
+/**
+ * Whether a recipient's finding subscription admits this finding.
+ *
+ * The stored model is a multi-select list (`subscriptions`) whose legacy shape
+ * is a single `subscriptionTier`. Reading the legacy field directly made every
+ * multi-select decision wrong: a recipient saved as
+ * `subscriptions: ['ALL_SEVERITIES', 'NEWS']` had a stale or default
+ * `subscriptionTier`, so LOW/MEDIUM findings were silently withheld from a
+ * mailbox that had explicitly opted into all severities, and a NEWS-only
+ * recipient could receive findings through its leftover tier. The packaged
+ * `RECIPIENT ALLOWS` path in every queue site (consolidated findings, news,
+ * daily digest, delivery-time revalidation) now agrees with the UI model.
+ *
+ * A recipient subscribed only to non-finding streams (news/digest) is not
+ * eligible for findings.
+ */
 export function recipientAllows(recipient: EmailRecipient, finding: Finding): boolean {
+  const tiers = recipientSubscriptions(recipient);
+  const allowsSeverity = tiers.some((tier) => FINDING_SUBSCRIPTIONS.includes(tier));
+  if (!allowsSeverity) return false;
+  const severity = finding.cve?.cvss?.severity;
   return (
-    recipient.subscriptionTier === 'ALL_SEVERITIES' ||
-    (recipient.subscriptionTier === 'CRITICAL_HIGH_ONLY' &&
-      ['CRITICAL', 'HIGH'].includes(finding.cve.cvss.severity)) ||
-    (recipient.subscriptionTier === 'CISA_KEV_ONLY' && finding.cve.cisaKev?.isKev)
+    tiers.includes('ALL_SEVERITIES') ||
+    (tiers.includes('CRITICAL_HIGH_ONLY') && (severity === 'CRITICAL' || severity === 'HIGH')) ||
+    (tiers.includes('CISA_KEV_ONLY') && finding.cve?.cisaKev?.isKev === true)
   );
 }
 export function webhookAllows(hook: WebhookEndpoint, finding: Finding): boolean {
@@ -639,7 +659,8 @@ async function buildPdfAttachment(
   if (!deliveryHtmlIsAttachable(content.payload.html)) return undefined;
   // Operational self-healing alerts are infrastructure messages, not advisories;
   // they must never carry a PDF attachment.
-  if (typeof content.advisory_id === 'string' && content.advisory_id.startsWith('SELFHEAL:')) return undefined;
+  if (typeof content.advisory_id === 'string' && content.advisory_id.startsWith('SELFHEAL:'))
+    return undefined;
   if (content.payload.dailyDigest) return undefined;
   try {
     const pdf = await renderAdvisoryPdf(content.payload.html);
@@ -728,7 +749,7 @@ async function confirmPriorDelivery(
   // The local evidence is inconclusive, so ask the provider. This is the only
   // way to tell an attempt that delivered and lost its receipt from one that
   // never left, and it is what lets those jobs be recovered instead of held.
-  const messageId = job.payload.unconfirmedProviderId || log?.providerId || '';
+  const messageId = job.payload.unconfirmedProviderId || job.provider_id || log?.providerId || '';
   if (!messageId) return 'unknown';
   const token = decrypt(saved.apiKey, encryptionKeys(config), `email-provider:${saved.provider}`);
   if (!token) return 'not-delivered';
@@ -761,15 +782,15 @@ export function createMailSender(
       const settings = (db && (await get<AppSettings>(db, 'settings', 'main'))) || DEFAULT_SETTINGS;
       if (settings.emailEnabled === false) throw new Error('Email delivery is disabled by settings');
     }
-// Apply operator edits exactly once and build the attachment from the very
+    // Apply operator edits exactly once and build the attachment from the very
     // body being sent, so the PDF is byte-identical to the email.
     const content = applyJobEdits(job);
     const pdfAttachment = await buildPdfAttachment(content, config, db);
     // The HTML file contains precisely the HTML sent as the email body, named
     // after the subject, and is attached to every finding email automatically.
     const htmlAttachment = findingHtmlAttachment(content);
-    const attachments = [htmlAttachment, pdfAttachment].filter(
-      (item): item is EmailAttachment => Boolean(item),
+    const attachments = [htmlAttachment, pdfAttachment].filter((item): item is EmailAttachment =>
+      Boolean(item),
     );
     if (!isSmtpEmailProvider(saved.provider)) {
       const token = decrypt(saved.apiKey, encryptionKeys(config), `email-provider:${saved.provider}`);
@@ -779,7 +800,7 @@ export function createMailSender(
           ? decrypt(saved.mailjetApiSecret, encryptionKeys(config), `email-mailjet:${saved.provider}`)
           : saved.mailjetApiSecret;
       const provider = EMAIL_PROVIDER_LABELS[saved.provider];
-try {
+      try {
         const id = await sendProviderEmail(
           { ...saved, mailjetApiSecret: mailjetSecret },
           token,
@@ -836,7 +857,7 @@ try {
         // RFC 8058 one-click is only valid for an HTTP(S) unsubscribe URL. A
         // mailto fallback is handled by the mail client, not an HTTP POST.
         ...(saved.unsubscribeUrl && /^https?:\/\//i.test(saved.unsubscribeUrl)
-? { 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' }
+          ? { 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' }
           : {}),
       },
       ...(attachments.length ? { attachments } : {}),
@@ -1074,8 +1095,7 @@ export async function queueEveryoneDeliveryJobs(
     recipientEmail?: string;
   };
   const dispatchKey =
-    acceptedJob.payload.digestKey ??
-    acceptedJob.dedupe_key.split(':email:')[0].split(':webhook:')[0];
+    acceptedJob.payload.digestKey ?? acceptedJob.dedupe_key.split(':email:')[0].split(':webhook:')[0];
   const contentRevision = sharedPayload.contentRevision ?? acceptedJob.advisory_id;
   // Skip recipients that already have a pending or active job for this content.
   // This guards against duplicates when the setting was toggled on after initial
@@ -1094,9 +1114,7 @@ export async function queueEveryoneDeliveryJobs(
   );
   const activeTargets = new Set(pending.rows.map((row) => row.target_id));
   const activeEmails = new Set(
-    pending.rows
-      .map((row) => row.recipient_email.toLowerCase())
-      .filter((email) => email.length > 0),
+    pending.rows.map((row) => row.recipient_email.toLowerCase()).filter((email) => email.length > 0),
   );
   if (securityRecipient?.email) {
     activeEmails.add(securityRecipient.email.toLowerCase());
@@ -1104,25 +1122,64 @@ export async function queueEveryoneDeliveryJobs(
   if (acceptedJob.payload.recipientEmail) {
     activeEmails.add(acceptedJob.payload.recipientEmail.toLowerCase());
   }
-  const everyoneRecipients = (await list<EmailRecipient>(db, 'recipients')).filter(
-    (r) => r.enabled && r.deliveryGroup === 'EVERYONE',
+  const everyoneRecipients = uniqueEnabledEmailRecipients(
+    (await list<EmailRecipient>(db, 'recipients')).filter((r) => r.deliveryGroup === 'EVERYONE'),
   );
   if (!everyoneRecipients.length) return 0;
+  const rawFindingIds = (acceptedJob.payload.includedFindingIds ?? advisory?.findingIds ?? []) as string[];
+  const findingsMap = await getMany<Finding>(db, 'findings', rawFindingIds);
+  const findings = rawFindingIds.map((id) => findingsMap.get(id)).filter((f): f is Finding => !!f);
   let queued = 0;
   const priority = acceptedJob.priority ?? 0;
   for (const recipient of everyoneRecipients) {
     if (activeTargets.has(recipient.id) || activeEmails.has(recipient.email.toLowerCase())) continue;
-    const findingIds = (acceptedJob.payload.includedFindingIds ?? advisory?.findingIds ?? []) as string[];
-    const claimRequests = claimsForJob(recipient.id, 'finding', findingIds);
+    activeEmails.add(recipient.email.toLowerCase());
+
+    const permitted = findings.length > 0 ? findings.filter((f) => recipientAllows(recipient, f)) : [];
+    if (!permitted.length && findings.length > 0) continue;
+    const permittedFindingIds = permitted.length > 0 ? permitted.map((f) => f.id) : rawFindingIds;
+
+    const claimRequests = claimsForJob(recipient.id, 'finding', permittedFindingIds);
     const claim = await claimItems(db, claimRequests);
     if (!claim.granted.length) continue;
-    const dedupeKey = `${dispatchKey}:everyone:${contentRevision}:email:${recipient.id}`;
+
+    let payload = {
+      ...sharedPayload,
+      recipientEmail: recipient.email,
+      includedFindingIds: permittedFindingIds,
+    };
+    let recipientContentRev = contentRevision;
+    if (permitted.length > 0 && permitted.length < findings.length) {
+      const template = await operatorTemplate(db);
+      const { advisory: builtAdvisory, document } = consolidatedFindingsDocument(
+        permitted,
+        new Date(),
+        template,
+      );
+      const evidence = deliveryRevisionEvidence(permitted);
+      recipientContentRev = createHash('sha256')
+        .update(stableJson({ findingIds: permitted.map((f) => f.id).sort(), ...evidence }))
+        .digest('hex')
+        .slice(0, 20);
+      payload = {
+        ...document,
+        cveIds: builtAdvisory.cveIds,
+        includedFindingIds: permittedFindingIds,
+        ...evidence,
+        contentRevision: recipientContentRev,
+        generatedAt: new Date().toISOString(),
+        digestKey: builtAdvisory.id,
+        recipientEmail: recipient.email,
+      };
+    }
+
+    const dedupeKey = `${dispatchKey}:everyone:${recipientContentRev}:email:${recipient.id}`;
     const jobId = await enqueue(
       db,
       'email',
       recipient.id,
       acceptedJob.advisory_id,
-      { ...sharedPayload, recipientEmail: recipient.email },
+      payload,
       dedupeKey,
       'QUEUED',
       priority,
@@ -1232,7 +1289,10 @@ export interface ConsolidatedFindingsDispatchOptions {
  * queue pass idempotent and lets a queued batch be recognised after a restart.
  */
 export function consolidatedFindingBatchId(findingIds: readonly string[]): string {
-  return createHash('sha256').update([...findingIds].sort().join(',')).digest('hex').slice(0, 24);
+  return createHash('sha256')
+    .update([...findingIds].sort().join(','))
+    .digest('hex')
+    .slice(0, 24);
 }
 
 /**
@@ -1325,15 +1385,14 @@ export async function queueConsolidatedFindingNotifications(
   findings: Finding[],
   options: ConsolidatedFindingsDispatchOptions = {},
 ): Promise<number> {
-  const unique = [...new Map(findings.filter((finding) => finding?.id).map((finding) => [finding.id, finding])).values()]
-    .filter(
-      (finding) =>
-        !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status),
-    )
+  const unique = [
+    ...new Map(findings.filter((finding) => finding?.id).map((finding) => [finding.id, finding])).values(),
+  ]
+    .filter((finding) => !['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status))
     .sort((left, right) => left.cveId.localeCompare(right.cveId) || left.id.localeCompare(right.id));
   if (!unique.length) return 0;
-  const recipients = (options.recipients ?? (await list<EmailRecipient>(db, 'recipients'))).filter(
-    (recipient) => recipient.enabled,
+  const recipients = uniqueEnabledEmailRecipients(
+    options.recipients ?? (await list<EmailRecipient>(db, 'recipients')),
   );
   if (!recipients.length) return 0;
   const hooks = (await list<WebhookEndpoint>(db, 'webhooks')).filter((hook) => hook.enabled);
@@ -1353,12 +1412,22 @@ export async function queueConsolidatedFindingNotifications(
     }
   }
 
+  const claimedFindingMap = await activeClaims(
+    db,
+    recipients.map((r) => r.id),
+    'finding',
+    unique.map((f) => f.id),
+  );
+
   let queued = 0;
   const generatedAt = new Date();
   const documentCache = new Map<string, { payload: Job['payload']; priority: number }>();
 
   for (const recipient of recipients) {
-    let permitted = unique.filter((finding) => recipientAllows(recipient, finding));
+    const alreadyClaimed = claimedFindingMap.get(recipient.id);
+    let permitted = unique
+      .filter((finding) => !alreadyClaimed?.has(finding.id))
+      .filter((finding) => recipientAllows(recipient, finding));
     if (deferEveryone && recipient.deliveryGroup === 'EVERYONE' && securitySubscribedFindingIds.size > 0) {
       permitted = permitted.filter((finding) => !securitySubscribedFindingIds.has(finding.id));
     }
@@ -1432,7 +1501,17 @@ export async function queueConsolidatedFindingNotifications(
     const isPoolDb = typeof (db as any).connect === 'function' && typeof (db as any).release !== 'function';
     const didQueue = isPoolDb
       ? await transaction(db as pg.Pool, enqueueForRecipient)
-      : await enqueueForRecipient(db);
+      : await (async () => {
+          await db.query('SAVEPOINT qcfn_recipient');
+          try {
+            const res = await enqueueForRecipient(db);
+            await db.query('RELEASE SAVEPOINT qcfn_recipient').catch(() => {});
+            return res;
+          } catch (err) {
+            await db.query('ROLLBACK TO SAVEPOINT qcfn_recipient').catch(() => {});
+            throw err;
+          }
+        })();
     if (didQueue) queued++;
   }
 
@@ -1513,7 +1592,10 @@ export async function queueZeroDayDigestNotification(
   );
   if (!selected.length || !digest.findings.length) return 0;
   const safeLine = (value: string) =>
-    value.replace(/[\r\n\t]+/g, ' ').replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, '').trim();
+    value
+      .replace(/[\r\n\t]+/g, ' ')
+      .replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, '')
+      .trim();
   const productLabel = `${digest.vendor} / ${digest.product}`;
   const subject = safeLine(
     `[Threat intelligence] [ZERO-DAY DIGEST] ${productLabel} (${digest.matchCount} matches)`,
@@ -1523,9 +1605,7 @@ export async function queueZeroDayDigestNotification(
       `${index + 1}. Asset: ${safeLine(finding.assetName)}`,
       finding.cveId ? `   CVE: ${safeLine(finding.cveId)}` : '   CVE: (none assigned - potential zero-day)',
       `   Evidence: ${safeLine(finding.evidence)}`,
-      typeof finding.credibilityScore === 'number'
-        ? `   Credibility: ${finding.credibilityScore}/100`
-        : '',
+      typeof finding.credibilityScore === 'number' ? `   Credibility: ${finding.credibilityScore}/100` : '',
     ]
       .filter(Boolean)
       .join('\n'),
@@ -1559,7 +1639,9 @@ export async function queueZeroDayDigestNotification(
         {
           subject,
           text,
-          cveIds: [...new Set(digest.findings.map((finding) => finding.cveId).filter(Boolean))].sort() as string[],
+          cveIds: [
+            ...new Set(digest.findings.map((finding) => finding.cveId).filter(Boolean)),
+          ].sort() as string[],
           zeroDayDigest: payload,
           contentRevision,
           recipientEmail: recipient.email,
@@ -1581,10 +1663,7 @@ export async function queueZeroDayDigestNotification(
  * the override's HTML verbatim is what keeps "the attachment is the email"
  * true even when an operator template produced the body.
  */
-export type DigestRender = (
-  advisory: Advisory,
-  findings: Finding[],
-) => string | undefined;
+export type DigestRender = (advisory: Advisory, findings: Finding[]) => string | undefined;
 
 const MAX_PLAIN_TEXT_BYTES = 2 * 1024 * 1024;
 
@@ -1619,14 +1698,16 @@ function digestDocument(
 /** Deterministic presentation order for a digest document. */
 function digestOrdered(view: Advisory, findings: Finding[]): Finding[] {
   const rank = (severity: string) => SEVERITY_ORDER.indexOf(severity as (typeof SEVERITY_ORDER)[number]);
-  return [...findings].sort((left, right) => {
-    const bySeverity = rank(right.cve.cvss.severity) - rank(left.cve.cvss.severity);
-    if (bySeverity) return bySeverity;
-    const byCve = left.cveId.localeCompare(right.cveId);
-    if (byCve) return byCve;
-    const byAsset = left.matchedAssetName.localeCompare(right.matchedAssetName);
-    return byAsset || left.id.localeCompare(right.id);
-  }).map((finding) => finding);
+  return [...findings]
+    .sort((left, right) => {
+      const bySeverity = rank(right.cve.cvss.severity) - rank(left.cve.cvss.severity);
+      if (bySeverity) return bySeverity;
+      const byCve = left.cveId.localeCompare(right.cveId);
+      if (byCve) return byCve;
+      const byAsset = left.matchedAssetName.localeCompare(right.matchedAssetName);
+      return byAsset || left.id.localeCompare(right.id);
+    })
+    .map((finding) => finding);
 }
 
 export interface DigestQueueResult {
@@ -1722,16 +1803,7 @@ export async function queueDigestAdvisory(
       contentRevision,
       recipientEmail: recipient.email,
     };
-    const jobId = await enqueue(
-      db,
-      'email',
-      recipient.id,
-      union.id,
-      payload,
-      dedupeKey,
-      'QUEUED',
-      priority,
-    );
+    const jobId = await enqueue(db, 'email', recipient.id, union.id, payload, dedupeKey, 'QUEUED', priority);
     if (jobId) {
       await attachClaimsToJob(db, jobId, claim.granted);
       jobs++;
@@ -1849,9 +1921,10 @@ export async function deliverNext(
   });
   if (!job) return false;
   const attemptStartedAt = Date.now();
-  const observedDelay = job.channel === 'email' && job.attempts > 1
-    ? observedRetryDelay(job.prior_attempt_at, attemptStartedAt)
-    : { delayMs: 0, observed: false };
+  const observedDelay =
+    job.channel === 'email' && job.attempts > 1
+      ? observedRetryDelay(job.prior_attempt_at, attemptStartedAt)
+      : { delayMs: 0, observed: false };
   const retryDelayObserved = observedDelay.delayMs;
   let transportAttempted = false;
   // Email retries follow the operator policy; webhooks retain the historical
@@ -1957,8 +2030,7 @@ export async function deliverNext(
     // infrastructure messages keyed SELFHEAL:* with no advisory row. Without
     // this exemption they were terminally rejected as "Queued advisory no longer
     // exists" and the Security team never received a degradation alert.
-    const isOperationalAlert =
-      typeof job.advisory_id === 'string' && job.advisory_id.startsWith('SELFHEAL:');
+    const isOperationalAlert = typeof job.advisory_id === 'string' && job.advisory_id.startsWith('SELFHEAL:');
     if (
       !advisory &&
       !native &&
@@ -1993,7 +2065,10 @@ export async function deliverNext(
         throw new Error('Webhook subscription does not permit native intelligence');
       }
       const declaredFindings = [...(await getMany<Finding>(pool, 'findings', declaredFindingIds)).values()];
-      if (declaredFindings.length && !declaredFindings.every((finding) => webhookAllows(subscribedHook, finding))) {
+      if (
+        declaredFindings.length &&
+        !declaredFindings.every((finding) => webhookAllows(subscribedHook, finding))
+      ) {
         permanent = true;
         throw new Error('Webhook event subscription no longer permits all advisory findings');
       }
@@ -2118,18 +2193,18 @@ export async function deliverNext(
             : asset.active === false
               ? 'the matched inventory item is no longer active'
               : ['RESOLVED', 'FALSE_POSITIVE', 'PATCH_APPLIED'].includes(finding.status)
-              ? 'a finding was resolved or dismissed'
-              : cve && withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate)
-                ? 'a CVE was withdrawn'
-                : cve &&
-                    job.payload.cveRevisions?.[cve.cveId] &&
-                    job.payload.cveRevisions[cve.cveId] !== revision(cve)
-                  ? 'CVE intelligence changed'
-                  : !match
-                    ? 'current inventory no longer matches'
-                    : job.payload.findingRevisions?.[id] !== findingRevision(match)
-                      ? 'inventory or matching evidence changed'
-                      : undefined;
+                ? 'a finding was resolved or dismissed'
+                : cve && withdrawal && Date.parse(cve.modifiedDate) <= Date.parse(withdrawal.modifiedDate)
+                  ? 'a CVE was withdrawn'
+                  : cve &&
+                      job.payload.cveRevisions?.[cve.cveId] &&
+                      job.payload.cveRevisions[cve.cveId] !== revision(cve)
+                    ? 'CVE intelligence changed'
+                    : !match
+                      ? 'current inventory no longer matches'
+                      : job.payload.findingRevisions?.[id] !== findingRevision(match)
+                        ? 'inventory or matching evidence changed'
+                        : undefined;
         if (reason) {
           invalid.push(reason);
           staleIds.add(id);
@@ -2158,7 +2233,10 @@ export async function deliverNext(
       ]);
       const evidenceOnly = invalid.every((reason) => EVIDENCE_ONLY_REASONS.has(reason));
       if (invalid.length) {
-        if (surviving.length && (job.advisory_id.startsWith('FINDINGS:') || advisory.id.startsWith('FINDINGS:') || !evidenceOnly)) {
+        if (
+          surviving.length &&
+          (job.advisory_id.startsWith('FINDINGS:') || advisory.id.startsWith('FINDINGS:') || !evidenceOnly)
+        ) {
           declaredFindingIds = surviving.map((finding) => finding.id);
           declaredCveIds = [...new Set(surviving.map((finding) => finding.cveId))];
           // Every shape is rebuilt with the canonical document builder so the
@@ -2253,6 +2331,14 @@ export async function deliverNext(
       const result = await sendMail(applyJobEdits(job));
       providerId = typeof result === 'string' ? result : result.id;
       if (typeof result !== 'string') emailProvider = result.provider;
+      if (providerId) {
+        await pool
+          .query(
+            `UPDATE outbox SET provider_id = $2, payload = jsonb_set(COALESCE(payload, '{}'::jsonb), '{unconfirmedProviderId}', to_jsonb($2::text)) WHERE id = $1`,
+            [job.id, providerId],
+          )
+          .catch(() => undefined);
+      }
     } else {
       const hook = await get<WebhookEndpoint>(pool, 'webhooks', job.target_id);
       if (!hook?.enabled) {
@@ -2328,14 +2414,20 @@ export async function deliverNext(
     // reset, dropped connection) leaves the outcome unknown, and only a
     // provider lookup can then decide whether a resend is safe.
     const smtpFailure = e as { command?: unknown; responseCode?: unknown };
-    const beforeSubmission = typeof smtpFailure?.command === 'string' &&
+    const beforeSubmission =
+      typeof smtpFailure?.command === 'string' &&
       /^(CONN|AUTH(?: .*)?|EHLO|HELO|STARTTLS|MAIL FROM|RCPT TO)$/i.test(smtpFailure.command);
-    const rejectedData = smtpFailure?.command === 'DATA' && typeof smtpFailure.responseCode === 'number' &&
-      smtpFailure.responseCode >= 400 && smtpFailure.responseCode < 600;
+    const rejectedData =
+      smtpFailure?.command === 'DATA' &&
+      typeof smtpFailure.responseCode === 'number' &&
+      smtpFailure.responseCode >= 400 &&
+      smtpFailure.responseCode < 600;
     transportRejected =
       e instanceof EmailProviderError
         ? e.status >= 400 && e.status < 500
-        : beforeSubmission || rejectedData || /HTTP \d{3}\b|did not accept the recipient|not configured|is missing/i.test(error);
+        : beforeSubmission ||
+          rejectedData ||
+          /HTTP \d{3}\b|did not accept the recipient|not configured|is missing/i.test(error);
     if (e instanceof EmailProviderError) {
       permanent = e.status >= 400 && e.status < 500 && ![408, 429].includes(e.status);
       retryNotBefore = e.retryAt;
@@ -2377,372 +2469,418 @@ export async function deliverNext(
   }
   let finalized = false;
   try {
-  await transaction(pool, async (db) => {
-    const current = await db.query('SELECT status,lock_token FROM outbox WHERE id=$1 FOR UPDATE', [job.id]);
-    if (current.rows[0]?.lock_token !== job.lock_token) return;
-    const failed =
-        !!error && (permanent || mlPermanent || !retryPolicy.enabled || job.attempts >= retryPolicy.maxAttempts),
-      mlDelayMs = getMlRuntime()?.deliveryOptimizer.isTrained() ? computeRetryDelay(job.attempts) : undefined,
-      retryDelay = emailRetryDelayPlan(job.attempts, retryPolicy, mlDelayMs);
-    const retryDelayBaseAt = Date.now();
-    // If the provider supplied a Retry-After, honour it exactly; otherwise
-    // fall back to the normal back-off calculation.
-    const nextAttemptAt = retryNotBefore
-      ? retryNotBefore
-      : Math.max(retryDelayBaseAt + retryDelay.delayMs, retryDelayBaseAt);
-    const next = new Date(nextAttemptAt);
-    const scheduledRetryDelayMs = nextAttemptAt - retryDelayBaseAt;
-    const scheduledRetryDelaySource = retryNotBefore > retryDelayBaseAt + retryDelay.delayMs
-      ? 'PROVIDER_RETRY_AFTER'
-      : retryDelay.source;
-    // A failure before the transport was contacted cannot have delivered the
-    // message. Recording it as NOT_ATTEMPTED (rather than UNKNOWN) is what lets
-    // a rebuilt replacement safely re-open the same dedupe key and is what
-    // distinguishes it from a timeout whose delivery outcome is genuinely
-    // unknown. Only a provable transport rejection is REJECTED.
-    const outcome = !error
-      ? 'ACCEPTED'
-      : !transportAttempted
-        ? 'NOT_ATTEMPTED'
-        : failed && transportRejected
-          ? 'REJECTED'
-          : 'UNKNOWN';
-    await db.query(
-      'UPDATE outbox SET status=$2,delivery_outcome=$3,next_attempt=$4,error=$5,provider_id=$6,locked_at=NULL,lock_token=NULL,updated_at=now() WHERE id=$1',
-      [
-        job.id,
-        error ? (failed ? 'FAILED' : 'QUEUED') : 'ACCEPTED',
-        outcome,
-        next,
-        // Keep the failure reason on the row so the Action Center can show why
-        // a delivery is being retried or has failed.
-        error || null,
-        providerId || null,
-      ],
-    );
-    if (error && !failed) {
-      // A rate-limited or blackholed endpoint must not be hammered once per
-      // queued job. Share this target's backoff with its remaining pending work;
-      // bound the batch so the global state lock is not held across the queue.
+    await transaction(pool, async (db) => {
+      const current = await db.query('SELECT status,lock_token FROM outbox WHERE id=$1 FOR UPDATE', [job.id]);
+      if (current.rows[0]?.lock_token !== job.lock_token) return;
+      const failed =
+          !!error &&
+          (permanent || mlPermanent || !retryPolicy.enabled || job.attempts >= retryPolicy.maxAttempts),
+        mlDelayMs = getMlRuntime()?.deliveryOptimizer.isTrained()
+          ? computeRetryDelay(job.attempts)
+          : undefined,
+        retryDelay = emailRetryDelayPlan(job.attempts, retryPolicy, mlDelayMs);
+      const retryDelayBaseAt = Date.now();
+      // If the provider supplied a Retry-After, honour it up to policy bounds; otherwise
+      // fall back to the normal back-off calculation.
+      const maxRetryDelayMs = Math.max(60_000, (retryPolicy.maxDelayMinutes ?? 1440) * 60_000);
+      const maxAllowedTimestamp = retryDelayBaseAt + maxRetryDelayMs;
+      const baseCalculatedDelay = Math.max(retryDelayBaseAt + retryDelay.delayMs, retryDelayBaseAt);
+      let nextAttemptAt =
+        retryNotBefore && Number.isFinite(retryNotBefore) && retryNotBefore > retryDelayBaseAt
+          ? Math.min(retryNotBefore, maxAllowedTimestamp)
+          : Math.min(baseCalculatedDelay, maxAllowedTimestamp);
+      if (!Number.isFinite(nextAttemptAt) || nextAttemptAt > maxAllowedTimestamp) {
+        nextAttemptAt = maxAllowedTimestamp;
+      }
+      const next = new Date(nextAttemptAt);
+      const scheduledRetryDelayMs = nextAttemptAt - retryDelayBaseAt;
+      const scheduledRetryDelaySource =
+        retryNotBefore && retryNotBefore > retryDelayBaseAt + retryDelay.delayMs
+          ? 'PROVIDER_RETRY_AFTER'
+          : retryDelay.source;
+      // A failure before the transport was contacted cannot have delivered the
+      // message. Recording it as NOT_ATTEMPTED (rather than UNKNOWN) is what lets
+      // a rebuilt replacement safely re-open the same dedupe key and is what
+      // distinguishes it from a timeout whose delivery outcome is genuinely
+      // unknown. Only a provable transport rejection is REJECTED.
+      const outcome = !error
+        ? 'ACCEPTED'
+        : !transportAttempted
+          ? 'NOT_ATTEMPTED'
+          : failed && transportRejected
+            ? 'REJECTED'
+            : 'UNKNOWN';
       await db.query(
-        `WITH pending AS (
+        'UPDATE outbox SET status=$2,delivery_outcome=$3,next_attempt=$4,error=$5,provider_id=$6,locked_at=NULL,lock_token=NULL,updated_at=now() WHERE id=$1',
+        [
+          job.id,
+          error ? (failed ? 'FAILED' : 'QUEUED') : 'ACCEPTED',
+          outcome,
+          next,
+          // Keep the failure reason on the row so the Action Center can show why
+          // a delivery is being retried or has failed.
+          error || null,
+          providerId || null,
+        ],
+      );
+      if (error && !failed) {
+        // A rate-limited or blackholed endpoint must not be hammered once per
+        // queued job. Share this target's backoff with its remaining pending work;
+        // bound the batch so the global state lock is not held across the queue.
+        await db.query(
+          `WITH pending AS (
            SELECT id FROM outbox
            WHERE channel=$1 AND target_id=$2 AND status='QUEUED' AND id<>$3 AND next_attempt < $4
            ORDER BY next_attempt
            LIMIT 1000
          )
          UPDATE outbox o SET next_attempt=$4, updated_at=now() FROM pending p WHERE o.id=p.id`,
-        [job.channel, job.target_id, job.id, next],
-      );
-    }
-    if (job.channel === 'email') {
-      const log = await get<EmailDeliveryLog>(db, 'emailLogs', job.id);
-      if (log) {
-        // Only stamp sentAt when the email is accepted; preserve the existing
-        // value on RETRYING so a provider-accepted-but-temporarily-deferred
-        // timestamp survives the retry cycle.
-        const status = error ? (failed ? 'FAILED' : 'RETRYING') : 'ACCEPTED';
-        const sentAt =
-          status === 'ACCEPTED' ? new Date().toISOString() : status === 'RETRYING' ? log.sentAt : undefined;
-        await put(db, 'emailLogs', job.id, {
-          ...log,
-          provider: emailProvider || log.provider,
-          // Persist the transport-assigned message id so a later retry can ask
-          // the provider whether the prior attempt was accepted (see
-          // confirmPriorDelivery). Without this the lookup is dead code and HTTP
-          // providers with non-status transport failures stay `unknown` until
-          // the retry budget is spent.
-          providerId: providerId || undefined,
-          // Audit M-6: record whether the transport provably rejected this
-          // attempt, so the resend-withhold decision never depends on matching
-          // error-message text.
-          transportRejected,
-          status,
-          attemptCount: job.attempts,
-          retryDelayMs: error && !failed ? scheduledRetryDelayMs : undefined,
-          retryDelaySource: error && !failed ? scheduledRetryDelaySource : undefined,
-          errorMessage: error || undefined,
-          nextRetryTime: error && !failed ? next.toISOString() : null,
-          sentAt,
-          // A test message or generated digest is not a finding email and never
-          // enters the Action Center. Every real accepted finding delivery
-          // becomes a PENDING follow-up action; an already-actioned log is never
-          // reopened by a retry.
-          ...(status === 'ACCEPTED' && job.target_id !== 'test' && isFindingDelivery(job.advisory_id)
-            ? {
-                actionStatus: log.actionStatus === 'ACTIONED' ? 'ACTIONED' : 'PENDING',
-              }
-            : {}),
-        });
+          [job.channel, job.target_id, job.id, next],
+        );
       }
-    } else {
-      const log = await get<WebhookDeliveryLog>(db, 'webhookLogs', job.id);
-      if (log)
-        await put(db, 'webhookLogs', job.id, {
-          ...log,
-          status: error ? (failed ? 'FAILED' : 'QUEUED') : 'SUCCESS',
-          statusCode,
-          hmacSignature: signature,
-          // FIX: Preserve sentAt on retry (QUEUED) and null on permanent
-          // failure (FAILED), mirroring the email-log sentAt fix. The old
-          // `error ? '' : ...` cleared the timestamp on every error including
-          // retries, losing the original dispatch time.
-          sentAt: !error ? new Date().toISOString() : failed ? null : log.sentAt,
-        });
-      if (!error) {
-        const hook = await get<WebhookEndpoint>(db, 'webhooks', job.target_id);
-        if (hook) await put(db, 'webhooks', hook.id, { ...hook, deliveryCount: hook.deliveryCount + 1 });
-      }
-    }
-    if (job.channel === 'email' && job.target_id !== 'test') {
-      const recipient = await get<EmailRecipient>(db, 'recipients', job.target_id);
-      if (recipient) {
-        const counts = (
-          await db.query(
-            "SELECT count(*) FILTER (WHERE status='ACCEPTED')::int AS accepted, count(*) FILTER (WHERE status IN ('ACCEPTED','FAILED'))::int AS terminal FROM outbox WHERE channel='email' AND target_id=$1",
-            [job.target_id],
-          )
-        ).rows[0];
-        await put(db, 'recipients', recipient.id, {
-          ...recipient,
-          deliverySuccessRate: counts.terminal ? (counts.accepted / counts.terminal) * 100 : 0,
-        });
-      }
-    }
-    const advisory = await get<Advisory>(db, 'advisories', job.advisory_id);
-    if (advisory) {
-      const totals = (
-        await db.query(
-          "SELECT count(*) FILTER(WHERE status='FAILED')::int AS failed,count(*) FILTER(WHERE status IN ('REVIEW','QUEUED','SENDING'))::int AS pending,count(*) FILTER(WHERE status='ACCEPTED')::int AS accepted FROM outbox WHERE advisory_id=$1",
-          [advisory.id],
-        )
-      ).rows[0];
-      // Acceptance by a transport is not proof of inbox delivery. A bundle whose
-      // only outcome so far is a transport failure stays FAILED; an advisory can
-      // have several batches over its lifetime (daily digests, re-queued
-      // findings), so an earlier acceptance must not be overwritten by a later
-      // partial failure, and a failure must not erase an accepted bundle.
-      advisory.deliveryStatus = Number(totals.pending)
-        ? 'PENDING'
-        : Number(totals.accepted)
-          ? 'ACCEPTED'
-          : Number(totals.failed)
-            ? 'FAILED'
-            : advisory.deliveryStatus;
-      await put(db, 'advisories', advisory.id, advisory);
-      if (!error) {
-        const dispatchKey = job.payload.digestKey ?? job.dedupe_key.split(':email:')[0].split(':webhook:')[0];
-        const dispatchIds = declaredCveIds.map((cveId) => `${cveId}:${dispatchKey}`);
-        const priorAlerts = await getMany<AlertedCVE>(db, 'alertedCves', declaredCveIds);
-        const priorDispatches = await getMany(db, 'alertDispatches', dispatchIds);
-        for (const cveId of declaredCveIds) {
-          const prior = priorAlerts.get(cveId);
-          const now = new Date().toISOString();
-          // Digest jobs carry one batch key across every recipient, so the same
-          // CVE is counted once even when several subscription cohorts receive
-          // it. Non-digest jobs retain the original content-revision key.
-          const same =
-            prior?.lastDispatchKey === dispatchKey || !!priorDispatches.get(`${cveId}:${dispatchKey}`);
-          await put(db, 'alertDispatches', `${cveId}:${dispatchKey}`, {
-            cveId,
-            dispatchKey,
-            acceptedAt: now,
+      if (job.channel === 'email') {
+        const log = await get<EmailDeliveryLog>(db, 'emailLogs', job.id);
+        if (log) {
+          // Only stamp sentAt when the email is accepted; preserve the existing
+          // value on RETRYING so a provider-accepted-but-temporarily-deferred
+          // timestamp survives the retry cycle.
+          const status = error ? (failed ? 'FAILED' : 'RETRYING') : 'ACCEPTED';
+          const sentAt =
+            status === 'ACCEPTED' ? new Date().toISOString() : status === 'RETRYING' ? log.sentAt : undefined;
+          await put(db, 'emailLogs', job.id, {
+            ...log,
+            provider: emailProvider || log.provider,
+            // Persist the transport-assigned message id so a later retry can ask
+            // the provider whether the prior attempt was accepted (see
+            // confirmPriorDelivery). Without this the lookup is dead code and HTTP
+            // providers with non-status transport failures stay `unknown` until
+            // the retry budget is spent.
+            providerId: providerId || undefined,
+            // Audit M-6: record whether the transport provably rejected this
+            // attempt, so the resend-withhold decision never depends on matching
+            // error-message text.
+            transportRejected,
+            status,
+            attemptCount: job.attempts,
+            retryDelayMs: error && !failed ? scheduledRetryDelayMs : undefined,
+            retryDelaySource: error && !failed ? scheduledRetryDelaySource : undefined,
+            errorMessage: error || undefined,
+            nextRetryTime: error && !failed ? next.toISOString() : null,
+            sentAt,
+            // A test message or generated digest is not a finding email and never
+            // enters the Action Center. Every real accepted finding delivery
+            // becomes a PENDING follow-up action; an already-actioned log is never
+            // reopened by a retry.
+            ...(status === 'ACCEPTED' && job.target_id !== 'test' && isFindingDelivery(job.advisory_id)
+              ? {
+                  actionStatus: log.actionStatus === 'ACTIONED' ? 'ACTIONED' : 'PENDING',
+                }
+              : {}),
           });
-          await put(db, 'alertedCves', cveId, {
-            cveId,
-            firstAlertedAt: prior?.firstAlertedAt || now,
-            lastAlertedAt: now,
-            advisoryId: advisory.id,
-            recipientEmails: Array.from(
-              new Set([
-                ...(prior?.recipientEmails || []),
-                ...(job.channel === 'email' ? [job.payload.recipientEmail!] : []),
-              ]),
-            ),
-            status: 'DISPATCHED',
-            lastDispatchKey: dispatchKey,
-            dispatchCount: (prior?.dispatchCount || 0) + (same ? 0 : 1),
-          } satisfies AlertedCVE);
+        }
+      } else {
+        const log = await get<WebhookDeliveryLog>(db, 'webhookLogs', job.id);
+        if (log)
+          await put(db, 'webhookLogs', job.id, {
+            ...log,
+            status: error ? (failed ? 'FAILED' : 'QUEUED') : 'SUCCESS',
+            statusCode,
+            hmacSignature: signature,
+            // FIX: Preserve sentAt on retry (QUEUED) and null on permanent
+            // failure (FAILED), mirroring the email-log sentAt fix. The old
+            // `error ? '' : ...` cleared the timestamp on every error including
+            // retries, losing the original dispatch time.
+            sentAt: !error ? new Date().toISOString() : failed ? null : log.sentAt,
+          });
+        if (!error) {
+          const hook = await get<WebhookEndpoint>(db, 'webhooks', job.target_id);
+          if (hook) await put(db, 'webhooks', hook.id, { ...hook, deliveryCount: hook.deliveryCount + 1 });
         }
       }
-      // Batch-fetch all finding rows in a single query instead of per-finding.
-      const findingMap = await getMany<Finding>(db, 'findings', advisory.findingIds);
-      // Only the findings this target actually delivered describe this
-      // recipient's bundle. Assessment or digest bundles that are already
-      // accepted must not be flipped back to FAILED because the digest window
-      // rolled over and a later partial bundle for the same advisory is still
-      // pending.
-      const deliveredIds =
-        job.payload.includedFindingIds !== undefined ? new Set(job.payload.includedFindingIds) : undefined;
-      for (const findingId of deliveredIds ?? advisory.findingIds) {
-        const f = findingMap.get(findingId);
-        if (!f) continue;
-        // A finding held for review was queued in this bundle deliberately
-        // (assessment and digest payloads may include them). Once the transport
-        // for that bundle accepts it, its notification lifecycle is dispatched;
-        // otherwise it would remain REVIEW_REQUIRED — perpetually re-selected by
-        // the daily digest — while its advisory reports ACCEPTED. A rejected or
-        // still-pending bundle keeps the hold in place.
-        const reviewHeld = f?.notificationStatus === 'REVIEW_REQUIRED';
-        const releasedByReview = reviewHeld && !error && !totals.pending && !totals.failed;
-        // Generated advisories (pipeline, digest, daily) are never bound to the
-        // findings they describe — only manually reviewed advisories set
-        // `advisoryId`. Gating this bookkeeping on that binding left every
-        // auto-queued finding marked QUEUED_FOR_DISPATCH after an accepted send,
-        // so it was re-queued and re-sent on the next pipeline run. A
-        // REVIEW_REQUIRED finding released by this acceptance has neither
-        // field set yet, so it must be admitted explicitly.
-        if (
-          f.advisoryId === advisory.id ||
-          (!f.advisoryId && f.autoDispatchedAt) ||
-          releasedByReview ||
-          // A digest or consolidated bundle records the exact findings it
-          // carried. Their acceptance is proof this finding was announced even
-          // though the finding itself has no manual advisory binding and was
-          // never auto-dispatched through the pipeline. Without this, every
-          // accepted digest left its findings QUEUED_FOR_DISPATCH, so the next
-          // digest re-selected and re-sent the same content (or a stale-bundle
-          // loop when the stored and current revisions disagreed).
-          deliveredIds?.has(findingId)
-        )
-          await put(db, 'findings', findingId, {
-            ...f,
-            advisoryId: f.advisoryId ?? advisory.id,
-            notificationStatus: releasedByReview
-              ? 'AUTO_DISPATCHED'
-              : ['NOT_APPLICABLE', 'REVIEW_REQUIRED'].includes(f.notificationStatus)
-                ? f.notificationStatus
-                : totals.pending
-                  ? 'QUEUED_FOR_DISPATCH'
-                  : totals.failed
-                    ? 'DELIVERY_FAILED'
-                    : 'AUTO_DISPATCHED',
-            autoDispatchedAt:
-              (releasedByReview || !reviewHeld) && !totals.pending && !totals.failed
-                ? new Date().toISOString()
-                : null,
+      if (job.channel === 'email' && job.target_id !== 'test') {
+        const recipient = await get<EmailRecipient>(db, 'recipients', job.target_id);
+        if (recipient) {
+          const counts = (
+            await db.query(
+              "SELECT count(*) FILTER (WHERE status='ACCEPTED')::int AS accepted, count(*) FILTER (WHERE status IN ('ACCEPTED','FAILED'))::int AS terminal FROM outbox WHERE channel='email' AND target_id=$1",
+              [job.target_id],
+            )
+          ).rows[0];
+          await put(db, 'recipients', recipient.id, {
+            ...recipient,
+            deliverySuccessRate: counts.terminal ? (counts.accepted / counts.terminal) * 100 : 0,
           });
-    }
-    }
-    // Every accepted finding email stamps `reviewNotifiedAt` on the findings it
-    // carried — including digest jobs that have an advisory row — so a finding is
-    // never included in a second consolidated email. The dedupe key alone is not
-    // enough: a benign finding revision change (vendor/product/asset label) would
-    // produce a new key and re-notify evidence the recipient already had.
-    // The timestamp is also the acceptance evidence for a finding whose group
-    // email is delayed, so the delay gate below cannot re-send it.
-    if (job.channel === 'email') {
-      const notifiedIds = job.payload.includedFindingIds ?? [];
-      if (!error && notifiedIds.length) {
-        const now = new Date().toISOString();
-        await db.query(
-          `UPDATE records SET data=jsonb_set(data,'{reviewNotifiedAt}',to_jsonb($2::text)),updated_at=now()
+        }
+      }
+      const advisory = await get<Advisory>(db, 'advisories', job.advisory_id);
+      if (advisory) {
+        const totals = (
+          await db.query(
+            "SELECT count(*) FILTER(WHERE status='FAILED')::int AS failed,count(*) FILTER(WHERE status IN ('REVIEW','QUEUED','SENDING'))::int AS pending,count(*) FILTER(WHERE status='ACCEPTED')::int AS accepted FROM outbox WHERE advisory_id=$1",
+            [advisory.id],
+          )
+        ).rows[0];
+        // Acceptance by a transport is not proof of inbox delivery. A bundle whose
+        // only outcome so far is a transport failure stays FAILED; an advisory can
+        // have several batches over its lifetime (daily digests, re-queued
+        // findings), so an earlier acceptance must not be overwritten by a later
+        // partial failure, and a failure must not erase an accepted bundle.
+        advisory.deliveryStatus = Number(totals.pending)
+          ? 'PENDING'
+          : Number(totals.accepted)
+            ? 'ACCEPTED'
+            : Number(totals.failed)
+              ? 'FAILED'
+              : advisory.deliveryStatus;
+        await put(db, 'advisories', advisory.id, advisory);
+        if (!error) {
+          const dispatchKey =
+            job.payload.digestKey ?? job.dedupe_key.split(':email:')[0].split(':webhook:')[0];
+          const dispatchIds = declaredCveIds.map((cveId) => `${cveId}:${dispatchKey}`);
+          const priorAlerts = await getMany<AlertedCVE>(db, 'alertedCves', declaredCveIds);
+          const priorDispatches = await getMany(db, 'alertDispatches', dispatchIds);
+          for (const cveId of declaredCveIds) {
+            const prior = priorAlerts.get(cveId);
+            const now = new Date().toISOString();
+            // Digest jobs carry one batch key across every recipient, so the same
+            // CVE is counted once even when several subscription cohorts receive
+            // it. Non-digest jobs retain the original content-revision key.
+            const same =
+              prior?.lastDispatchKey === dispatchKey || !!priorDispatches.get(`${cveId}:${dispatchKey}`);
+            await put(db, 'alertDispatches', `${cveId}:${dispatchKey}`, {
+              cveId,
+              dispatchKey,
+              acceptedAt: now,
+            });
+            await put(db, 'alertedCves', cveId, {
+              cveId,
+              firstAlertedAt: prior?.firstAlertedAt || now,
+              lastAlertedAt: now,
+              advisoryId: advisory.id,
+              recipientEmails: Array.from(
+                new Set([
+                  ...(prior?.recipientEmails || []),
+                  ...(job.channel === 'email' ? [job.payload.recipientEmail!] : []),
+                ]),
+              ),
+              status: 'DISPATCHED',
+              lastDispatchKey: dispatchKey,
+              dispatchCount: (prior?.dispatchCount || 0) + (same ? 0 : 1),
+            } satisfies AlertedCVE);
+          }
+        }
+        // Batch-fetch all finding rows in a single query instead of per-finding.
+        const findingMap = await getMany<Finding>(db, 'findings', advisory.findingIds);
+        // Only the findings this target actually delivered describe this
+        // recipient's bundle. Assessment or digest bundles that are already
+        // accepted must not be flipped back to FAILED because the digest window
+        // rolled over and a later partial bundle for the same advisory is still
+        // pending.
+        const deliveredIds =
+          job.payload.includedFindingIds !== undefined ? new Set(job.payload.includedFindingIds) : undefined;
+        for (const findingId of deliveredIds ?? advisory.findingIds) {
+          const f = findingMap.get(findingId);
+          if (!f) continue;
+          // A finding held for review was queued in this bundle deliberately
+          // (assessment and digest payloads may include them). Once the transport
+          // for that bundle accepts it, its notification lifecycle is dispatched;
+          // otherwise it would remain REVIEW_REQUIRED — perpetually re-selected by
+          // the daily digest — while its advisory reports ACCEPTED. A rejected or
+          // still-pending bundle keeps the hold in place.
+          const reviewHeld = f?.notificationStatus === 'REVIEW_REQUIRED';
+          const releasedByReview = reviewHeld && !error && !totals.pending && !totals.failed;
+          // Generated advisories (pipeline, digest, daily) are never bound to the
+          // findings they describe — only manually reviewed advisories set
+          // `advisoryId`. Gating this bookkeeping on that binding left every
+          // auto-queued finding marked QUEUED_FOR_DISPATCH after an accepted send,
+          // so it was re-queued and re-sent on the next pipeline run. A
+          // REVIEW_REQUIRED finding released by this acceptance has neither
+          // field set yet, so it must be admitted explicitly.
+          if (
+            f.advisoryId === advisory.id ||
+            (!f.advisoryId && f.autoDispatchedAt) ||
+            releasedByReview ||
+            // A digest or consolidated bundle records the exact findings it
+            // carried. Their acceptance is proof this finding was announced even
+            // though the finding itself has no manual advisory binding and was
+            // never auto-dispatched through the pipeline. Without this, every
+            // accepted digest left its findings QUEUED_FOR_DISPATCH, so the next
+            // digest re-selected and re-sent the same content (or a stale-bundle
+            // loop when the stored and current revisions disagreed).
+            deliveredIds?.has(findingId)
+          )
+            await put(db, 'findings', findingId, {
+              ...f,
+              advisoryId: f.advisoryId ?? advisory.id,
+              notificationStatus: releasedByReview
+                ? 'AUTO_DISPATCHED'
+                : ['NOT_APPLICABLE', 'REVIEW_REQUIRED'].includes(f.notificationStatus)
+                  ? f.notificationStatus
+                  : totals.pending
+                    ? 'QUEUED_FOR_DISPATCH'
+                    : totals.failed
+                      ? 'DELIVERY_FAILED'
+                      : 'AUTO_DISPATCHED',
+              autoDispatchedAt:
+                (releasedByReview || !reviewHeld) && !totals.pending && !totals.failed
+                  ? new Date().toISOString()
+                  : null,
+            });
+        }
+      }
+      // Every accepted finding email stamps `reviewNotifiedAt` on the findings it
+      // carried — including digest jobs that have an advisory row — so a finding is
+      // never included in a second consolidated email. The dedupe key alone is not
+      // enough: a benign finding revision change (vendor/product/asset label) would
+      // produce a new key and re-notify evidence the recipient already had.
+      // The timestamp is also the acceptance evidence for a finding whose group
+      // email is delayed, so the delay gate below cannot re-send it.
+      if (job.channel === 'email') {
+        const notifiedIds = job.payload.includedFindingIds ?? [];
+        if (!error && notifiedIds.length) {
+          const now = new Date().toISOString();
+          await db.query(
+            `UPDATE records SET data=jsonb_set(data,'{reviewNotifiedAt}',to_jsonb($2::text)),updated_at=now()
            WHERE kind='findings' AND id=ANY($1::text[]) AND COALESCE(data->>'reviewNotifiedAt','')=''`,
-          [notifiedIds, now],
-        );
-        await markClaimsDelivered(db, claimsForJob(job.target_id, 'finding', notifiedIds), {
-          jobId: job.id,
-          deliveredAt: now,
-        });
+            [notifiedIds, now],
+          );
+          await markClaimsDelivered(db, claimsForJob(job.target_id, 'finding', notifiedIds), {
+            jobId: job.id,
+            deliveredAt: now,
+          });
+        }
+        // A terminal failure that never reached the transport (stale bundle,
+        // withdrawn CVE, removed recipient, exhausted pre-send validation) owns no
+        // delivery claim: nothing was sent. Holding it would permanently block the
+        // rebuilt replacement, because claims are per recipient+finding and the
+        // failed job is never retried once its replacement is queued.
+        if (failed && (transportRejected || !transportAttempted) && notifiedIds.length) {
+          await releaseClaims(db, claimsForJob(job.target_id, 'finding', notifiedIds), { jobId: job.id });
+        }
       }
-      // A terminal failure that never reached the transport (stale bundle,
-      // withdrawn CVE, removed recipient, exhausted pre-send validation) owns no
-      // delivery claim: nothing was sent. Holding it would permanently block the
-      // rebuilt replacement, because claims are per recipient+finding and the
-      // failed job is never retried once its replacement is queued.
-      if (failed && (transportRejected || !transportAttempted) && notifiedIds.length) {
-        await releaseClaims(db, claimsForJob(job.target_id, 'finding', notifiedIds), { jobId: job.id });
+      // After a Security-team delivery is confirmed ACCEPTED, queue the same
+      // email for Everyone-group recipients. This is the deferred half of the
+      // `deferEveryoneUntilSecurityDelivered` setting; the function is a no-op when
+      // the setting is off or the recipient is not Security-team.
+      if (job.channel === 'email' && !error && job.target_id !== 'test') {
+        await queueEveryoneDeliveryJobs(db, job, settings);
       }
-    }
-    // After a Security-team delivery is confirmed ACCEPTED, queue the same
-    // email for Everyone-group recipients. This is the deferred half of the
-    // `deferEveryoneUntilSecurityDelivered` setting; the function is a no-op when
-    // the setting is off or the recipient is not Security-team.
-    if (job.channel === 'email' && !error && job.target_id !== 'test') {
-      await queueEveryoneDeliveryJobs(db, job, settings);
-    }
-    if (job.channel === 'email' && job.payload.newsEvidence?.articles?.length) {
-      const articleIdentities = job.payload.newsEvidence.articles.map((a: any) => newsArticleIdentity(a));
-      if (!error) {
-        // The notification is durable only after the transport accepts it.
-        await recordNewsDeliveries(db, job.target_id, job.advisory_id,
-          job.payload.newsEvidence.articles, new Date().toISOString());
-        await markClaimsDelivered(db, claimsForJob(job.target_id, 'article', articleIdentities), { jobId: job.id });
-      } else if (failed && (transportRejected || !transportAttempted)) {
-        await releaseClaims(db, claimsForJob(job.target_id, 'article', articleIdentities), { jobId: job.id });
+      if (job.channel === 'email' && job.payload.newsEvidence?.articles?.length) {
+        const articleIdentities = job.payload.newsEvidence.articles.map((a: any) => newsArticleIdentity(a));
+        if (!error) {
+          // The notification is durable only after the transport accepts it.
+          await recordNewsDeliveries(
+            db,
+            job.target_id,
+            job.advisory_id,
+            job.payload.newsEvidence.articles,
+            new Date().toISOString(),
+          );
+          await markClaimsDelivered(db, claimsForJob(job.target_id, 'article', articleIdentities), {
+            jobId: job.id,
+          });
+        } else if (failed && (transportRejected || !transportAttempted)) {
+          await releaseClaims(db, claimsForJob(job.target_id, 'article', articleIdentities), {
+            jobId: job.id,
+          });
+        }
       }
-    }
-    await writeEvent(db, {
-      category: job.channel === 'email' ? 'EMAIL' : 'EVENT',
-      level: error ? 'WARNING' : 'INFO',
-      code: error ? 'delivery.attempt_failed' : 'delivery.accepted',
-      message: error ? 'Delivery attempt failed; retry policy applied' : 'Transport accepted delivery',
-      context: {
-        jobId: job.id,
-        channel: job.channel,
-        attempt: job.attempts,
-        advisoryId: job.advisory_id,
-        ...(error ? errorInfo : {}),
-      },
-    });
-    if (job.channel === 'email' && transportAttempted && !staleAdvisory && !holdGated && !unconfirmedError) {
-      const observedStatus = Number(/HTTP\s+(\d{3})\b/i.exec(error)?.[1] ?? statusCode);
-      const classification = classifyDeliveryError({
-        provider: emailProvider ?? 'unknown', statusCode: observedStatus,
-        errorMessage: error, attemptNumber: job.attempts, hourOfDay: new Date().getUTCHours(),
-      });
-      await writeEvent(db, {
-        category: 'ML', code: 'ml.delivery.outcome', message: 'Observed delivery attempt outcome',
-        context: {
-          jobId: job.id, provider: emailProvider ?? 'unknown', attempt: job.attempts, delayMs: retryDelayObserved,
-          delayObserved: observedDelay.observed,
-          succeeded: !error, isRateLimited: observedStatus === 429, isPermanentFailure: permanent,
-        },
-      });
-      if (error) await writeEvent(db, {
-        category: 'ML', code: 'ml.delivery.classification', message: 'Delivery classification recommendation',
-        context: {
-          ...classification,
-          jobId: job.id,
-          authoritativePermanent: permanent,
-          mlPermanentApplied: mlPermanent,
-        },
-      });
-      if (error) await writeEvent(db, {
-        category: 'ML', code: 'ml.delivery.error', message: 'Observed transport error classification',
-        context: {
-          provider: emailProvider ?? 'unknown', statusCode: observedStatus,
-          errorMessage: error.slice(0, 1000), attemptNumber: job.attempts,
-          hourOfDay: new Date().getUTCHours(), isPermanent: permanent,
-        },
-      });
-    }
-    if (failed && error) {
       await writeEvent(db, {
         category: job.channel === 'email' ? 'EMAIL' : 'EVENT',
-        level: 'ERROR',
-        code: 'delivery.exhausted',
-        message: `Delivery retries exhausted for advisory ${job.advisory_id}; permanent failure`,
+        level: error ? 'WARNING' : 'INFO',
+        code: error ? 'delivery.attempt_failed' : 'delivery.accepted',
+        message: error ? 'Delivery attempt failed; retry policy applied' : 'Transport accepted delivery',
         context: {
           jobId: job.id,
           channel: job.channel,
-          attempts: job.attempts,
+          attempt: job.attempts,
           advisoryId: job.advisory_id,
-          error,
-          ...errorInfo,
+          ...(error ? errorInfo : {}),
         },
       });
-    }
-    await appendAudit(
-      db,
-      error ? 'Delivery attempt failed' : 'Delivery accepted',
-      `${job.channel} delivery ${job.id}; attempt ${job.attempts}`,
-      'delivery-worker',
-      job.channel === 'email' ? 'EMAIL' : 'WEBHOOK',
-      error ? 'WARNING' : 'INFO',
-    );
-    finalized = true;
-  });
+      if (
+        job.channel === 'email' &&
+        transportAttempted &&
+        !staleAdvisory &&
+        !holdGated &&
+        !unconfirmedError
+      ) {
+        const observedStatus = Number(/HTTP\s+(\d{3})\b/i.exec(error)?.[1] ?? statusCode);
+        const classification = classifyDeliveryError({
+          provider: emailProvider ?? 'unknown',
+          statusCode: observedStatus,
+          errorMessage: error,
+          attemptNumber: job.attempts,
+          hourOfDay: new Date().getUTCHours(),
+        });
+        await writeEvent(db, {
+          category: 'ML',
+          code: 'ml.delivery.outcome',
+          message: 'Observed delivery attempt outcome',
+          context: {
+            jobId: job.id,
+            provider: emailProvider ?? 'unknown',
+            attempt: job.attempts,
+            delayMs: retryDelayObserved,
+            delayObserved: observedDelay.observed,
+            succeeded: !error,
+            isRateLimited: observedStatus === 429,
+            isPermanentFailure: permanent,
+          },
+        });
+        if (error)
+          await writeEvent(db, {
+            category: 'ML',
+            code: 'ml.delivery.classification',
+            message: 'Delivery classification recommendation',
+            context: {
+              ...classification,
+              jobId: job.id,
+              authoritativePermanent: permanent,
+              mlPermanentApplied: mlPermanent,
+            },
+          });
+        if (error)
+          await writeEvent(db, {
+            category: 'ML',
+            code: 'ml.delivery.error',
+            message: 'Observed transport error classification',
+            context: {
+              provider: emailProvider ?? 'unknown',
+              statusCode: observedStatus,
+              errorMessage: error.slice(0, 1000),
+              attemptNumber: job.attempts,
+              hourOfDay: new Date().getUTCHours(),
+              isPermanent: permanent,
+            },
+          });
+      }
+      if (failed && error) {
+        await writeEvent(db, {
+          category: job.channel === 'email' ? 'EMAIL' : 'EVENT',
+          level: 'ERROR',
+          code: 'delivery.exhausted',
+          message: `Delivery retries exhausted for advisory ${job.advisory_id}; permanent failure`,
+          context: {
+            jobId: job.id,
+            channel: job.channel,
+            attempts: job.attempts,
+            advisoryId: job.advisory_id,
+            error,
+            ...errorInfo,
+          },
+        });
+      }
+      await appendAudit(
+        db,
+        error ? 'Delivery attempt failed' : 'Delivery accepted',
+        `${job.channel} delivery ${job.id}; attempt ${job.attempts}`,
+        'delivery-worker',
+        job.channel === 'email' ? 'EMAIL' : 'WEBHOOK',
+        error ? 'WARNING' : 'INFO',
+      );
+      finalized = true;
+    });
   } catch (bookkeepingError) {
     if (!unconfirmedError) throw bookkeepingError;
     // The transport already holds this message but the receipt could not be
@@ -2755,7 +2893,12 @@ export async function deliverNext(
       level: 'ERROR',
       code: 'delivery.receipt_unconfirmed',
       message: unconfirmedError,
-      context: { jobId: job.id, advisoryId: job.advisory_id, attempt: job.attempts, ...describeError(bookkeepingError) },
+      context: {
+        jobId: job.id,
+        advisoryId: job.advisory_id,
+        attempt: job.attempts,
+        ...describeError(bookkeepingError),
+      },
     }).catch(() => undefined);
   }
   if (finalized && staleAdvisory) {
@@ -2775,4 +2918,3 @@ export async function deliverNext(
 
   return true;
 }
-

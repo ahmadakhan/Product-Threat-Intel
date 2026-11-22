@@ -23,6 +23,7 @@ import {
   DEFAULT_TEMPLATE_CUSTOMIZATION,
   DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
   DEFAULT_DAILY_DIGEST_TEMPLATE,
+  DEFAULT_NEWS_EMAIL_CUSTOMIZATION,
   DEFAULT_NEWS_EMAIL_TEMPLATE,
 } from '../src/utils/templateCompiler.ts';
 import { DEFAULT_ADVISORY_EMAIL_TEMPLATE } from '../src/utils/defaultAdvisoryEmailTemplate.ts';
@@ -225,7 +226,13 @@ export const emptyState = (): AppState => ({
   dailyDigestCustomization: { ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION },
   dailyDigestTemplate: DEFAULT_DAILY_DIGEST_TEMPLATE,
   dailyDigestCustomTemplate: null,
-  newsDigestCustomization: { ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION },
+  // The news studio has its own stock palette (system font, slate text, blue
+  // accent). Seeding it from the daily digest's customization made the initial
+  // snapshot describe the news document with the digest's colours, so an
+  // untouched installation opened the studio on a template that did not match
+  // the news email actually sent (`server/newsEmail.ts` uses
+  // DEFAULT_NEWS_EMAIL_CUSTOMIZATION).
+  newsDigestCustomization: { ...DEFAULT_NEWS_EMAIL_CUSTOMIZATION },
   newsDigestTemplate: DEFAULT_NEWS_EMAIL_TEMPLATE,
   newsDigestCustomTemplate: null,
   counts: zeroCounts(),

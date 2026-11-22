@@ -145,10 +145,14 @@ const buildRemediationInstructions = (findings: Finding[]): string => {
     );
   }
 
-  steps.push(`Review each finding's applicability against your inventory, apply vendor patches via your change management process, and validate backups before and after remediation.`);
+  steps.push(
+    `Review each finding's applicability against your inventory, apply vendor patches via your change management process, and validate backups before and after remediation.`,
+  );
 
   if (findings.some((f) => f.confidence !== undefined && f.confidence < 90)) {
-    steps.push('Findings with confidence below 90% require manual verification — confirm asset applicability and version evidence before acting.');
+    steps.push(
+      'Findings with confidence below 90% require manual verification — confirm asset applicability and version evidence before acting.',
+    );
   }
 
   return steps.join(' ');
@@ -334,7 +338,11 @@ async function computeHealth(
     for (const row of pipelineAudit?.rows ?? []) {
       const count = Number(row.count);
       pipelineJobs.total += count;
-      if (row.event === 'Pipeline completed' || row.event === 'AUTHORITATIVE_AUTO_DISPATCH' || row.event === 'Pipeline recovered') {
+      if (
+        row.event === 'Pipeline completed' ||
+        row.event === 'AUTHORITATIVE_AUTO_DISPATCH' ||
+        row.event === 'Pipeline recovered'
+      ) {
         pipelineJobs.succeeded += count;
       } else if (row.event === 'Pipeline failed') {
         pipelineJobs.failed += count;
@@ -426,10 +434,10 @@ export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promi
       // operational event worth a log row per minute.
       return 0;
     }
-    
-  return await transaction(
-        pool,
-        async (db) => {
+
+    return await transaction(
+      pool,
+      async (db) => {
         const row = await db.query<{ data: Record<string, unknown> }>(
           `SELECT data FROM records WHERE kind='systemState' AND id=$1 FOR UPDATE`,
           [DAILY_SCHEDULE_ID],
@@ -520,11 +528,9 @@ export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promi
         // a single connection. Issuing four at once races the protocol queue and
         // the results are only ordered by luck.
         const cached = await getMany<NormalizedCVE>(db, 'cveData', ids);
-        const assets = await getMany<WatchListItem>(
-          db,
-          'watchlist',
-          [...new Set(candidates.map((f) => f.matchedAssetId))],
-        );
+        const assets = await getMany<WatchListItem>(db, 'watchlist', [
+          ...new Set(candidates.map((f) => f.matchedAssetId)),
+        ]);
         const withdrawals = await getMany<{ modifiedDate: string }>(db, 'cveWithdrawals', ids);
         const aliases = await list<AliasEntry>(db, 'aliases');
         const cves = new Map(candidates.map((f) => [f.cveId, cached.get(f.cveId) || f.cve]));
@@ -581,7 +587,14 @@ export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promi
         ).length;
         const worker = (await db.query('SELECT heartbeat FROM scheduler_state WHERE id=1')).rows[0];
         const health = daily.includeHealthReport
-          ? await computeHealth(db, settings.schedulerEnabled, worker?.heartbeat ?? null, timezone, daily.time, now)
+          ? await computeHealth(
+              db,
+              settings.schedulerEnabled,
+              worker?.heartbeat ?? null,
+              timezone,
+              daily.time,
+              now,
+            )
           : null;
         const healthReportHtml = health ? renderDailyHealthReport(health, dailyConfig) : '';
         // No findings and no health report means there is nothing to email. Skip
@@ -631,12 +644,23 @@ export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promi
             .map((finding) => ({
               finding,
               relevance: shouldSelectForDigest({
-                cvssScore: finding.cve.cvss.score, epssScore: finding.cve.epss?.score ?? 0,
+                cvssScore: finding.cve.cvss.score,
+                epssScore: finding.cve.epss?.score ?? 0,
                 cisaKev: finding.cve.cisaKev?.isKev === true,
-                exploitStatus: Math.max(0, ['None', 'POC Available', 'Reported In Wild', 'Active Weaponized'].indexOf(finding.cve.exploitStatus)),
-                daysSincePublished: Math.max(0, (Date.now() - Date.parse(finding.cve.publishedDate)) / 86400000) || 0,
-                sourceFeedWeight: 0, credibilityScore: finding.confidence ?? 0, assetCriticality: 0,
-                recipientTier: 'SUBSCRIBED_ONLY', findingInDigest: true, timeInDigestMinutes: 0,
+                exploitStatus: Math.max(
+                  0,
+                  ['None', 'POC Available', 'Reported In Wild', 'Active Weaponized'].indexOf(
+                    finding.cve.exploitStatus,
+                  ),
+                ),
+                daysSincePublished:
+                  Math.max(0, (Date.now() - Date.parse(finding.cve.publishedDate)) / 86400000) || 0,
+                sourceFeedWeight: 0,
+                credibilityScore: finding.confidence ?? 0,
+                assetCriticality: 0,
+                recipientTier: 'SUBSCRIBED_ONLY',
+                findingInDigest: true,
+                timeInDigestMinutes: 0,
               }),
             }))
             .sort((a, b) => b.relevance - a.relevance)
@@ -651,7 +675,11 @@ export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promi
           if (candidate.length) {
             const claim = await claimItems(
               db,
-              claimsForJob(recipient.id, 'finding', candidate.map((finding) => finding.id)),
+              claimsForJob(
+                recipient.id,
+                'finding',
+                candidate.map((finding) => finding.id),
+              ),
             );
             claimed = claim.granted;
             const granted = new Set(claimed.map((request) => request.itemId));
@@ -669,44 +697,44 @@ export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promi
           // Keep the narrative's scope and counts identical to the recipient's KPIs.
           const executiveSummary = formatExecutiveSummary(included.length, severityCounts);
           const parts: DailyDigestParts = {
-             advisory_id: view.id,
-             advisory_title: view.title,
-             dispatch_date: new Date().toISOString(),
-             severity: view.severity,
-             finding_count: findings.length,
-             severity_counts: formatSeverityCounts(severityCounts),
-              findings_summary: renderDailyFindingSummary(
-                included.map((finding) => ({
-                  cveId: finding.cveId,
-                  severity: finding.cve.cvss.severity,
-                  assetName: finding.matchedAssetName,
-                  vendor: finding.matchedAssetVendor,
-                  sourceUrl: `https://nvd.nist.gov/vuln/detail/${finding.cveId}`,
-                  cvssScore: finding.cve.cvss.score,
-                  exploitStatus: finding.cve.exploitStatus,
-                  epssScore: finding.cve.epss?.score,
-                  cisaKev: finding.cve.cisaKev?.isKev,
-                })),
-                dailyConfig,
-              ),
-             health_report: healthReportHtml,
-             recipient_name: recipient.name || recipient.email,
-             critical_count: criticalCount,
-             high_count: highCount,
-             medium_count: mediumCount,
-             low_count: lowCount,
-             asset_count: uniqueAssets.size,
-             executive_summary: executiveSummary,
-             report_generated: reportGenerated,
-           held_for_review: renderHeldForReview(heldForReview, dailyConfig),
-           critical_summary: digestSeveritySummary('CRITICAL', criticalCount, dailyConfig),
-           high_summary: digestSeveritySummary('HIGH', highCount, dailyConfig),
-           medium_summary: digestSeveritySummary('MEDIUM', mediumCount, dailyConfig),
-           low_summary: digestSeveritySummary('LOW', lowCount, dailyConfig),
-           critical_kpi: digestSeverityKpi('CRITICAL', criticalCount, dailyConfig),
-           high_kpi: digestSeverityKpi('HIGH', highCount, dailyConfig),
-           medium_kpi: digestSeverityKpi('MEDIUM', mediumCount, dailyConfig),
-           low_kpi: digestSeverityKpi('LOW', lowCount, dailyConfig),
+            advisory_id: view.id,
+            advisory_title: view.title,
+            dispatch_date: new Date().toISOString(),
+            severity: view.severity,
+            finding_count: findings.length,
+            severity_counts: formatSeverityCounts(severityCounts),
+            findings_summary: renderDailyFindingSummary(
+              included.map((finding) => ({
+                cveId: finding.cveId,
+                severity: finding.cve.cvss.severity,
+                assetName: finding.matchedAssetName,
+                vendor: finding.matchedAssetVendor,
+                sourceUrl: `https://nvd.nist.gov/vuln/detail/${finding.cveId}`,
+                cvssScore: finding.cve.cvss.score,
+                exploitStatus: finding.cve.exploitStatus,
+                epssScore: finding.cve.epss?.score,
+                cisaKev: finding.cve.cisaKev?.isKev,
+              })),
+              dailyConfig,
+            ),
+            health_report: healthReportHtml,
+            recipient_name: recipient.name || recipient.email,
+            critical_count: criticalCount,
+            high_count: highCount,
+            medium_count: mediumCount,
+            low_count: lowCount,
+            asset_count: uniqueAssets.size,
+            executive_summary: executiveSummary,
+            report_generated: reportGenerated,
+            held_for_review: renderHeldForReview(heldForReview, dailyConfig),
+            critical_summary: digestSeveritySummary('CRITICAL', criticalCount, dailyConfig),
+            high_summary: digestSeveritySummary('HIGH', highCount, dailyConfig),
+            medium_summary: digestSeveritySummary('MEDIUM', mediumCount, dailyConfig),
+            low_summary: digestSeveritySummary('LOW', lowCount, dailyConfig),
+            critical_kpi: digestSeverityKpi('CRITICAL', criticalCount, dailyConfig),
+            high_kpi: digestSeverityKpi('HIGH', highCount, dailyConfig),
+            medium_kpi: digestSeverityKpi('MEDIUM', mediumCount, dailyConfig),
+            low_kpi: digestSeverityKpi('LOW', lowCount, dailyConfig),
           };
           const html = renderDailyDigest(dailyConfig, parts, dailyDigestTemplate ?? undefined);
           // Recorded so approval can prove the stored body is unchanged. The
@@ -777,6 +805,7 @@ export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promi
         return jobs;
       },
       client,
+      { signal },
     );
   } catch (error) {
     // A transport-level failure can leave the connection unusable; release with

@@ -17,11 +17,14 @@ export function uniqueEnabledEmailRecipients(recipients: readonly EmailRecipient
   const byAddress = new Map<string, EmailRecipient>();
   // Widest finding tier wins; a recipient subscribed only to the news or digest
   // stream ranks below any findings subscription so it cannot shadow a mailbox
-  // that also receives findings.
+  // that also receives findings. Rank by the index of the widest tier present:
+  // `ALL_SEVERITIES` (0) must outrank `CISA_KEV_ONLY`, which the previous
+  // `4 - index` arithmetic got exactly backwards.
   const tierOrder: SubscriptionTier[] = ['ALL_SEVERITIES', 'CRITICAL_HIGH_ONLY', 'CISA_KEV_ONLY'];
   const tierRank = (recipient: EmailRecipient): number => {
     const tiers = recipientSubscriptions(recipient);
-    return Math.max(1, ...tiers.map((tier) => 4 - tierOrder.indexOf(tier)).filter((rank) => rank > 0));
+    const indexes = tiers.map((tier) => tierOrder.indexOf(tier)).filter((index) => index >= 0);
+    return indexes.length ? tierOrder.length - Math.min(...indexes) : 0;
   };
   const groupRank = (recipient: EmailRecipient): number =>
     recipient.deliveryGroup === 'SECURITY_TEAM' ? 2 :

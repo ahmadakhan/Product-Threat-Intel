@@ -26,7 +26,14 @@ export class WorkLimiter {
     private readonly queueLimit: number,
     private readonly waitMs: number,
   ) {
-    if (!Number.isInteger(concurrency) || concurrency < 1 || !Number.isInteger(queueLimit) || queueLimit < 0 || !Number.isFinite(waitMs) || waitMs <= 0)
+    if (
+      !Number.isInteger(concurrency) ||
+      concurrency < 1 ||
+      !Number.isInteger(queueLimit) ||
+      queueLimit < 0 ||
+      !Number.isFinite(waitMs) ||
+      waitMs <= 0
+    )
       throw new Error('INVALID_WORK_LIMIT');
   }
   async run<T>(work: () => Promise<T>, options?: { signal?: AbortSignal; deadlineMs?: number }): Promise<T> {
@@ -35,12 +42,32 @@ export class WorkLimiter {
     else {
       if (this.waiting.length >= this.queueLimit) throw new WorkCapacityError();
       await new Promise<void>((resolve, reject) => {
-        const entry = { admit: () => { clearTimeout(timer); resolve(); } };
-        const timer = setTimeout(() => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let onAbort: (() => void) | undefined;
+        let entry: { admit: () => void };
+        const cleanup = () => {
+          if (timer) clearTimeout(timer);
+          if (onAbort && options?.signal) options.signal.removeEventListener('abort', onAbort);
           const index = this.waiting.indexOf(entry);
           if (index >= 0) this.waiting.splice(index, 1);
+        };
+        entry = {
+          admit: () => {
+            cleanup();
+            resolve();
+          },
+        };
+        timer = setTimeout(() => {
+          cleanup();
           reject(new WorkCapacityError());
         }, this.waitMs);
+        if (options?.signal) {
+          onAbort = () => {
+            cleanup();
+            reject(new WorkLimiterAbortedError());
+          };
+          options.signal.addEventListener('abort', onAbort, { once: true });
+        }
         this.waiting.push(entry);
       });
     }
@@ -75,10 +102,7 @@ export class WorkLimiter {
       }
       if (options?.deadlineMs && options.deadlineMs > 0) {
         const deadlineMs = options.deadlineMs;
-        deadlineTimer = setTimeout(
-          () => reject(new WorkLimiterDeadlineError(deadlineMs)),
-          deadlineMs,
-        );
+        deadlineTimer = setTimeout(() => reject(new WorkLimiterDeadlineError(deadlineMs)), deadlineMs);
         deadlineTimer.unref?.();
       }
       onAbort = () => {

@@ -61,6 +61,12 @@ export const CLAIM_TTL_MS = 6 * 60 * 60 * 1000;
 
 const claimKey = (claim: ClaimRequest) => `${claim.recipientId}\u0000${claim.kind}\u0000${claim.itemId}`;
 
+const compareClaims = (a: ClaimRequest, b: ClaimRequest) => {
+  const ka = claimKey(a);
+  const kb = claimKey(b);
+  return ka < kb ? -1 : ka > kb ? 1 : 0;
+};
+
 /**
  * Claims a set of items for their recipients.
  *
@@ -82,7 +88,9 @@ export async function claimItems(
   requests: readonly ClaimRequest[],
   options: { jobId?: string; ttlMs?: number } = {},
 ): Promise<ClaimResult> {
-  const unique = [...new Map(requests.map((request) => [claimKey(request), request])).values()];
+  const unique = [...new Map(requests.map((request) => [claimKey(request), request])).values()].sort(
+    compareClaims,
+  );
   if (!unique.length) return { granted: [], denied: [] };
   const ttlMs = options.ttlMs ?? CLAIM_TTL_MS;
   const rows = await db.query<{ recipient_id: string; kind: ClaimKind; item_id: string }>(
@@ -137,9 +145,7 @@ export async function claimItems(
     ],
   );
   const grantedKeys = new Set(
-    rows.rows.map((row) =>
-      claimKey({ recipientId: row.recipient_id, kind: row.kind, itemId: row.item_id }),
-    ),
+    rows.rows.map((row) => claimKey({ recipientId: row.recipient_id, kind: row.kind, itemId: row.item_id })),
   );
   return {
     granted: unique.filter((request) => grantedKeys.has(claimKey(request))),
@@ -158,7 +164,9 @@ export async function markClaimsDelivered(
   requests: readonly ClaimRequest[],
   options: { jobId: string; deliveredAt?: string },
 ): Promise<number> {
-  const unique = [...new Map(requests.map((request) => [claimKey(request), request])).values()];
+  const unique = [...new Map(requests.map((request) => [claimKey(request), request])).values()].sort(
+    compareClaims,
+  );
   if (!unique.length) return 0;
   const result = await db.query(
     `UPDATE delivery_claims
@@ -197,7 +205,9 @@ export async function releaseClaims(
   requests: readonly ClaimRequest[],
   options: { jobId: string },
 ): Promise<number> {
-  const unique = [...new Map(requests.map((request) => [claimKey(request), request])).values()];
+  const unique = [...new Map(requests.map((request) => [claimKey(request), request])).values()].sort(
+    compareClaims,
+  );
   if (!unique.length) return 0;
   const result = await db.query(
     `DELETE FROM delivery_claims
@@ -224,11 +234,10 @@ export async function releaseClaims(
  * since been attached to a job is managed exclusively through that job's
  * lifecycle (`releaseClaims`, `markClaimsDelivered`).
  */
-export async function releaseUnattachedClaims(
-  db: Db,
-  requests: readonly ClaimRequest[],
-): Promise<number> {
-  const unique = [...new Map(requests.map((request) => [claimKey(request), request])).values()];
+export async function releaseUnattachedClaims(db: Db, requests: readonly ClaimRequest[]): Promise<number> {
+  const unique = [...new Map(requests.map((request) => [claimKey(request), request])).values()].sort(
+    compareClaims,
+  );
   if (!unique.length) return 0;
   const result = await db.query(
     `DELETE FROM delivery_claims
@@ -323,7 +332,9 @@ export async function attachClaimsToJob(
   jobId: string,
   requests: readonly ClaimRequest[],
 ): Promise<number> {
-  const unique = [...new Map(requests.map((request) => [claimKey(request), request])).values()];
+  const unique = [...new Map(requests.map((request) => [claimKey(request), request])).values()].sort(
+    compareClaims,
+  );
   if (!unique.length) return 0;
   const result = await db.query(
     `UPDATE delivery_claims SET job_id=$4::uuid
@@ -361,7 +372,14 @@ export async function reconcileDuplicateOutboxClaims(
   requests: readonly ClaimRequest[],
 ): Promise<void> {
   if (!requests.length) return;
-  const prior = await db.query<{ id: string; status: string; delivery_outcome: string; target_id: string; channel: string; payload: Record<string, unknown> }>(
+  const prior = await db.query<{
+    id: string;
+    status: string;
+    delivery_outcome: string;
+    target_id: string;
+    channel: string;
+    payload: Record<string, unknown>;
+  }>(
     'SELECT id,status,delivery_outcome,target_id,channel,payload FROM outbox WHERE dedupe_key=$1 FOR UPDATE',
     [dedupeKey],
   );
@@ -378,17 +396,28 @@ export async function reconcileDuplicateOutboxClaims(
       if (typeof id === 'string') recorded.add(`finding:${id}`);
   }
   const evidence = job.payload.newsEvidence as { articles?: unknown; article?: unknown } | undefined;
-  const articles = Array.isArray(evidence?.articles) ? evidence.articles : evidence?.article ? [evidence.article] : [];
+  const articles = Array.isArray(evidence?.articles)
+    ? evidence.articles
+    : evidence?.article
+      ? [evidence.article]
+      : [];
   for (const value of articles) {
     if (!value || typeof value !== 'object') continue;
     const article = value as { id?: unknown; url?: unknown };
-    recorded.add(`article:${newsArticleIdentity({
-      id: typeof article.id === 'string' ? article.id : '',
-      url: typeof article.url === 'string' ? article.url : '',
-    })}`);
+    recorded.add(
+      `article:${newsArticleIdentity({
+        id: typeof article.id === 'string' ? article.id : '',
+        url: typeof article.url === 'string' ? article.url : '',
+      })}`,
+    );
   }
-  if (job.channel !== 'email' || requests.some((request) =>
-    request.recipientId !== job.target_id || !recorded.has(`${request.kind}:${request.itemId}`))) {
+  if (
+    job.channel !== 'email' ||
+    requests.some(
+      (request) =>
+        request.recipientId !== job.target_id || !recorded.has(`${request.kind}:${request.itemId}`),
+    )
+  ) {
     throw new Error('Outbox dedupe collision does not contain the claimed recipient/items');
   }
   if (job.status === 'ACCEPTED' || job.delivery_outcome === 'ACCEPTED') {

@@ -160,6 +160,59 @@ async function getSecurityRecipients(db: Db): Promise<EmailRecipient[]> {
 }
 
 /**
+ * Queues a deduplicated operator alert for a fault detected OUTSIDE the periodic
+ * watchdog (for example a delivery failure inside a pipeline run).
+ *
+ * This reuses the watchdog's own incident bookkeeping instead of inventing a
+ * second alert mechanism: the same `claimAlertSlot` cooldown keyed by
+ * component+incident means a fault that repeats on every run mails the Security
+ * team once per cooldown window rather than once per run, while a *different*
+ * fault re-arms immediately.
+ *
+ * Failures here are swallowed into an event: an alert that cannot be queued must
+ * never turn the fault it reports into a second, larger fault.
+ */
+export async function queueOperatorAlert(
+  pool: Pool,
+  input: {
+    component: Component;
+    incident: string;
+    subject: string;
+    text: string;
+    /** Cooldown in minutes; omitted uses the watchdog default. */
+    cooldownMinutes?: number;
+  },
+): Promise<number> {
+  try {
+    const settings = await get<AppSettings>(pool, 'settings', 'main');
+    return await queueSecurityAlert(
+      pool,
+      input.component,
+      input.incident,
+      input.subject,
+      input.text,
+      cooldownMs(input.cooldownMinutes),
+      // Mirror the watchdog's own policy: alerts are suppressed when email is
+      // disabled globally or the operator turned off self-healing notifications.
+      settings?.emailEnabled !== false && (settings?.selfHealing?.emailNotifications ?? true),
+    );
+  } catch (error) {
+    await writeEvent(pool, {
+      category: 'SYSTEM',
+      level: 'ERROR',
+      code: 'selfHealing.alert_failed',
+      message: `Operator alert for ${input.component} could not be queued`,
+      context: {
+        component: input.component,
+        incident: safeLine(input.incident),
+        error: error instanceof Error ? error.message : String(error),
+      },
+    }).catch(() => undefined);
+    return 0;
+  }
+}
+
+/**
  * Queues one alert email per security-team recipient into the durable outbox.
  *
  * The dedupe key includes the incident and the recipient: the outbox unique

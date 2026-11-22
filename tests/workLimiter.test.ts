@@ -67,10 +67,19 @@ test('WorkLimiter rejects work that exceeds deadlineMs and frees the slot for th
   let completed = 0;
   const [a, b] = await Promise.allSettled([
     limiter.run(
-      () => new Promise<void>((resolve) => { setTimeout(() => { completed++; resolve(); }, 2000); }),
+      () =>
+        new Promise<void>((resolve) => {
+          setTimeout(() => {
+            completed++;
+            resolve();
+          }, 2000);
+        }),
       { deadlineMs: 30 },
     ),
-    limiter.run(() => { completed++; return Promise.resolve(); }),
+    limiter.run(() => {
+      completed++;
+      return Promise.resolve();
+    }),
   ]);
   assert.equal(a.status, 'rejected');
   assert.ok(a.reason instanceof WorkLimiterDeadlineError, 'should reject with a deadline error');
@@ -84,11 +93,52 @@ test('WorkLimiter rejects immediately when the signal is already aborted and doe
   controller.abort();
   let ran = false;
   await assert.rejects(
-    () => limiter.run(() => { ran = true; return Promise.resolve(); }, { signal: controller.signal }),
+    () =>
+      limiter.run(
+        () => {
+          ran = true;
+          return Promise.resolve();
+        },
+        { signal: controller.signal },
+      ),
     (err) => err instanceof WorkLimiterAbortedError,
   );
   assert.equal(ran, false);
   // No slot was consumed: a subsequent caller admits immediately.
   const ok = await limiter.run(() => Promise.resolve('admitted'));
   assert.equal(ok, 'admitted');
+});
+
+test('WorkLimiter rejects immediately when aborted while waiting in the queue and frees queue capacity', async () => {
+  const limiter = new WorkLimiter(1, 1, 5000);
+  const controller = new AbortController();
+  let firstFinished = false;
+  const first = limiter.run(async () => {
+    await hold(60);
+    firstFinished = true;
+  });
+
+  let secondRan = false;
+  const second = limiter.run(
+    async () => {
+      secondRan = true;
+    },
+    { signal: controller.signal },
+  );
+
+  await hold(10);
+  controller.abort();
+
+  const secondRes = await second.catch((err) => err);
+  assert.ok(secondRes instanceof WorkLimiterAbortedError);
+  assert.equal(secondRan, false);
+
+  let thirdRan = false;
+  const third = limiter.run(async () => {
+    thirdRan = true;
+  });
+
+  await Promise.all([first, third]);
+  assert.equal(firstFinished, true);
+  assert.equal(thirdRan, true);
 });

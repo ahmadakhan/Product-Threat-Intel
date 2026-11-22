@@ -42,18 +42,22 @@ test('the digest studio preview renders the live customization, not a stale temp
     canvasBg: '#fdf4ff',
     cardBg: '#fffaf0',
   };
+  const sent: { email: string; html?: string }[] = [];
   const context = {
-    settings: { timezone: 'UTC' },
+    settings: { timezone: 'UTC', advisoryPrefix: 'BA-' },
     error: null as string | null,
-    clearError() { },
+    clearError() {},
     // What AppContext exposes: the saved template compiled from the live
     // customization.
     dailyDigestTemplate: compileDailyDigestTemplate(customization),
     dailyDigestCustomization: customization,
-    updateDailyDigestCustomization() { },
+    updateDailyDigestCustomization() {},
     saveDailyDigestTemplate: async () => true,
-    setDailyDigestCustomTemplate() { },
-    sendTestDailyDigestEmail: async () => ({ success: true }),
+    setDailyDigestCustomTemplate() {},
+    sendTestDailyDigestEmail: async (email: string, html?: string) => {
+      sent.push({ email, html });
+      return { success: true, message: 'queued' };
+    },
   };
   globals.__digestStudioPreviewContext = context;
 
@@ -70,11 +74,13 @@ test('the digest studio preview renders the live customization, not a stale temp
       {
         name: 'test-context',
         setup(builder) {
-          builder.onResolve({ filter: /\/context\/AppContext$/ }, () => ({ path: 'context', namespace: 'test' }));
-          builder.onLoad(
-            { filter: /.*/, namespace: 'test' },
-            () => ({ contents: 'export const useApp = () => globalThis.__digestStudioPreviewContext;' }),
-          );
+          builder.onResolve({ filter: /\/context\/AppContext$/ }, () => ({
+            path: 'context',
+            namespace: 'test',
+          }));
+          builder.onLoad({ filter: /.*/, namespace: 'test' }, () => ({
+            contents: 'export const useApp = () => globalThis.__digestStudioPreviewContext;',
+          }));
         },
       },
     ],
@@ -106,6 +112,39 @@ test('the digest studio preview renders the live customization, not a stale temp
     // stock constant, so the source pane and the preview describe one document.
     assert.notEqual(context.dailyDigestTemplate, DEFAULT_DAILY_DIGEST_TEMPLATE);
     assert.match(context.dailyDigestTemplate, /#7c3aed/);
+
+    // The email surface is the same document: "Send Test Email" submits what the
+    // canvas iframe is showing, not a second server render of the saved state.
+    const canvasHtml = frames[0].getAttribute('srcdoc') ?? '';
+    const sendTestEmail = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Send Test Email',
+    );
+    assert.ok(sendTestEmail, 'the Send Test Email action is rendered');
+    await act(async () => sendTestEmail.click());
+
+    const recipient = document.querySelector('input[type="email"]') as HTMLInputElement | null;
+    assert.ok(recipient, 'the test recipient field is rendered');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value')!.set!.call(
+        recipient,
+        'soc@example.com',
+      );
+      recipient.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    });
+
+    const send = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Send Test',
+    );
+    assert.ok(send, 'the Send Test action is rendered');
+    await act(async () => send.click());
+    const confirm = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Confirm send',
+    );
+    assert.ok(confirm, 'the confirmation action is rendered');
+    await act(async () => confirm.click());
+    assert.equal(sent.length, 1, 'the studio queued exactly one test email');
+    assert.equal(sent[0].email, 'soc@example.com');
+    assert.equal(sent[0].html, canvasHtml, 'the email body is the canvas document, byte for byte');
 
     await act(async () => root.unmount());
   } finally {
