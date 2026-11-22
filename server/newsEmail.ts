@@ -1,4 +1,9 @@
-import type { IntelligenceArticle, IntelligenceMatch } from '../src/types/index.ts';
+import type { IntelligenceArticle, IntelligenceMatch, TemplateCustomization } from '../src/types/index.ts';
+import {
+  DEFAULT_NEWS_EMAIL_CUSTOMIZATION,
+  compileNewsTemplate,
+  renderNewsTemplate,
+} from '../src/utils/templateCompiler.ts';
 
 /**
  * Consolidated security-news rendering.
@@ -52,6 +57,19 @@ export const newsSafeLine = (value: string | undefined) =>
     .replace(/[\r\n\t]+/g, ' ')
     .replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, '')
     .trim();
+
+/** Generated timestamp for the studio document, in the operator's timezone. */
+function formatNewsDate(timezone: string | undefined): string {
+  try {
+    return new Intl.DateTimeFormat('en-GB', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+      timeZone: timezone || 'UTC',
+    }).format(new Date());
+  } catch {
+    return new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+  }
+}
 
 const escapeHtml = (value: string) =>
   value.replace(/[&<>"']/g, (character) =>
@@ -287,6 +305,22 @@ export function selectUnnotifiedArticles(
   );
 }
 
+/**
+ * The News Template Studio document the delivered email is built from.
+ *
+ * Both values come from `template.main` (server/commands.ts `newsTemplate.save`):
+ * `customTemplate` is the hand-authored HTML when an operator saved one, and
+ * `customization` is the visual configuration used to compile the studio's own
+ * template otherwise. They are optional so callers that have no saved studio
+ * document (unit tests, one-off renders) fall back to the default studio HTML.
+ */
+export interface NewsEmailTemplateInput {
+  customization?: TemplateCustomization;
+  customTemplate?: string | null;
+  /** Display timezone for the generated timestamp. */
+  timezone?: string;
+}
+
 export interface ConsolidatedNewsDocument {
   subject: string;
   text: string;
@@ -321,20 +355,21 @@ export const NEWS_HTML_MAX_BYTES = 1_500_000;
 export function renderConsolidatedNewsEmailWithin(
   items: readonly ConsolidatedNewsItem[],
   maxBytes: number = NEWS_HTML_MAX_BYTES,
+  studio?: NewsEmailTemplateInput,
 ): ConsolidatedNewsDocument {
-  const full = renderConsolidatedNewsEmail(items);
+  const full = renderConsolidatedNewsEmail(items, [], studio);
   if (Buffer.byteLength(full.html, 'utf8') <= maxBytes) return full;
   // Binary search the largest prefix whose full render fits. The render is
   // monotonic in the number of cards, so this is exact and costs O(log n)
   // renders rather than one per article.
   let low = 0;
   let high = items.length - 1;
-  let best = renderConsolidatedNewsEmail(items.slice(0, 0), items.slice(0));
+  let best = renderConsolidatedNewsEmail(items.slice(0, 0), items.slice(0), studio);
   if (Buffer.byteLength(best.html, 'utf8') > maxBytes)
     throw new Error('Consolidated news HTML exceeds the allowed size even in compact summary form');
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
-    const candidate = renderConsolidatedNewsEmail(items.slice(0, middle), items.slice(middle));
+    const candidate = renderConsolidatedNewsEmail(items.slice(0, middle), items.slice(middle), studio);
     if (Buffer.byteLength(candidate.html, 'utf8') <= maxBytes) {
       best = candidate;
       low = middle + 1;
@@ -356,6 +391,12 @@ export function renderConsolidatedNewsEmail(
   items: readonly ConsolidatedNewsItem[],
   /** Articles listed in the overflow summary instead of as full cards. */
   overflow: readonly ConsolidatedNewsItem[] = [],
+  /**
+   * The News Template Studio document. When omitted the default studio HTML is
+   * compiled from the default customization, so the delivered email always has
+   * the same layout the studio previews (there is no separate hard-coded body).
+   */
+  studio: NewsEmailTemplateInput = {},
 ): ConsolidatedNewsDocument {
   const count = items.length + overflow.length;
   const countLabel = `${count} article${count === 1 ? '' : 's'}`;
@@ -425,6 +466,7 @@ export function renderConsolidatedNewsEmail(
 
   const cards = items
     .map((item, index) => {
+      const position = `ARTICLE ${index + 1} OF ${count}`;
       const href = safeHref(item.article.url);
       const source = item.article.sourceFeeds.length
         ? item.article.sourceFeeds.map(newsSafeLine).join(', ')
@@ -452,7 +494,7 @@ export function renderConsolidatedNewsEmail(
       return `<tr><td style="padding:22px 26px;border-top:1px solid #e2e8f0;">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;table-layout:fixed;">
           <tr><td style="padding:0 0 10px;">
-            <p style="margin:0 0 6px;font-size:11px;line-height:16px;color:#64748b;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;">ARTICLE ${index + 1} OF ${count}</p>
+            <p style="margin:0 0 6px;font-size:11px;line-height:16px;color:#64748b;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;">${position}</p>
             <h2 style="margin:0 0 10px;font-size:20px;line-height:28px;font-weight:800;color:#0f172a;">${titleHtml}</h2>
           </td></tr>
           ${chips ? `<tr><td style="padding:0 0 10px;">${chips}</td></tr>` : ''}
@@ -477,8 +519,8 @@ export function renderConsolidatedNewsEmail(
     .join('');
 
   // Overflow summary: the articles that did not fit the size budget are still
-  // named, linked and styled like the rest of the email. The body therefore
-  // stays valid, styled HTML instead of degrading to the plain-text document.
+  // named and linked inside the studio's card section, so the body stays the
+  // styled studio document instead of degrading to the plain-text version.
   const overflowRows = overflow
     .map((item, index) => {
       const href = safeHref(item.article.url);
@@ -489,36 +531,62 @@ export function renderConsolidatedNewsEmail(
       const source = item.article.sourceFeeds.length
         ? item.article.sourceFeeds.map(newsSafeLine).join(', ')
         : 'security news';
-      return `<tr><td style="padding:10px 24px;border-top:1px solid #e2e8f0;font-size:13px;line-height:19px;color:#475569;">
+      return `<div style="padding:10px 0;border-top:1px solid #e2e8f0;font-size:13px;line-height:19px;color:#475569;">
         <span style="color:#64748b;font-weight:700;">${items.length + index + 1}.</span> ${titleHtml}
         <br><span style="color:#94a3b8;">${escapeHtml(source)}</span>
-      </td></tr>`;
+      </div>`;
     })
     .join('');
   const overflowSection = overflow.length
-    ? '<tr><td style="padding:20px 24px 8px;border-top:1px solid #e2e8f0;background:#fffbeb;">' +
-      `<p style="margin:0 0 4px;font-size:11px;line-height:16px;color:#92400e;font-weight:600;letter-spacing:0.5px;">ADDITIONAL ARTICLES (${overflow.length})</p>` +
-      '<p style="margin:0;font-size:13px;line-height:19px;color:#475569;">These articles matched your monitored inventory but are shown in summary form because the email reached its size limit.</p></td></tr>' +
-      overflowRows
+    ? '<div style="margin:0 0 16px;padding:16px;border-radius:8px;background:#fffbeb;border:1px solid #fcd34d;">' +
+      `<div style="font-size:11px;line-height:16px;color:#92400e;font-weight:700;letter-spacing:0.5px;padding-bottom:4px;">ADDITIONAL ARTICLES (${overflow.length})</div>` +
+      '<div style="font-size:13px;line-height:19px;color:#475569;padding-bottom:4px;">These articles matched your monitored inventory but are shown in summary form because the email reached its size limit.</div>' +
+      overflowRows +
+      '</div>'
     : '';
 
-  const html =
-    '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
-    `<title>${escapeHtml(subject)}</title></head>` +
-    '<body style="margin:0;padding:0;background:#f1f5f9;color:#0f172a;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,\'Helvetica Neue\',Arial,sans-serif;">' +
-    '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;background:#f1f5f9;border-collapse:collapse;"><tr><td align="center" style="padding:24px 8px;">' +
-    '<!--[if mso]><table role="presentation" width="640" align="center"><tr><td><![endif]-->' +
-    '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;max-width:640px;table-layout:fixed;background:#ffffff;border:1px solid #e2e8f0;border-top:4px solid #1e3a8a;border-collapse:collapse;">' +
-    '<tr><td style="padding:20px 24px;border-bottom:1px solid #e2e8f0;">' +
-    '<p style="margin:0;font-size:15px;line-height:22px;font-weight:800;color:#0f172a;letter-spacing:0.2px;">BA Threat intelligence | Security news</p></td></tr>' +
-    '<tr><td style="padding:26px 24px 22px;">' +
-    '<p style="margin:0 0 12px;display:inline-block;padding:4px 10px;border-radius:10px;background:#dbeafe;color:#1e40af;font-size:11px;line-height:15px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;">news</p>' +
-    `<h1 style="margin:0 0 14px;font-size:26px;line-height:34px;font-weight:800;color:#0f172a;">Security news</h1>` +
-    `<p style="margin:0;font-size:14px;line-height:23px;color:#475569;">${escapeHtml(countLabel)} matched your monitored inventory in this intelligence run.</p></td></tr>` +
-    cards +
-    overflowSection +
-    `<tr><td style="padding:22px 24px;border-top:1px solid #e2e8f0;background:#f8fafc;"><p style="margin:0 0 8px;font-size:12.5px;line-height:20px;color:#64748b;">${escapeHtml(footer)}</p><p style="margin:0;font-size:11px;line-height:17px;color:#94a3b8;">VulnStream Enterprise &middot; Automated threat intelligence. Confirm source authenticity and consult the vendor before remediation.</p></td></tr>` +
-    '</table><!--[if mso]></td></tr></table><![endif]--></td></tr></table></body></html>';
+  // The delivered body is the News Template Studio document. An operator's
+  // custom HTML wins; otherwise the studio's own markup is compiled from their
+  // saved customization, so the email matches what the studio previews.
+  const customization = studio.customization ?? DEFAULT_NEWS_EMAIL_CUSTOMIZATION;
+  const template = studio.customTemplate || compileNewsTemplate(customization);
+  const summary =
+    `${countLabel} matched your monitored inventory in this intelligence run.` +
+    (overflow.length
+      ? ` ${overflow.length} additional article${overflow.length === 1 ? '' : 's'} ${overflow.length === 1 ? 'is' : 'are'} listed in summary form.`
+      : '');
+
+  // One source card per consolidated article, rendered by the {{#each news_sources}}
+  // loop in the studio template. Feed-controlled fields are escaped by the
+  // renderer; excerpt is delivered raw ({{{excerpt}}}) so feed HTML survives.
+  const newsSources = items.map((item) => {
+    const href = safeHref(item.article.url);
+    return {
+      title: newsSafeLine(item.article.title),
+      url: href,
+      source_name: item.article.sourceFeeds.length
+        ? item.article.sourceFeeds.map(newsSafeLine).join(', ')
+        : 'Security news',
+      published_at: newsSafeLine(item.article.modifiedDate || item.article.publishedDate),
+      excerpt: escapeHtml(item.evidence.length ? item.evidence.join(' | ') : newsSafeLine(item.article.title)),
+    };
+  });
+  const html = renderNewsTemplate(
+    customization,
+    {
+      news_title: 'Security news',
+      news_subject_badge_text: 'THREAT BRIEFING',
+      news_subject: subject,
+      news_date: formatNewsDate(studio.timezone),
+      news_count: count,
+      news_summary: summary,
+      news_sources: newsSources,
+      news_articles: overflowSection + cards,
+      sources_hub_url: 'https://www.cisa.gov/news-events/cybersecurity-advisories',
+      news_footer: footer,
+    },
+    template,
+  );
 
   return { subject: newsSafeLine(subject), text, html, overflow: [...overflow] };
 }

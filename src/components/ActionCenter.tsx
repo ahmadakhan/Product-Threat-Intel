@@ -161,6 +161,13 @@ export const ActionCenter: React.FC = () => {
   // an operator suppress it for one send.
   const [attachHtml, setAttachHtml] = useState(true);
   const [isFullScreen, setIsFullScreen] = useState(false);
+  // "Insert link" used to call the browser's native `window.prompt`, a jarring
+  // OS-chrome dialog dropped on top of an otherwise themed editor - exactly
+  // the kind of unprofessional-looking inconsistency reported. It's replaced
+  // by a small in-dialog popover styled like the rest of the editor.
+  const [linkPopoverOpen, setLinkPopoverOpen] = useState(false);
+  const [linkUrlDraft, setLinkUrlDraft] = useState('https://');
+  const savedSelectionRef = useRef<Range | null>(null);
   const editDialogRef = useDialogFocus(() => {
     if (!editBusy) setEditing(null);
   }, !!editing);
@@ -598,11 +605,32 @@ export const ActionCenter: React.FC = () => {
   }, [commitVisualBody]);
 
   const createLink = useCallback(() => {
-    const url = window.prompt('Enter URL:', 'https://');
-    if (url) {
-      execCommand('createLink', url);
+    // Capture the live selection before the popover steals focus from the
+    // contentEditable area - focusing the URL input collapses it otherwise,
+    // so `execCommand('createLink', ...)` on confirm would have nothing to
+    // apply to.
+    const sel = document.getSelection();
+    savedSelectionRef.current = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
+    setLinkUrlDraft('https://');
+    setLinkPopoverOpen(true);
+  }, []);
+
+  const confirmLink = useCallback(() => {
+    const url = linkUrlDraft.trim();
+    setLinkPopoverOpen(false);
+    if (!url || !editorRef.current) return;
+    const sel = document.getSelection();
+    const range = savedSelectionRef.current;
+    if (sel && range && editorRef.current.contains(range.startContainer)) {
+      sel.removeAllRanges();
+      sel.addRange(range);
     }
-  }, [execCommand]);
+    execCommand('createLink', url);
+  }, [linkUrlDraft, execCommand]);
+
+  const cancelLink = useCallback(() => {
+    setLinkPopoverOpen(false);
+  }, []);
 
   const updatePreviewFromHtml = useCallback(() => {
     if (editorRef.current) commitVisualBody(editorRef.current.innerHTML);
@@ -1372,11 +1400,51 @@ export const ActionCenter: React.FC = () => {
                             <button type="button" onClick={() => execCommand('justifyRight')} title="Align right" className="editor-btn"><AlignRight className="h-3.5 w-3.5" /></button>
                           </div>
                           <div className="w-px h-6 bg-zinc-700 mx-1" />
-                          <div className="flex items-center gap-1">
+                          <div className="relative flex items-center gap-1">
                             <button type="button" onClick={createLink} title="Insert link" className="editor-btn"><Link className="h-3.5 w-3.5" /></button>
                             <button type="button" onClick={() => execCommand('unlink')} title="Remove link" className="editor-btn"><Unlink className="h-3.5 w-3.5" /></button>
                             <button type="button" onClick={() => execCommand('formatBlock', 'blockquote')} title="Quote" className="editor-btn"><Quote className="h-3.5 w-3.5" /></button>
                             <button type="button" onClick={() => insertHtml('<hr />')} title="Horizontal rule" className="editor-btn"><Minus className="h-3.5 w-3.5" /></button>
+                            {linkPopoverOpen && (
+                              <div
+                                role="dialog"
+                                aria-label="Insert link"
+                                className="absolute left-0 top-full z-10 mt-2 flex w-72 items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 p-2 shadow-xl light:border-zinc-200 light:bg-white"
+                              >
+                                <input
+                                  type="url"
+                                  autoFocus
+                                  value={linkUrlDraft}
+                                  onChange={(e) => setLinkUrlDraft(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      e.preventDefault();
+                                      confirmLink();
+                                    } else if (e.key === 'Escape') {
+                                      e.preventDefault();
+                                      cancelLink();
+                                    }
+                                  }}
+                                  placeholder="https://example.com"
+                                  className="min-w-0 flex-1 text-xs"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={confirmLink}
+                                  className="rounded-md bg-sky-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-sky-500"
+                                >
+                                  Add
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={cancelLink}
+                                  aria-label="Cancel"
+                                  className="rounded-md p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                                >
+                                  <X className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            )}
                           </div>
                           <div className="w-px h-6 bg-zinc-700 mx-1" />
                           <div className="flex items-center gap-1">
@@ -1605,24 +1673,13 @@ export const ActionCenter: React.FC = () => {
                           <FileText className="mr-1 inline h-3 w-3" /> HTML source
                         </button>
                       </div>
-                      <button
-                        type="button"
-                        className="ui-secondary inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium"
-                        disabled={previewLoading}
-                        onClick={() => setIsFullScreen((prev) => !prev)}
-                      >
-                        <Maximize className="h-3 w-3" />
-                        <span>{isFullScreen ? 'Exit full size' : 'Full size'}</span>
-                      </button>
-                      <label className="inline-flex items-center gap-1.5 cursor-pointer select-none px-3 py-1.5 rounded-lg border border-zinc-800/80 bg-zinc-900/50 text-xs text-zinc-300 light:border-zinc-200 light:bg-zinc-50 light:text-zinc-700 hover:bg-zinc-800/30 light:hover:bg-zinc-100 transition">
-                        <input
-                          type="checkbox"
-                          checked={attachHtml}
-                          onChange={(e) => setAttachHtml(e.target.checked)}
-                          className="w-4 h-4 rounded border-zinc-600 text-sky-500 focus:ring-sky-500"
-                        />
-                        <span>Attach HTML file</span>
-                      </label>
+                      {/* "Full size" and "Attach HTML file" used to be duplicated here -
+                          this exact toggle already lives in the dialog header (the
+                          Maximize icon button), and the checkbox already lives in the
+                          footer below ("Attach HTML file to email"). Two controls for
+                          the same state (with inconsistent `disabled` conditions between
+                          the two full-size buttons) was the literal "mess" being
+                          reported; removed rather than kept in sync. */}
                     </div>
 
                     <div

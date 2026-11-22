@@ -1,8 +1,62 @@
 import { PageHeading } from './PageHeading';
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
-import { EmailRecipient, WebhookEndpoint } from '../types';
+import {
+  EmailRecipient,
+  SubscriptionTier,
+  WebhookEndpoint,
+  recipientSubscriptions,
+  subscribesToDailyDigest,
+} from '../types';
 import { Plus, Trash2, Mail, AlertCircle, X, Search, Webhook, Send, CheckCircle2, Edit2 } from 'lucide-react';
+
+/** Every selectable subscription, in display order, with an operator-facing label. */
+const SUBSCRIPTION_OPTIONS: { value: SubscriptionTier; label: string; hint: string }[] = [
+  {
+    value: 'CRITICAL_HIGH_ONLY',
+    label: 'Critical & High findings',
+    hint: 'Advisory emails for CRITICAL and HIGH severity findings.',
+  },
+  { value: 'CISA_KEV_ONLY', label: 'CISA KEV only', hint: 'Advisories only where the CVE is in the CISA KEV catalog.' },
+  {
+    value: 'ALL_SEVERITIES',
+    label: 'All severities',
+    hint: 'Every advisory, including LOW and MEDIUM findings.',
+  },
+  { value: 'NEWS', label: 'Security news', hint: 'Consolidated threat-intelligence news matched to your inventory.' },
+  {
+    value: 'DAILY_DIGEST',
+    label: 'Daily digest',
+    hint: 'Daily findings summary and operational health report.',
+  },
+];
+
+/** Finding tiers ordered widest-first; the first selected one becomes `subscriptionTier`. */
+const FINDING_TIER_ORDER: SubscriptionTier[] = ['ALL_SEVERITIES', 'CRITICAL_HIGH_ONLY', 'CISA_KEV_ONLY'];
+
+const emptyEmailForm = (): {
+  name: string;
+  email: string;
+  role: string;
+  deliveryGroup: NonNullable<EmailRecipient['deliveryGroup']>;
+  subscriptions: SubscriptionTier[];
+  enabled: boolean;
+} => ({
+  name: '',
+  email: '',
+  role: '',
+  deliveryGroup: 'SECURITY_TEAM',
+  subscriptions: ['CRITICAL_HIGH_ONLY'],
+  enabled: true,
+});
+
+/** Legacy `subscriptionTier` mirror of the selected list (widest finding tier). */
+const primaryTier = (subscriptions: SubscriptionTier[]): SubscriptionTier =>
+  FINDING_TIER_ORDER.find((tier) => subscriptions.includes(tier)) ?? subscriptions[0] ?? 'CRITICAL_HIGH_ONLY';
+
+/** Group badge label for the recipients table. */
+const groupLabel = (group: EmailRecipient['deliveryGroup']): string =>
+  group === 'EVERYONE' ? 'SECURITY REVIEW' : group === 'ADMINISTRATORS' ? 'AUTO · ADMINISTRATORS' : 'AUTO · SECURITY TEAM';
 
 export const RecipientsView: React.FC = () => {
   const {
@@ -37,16 +91,10 @@ export const RecipientsView: React.FC = () => {
   const [confirmingEmailSave, setConfirmingEmailSave] = useState(false);
   const [confirmingWebhookSave, setConfirmingWebhookSave] = useState(false);
 
-  // Email form state
-  const [emailForm, setEmailForm] = useState({
-    name: '',
-    email: '',
-    role: '',
-    deliveryGroup: 'SECURITY_TEAM' as NonNullable<EmailRecipient['deliveryGroup']>,
-    subscriptionTier: 'CRITICAL_HIGH_ONLY' as EmailRecipient['subscriptionTier'],
-    enabled: true,
-    dailyDigest: false,
-  });
+  // Email form state. `subscriptions` is the multi-select source of truth;
+  // `subscriptionTier` is derived from it when saving (the widest finding tier).
+  const [emailForm, setEmailForm] = useState(() => emptyEmailForm()); // eslint-disable-line no-use-before-define
+  const [subscriptionError, setSubscriptionError] = useState<string | null>(null);
 
   // Webhook form state
   const [webhookForm, setWebhookForm] = useState({
@@ -81,22 +129,42 @@ export const RecipientsView: React.FC = () => {
 
   const handleOpenEmailEdit = (r: EmailRecipient) => {
     setEditingRecipient(r);
+    setSubscriptionError(null);
+    setErrorMsg(null);
     setEmailForm({
       name: r.name,
       email: r.email,
       role: r.role,
       deliveryGroup: r.deliveryGroup ?? 'SECURITY_TEAM',
-      subscriptionTier: r.subscriptionTier,
+      subscriptions: recipientSubscriptions(r),
       enabled: r.enabled,
-      dailyDigest: !!r.dailyDigest,
     });
     setShowAddEmailModal(true);
+  };
+
+  /** Adds or removes one subscription from the multi-select list. */
+  const toggleSubscription = (tier: SubscriptionTier) => {
+    setSubscriptionError(null);
+    setEmailForm((form) => ({
+      ...form,
+      subscriptions: form.subscriptions.includes(tier)
+        ? form.subscriptions.filter((value) => value !== tier)
+        : [...form.subscriptions, tier],
+    }));
   };
 
   const handleAddEmailSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (confirmingEmailSave) return;
     setErrorMsg(null);
+    // At least one subscription is required: a recipient subscribed to nothing
+    // would be enabled but never receive any email, which looks like a
+    // delivery fault from the operator's side.
+    if (!emailForm.subscriptions.length) {
+      setSubscriptionError('Select at least one subscription the recipient should receive.');
+      return;
+    }
+    setSubscriptionError(null);
     setConfirmingEmailSave(true);
   };
 
@@ -169,7 +237,17 @@ export const RecipientsView: React.FC = () => {
       return;
     }
     try {
-      await updateRecipient({ ...r, dailyDigest });
+      // Toggle the DAILY_DIGEST stream in the subscription list and mirror it
+      // onto the legacy flag so both readers agree.
+      const subscriptions = dailyDigest
+        ? [...new Set([...recipientSubscriptions(r), 'DAILY_DIGEST' as const])]
+        : recipientSubscriptions(r).filter((tier) => tier !== 'DAILY_DIGEST');
+      await updateRecipient({
+        ...r,
+        subscriptions,
+        subscriptionTier: primaryTier(subscriptions),
+        dailyDigest,
+      });
     } finally {
       setConfirmToggleDigest(null);
     }
@@ -196,14 +274,18 @@ export const RecipientsView: React.FC = () => {
 
   const executeConfirmedEmailSave = async () => {
     setConfirmingEmailSave(false);
+    // The list is authoritative; `subscriptionTier`/`dailyDigest` are kept in
+    // sync for readers written before multi-select.
+    const subscriptions = emailForm.subscriptions;
     const payload = {
       name: emailForm.name.trim(),
       email: emailForm.email.trim(),
       role: emailForm.role.trim() || 'Security Engineer',
       deliveryGroup: emailForm.deliveryGroup,
-      subscriptionTier: emailForm.subscriptionTier,
+      subscriptions,
+      subscriptionTier: primaryTier(subscriptions),
       enabled: emailForm.enabled,
-      dailyDigest: emailForm.dailyDigest,
+      dailyDigest: subscriptions.includes('DAILY_DIGEST'),
     };
     const ok = editingRecipient
       ? await updateRecipient({
@@ -215,15 +297,8 @@ export const RecipientsView: React.FC = () => {
     if (ok) {
       setShowAddEmailModal(false);
       setEditingRecipient(null);
-      setEmailForm({
-        name: '',
-        email: '',
-        role: '',
-        deliveryGroup: 'SECURITY_TEAM',
-        subscriptionTier: 'CRITICAL_HIGH_ONLY',
-        enabled: true,
-        dailyDigest: false,
-      });
+      setSubscriptionError(null);
+      setEmailForm(emptyEmailForm());
     } else {
       setErrorMsg('Invalid email format. Please check and try again.');
     }
@@ -276,16 +351,9 @@ export const RecipientsView: React.FC = () => {
             <button
               onClick={() => {
                 setErrorMsg(null);
+                setSubscriptionError(null);
                 setEditingRecipient(null);
-                setEmailForm({
-                  name: '',
-                  email: '',
-                  role: '',
-                  deliveryGroup: 'SECURITY_TEAM',
-                  subscriptionTier: 'CRITICAL_HIGH_ONLY',
-                  enabled: true,
-                  dailyDigest: false,
-                });
+                setEmailForm(emptyEmailForm());
                 setShowAddEmailModal(true);
               }}
               className="text-xs px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 light:bg-zinc-100 light:hover:bg-zinc-200 text-zinc-100 dark:text-zinc-100 light:text-zinc-900 font-semibold transition flex items-center space-x-1.5 shadow-sm"
@@ -409,21 +477,32 @@ export const RecipientsView: React.FC = () => {
                             className={`mb-1 inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
                               r.deliveryGroup === 'EVERYONE'
                                 ? 'border-amber-500/30 bg-amber-500/10 text-amber-300 light:text-amber-700'
-                                : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300 light:text-emerald-700'
+                                : r.deliveryGroup === 'ADMINISTRATORS'
+                                  ? 'border-sky-500/30 bg-sky-500/10 text-sky-300 light:text-sky-700'
+                                  : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300 light:text-emerald-700'
                             }`}
                           >
-                            {r.deliveryGroup === 'EVERYONE' ? 'SECURITY REVIEW' : 'AUTO · SECURITY TEAM'}
+                            {groupLabel(r.deliveryGroup)}
                           </span>
-                          <span
-                            className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${
-                              r.subscriptionTier === 'ALL_SEVERITIES'
-                                ? 'bg-zinc-800 text-zinc-200 dark:bg-zinc-800 dark:text-zinc-200 light:bg-zinc-200 light:text-zinc-800 border-zinc-600 dark:border-zinc-600 light:border-zinc-400'
-                                : r.subscriptionTier === 'CISA_KEV_ONLY'
-                                  ? 'bg-zinc-800/80 dark:bg-zinc-800/80 light:bg-zinc-300 text-zinc-100 dark:text-zinc-100 light:text-zinc-900 border-zinc-500 dark:border-zinc-500 light:border-zinc-400 font-bold'
-                                  : 'bg-zinc-900 dark:bg-zinc-900 light:bg-zinc-100 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 border-zinc-700 dark:border-zinc-700 light:border-zinc-300'
-                            }`}
-                          >
-                            {r.subscriptionTier.replace(/_/g, ' ')}
+                          <span className="flex flex-wrap gap-1">
+                            {recipientSubscriptions(r).map((tier) => (
+                              <span
+                                key={tier}
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${
+                                  tier === 'ALL_SEVERITIES'
+                                    ? 'bg-zinc-800 text-zinc-200 dark:bg-zinc-800 dark:text-zinc-200 light:bg-zinc-200 light:text-zinc-800 border-zinc-600 dark:border-zinc-600 light:border-zinc-400'
+                                    : tier === 'CISA_KEV_ONLY'
+                                      ? 'bg-zinc-800/80 dark:bg-zinc-800/80 light:bg-zinc-300 text-zinc-100 dark:text-zinc-100 light:text-zinc-900 border-zinc-500 dark:border-zinc-500 light:border-zinc-400 font-bold'
+                                      : tier === 'NEWS'
+                                        ? 'bg-sky-950/50 text-sky-300 light:text-sky-700 border-sky-800/60'
+                                        : tier === 'DAILY_DIGEST'
+                                          ? 'bg-amber-950/50 text-amber-300 light:text-amber-700 border-amber-800/60'
+                                          : 'bg-zinc-900 dark:bg-zinc-900 light:bg-zinc-100 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 border-zinc-700 dark:border-zinc-700 light:border-zinc-300'
+                                }`}
+                              >
+                                {tier.replace(/_/g, ' ')}
+                              </span>
+                            ))}
                           </span>
                         </td>
                         <td className="py-3 px-4 font-mono text-zinc-300 dark:text-zinc-300 light:text-zinc-700">
@@ -445,14 +524,21 @@ export const RecipientsView: React.FC = () => {
                         <td className="py-3 px-4">
                           <button
                             type="button"
-                            onClick={() => setConfirmToggleDigest({ id: r.id, dailyDigest: !r.dailyDigest })}
+                            onClick={() =>
+                              setConfirmToggleDigest({
+                                id: r.id,
+                                dailyDigest: !subscribesToDailyDigest(r),
+                              })
+                            }
                             disabled={confirmToggleDigest !== null}
                             className={`inline-flex items-center justify-center w-5 h-5 rounded border transition ${
-                              r.dailyDigest
+                              subscribesToDailyDigest(r)
                                 ? 'bg-amber-500 border-amber-500 text-white'
                                 : 'bg-zinc-900 dark:bg-zinc-900 light:bg-zinc-100 border-zinc-700 dark:border-zinc-700 light:border-zinc-300 text-zinc-500 dark:text-zinc-500 light:text-zinc-600'
                             }`}
-                            title={r.dailyDigest ? 'Opted out of daily digest' : 'Opt in to daily digest'}
+                            title={
+                              subscribesToDailyDigest(r) ? 'Opted out of daily digest' : 'Opt in to daily digest'
+                            }
                           >
                             <Send className="w-3 h-3" />
                           </button>
@@ -735,52 +821,61 @@ export const RecipientsView: React.FC = () => {
                   className="w-full bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-xl px-3 py-2 text-xs text-zinc-100 dark:text-zinc-100 light:text-zinc-900 focus:border-zinc-600 focus:outline-none"
                 >
                   <option value="SECURITY_TEAM">Security team · send automatically</option>
+                  <option value="ADMINISTRATORS">Administrators · send automatically</option>
                   <option value="EVERYONE">Everyone · require security review</option>
                 </select>
                 <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-500 light:text-zinc-600">
-                  Review-required alerts stay queued until an authorized operator approves them.
+                  Administrators receive the same automated advisory and news streams as the Security team, under
+                  their own distribution list. Review-required alerts stay queued until an authorized operator
+                  approves them.
                 </p>
               </div>
 
               <div>
-                <label className="block text-zinc-400 dark:text-zinc-400 light:text-zinc-600 mb-1 font-mono">
-                  Subscription Filter Tier
-                </label>
-                <select
-                  value={emailForm.subscriptionTier}
-                  onChange={(e) =>
-                    setEmailForm({
-                      ...emailForm,
-                      subscriptionTier: e.target.value as EmailRecipient['subscriptionTier'],
-                    })
-                  }
-                  className="w-full bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-xl px-3 py-2 text-xs text-zinc-100 dark:text-zinc-100 light:text-zinc-900 focus:border-zinc-600 focus:outline-none"
-                >
-                  <option value="CRITICAL_HIGH_ONLY">Critical &amp; High Only (Standard)</option>
-                  <option value="CISA_KEV_ONLY">CISA KEV Actively Exploited Only</option>
-                  <option value="ALL_SEVERITIES">All Severities (Includes Low / Medium)</option>
-                </select>
-              </div>
-
-              <label className="settings-toggle-card ui-check-row cursor-pointer text-xs leading-relaxed">
-                <div className="flex items-center gap-3">
-                  <input
-                    type="checkbox"
-                    checked={emailForm.dailyDigest}
-                    onChange={(e) => setEmailForm({ ...emailForm, dailyDigest: e.target.checked })}
-                    className="h-4 w-4 rounded border-zinc-600 bg-zinc-800 text-amber-500 focus:ring-amber-500 light:bg-white"
-                  />
-                  <span>
-                    <span className="block font-medium text-zinc-200 light:text-zinc-800">
-                      Subscribe to daily digest
-                    </span>
-                    <span className="ui-description mt-0.5 block">
-                      Receive a daily summary of findings plus an operational health-check report at the time
-                      configured in Settings.
-                    </span>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-zinc-400 dark:text-zinc-400 light:text-zinc-600 font-mono">
+                    Subscription Filter Tier
+                  </label>
+                  <span className="text-[10px] font-mono text-zinc-500 dark:text-zinc-500 light:text-zinc-600">
+                    {emailForm.subscriptions.length} selected
                   </span>
                 </div>
-              </label>
+                <div
+                  role="group"
+                  aria-label="Subscription Filter Tier"
+                  className="rounded-xl border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 divide-y divide-zinc-800/70 dark:divide-zinc-800/70 light:divide-zinc-200"
+                >
+                  {SUBSCRIPTION_OPTIONS.map((option) => {
+                    const checked = emailForm.subscriptions.includes(option.value);
+                    return (
+                      <label
+                        key={option.value}
+                        className="flex items-start gap-2.5 px-3 py-2 cursor-pointer select-none"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleSubscription(option.value)}
+                          className="mt-0.5 h-3.5 w-3.5 rounded border-zinc-600 bg-zinc-800 text-amber-500 focus:ring-amber-500 light:bg-white"
+                        />
+                        <span>
+                          <span className="block font-medium text-zinc-200 light:text-zinc-800">{option.label}</span>
+                          <span className="block text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-500 light:text-zinc-600">
+                            {option.hint}
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-500 light:text-zinc-600">
+                  Select every email stream this recipient should receive. News and the daily digest are delivered
+                  only to recipients that select them.
+                </p>
+                {subscriptionError && (
+                  <p className="mt-1.5 text-[11px] text-rose-400 light:text-rose-600">{subscriptionError}</p>
+                )}
+              </div>
 
               <div className="flex justify-end gap-2 pt-3 border-t border-zinc-800 dark:border-zinc-800 light:border-zinc-200">
                 <button

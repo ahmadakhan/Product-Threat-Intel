@@ -1,5 +1,10 @@
 import { correlationPreflight } from './correlation/preflight.ts';
-import { compileDailyDigestTemplate, compileNewsTemplate } from '../src/utils/templateCompiler.ts';
+import {
+  DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
+  DEFAULT_NEWS_EMAIL_CUSTOMIZATION,
+  compileDailyDigestTemplate,
+  compileNewsTemplate,
+} from '../src/utils/templateCompiler.ts';
 import { DEFAULT_ADVISORY_EMAIL_TEMPLATE } from '../src/utils/defaultAdvisoryEmailTemplate.ts';
 import pg, { type PoolClient } from 'pg';
 import { readFile, readdir } from 'node:fs/promises';
@@ -881,9 +886,13 @@ export async function state(db: Db, options: StateOptions = {}): Promise<AppStat
   snapshot.advisoryTemplate =
     snapshot.customAdvisoryTemplate || DEFAULT_ADVISORY_EMAIL_TEMPLATE;
   snapshot.dailyDigestTemplate =
-    snapshot.dailyDigestCustomTemplate || compileDailyDigestTemplate(snapshot.dailyDigestCustomization);
+    snapshot.dailyDigestCustomTemplate ||
+    compileDailyDigestTemplate(
+      snapshot.dailyDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
+    );
   snapshot.newsDigestTemplate =
-    snapshot.newsDigestCustomTemplate || compileNewsTemplate(snapshot.newsDigestCustomization);
+    snapshot.newsDigestCustomTemplate ||
+    compileNewsTemplate(snapshot.newsDigestCustomization || DEFAULT_NEWS_EMAIL_CUSTOMIZATION);
   await attachCounts(db, snapshot);
   return snapshot;
 }
@@ -936,8 +945,12 @@ export async function pipelineState(db: Db, opts?: { skipCveData?: boolean }): P
   snapshot.advisoryTemplate =
     snapshot.customAdvisoryTemplate || DEFAULT_ADVISORY_EMAIL_TEMPLATE;
   snapshot.dailyDigestTemplate =
-    snapshot.dailyDigestCustomTemplate || compileDailyDigestTemplate(snapshot.dailyDigestCustomization);
+    snapshot.dailyDigestCustomTemplate ||
+    compileDailyDigestTemplate(
+      snapshot.dailyDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
+    );
   snapshot.newsDigestTemplate =
-    snapshot.newsDigestCustomTemplate || compileNewsTemplate(snapshot.newsDigestCustomization);
+    snapshot.newsDigestCustomTemplate ||
+    compileNewsTemplate(snapshot.newsDigestCustomization || DEFAULT_NEWS_EMAIL_CUSTOMIZATION);
   return snapshot;
 }

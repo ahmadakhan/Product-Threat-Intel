@@ -182,6 +182,13 @@ export const aliasSchema = z.object({
     .refine((list) => new Set(list).size === list.length, 'Duplicate alias entries'),
   notes: z.string().max(500).optional(),
 });
+export const subscriptionTierSchema = z.enum([
+  'ALL_SEVERITIES',
+  'CRITICAL_HIGH_ONLY',
+  'CISA_KEV_ONLY',
+  'NEWS',
+  'DAILY_DIGEST',
+]);
 export const recipientSchema = z.object({
   name: shortText,
   email: z
@@ -189,8 +196,15 @@ export const recipientSchema = z.object({
     .max(254)
     .transform((s) => s.toLowerCase()),
   role: shortText,
-  deliveryGroup: z.enum(['SECURITY_TEAM', 'EVERYONE']).default('SECURITY_TEAM'),
-  subscriptionTier: z.enum(['ALL_SEVERITIES', 'CRITICAL_HIGH_ONLY', 'CISA_KEV_ONLY']),
+  deliveryGroup: z.enum(['SECURITY_TEAM', 'EVERYONE', 'ADMINISTRATORS']).default('SECURITY_TEAM'),
+  subscriptionTier: subscriptionTierSchema,
+  // Multi-select subscriptions. Accepts the newer list shape (or a single
+  // legacy string on pre-multi-select clients) and always normalises to a
+  // deduplicated list whose first entry supplies the legacy `subscriptionTier`.
+  subscriptions: z
+    .union([z.array(subscriptionTierSchema).max(5), subscriptionTierSchema])
+    .optional()
+    .transform((value) => (value === undefined ? undefined : [...new Set(Array.isArray(value) ? value : [value])])),
   enabled: z.boolean(),
   dailyDigest: z.boolean().default(false),
 });

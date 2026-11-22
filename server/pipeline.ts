@@ -1304,7 +1304,12 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             // for the same id can ever exist, so the check could never fire.
             // The actual signal is a mismatch between what the provider
             // reported and what this feed itself produced.
-            const producedCount = result.cves.length + (result.articles?.length ?? 0);
+            const producedCount =
+              result.cves.length +
+              (result.articles?.length ?? 0) +
+              (result.kev ? Object.keys(result.kev).length : 0) +
+              (result.exploited ? Object.keys(result.exploited).length : 0) +
+              (result.epss ? Object.keys(result.epss).length : 0);
             if (result.count > 0 && !result.notModified && producedCount === 0) {
               pushExecutionLog(execution!, `Feed ${feed.id}: returned ${result.count} items but zero CVEs entered the pipeline — possible ingestion filter issue`);
               await writeEvent(pool, {
@@ -2396,6 +2401,14 @@ export async function processPipeline(pool: pg.Pool, config: Config, request: Re
             articles.map((article) => [article.id, article] as [string, IntelligenceArticle]),
           );
           const news = await queueConsolidatedNews(db, rateLimitedMatches, articleMap, securityRecipients, {
+            // News findings are delivered in the News Template Studio document,
+            // not a hard-coded body: the saved studio template applies to every
+            // consolidated news email from this run onward.
+            template: {
+              customization: snapshot.newsDigestCustomization,
+              customTemplate: snapshot.newsDigestCustomTemplate,
+              timezone: settings.timezone,
+            },
             enqueue: async (input) =>
               enqueue(
                 input.db,

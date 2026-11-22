@@ -218,6 +218,9 @@ test('the consolidated news email lists every article and escapes feed content',
   assert.ok(!document.html.includes('<script>'));
   assert.ok(!document.html.includes('<b>evidence</b>'));
   assert.ok(!document.html.includes('href="javascript:'), 'a non-http URL is never hyperlinked');
+  // The body is the News Template Studio document, not a separate hard-coded layout.
+  assert.match(document.html, /SECURITY NEWS/);
+  assert.match(document.html, /SUMMARY/);
   assert.match(document.html, /Matched asset\(s\)/);
   assert.match(document.text, /Matched asset\(s\): server-1/);
   assert.match(document.subject, /\[NEWS\]/);
@@ -252,6 +255,93 @@ test('recipient subscription filters which findings a document may carry', async
     recipientAllows(kevOnly, { ...critical, cve: { ...critical.cve, cisaKev: { ...critical.cve.cisaKev, isKev: true } } }),
     true,
   );
+});
+
+test('the administrators group is a separate automatic stream, routed by subscription', async () => {
+  const { newsRecipients, dailyDigestRecipients } = await import('../server/emailRecipients.ts');
+  const { recipientAllows } = await import('../server/delivery.ts');
+  const admin: EmailRecipient = {
+    id: 'admin', name: 'Administrators', email: 'admins@example.invalid', role: 'ADMIN',
+    deliveryGroup: 'ADMINISTRATORS', subscriptionTier: 'CRITICAL_HIGH_ONLY',
+    subscriptions: ['CRITICAL_HIGH_ONLY', 'NEWS', 'DAILY_DIGEST'], enabled: true, deliverySuccessRate: 100,
+  };
+  const secTeamNoNews: EmailRecipient = {
+    ...admin, id: 'sec', deliveryGroup: 'SECURITY_TEAM', subscriptions: ['ALL_SEVERITIES'],
+  };
+  const everyoneReview: EmailRecipient = {
+    ...admin, id: 'every', deliveryGroup: 'EVERYONE',
+  };
+  // News follows the NEWS subscription, not the group.
+  assert.deepEqual(newsRecipients([admin, secTeamNoNews]).map((r) => r.id), ['admin']);
+  // EVERYONE is the review group: even a NEWS selection does not put it on the
+  // automated news stream.
+  assert.deepEqual(newsRecipients([everyoneReview]), []);
+  // The digest is its own stream, available to any group.
+  assert.deepEqual(dailyDigestRecipients([admin, secTeamNoNews, everyoneReview]).map((r) => r.id), [
+    'admin',
+    'every',
+  ]);
+  // The finding tier still filters per-CVE severity for the Administrators list.
+  const critical = finding({ id: 'f1', cveId: 'CVE-2026-10001' });
+  critical.cve.cvss.severity = 'LOW';
+  assert.equal(recipientAllows(admin, critical), false);
+  assert.equal(recipientAllows({ ...admin, subscriptions: ['ALL_SEVERITIES', 'NEWS'] }, critical), true);
+});
+
+test('news is queued only for recipients who selected the NEWS subscription', async () => {
+  const { queueConsolidatedNews } = await import('../server/newsQueue.ts');
+  const a1 = article('a1', 'https://example.com/story-1', 'Story one');
+  const recipients: EmailRecipient[] = [
+    { id: 'admin', name: 'a', email: 'admin@example.invalid', role: 'ADMIN', deliveryGroup: 'ADMINISTRATORS',
+      subscriptionTier: 'ALL_SEVERITIES', subscriptions: ['ALL_SEVERITIES', 'NEWS'], enabled: true, deliverySuccessRate: 100 },
+    { id: 'sec-news', name: 'b', email: 'secn@example.invalid', role: 'SEC', deliveryGroup: 'SECURITY_TEAM',
+      subscriptionTier: 'CRITICAL_HIGH_ONLY', subscriptions: ['CRITICAL_HIGH_ONLY', 'NEWS'], enabled: true, deliverySuccessRate: 100 },
+    // Security team, but never opted in to news.
+    { id: 'sec-no-news', name: 'c', email: 'sec@example.invalid', role: 'SEC', deliveryGroup: 'SECURITY_TEAM',
+      subscriptionTier: 'ALL_SEVERITIES', subscriptions: ['ALL_SEVERITIES'], enabled: true, deliverySuccessRate: 100 },
+    // Review group: never on the automated news stream.
+    { id: 'review', name: 'd', email: 'review@example.invalid', role: 'PM', deliveryGroup: 'EVERYONE',
+      subscriptionTier: 'ALL_SEVERITIES', subscriptions: ['ALL_SEVERITIES', 'NEWS'], enabled: true, deliverySuccessRate: 100 },
+    // Disabled recipient is never queued even when subscribed.
+    { id: 'off', name: 'e', email: 'off@example.invalid', role: 'SEC', deliveryGroup: 'SECURITY_TEAM',
+      subscriptionTier: 'ALL_SEVERITIES', subscriptions: ['ALL_SEVERITIES', 'NEWS'], enabled: false, deliverySuccessRate: 100 },
+  ];
+  const targets: string[] = [];
+  // A minimal stand-in for the DB: reads return nothing (no prior ledger rows or
+  // outbox evidence) and the claim insert grants every requested item, echoing
+  // back the rows it was given. No real database is required.
+  const db = {
+    query: async (sql: string, params: unknown[] = []) => {
+      if (!/RETURNING/i.test(sql)) return { rows: [], rowCount: 0 };
+      const [recipientIds, kinds, , , itemIds] = params as string[][];
+      const rows = (recipientIds ?? []).map((recipientId, index) => ({
+        recipient_id: recipientId,
+        kind: kinds[index],
+        item_id: itemIds[index],
+      }));
+      return { rows, rowCount: rows.length };
+    },
+  } as never;
+  await queueConsolidatedNews(db, [match('m1', 'asset-1', ['a1'])], new Map([[a1.id, a1]]), recipients, {
+    enqueue: async ({ recipient }) => {
+      targets.push(recipient.id);
+      return 'job';
+    },
+  });
+  assert.deepEqual(targets.sort(), ['admin', 'sec-news']);
+});
+
+test('legacy recipients without a subscriptions list keep their single tier', async () => {
+  const { recipientSubscriptions, subscribesToNews, subscribesToDailyDigest } = await import('../src/types/index.ts');
+  const legacy: EmailRecipient = {
+    id: 'r', name: 'r', email: 'r@example.invalid', role: 'x',
+    subscriptionTier: 'CISA_KEV_ONLY', enabled: true, deliverySuccessRate: 100,
+  };
+  assert.deepEqual(recipientSubscriptions(legacy), ['CISA_KEV_ONLY']);
+  assert.equal(subscribesToNews(legacy), false);
+  assert.equal(subscribesToDailyDigest(legacy), false);
+  // The old boolean digest flag still opts the recipient in.
+  assert.deepEqual(recipientSubscriptions({ ...legacy, dailyDigest: true }), ['CISA_KEV_ONLY', 'DAILY_DIGEST']);
 });
 
 test('syndicated URLs with different article ids and query strings are one story', () => {
@@ -339,7 +429,7 @@ test('an oversized consolidated news email keeps styled HTML and summarises the 
   const bounded = renderConsolidatedNewsEmailWithin(items, budget);
   assert.ok(Buffer.byteLength(bounded.html, 'utf8') <= budget, 'the HTML stays within the budget');
   assert.ok(bounded.overflow.length > 0, 'the articles that did not fit are reported');
-  assert.match(bounded.html, /<!doctype html>/i, 'the body is still an HTML document');
+  assert.match(bounded.html, /<!DOCTYPE html>/i, 'the body is still an HTML document');
   assert.match(bounded.html, /ADDITIONAL ARTICLES/, 'the overflow summary is rendered');
   assert.match(bounded.html, /background:#fffbeb/, 'the summary keeps the styled palette');
   assert.match(bounded.html, /ARTICLE 1 OF 3/, 'the full cards are still styled cards');

@@ -150,6 +150,8 @@ test(
           email: 'sec@example.invalid',
           enabled: true,
           subscriptionTier: 'ALL_SEVERITIES',
+          // News and zero-day digests are subscription streams now.
+          subscriptions: ['ALL_SEVERITIES', 'NEWS'],
           deliveryGroup: 'SECURITY_TEAM',
         });
         await save('feeds', 'news', {

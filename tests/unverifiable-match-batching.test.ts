@@ -86,6 +86,9 @@ const recipient = (id: string, email: string, group: 'SECURITY_TEAM' | 'EVERYONE
   role: 'admin',
   deliveryGroup: group,
   subscriptionTier: 'ALL_SEVERITIES',
+  // News and zero-day digests are subscription streams: select NEWS so these
+  // fixtures keep receiving them.
+  subscriptions: ['ALL_SEVERITIES', 'NEWS'],
   enabled: true,
   deliverySuccessRate: 1,
 });
@@ -679,7 +682,9 @@ test('delivery rechecks the recipient subscription before sending', { skip: !url
     await put(pool, 'recipients', target.id, target);
     const entry = await saveReviewFinding(pool, finding('CVE-2026-20021', 'f1', 'server', 'acme', 'widget'));
     assert.equal(await queueConsolidatedFindingNotifications(pool, [entry], { recipients: [target] }), 1);
-    await put(pool, 'recipients', 'r1', { ...target, subscriptionTier: 'CISA_KEV_ONLY' });
+    // A downgrade via the command path rewrites both the tier and the
+    // subscription list; mirror that here.
+    await put(pool, 'recipients', 'r1', { ...target, subscriptionTier: 'CISA_KEV_ONLY', subscriptions: ['CISA_KEV_ONLY'] });
     let sent = 0;
     await deliverNext(pool, config, request, async () => { sent++; return 'must-not-send'; });
     assert.equal(sent, 0);

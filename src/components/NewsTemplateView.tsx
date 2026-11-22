@@ -31,9 +31,10 @@ import {
   Hash,
 } from 'lucide-react';
 import {
-  DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
+  DEFAULT_NEWS_EMAIL_CUSTOMIZATION,
   compileNewsTemplate,
-  type NewsTemplateParts,
+  renderNewsTemplate,
+  type NewsSource,
 } from '../utils/templateCompiler';
 
 const SAMPLE_NEWS_ARTICLES = [
@@ -148,13 +149,21 @@ export const NewsTemplateView: React.FC = () => {
   const tokenList = useMemo(
     () => [
       '{{news_title}}',
+      '{{news_subject_badge_text}}',
       '{{news_subject}}',
       '{{news_date}}',
       '{{news_count}}',
       '{{news_summary}}',
+      '{{#each news_sources}}',
+      '{{source_name}}',
+      '{{published_at}}',
+      '{{title}}',
+      '{{url}}',
+      '{{excerpt}}',
+      '{{/each}}',
       '{{news_articles}}',
+      '{{sources_hub_url}}',
       '{{news_footer}}',
-      '{{news_subject_badge}}',
     ],
     [],
   );
@@ -176,91 +185,60 @@ export const NewsTemplateView: React.FC = () => {
 
   const [toolTab, setToolTab] = useState<'typography' | 'colors' | 'stamps' | 'tokens'>('colors');
 
-  const newsArticlesHtml = useMemo(() => {
-    return SAMPLE_NEWS_ARTICLES.map((article, index) => {
-      const accentColor = newsDigestCustomization.accentColor;
-      const cveChips = article.cves.map(
-        (cve) =>
-          `<a href="https://nvd.nist.gov/vuln/detail/${cve}" style="color:${accentColor};text-decoration:none;border:1px solid #bfdbfe;background:#eff6ff;border-radius:6px;padding:2px 8px;margin:0 6px 6px 0;font-size:12px;line-height:16px;font-weight:600;white-space:nowrap;">${cve}</a>`,
-      ).join(' ');
-      const assetBadges = article.assets.map(
-        (asset) =>
-          `<span style="display:inline-block;padding:2px 8px;margin:0 6px 6px 0;border-radius:10px;background:#f1f5f9;color:#475569;font-size:10px;line-height:14px;font-weight:700;letter-spacing:0.4px;white-space:nowrap;">${asset}</span>`,
-      ).join('');
-      const credibilityBadge = () => {
-        const score = article.credibilityScore ?? 0;
-        const [bg, color] =
-          score < 50 ? ['#fde68a', '#92400e']
-            : score < 75 ? ['#dbeafe', '#1e40af']
-            : ['#dcfce7', '#15803d'];
-        return `<span style="display:inline-block;padding:2px 8px;background:${bg};color:${color};border-radius:10px;font-size:10px;line-height:14px;font-weight:700;">${score}/100 credibility</span>`;
-      };
-      const evidenceBox = article.evidence
-        ? `<p style="margin:10px 0 0;padding:12px 16px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0;font-size:12.5px;line-height:20px;color:#334155;">${article.evidence}</p>`
-        : '';
-      const zeroDayBanner = article.zeroDay
-        ? '<p style="margin:12px 0 0;padding:10px 14px;border-radius:8px;background:#fef3c7;border:1px solid #fcd34d;font-size:12.5px;line-height:19px;font-weight:700;color:#92400e;">Potential zero-day: no assigned CVE</p>'
-        : '';
-      const viewSource = article.source
-        ? `<p style="margin:16px 0 0;"><a href="${article.source}" style="display:inline-block;background:#1e40af;color:#ffffff;text-decoration:none;border-radius:6px;padding:10px 18px;font-size:13px;font-weight:700;">View source article &rarr;</a></p>`
-        : '';
-      return `<tr><td style="padding:22px 26px;border-top:1px solid #e2e8f0;">
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;table-layout:fixed;">
-          <tr><td style="padding:0 0 10px;">
-            <p style="margin:0 0 6px;font-size:11px;line-height:16px;color:#64748b;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;">ARTICLE ${index + 1} OF ${SAMPLE_NEWS_ARTICLES.length}</p>
-            <h2 style="margin:0 0 10px;font-size:20px;line-height:28px;font-weight:800;color:#0f172a;"><a href="${article.source}" style="color:#1e40af;text-decoration:underline;font-weight:700;">${article.title}</a></h2>
-          </td></tr>
-          <tr><td style="padding:0 0 10px;">
-            ${assetBadges} ${cveChips} ${credibilityBadge()}
-          </td></tr>
-          <tr><td style="padding:0 0 12px;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;table-layout:fixed;border-collapse:collapse;">
-              <tr>
-                <td style="padding:4px 0;font-size:12.5px;line-height:18px;color:#475569;width:50%;vertical-align:top;"><strong style="color:#94a3b8;">Source:</strong> ${article.source}</td>
-                <td style="padding:4px 0;font-size:12.5px;line-height:18px;color:#475569;width:50%;text-align:right;vertical-align:top;"><strong style="color:#94a3b8;">Published:</strong> ${article.published}</td>
-              </tr>
-              <tr>
-                <td style="padding:4px 0 0;font-size:12.5px;line-height:18px;color:#475569;width:50%;vertical-align:top;"><strong style="color:#94a3b8;">Source feed:</strong> ${article.feed}</td>
-                <td style="padding:4px 0 0;font-size:12.5px;line-height:18px;color:#475569;width:50%;text-align:right;vertical-align:top;"><strong style="color:#94a3b8;">Matched asset(s):</strong> ${article.assets.join(', ')}</td>
-              </tr>
-            </table>
-          </td></tr>
-          ${evidenceBox ? `<tr><td style="padding:0 0 12px;">${evidenceBox}</td></tr>` : ''}
-          ${zeroDayBanner ? `<tr><td style="padding:0 0 12px;">${zeroDayBanner}</td></tr>` : ''}
-          ${viewSource ? `<tr><td style="padding:0;">${viewSource}</td></tr>` : ''}
-        </table>
-      </td></tr>`;
-    }).join('');
-  }, [newsDigestCustomization]);
+  const newsSources: NewsSource[] = useMemo(() => {
+    return SAMPLE_NEWS_ARTICLES.map((article) => ({
+      title: article.title,
+      url: article.source,
+      source_name: article.feed,
+      published_at: article.published,
+      excerpt: article.evidence,
+    }));
+  }, []);
 
-  const getRenderedHtml = (): string => {
-    const source = isCustomTemplate && customTemplate
-      ? customTemplate
-      : compileNewsTemplate(newsDigestCustomization);
-    return source
-      .replace(/{{news_title}}/g, 'Security News — Threat Intelligence')
-      .replace(/{{news_subject}}/g, '[Threat intelligence] [NEWS] 3 articles: Critical Authentication Bypass in Enterprise Firewall')
-      .replace(/{{news_date}}/g, previewDate)
-      .replace(/{{news_count}}/g, String(SAMPLE_NEWS_ARTICLES.length))
-      .replace(
-        /{{news_summary}}/g,
-        'A total of 3 security news articles matched your monitored inventory in this intelligence run, including 1 potential zero-day, 1 high-severity RCE, and 1 medium-severity privilege escalation across monitored assets.',
-      )
-      .replace(/{{news_articles}}/g, newsArticlesHtml)
-      .replace(
-        /{{news_footer}}/g,
-        'This is applicability evidence, not a confirmed advisory. Confirm source authenticity and consult the vendor before remediation.',
-      )
-      .replace(
-        /{{news_subject_badge}}/g,
-        '<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:#1e40af;color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">SECURITY NEWS</span>',
-      );
+  /**
+   * The template body in use right now.
+   *
+   * An unsaved edit in the HTML editor wins, so "Live Rendered Preview" shows
+   * the code the operator is actually editing. Otherwise the saved studio
+   * template is used, which the app keeps compiled from the live customization.
+   */
+  const activeTemplateSource = (): string => {
+    if (isCustomTemplate && customTemplate.trim()) return customTemplate;
+    return newsDigestTemplate || compileNewsTemplate(newsDigestCustomization);
   };
 
-  const getTemplateSource = (): string => {
-    if (isCustomTemplate && customTemplate) return customTemplate;
-    return compileNewsTemplate(newsDigestCustomization);
-  };
+  /**
+   * The one rendered document the studio shows.
+   *
+   * Both the "Rendered" inspector tab and the "Live Rendered Preview" pane read
+   * this, so they can never disagree. It is the same renderer the delivery path
+   * uses (`server/newsEmail.ts`), fed with the operator's LIVE customization
+   * rather than a hard-coded default: the preview previously ignored every
+   * colour and typography change, which is what made the source and the pane
+   * show different documents.
+   */
+  const getRenderedHtml = (): string =>
+    renderNewsTemplate(
+      newsDigestCustomization,
+      {
+        news_title: 'Security News — Threat Intelligence',
+        news_subject_badge_text: 'THREAT BRIEFING',
+        news_subject:
+          '[Threat intelligence] [NEWS] 3 articles: Critical Authentication Bypass in Enterprise Firewall',
+        news_date: previewDate,
+        news_count: SAMPLE_NEWS_ARTICLES.length,
+        news_summary:
+          'A total of 3 security news articles matched your monitored inventory in this intelligence run, including 1 potential zero-day, 1 high-severity RCE, and 1 medium-severity privilege escalation across monitored assets.',
+        news_sources: newsSources,
+        news_articles: '',
+        sources_hub_url: 'https://www.cisa.gov/news-events/cybersecurity-advisories',
+        news_footer:
+          'This is applicability evidence, not a confirmed advisory. Confirm source authenticity and consult the vendor before remediation.',
+      },
+      activeTemplateSource(),
+    );
+
+  const getTemplateSource = (): string => activeTemplateSource();
 
   const syncIframeHeight = useCallback(() => {
     try {
@@ -385,7 +363,9 @@ export const NewsTemplateView: React.FC = () => {
   };
 
   const confirmReset = () => {
-    updateNewsDigestCustomization(DEFAULT_DAILY_DIGEST_CUSTOMIZATION);
+    // Reset restores the NEWS studio defaults, not the daily-digest ones: the
+    // two templates have different stock colours and fonts.
+    updateNewsDigestCustomization(DEFAULT_NEWS_EMAIL_CUSTOMIZATION);
     setShowResetConfirm(false);
   };
 
@@ -1075,6 +1055,11 @@ export const NewsTemplateView: React.FC = () => {
               </span>
               <span>{(htmlSubView === 'template' ? getTemplateSource() : getRenderedHtml()).length} characters</span>
             </div>
+            <p className="px-4 py-2 bg-zinc-950 border-b border-zinc-800 text-[11px] leading-relaxed text-zinc-500">
+              {htmlSubView === 'template'
+                ? 'Template source: the document with {{tokens}}. This is what gets saved and re-rendered per recipient. It is expected to differ from the Rendered tab once tokens are replaced.'
+                : 'Rendered: the template with preview values substituted and the live customization applied. This is byte-for-byte what "Live Rendered Preview" below shows.'}
+            </p>
             <pre className="p-4 text-xs font-mono text-zinc-300 overflow-x-auto max-h-[640px] leading-relaxed selection:bg-zinc-800">
               <code>{htmlSubView === 'template' ? getTemplateSource() : getRenderedHtml()}</code>
             </pre>
@@ -1166,9 +1151,13 @@ export const NewsTemplateView: React.FC = () => {
 
               <div className="w-1/2 flex flex-col">
                 <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-900/80 border-b border-zinc-800 text-xs font-mono text-zinc-400">
-                  <span>Live Rendered Preview</span>
+                  {/* The label follows the toggle: showing the raw template must
+                      never be presented as a rendered preview. */}
+                  <span>{showTokensInCanvas ? 'Template With Tokens (unrendered)' : 'Live Rendered Preview'}</span>
                   <div className="flex items-center space-x-1">
-                    <span className="text-zinc-500">{getRenderedHtml().length} chars</span>
+                    <span className="text-zinc-500">
+                      {(showTokensInCanvas ? getTemplateSource() : getRenderedHtml()).length} chars
+                    </span>
                   </div>
                 </div>
                 <div className="flex-1 overflow-auto bg-zinc-950/80">

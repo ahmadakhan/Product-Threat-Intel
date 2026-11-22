@@ -1072,7 +1072,7 @@ export async function ingestFeed(
         ) {
           const cached = context.knownCveContent?.get(id);
           if (!cached) continue;
-          const candidate = normalizeNvdItem(item, feed.id);
+          const { cve: candidate } = normalizeNvdItem(item, feed.id);
           if (!candidate) continue;
           const sourceRevision = cached.sourceApplicability?.[feed.id];
           if (
@@ -1088,7 +1088,7 @@ export async function ingestFeed(
           continue;
         }
         totalFetched++;
-        const normalized = normalizeNvdItem(item, feed.id);
+        const { cve: normalized, rejectionReason } = normalizeNvdItem(item, feed.id);
         if (!normalized) {
           // Never advance the cursor past an unparsed record on the first attempts:
           // the stored resume cursor is the only way back into this window.
@@ -1098,7 +1098,9 @@ export async function ingestFeed(
             cveId: id,
             recordHash,
             category: 'SCHEMA_VALIDATION',
-            summary: 'VulnCheck NVD++ record failed normalization',
+            summary: rejectionReason
+              ? `VulnCheck NVD++ record failed normalization: ${rejectionReason}`
+              : 'VulnCheck NVD++ record failed normalization',
             rejectedAt: new Date().toISOString(),
           };
           rejections.push(rejection);
@@ -1248,7 +1250,7 @@ export async function ingestFeed(
         ) {
           const cached = context.knownCveContent?.get(id);
           if (!cached) continue;
-          const candidate = normalizeNvdItem(item, feed.id);
+          const { cve: candidate } = normalizeNvdItem(item, feed.id);
           if (!candidate) continue;
           const sourceRevision = cached.sourceApplicability?.[feed.id];
           if (
@@ -1264,7 +1266,7 @@ export async function ingestFeed(
           continue;
         }
         totalFetched++;
-        const normalized = normalizeNvdItem(item, feed.id);
+        const { cve: normalized, rejectionReason } = normalizeNvdItem(item, feed.id);
         if (!normalized) {
           // A record that cannot be normalized is unparsed exposure, not a
           // skippable row. Advancing `offset` past it silently would retire it
@@ -1275,7 +1277,9 @@ export async function ingestFeed(
             cveId: id,
             recordHash,
             category: 'SCHEMA_VALIDATION',
-            summary: 'NVD record failed normalization',
+            summary: rejectionReason
+              ? `NVD record failed normalization: ${rejectionReason}`
+              : 'NVD record failed normalization',
             rejectedAt: new Date().toISOString(),
           };
           rejections.push(rejection);
@@ -1438,9 +1442,15 @@ export async function ingestFeed(
  * NormalizedCVE. VulnCheck enriches CPEs, CVSS scores, and vendor product tags
  * faster than NIST, but the record structure is compatible with NVD parsing.
  */
-function normalizeNvdItem(item: any, feedId: string): NormalizedCVE | null {
+export interface NormalizeNvdItemResult {
+  cve: NormalizedCVE | null;
+  /** Field-level validation failure, when the schema parse rejected the record. */
+  rejectionReason?: string;
+}
+
+function normalizeNvdItem(item: any, feedId: string): NormalizeNvdItemResult {
   const cve = item.cve;
-  if (!cve || cve.vulnStatus === 'Rejected') return null;
+  if (!cve || cve.vulnStatus === 'Rejected') return { cve: null };
 
   // Extract CVSS metric: prefer NVD primary, fall back to CNA secondary
   const cvssData =
@@ -1502,7 +1512,7 @@ function normalizeNvdItem(item: any, feedId: string): NormalizedCVE | null {
   const cpeMatches = validDetails.map((d) => d.criteria);
 
   try {
-    return cveSchema.parse({
+    return { cve: cveSchema.parse({
       cveId: cve.id,
       title: description.slice(0, 500),
       description,
@@ -1541,8 +1551,11 @@ function normalizeNvdItem(item: any, feedId: string): NormalizedCVE | null {
         rollbackPlan: '',
         stepByStep: [],
       },
-    });
-  } catch {
-    return null;
+    }) };
+  } catch (e) {
+    return {
+      cve: null,
+      rejectionReason: e instanceof Error ? e.message : String(e),
+    };
   }
 }

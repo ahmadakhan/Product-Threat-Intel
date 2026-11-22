@@ -44,6 +44,37 @@ const escapeTemplateValue = (value: string) =>
     "'": '&#39;',
   })[char]!);
 
+/**
+ * The studio preview shows at most this many products/CVEs.
+ *
+ * A long real advisory makes the preview unreadable and the operator cannot
+ * tell a layout problem from a data volume problem. Two records are enough to
+ * exercise both per-CVE severity branches; the delivered email still carries
+ * every record in the advisory.
+ */
+const PREVIEW_MAX_PRODUCTS = 2;
+
+/**
+ * Baseline Required Actions & Mitigation lines shown for every sample record.
+ *
+ * Per-CVE mitigations are appended after these, so the preview always shows
+ * the full section even when a sample record carries no vendor remediation of
+ * its own. These are preview text only; a delivered email uses the advisory's
+ * own vendor guidance. Sample data can carry the first line verbatim; the
+ * helper drops any duplicate so a record never lists the same action twice.
+ */
+const REQUIRED_ACTIONS_BASELINE = [
+  'Confirm affected products and versions against current vendor guidance before remediation.',
+  'Apply the vendor-supplied update or documented workaround through change control.',
+  'Restrict network access to affected systems until the fix is validated in your environment.',
+  'Monitor affected assets for exploitation attempts and review logs for indicators of compromise.',
+];
+
+/** Baseline required actions followed by any per-record vendor mitigation. */
+const withRequiredActions = (vendorMitigations: readonly string[]): string[] => [
+  ...new Set([...REQUIRED_ACTIONS_BASELINE, ...vendorMitigations]),
+];
+
 export const AdvisoryTemplateView: React.FC = () => {
   const {
     advisories = [],
@@ -384,7 +415,7 @@ const handleInsertToken = (token: string) => {
       : [];
     const previewCves = previewAdvisory
       ? (previewFindings.length
-          ? previewFindings.map((finding) => {
+          ? previewFindings.slice(0, PREVIEW_MAX_PRODUCTS).map((finding) => {
               const severity = finding.cve.cvss.severity || previewAdvisory.severity;
               const range = finding.cve.versionRange;
               const versions = [
@@ -408,14 +439,14 @@ const handleInsertToken = (token: string) => {
                 product: finding.matchedAssetProduct || finding.matchedAssetName || 'Unavailable',
                 description: escapeTemplateValue(finding.cve.description || 'No vendor description published.'),
                 affected_versions: versions || 'Confirm with vendor',
-                mitigations: [
+                mitigations: withRequiredActions([
                   ...(remediation?.immediateActions || []),
                   ...(remediation?.stepByStep || []),
                   ...(remediation?.workarounds || []),
-                ].map(escapeTemplateValue),
+                ]).map(escapeTemplateValue),
               };
             })
-          : previewAdvisory.cveIds.map((id) => ({
+          : previewAdvisory.cveIds.slice(0, PREVIEW_MAX_PRODUCTS).map((id) => ({
               id,
               cve_id: id,
               url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`,
@@ -429,7 +460,7 @@ const handleInsertToken = (token: string) => {
               product: 'Unavailable',
               description: 'No current inventory finding details are available for this CVE.',
               affected_versions: 'Confirm with vendor',
-              mitigations: ['Confirm affected versions and follow current vendor guidance before remediation.'],
+              mitigations: withRequiredActions([]),
             })))
       : [];
     const previewSeverity = previewAdvisory?.severity || 'UNKNOWN';

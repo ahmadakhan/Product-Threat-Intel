@@ -126,6 +126,8 @@ test('POST /api/email/:id/resend re-queues a delivered advisory to one recipient
         enabled: true,
         deliveryGroup: 'SECURITY_TEAM',
         subscriptionTier: 'ALL_SEVERITIES',
+        // Subscriptions are a list now; keep this row on the all-severities stream.
+        subscriptions: ['ALL_SEVERITIES'],
       });
       // Create a delivered email log + outbox job for the delivery being resent.
       const jobId = randomUUID();
@@ -243,6 +245,7 @@ test('POST /api/email/:id/resend re-queues a delivered advisory to one recipient
         enabled: true,
         deliveryGroup: 'SECURITY_TEAM',
         subscriptionTier: 'ALL_SEVERITIES',
+        subscriptions: ['ALL_SEVERITIES'],
       });
       const jobId = randomUUID();
       await pool.query(

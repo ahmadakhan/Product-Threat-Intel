@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import {
   DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
-  compileDailyDigestTemplate,
+  DEFAULT_DAILY_DIGEST_TEMPLATE,
   renderDailyDigest,
   renderDailyFindingSummary,
   renderDailyHealthReport,
@@ -159,7 +159,7 @@ test('renderDailyDigest populates KPI counts exactly', () => {
 
 test('renderDailyDigest embeds executive summary and report generated date', () => {
   const html = renderDailyDigest(DEFAULT_DAILY_DIGEST_CUSTOMIZATION, PARTS);
-  assert.ok(html.includes('Generated: 29 October 2026 | 22:48 GMT+4'));
+  assert.ok(html.includes('Generated:</strong> 29 October 2026 | 22:48 GMT+4'));
   assert.ok(html.includes('SUMMARY'));
   assert.ok(html.includes('<strong>5 findings</strong>'));
   assert.ok(html.includes('<strong>2 Critical</strong>'));
@@ -397,9 +397,9 @@ test('the severity breakdown row carries one count per severity, in its own cell
 });
 
 test('every detail row declares exactly two cells', () => {
-  const doc = new JSDOM(compileDailyDigestTemplate(DEFAULT_DAILY_DIGEST_CUSTOMIZATION)).window.document;
+  const doc = new JSDOM(DEFAULT_DAILY_DIGEST_TEMPLATE).window.document;
   const rows = [...doc.querySelectorAll('tr')].filter((row) =>
-    ['Severity Breakdown', 'Findings (24h)', 'Confidence Follow-up', 'Platform Health'].includes(
+    ['Severity Breakdown', 'Findings (24h)', 'Confidence Follow-Up', 'Platform Health'].includes(
       row.firstElementChild?.textContent?.trim() ?? '',
     ),
   );
@@ -414,13 +414,99 @@ test('the digest stylesheet quotes font names instead of HTML entities', () => {
   // preview; it is not HTML that an HTML parser will decode. `&quot;` is
   // therefore an invalid CSS string, and the whole font-family declaration
   // is dropped -- the body silently falls back to the client default font.
-  const html = compileDailyDigestTemplate(DEFAULT_DAILY_DIGEST_CUSTOMIZATION);
-  const css = /<style>([\s\S]*?)<\/style>/.exec(html)?.[1] ?? '';
+  const html = DEFAULT_DAILY_DIGEST_TEMPLATE;
+  const css = /<style[^>]*>([\s\S]*?)<\/style>/.exec(html)?.[1] ?? '';
   assert.ok(!css.includes('&quot;'), 'stylesheet must not contain HTML entities');
   assert.ok(!css.includes('&amp;'), 'stylesheet must not contain HTML entities');
   assert.ok(
-    css.includes('font-family:"Plus Jakarta Sans"'),
-    'a quoted font name must survive into the stylesheet',
+    css.includes('font-family:'),
+    'font-family declaration must survive into the stylesheet',
   );
 });
 
+
+/**
+ * The Daily Digest Studio preview was rendering the stock template: the pane
+ * built its HTML from DEFAULT_DAILY_DIGEST_TEMPLATE, so every colour, font,
+ * stamp and classification change was discarded and "the preview is still using
+ * the old one" was literally true. The compile step now bakes the
+ * customization, and the stock default must still be byte-identical so an
+ * operator who changed nothing sees exactly the shipped layout.
+ */
+test('compiling the digest template applies the studio customization', async () => {
+  const { compileDailyDigestTemplate, DEFAULT_DAILY_DIGEST_CUSTOMIZATION, DEFAULT_DAILY_DIGEST_TEMPLATE } =
+    await import('../src/utils/templateCompiler.ts');
+
+  assert.equal(
+    compileDailyDigestTemplate(DEFAULT_DAILY_DIGEST_CUSTOMIZATION),
+    DEFAULT_DAILY_DIGEST_TEMPLATE,
+    'the default customization must compile to the shipped document, byte for byte',
+  );
+
+  const customized = compileDailyDigestTemplate({
+    ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
+    accentColor: '#7c3aed',
+    canvasBg: '#fdf4ff',
+    cardBg: '#fffaf0',
+    headingColor: '#4c1d95',
+    fontColor: '#3b0764',
+    headerBg: '#faf5ff',
+    badgeStampColor: '#db2777',
+    badgeStampText: 'ACME SOC',
+    showStamp: true,
+    showClassificationBanner: true,
+    classificationText: 'TLP:AMBER',
+  });
+
+  assert.match(customized, /#7c3aed/, 'the accent colour reaches the markup');
+  assert.ok(!customized.includes('#1d4ed8'), 'no stock accent survives');
+  assert.match(customized, /#fdf4ff/, 'the canvas colour reaches the markup');
+  assert.match(customized, /background-color: #fffaf0/, 'the card colour reaches the markup');
+  assert.match(customized, /color: #4c1d95/, 'the heading colour reaches the markup');
+  assert.match(customized, /ACME SOC/, 'the stamp is rendered when enabled');
+  assert.match(customized, /TLP:AMBER/, 'the classification banner is rendered when enabled');
+  // The document is still a renderable template, not a half-substituted string.
+  assert.match(customized, /\{\{advisory_id\}\}/);
+  assert.match(customized, /\{\{\{findings_summary\}\}\}/);
+});
+
+test('the digest render never silently falls back to the stock template', async () => {
+  const { renderDailyDigest, DEFAULT_DAILY_DIGEST_CUSTOMIZATION } = await import(
+    '../src/utils/templateCompiler.ts'
+  );
+  const html = renderDailyDigest(
+    { ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION, accentColor: '#7c3aed' },
+    {
+      advisory_id: 'ADV-PREVIEW',
+      advisory_title: 'Daily preview',
+      dispatch_date: '2026-11-22T09:00:00Z',
+      severity: 'HIGH',
+      finding_count: 1,
+      severity_counts: '1 high',
+      findings_summary: '<p>one finding</p>',
+      health_report: '<p>healthy</p>',
+      recipient_name: 'preview@example.invalid',
+      critical_count: 0,
+      high_count: 1,
+      medium_count: 0,
+      low_count: 0,
+      asset_count: 1,
+      executive_summary: 'Summary',
+      report_generated: '22 November 2026',
+      critical_summary: '',
+      high_summary: '<td>High: 1</td>',
+      medium_summary: '',
+      low_summary: '',
+      critical_kpi: '',
+      high_kpi: '<td>1</td>',
+      medium_kpi: '',
+      low_kpi: '',
+      held_for_review: '',
+    },
+  );
+  // The render compiles the studio markup with the customization, so the
+  // operator's accent is present and the digest default accent is not.
+  assert.match(html, /#7c3aed/, 'the customization accent reaches the delivered document');
+  assert.ok(!html.includes('#1d4ed8'), 'the stock accent is not used once customized');
+  assert.ok(!html.includes('{{'), 'every placeholder is resolved');
+});

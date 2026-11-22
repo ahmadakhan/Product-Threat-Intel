@@ -22,8 +22,8 @@ import type { ZeroDayDigest } from '../src/engine/pipelineEngine.ts';
 import {
   DEFAULT_TEMPLATE_CUSTOMIZATION,
   DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
-  compileDailyDigestTemplate,
-  compileNewsTemplate,
+  DEFAULT_DAILY_DIGEST_TEMPLATE,
+  DEFAULT_NEWS_EMAIL_TEMPLATE,
 } from '../src/utils/templateCompiler.ts';
 import { DEFAULT_ADVISORY_EMAIL_TEMPLATE } from '../src/utils/defaultAdvisoryEmailTemplate.ts';
 export const DEFAULT_EMAIL_CONFIG: EmailConfiguration = {
@@ -223,10 +223,10 @@ export const emptyState = (): AppState => ({
   customAdvisoryTemplate: null,
   advisoryTemplate: DEFAULT_ADVISORY_EMAIL_TEMPLATE,
   dailyDigestCustomization: { ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION },
-  dailyDigestTemplate: compileDailyDigestTemplate(DEFAULT_DAILY_DIGEST_CUSTOMIZATION),
+  dailyDigestTemplate: DEFAULT_DAILY_DIGEST_TEMPLATE,
   dailyDigestCustomTemplate: null,
   newsDigestCustomization: { ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION },
-  newsDigestTemplate: compileNewsTemplate(DEFAULT_DAILY_DIGEST_CUSTOMIZATION),
+  newsDigestTemplate: DEFAULT_NEWS_EMAIL_TEMPLATE,
   newsDigestCustomTemplate: null,
   counts: zeroCounts(),
   summary: { activeFindings: 0, criticalFindings: 0, kevFindings: 0, deliveredEmails: 0 },

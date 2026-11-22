@@ -948,17 +948,92 @@ export interface AliasEntry {
   revokedAt?: string;
 }
 
+/** Delivery targeting group. `ADMINISTRATORS` receives the advisory and news
+ *  streams like the Security team; it is a label for senior stakeholders so a
+ *  separate distribution list can be managed without editing each address. */
+export type DeliveryGroup = 'SECURITY_TEAM' | 'EVERYONE' | 'ADMINISTRATORS';
+
+/**
+ * A per-stream subscription. News and the daily digest are separate streams
+ * from the advisory findings tier, so a recipient may opt into several at once
+ * (multi-select in the recipient form).
+ *
+ *  - `CRITICAL_HIGH_ONLY` / `CISA_KEV_ONLY` / `ALL_SEVERITIES` filter findings.
+ *  - `NEWS` delivers consolidated security-news articles.
+ *  - `DAILY_DIGEST` delivers the daily summary + operational health report.
+ */
+export type SubscriptionTier =
+  | 'ALL_SEVERITIES'
+  | 'CRITICAL_HIGH_ONLY'
+  | 'CISA_KEV_ONLY'
+  | 'NEWS'
+  | 'DAILY_DIGEST';
+
+/** The news stream tier. */
+export const NEWS_SUBSCRIPTION: SubscriptionTier = 'NEWS';
+/** The daily digest stream tier. */
+export const DAILY_DIGEST_SUBSCRIPTION: SubscriptionTier = 'DAILY_DIGEST';
+
+/**
+ * Normalises a stored recipient to the multi-select model.
+ *
+ * Records written before subscriptions were a list carry a single
+ * `subscriptionTier` and (optionally) a `dailyDigest` flag. They are read as a
+ * list: the tier becomes the first entry and `dailyDigest` adds `DAILY_DIGEST`.
+ * A record with no tier and no digest defaults to the advisory tier so an
+ * existing recipient keeps receiving findings after the upgrade.
+ */
+export function recipientSubscriptions(
+  recipient: Pick<EmailRecipient, 'subscriptionTier' | 'subscriptions' | 'dailyDigest'>,
+): SubscriptionTier[] {
+  const stored = Array.isArray(recipient.subscriptions) ? recipient.subscriptions : null;
+  const tiers: SubscriptionTier[] = stored?.length
+    ? [...new Set(stored)]
+    : recipient.subscriptionTier
+      ? [recipient.subscriptionTier]
+      : [DEFAULT_SUBSCRIPTION];
+  if (recipient.dailyDigest && !tiers.includes(DAILY_DIGEST_SUBSCRIPTION)) tiers.push(DAILY_DIGEST_SUBSCRIPTION);
+  return tiers;
+}
+
+const DEFAULT_SUBSCRIPTION: SubscriptionTier = 'CRITICAL_HIGH_ONLY';
+
+/** True when the recipient subscribed to at least one finding severity tier. */
+export function subscribesToFindings(recipient: Pick<EmailRecipient, 'subscriptionTier' | 'subscriptions' | 'dailyDigest'>): boolean {
+  return recipientSubscriptions(recipient).some((tier) => FINDING_SUBSCRIPTIONS.includes(tier));
+}
+
+/** Subscription tiers that filter advisory findings (as opposed to other streams). */
+export const FINDING_SUBSCRIPTIONS: SubscriptionTier[] = [
+  'CRITICAL_HIGH_ONLY',
+  'CISA_KEV_ONLY',
+  'ALL_SEVERITIES',
+];
+
+/** True when the recipient subscribed to consolidated security news. */
+export function subscribesToNews(recipient: Pick<EmailRecipient, 'subscriptionTier' | 'subscriptions' | 'dailyDigest'>): boolean {
+  return recipientSubscriptions(recipient).includes(NEWS_SUBSCRIPTION);
+}
+
+/** True when the recipient subscribed to the daily digest. */
+export function subscribesToDailyDigest(recipient: Pick<EmailRecipient, 'subscriptionTier' | 'subscriptions' | 'dailyDigest'>): boolean {
+  return recipientSubscriptions(recipient).includes(DAILY_DIGEST_SUBSCRIPTION);
+}
+
 export interface EmailRecipient {
   id: string;
   name: string;
   email: string;
   role: string;
   /** Legacy recipients without a group continue to receive automatic delivery. */
-  deliveryGroup?: 'SECURITY_TEAM' | 'EVERYONE';
-  subscriptionTier: 'ALL_SEVERITIES' | 'CRITICAL_HIGH_ONLY' | 'CISA_KEV_ONLY';
+  deliveryGroup?: DeliveryGroup;
+  /** Widest finding severity tier. Kept as the primary tier for older readers. */
+  subscriptionTier: SubscriptionTier;
+  /** All selected subscriptions (multi-select). Authoritative when present. */
+  subscriptions?: SubscriptionTier[];
   enabled: boolean;
   deliverySuccessRate: number;
-  /** Opt a recipient into the daily digest (daily summary + health report) subscription. */
+  /** Mirror of a `DAILY_DIGEST` subscription, kept for pre-multi-select readers. */
   dailyDigest?: boolean;
 }
 

@@ -391,11 +391,12 @@ export interface AppOptions {
 /**
  * Sample advisory + findings for the Template Studio preview.
  *
- * Deliberately covers the schema the shipped template addresses: three CVEs at
- * three severities (so every per-item severity branch renders at least once),
- * vendor/product identity, per-CVE mitigations, and a vendor advisory link.
- * Without multi-severity, mixed data an operator cannot tell a template that is
- * broken from one that is merely taking an untested branch.
+ * Deliberately covers the schema the shipped template addresses: two CVEs at
+ * two different severities (so both per-item severity branches and two distinct
+ * vendor/product rows render), vendor/product identity, per-CVE mitigations,
+ * and a vendor advisory link. Without multi-severity, mixed data an operator
+ * cannot tell a template that is broken from one that is merely taking an
+ * untested branch. Kept to two records so the studio preview stays readable.
  */
 function sampleAdvisoryForPreview(): { advisory: Advisory; findings: Finding[] } {
   const make = (n: number, severity: Advisory['severity'], score: number): Finding =>
@@ -415,16 +416,22 @@ function sampleAdvisoryForPreview(): { advisory: Advisory; findings: Finding[] }
         modifiedDate: '2026-11-19T09:00:00.000Z',
         remediation: {
           vendorAdvisoryRef: 'https://example.com/vendor-advisory',
+          // Sample Required Actions & Mitigation text, so the preview shows the
+          // section populated instead of only a single vendor line.
           immediateActions: [
+            'Confirm affected products and versions against current vendor guidance before remediation.',
             'Apply the vendor security update once tested in your environment.',
             'Restrict network access to affected systems until remediation is validated.',
+            'Monitor affected assets for exploitation attempts and review logs for indicators of compromise.',
           ],
         },
       },
       matchedAssetId: `preview-asset-${n}`,
       matchedAssetName: `example-asset-0${n} (VendorCorp ProductSuite)`,
-      matchedAssetVendor: 'VendorCorp',
-      matchedAssetProduct: 'ProductSuite',
+      // Two distinct products, so the vendor/product columns of the summary
+      // matrix and the per-record breakdown can be told apart in the preview.
+      matchedAssetVendor: n === 1 ? 'VendorCorp' : 'Acme Systems',
+      matchedAssetProduct: n === 1 ? 'ProductSuite' : 'EdgeGateway',
       matchedCpe: '',
       matchingMethod: 'CPE',
       matchingEvidence: 'Sample data for template preview',
@@ -440,11 +447,7 @@ function sampleAdvisoryForPreview(): { advisory: Advisory; findings: Finding[] }
       timeline: [],
     }) as unknown as Finding;
 
-  const findings = [
-    make(1, 'CRITICAL', 9.8),
-    make(2, 'HIGH', 7.5),
-    make(3, 'MEDIUM', 5.3),
-  ];
+  const findings = [make(1, 'CRITICAL', 9.8), make(2, 'HIGH', 7.5)];
   const advisory: Advisory = {
     id: 'ADV-TEMPLATE-PREVIEW',
     title: 'Example advisory - template preview only',
@@ -455,7 +458,7 @@ function sampleAdvisoryForPreview(): { advisory: Advisory; findings: Finding[] }
     deliveryStatus: 'PENDING',
     recipientCount: 1,
     executiveSummary:
-      'This advisory covers <strong>3 vulnerabilities</strong> affecting the monitored estate. This is sample content used only for template preview.',
+      'This advisory covers <strong>2 vulnerabilities</strong> affecting two monitored products. Required actions and mitigation guidance are listed against each record. This is sample content used only for template preview.',
     remediationInstructions: 'Validate vendor guidance and deploy tested updates through change control.',
     affectedSystems: findings.map((finding) => finding.matchedAssetName),
     vendorLink: 'https://example.com/vendor-advisory',

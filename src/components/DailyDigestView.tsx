@@ -11,6 +11,8 @@ import {
   digestSeveritySummary,
   digestSeverityKpi,
   formatExecutiveSummary,
+  renderDailyDigest,
+  renderHeldForReview,
   compileDailyDigestTemplate,
   type DigestFinding,
   type DigestHealth,
@@ -173,54 +175,66 @@ export const DailyDigestView: React.FC = () => {
     [dailyDigestCustomization, displayTimezone],
   );
 
+  /**
+   * The one rendered digest document the studio shows.
+   *
+   * This is `renderDailyDigest` — the exact renderer the delivered digest uses
+   * (`server/dailyDigest.ts`) — fed the preview sample data and the operator's
+   * live customization. It replaces a hand-rolled `.replace()` chain that had
+   * drifted from the renderer: it blanked `held_for_review`, hard-coded the
+   * severity badge, and skipped the `{{#if}}` branches, so the pane and the
+   * delivered mail disagreed even when the template was identical.
+   */
   const getRenderedHtml = (): string => {
-    const source = isCustomTemplate && customTemplate
-      ? customTemplate
-      : compileDailyDigestTemplate(dailyDigestCustomization);
     const criticalCount = SAMPLE_FINDINGS.filter((f) => f.severity === 'CRITICAL').length;
     const highCount = SAMPLE_FINDINGS.filter((f) => f.severity === 'HIGH').length;
     const mediumCount = SAMPLE_FINDINGS.filter((f) => f.severity === 'MEDIUM').length;
     const lowCount = SAMPLE_FINDINGS.filter((f) => f.severity === 'LOW').length;
-    return source
-      .replace(/{{report_generated}}/g, previewDate)
-      .replace(/{{finding_count}}/g, String(SAMPLE_FINDINGS.length))
-      .replace(/{{critical_count}}/g, String(criticalCount))
-      .replace(/{{high_count}}/g, String(highCount))
-      .replace(/{{medium_count}}/g, String(mediumCount))
-      .replace(/{{low_count}}/g, String(lowCount))
-      .replace(/{{asset_count}}/g, '5')
-      .replace(/{{advisory_title}}/g, 'Daily Vulnerability Notification')
-      .replace(/{{advisory_id}}/g, 'DAILY-PREVIEW')
-      .replace(/{{recipient_name}}/g, 'Team')
-      .replace(/{{severity_counts}}/g, '2 critical, 1 high, 1 medium, 1 low')
-      .replace(/{{dispatch_date}}/g, previewTimestamp)
-      .replace(/{{severity}}/g, 'HIGH')
-      .replace(
-        /{{severity_header_badge}}/g,
-        '<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:#ea580c;color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">HIGH SEVERITY</span>',
-      )
-      .replace(/{{executive_summary}}/g, formatExecutiveSummary(SAMPLE_FINDINGS.length, {
-        CRITICAL: criticalCount, HIGH: highCount, MEDIUM: mediumCount, LOW: lowCount,
-      }))
-      .replace(/{{findings_summary}}/g, findingsSummary)
-      .replace(/{{health_report}}/g, healthReport)
-      .replace(/{{critical_summary}}/g, digestSeveritySummary('CRITICAL', criticalCount, dailyDigestCustomization))
-      .replace(/{{high_summary}}/g, digestSeveritySummary('HIGH', highCount, dailyDigestCustomization))
-      .replace(/{{medium_summary}}/g, digestSeveritySummary('MEDIUM', mediumCount, dailyDigestCustomization))
-      .replace(/{{low_summary}}/g, digestSeveritySummary('LOW', lowCount, dailyDigestCustomization))
-      .replace(/{{critical_kpi}}/g, digestSeverityKpi('CRITICAL', criticalCount, dailyDigestCustomization))
-      .replace(/{{high_kpi}}/g, digestSeverityKpi('HIGH', highCount, dailyDigestCustomization))
-      .replace(/{{medium_kpi}}/g, digestSeverityKpi('MEDIUM', mediumCount, dailyDigestCustomization))
-      .replace(/{{low_kpi}}/g, digestSeverityKpi('LOW', lowCount, dailyDigestCustomization))
-      .replace(/{{held_for_review}}/g, '');
+    return renderDailyDigest(
+      dailyDigestCustomization,
+      {
+        advisory_id: 'DAILY-PREVIEW',
+        advisory_title: 'Daily Vulnerability Notification',
+        dispatch_date: previewTimestamp,
+        severity: 'HIGH',
+        finding_count: SAMPLE_FINDINGS.length,
+        severity_counts: '2 critical, 1 high, 1 medium, 1 low',
+        findings_summary: findingsSummary,
+        health_report: healthReport,
+        recipient_name: 'preview@example.invalid',
+        critical_count: criticalCount,
+        high_count: highCount,
+        medium_count: mediumCount,
+        low_count: lowCount,
+        asset_count: new Set(SAMPLE_FINDINGS.map((finding) => finding.assetName)).size,
+        executive_summary: formatExecutiveSummary(SAMPLE_FINDINGS.length, {
+          CRITICAL: criticalCount,
+          HIGH: highCount,
+          MEDIUM: mediumCount,
+          LOW: lowCount,
+        }),
+        report_generated: previewDate,
+        held_for_review: renderHeldForReview(0, dailyDigestCustomization),
+        critical_summary: digestSeveritySummary('CRITICAL', criticalCount, dailyDigestCustomization),
+        high_summary: digestSeveritySummary('HIGH', highCount, dailyDigestCustomization),
+        medium_summary: digestSeveritySummary('MEDIUM', mediumCount, dailyDigestCustomization),
+        low_summary: digestSeveritySummary('LOW', lowCount, dailyDigestCustomization),
+        critical_kpi: digestSeverityKpi('CRITICAL', criticalCount, dailyDigestCustomization),
+        high_kpi: digestSeverityKpi('HIGH', highCount, dailyDigestCustomization),
+        medium_kpi: digestSeverityKpi('MEDIUM', mediumCount, dailyDigestCustomization),
+        low_kpi: digestSeverityKpi('LOW', lowCount, dailyDigestCustomization),
+      },
+      // An unsaved editor edit wins; otherwise the saved studio document (which
+      // AppContext keeps compiled from the live customization).
+      isCustomTemplate && customTemplate
+        ? customTemplate
+        : dailyDigestTemplate || compileDailyDigestTemplate(dailyDigestCustomization),
+    );
   };
 
   const getTemplateSource = (): string => {
     if (isCustomTemplate && customTemplate) return customTemplate;
-    // Always compile from the live customization so the preview reflects
-    // the operator's current color/typography/stamp settings, not a stale
-    // snapshot-compiled template.
-    return compileDailyDigestTemplate(dailyDigestCustomization);
+    return dailyDigestTemplate || compileDailyDigestTemplate(dailyDigestCustomization);
   };
 
   // Dynamically sync iframe height to eliminate internal scrollbars and scroll trapping
@@ -303,8 +317,8 @@ export const DailyDigestView: React.FC = () => {
       // Do NOT read dailyDigestTemplate here: React has not yet committed the
       // post-save snapshot refresh, so that context value is still stale.
       // For a settings-only save (no custom body), dropping isCustomTemplate
-      // lets the next render read the refreshed dailyDigestTemplate (which
-      // embeds the saved customization via compileDailyDigestTemplate).
+      // lets the next render read the refreshed dailyDigestTemplate, which is
+      // compiled from the saved customization.
       // For a custom-body save, local customTemplate already equals the saved
       // body, so keep it.
       if (!isCustomTemplate) {
@@ -1016,6 +1030,11 @@ export const DailyDigestView: React.FC = () => {
               </span>
               <span>{(htmlSubView === 'template' ? getTemplateSource() : getRenderedHtml()).length} characters</span>
             </div>
+            <p className="px-4 py-2 bg-zinc-950 border-b border-zinc-800 text-[11px] leading-relaxed text-zinc-500">
+              {htmlSubView === 'template'
+                ? 'Template source: the document with {{tokens}}. This is what gets saved and re-rendered per recipient. It is expected to differ from the Rendered tab once tokens are replaced.'
+                : 'Rendered: the template rendered by the same engine the delivered digest uses, with preview values and the live customization applied. This is byte-for-byte what "Live Rendered Preview" below shows.'}
+            </p>
             <pre className="p-4 text-xs font-mono text-zinc-300 overflow-x-auto max-h-[640px] leading-relaxed selection:bg-zinc-800">
               <code>{htmlSubView === 'template' ? getTemplateSource() : getRenderedHtml()}</code>
             </pre>
@@ -1111,9 +1130,13 @@ export const DailyDigestView: React.FC = () => {
               {/* Right: Live Preview */}
               <div className="w-1/2 flex flex-col">
                 <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-900/80 border-b border-zinc-800 text-xs font-mono text-zinc-400">
-                  <span>Live Rendered Preview</span>
+                  {/* The label follows the toggle: showing the raw template must
+                      never be presented as a rendered preview. */}
+                  <span>{showTokensInCanvas ? 'Template With Tokens (unrendered)' : 'Live Rendered Preview'}</span>
                   <div className="flex items-center space-x-1">
-                    <span className="text-zinc-500">{getRenderedHtml().length} chars</span>
+                    <span className="text-zinc-500">
+                      {(showTokensInCanvas ? getTemplateSource() : getRenderedHtml()).length} chars
+                    </span>
                   </div>
                 </div>
                 <div className="flex-1 overflow-auto bg-zinc-950/80">

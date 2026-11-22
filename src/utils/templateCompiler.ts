@@ -1,5 +1,6 @@
 import { TemplateCustomization } from '../types/index.ts';
 import { resolveTimezone, utcOffsetLabel } from './dateTime.ts';
+import { renderEmailTemplate } from './emailTemplate.ts';
 
 export const DEFAULT_TEMPLATE_CUSTOMIZATION: TemplateCustomization = {
   fontFamily: 'sans',
@@ -25,7 +26,7 @@ export function getFontFamilyCss(family: TemplateCustomization['fontFamily']): s
     case 'serif':
       return 'Georgia, Cambria, "Times New Roman", Times, serif';
     case 'system':
-      return '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+      return '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
     case 'sans':
     default:
       return '"Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
@@ -312,9 +313,27 @@ td{mso-line-height-rule:exactly;}
 </html>`;
 }
 
+/**
+ * Digest defaults.
+ *
+ * These deliberately mirror the stock `DEFAULT_DAILY_DIGEST_TEMPLATE` markup
+ * (system font stack, slate body text, blue accent, square 1px card, no stamp),
+ * so `compileDailyDigestTemplate(DEFAULT_DAILY_DIGEST_CUSTOMIZATION)` produces
+ * that document byte for byte. An operator who never opened the typography or
+ * colour tools keeps the exact layout they already ship.
+ */
 export const DEFAULT_DAILY_DIGEST_CUSTOMIZATION: TemplateCustomization = {
   ...DEFAULT_TEMPLATE_CUSTOMIZATION,
   badgeStampText: 'DAILY DIGEST',
+  fontFamily: 'system',
+  fontColor: '#1e293b',
+  headingColor: '#0f172a',
+  accentColor: '#1d4ed8',
+  canvasBg: '#f1f5f9',
+  cardBg: '#ffffff',
+  headerBg: '#f8fafc',
+  borderRadius: '1px',
+  showStamp: false,
 };
 
 export interface DigestFinding {
@@ -399,247 +418,409 @@ function normalizeDigestConfig(config: TemplateCustomization): TemplateCustomiza
   return config;
 }
 
-export function compileDailyDigestTemplate(config: TemplateCustomization): string {
-  config = normalizeDigestConfig(config);
-  const headerHex = config.headerBg.slice(1);
-  const expanded = headerHex.length === 3 ? [...headerHex].map((ch) => ch + ch).join('') : headerHex;
-  const luminance = [0, 2, 4]
-    .map((offset) => parseInt(expanded.slice(offset, offset + 2), 16) / 255)
-    .map((channel) => (channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4))
-    .reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
-  const headerText = luminance > 0.179 ? '#0f172a' : '#ffffff';
-  const headerMuted = luminance > 0.179 ? '#334155' : '#cbd5e1';
-  const stampHtml = config.showStamp
-    ? `<p style="margin:0 0 8px;font-size:11px;line-height:18px;letter-spacing:1.5px;font-weight:700;color:${config.badgeStampColor};">${config.badgeStampText}</p>`
-    : '';
-  const classificationBanner = config.showClassificationBanner
-    ? `<tr><td style="padding:12px 28px;background:${config.canvasBg};color:${config.fontColor};font-size:10px;line-height:16px;letter-spacing:1px;text-align:center;">${config.classificationText}</td></tr>`
-    : '';
-  return `<!DOCTYPE html>
-<html lang="en">
+/**
+ * Daily Vulnerability Digest Template Studio HTML — delivered digest email uses
+ * exactly this markup. Renders through the Handlebars-subset engine
+ * (`renderEmailTemplate`) which supports `{{{triple}}}` raw HTML fields.
+ */
+export const DEFAULT_DAILY_DIGEST_TEMPLATE = `<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="x-apple-disable-message-reformatting">
-<title>Daily Vulnerability Notification</title>
-
-<style>
-body{
-    margin:0;
-    padding:0;
-    background:${config.canvasBg};
-    font-family:${getFontFamilyCss(config.fontFamily)};
-}
-table{
-    border-collapse:collapse;
-}
-img{
-    border:0;
-    display:block;
-}
-@media only screen and (max-width:600px){
-    .container{
-        width:100% !important;
+<meta name="dispatch-date" content="{{dispatch_date}}">
+<meta name="digest-severity" content="{{severity}}">
+<title>{{advisory_id}} | Daily Vulnerability Notification</title>
+<!--[if gte mso 9]>
+<xml>
+  <o:OfficeDocumentSettings>
+    <o:AllowPNG/>
+    <o:PixelsPerInch>96</o:PixelsPerInch>
+  </o:OfficeDocumentSettings>
+</xml>
+<![endif]-->
+<style type="text/css">
+  body, table, td, a {
+    -webkit-text-size-adjust: 100%;
+    -ms-text-size-adjust: 100%;
+  }
+  table, td {
+    mso-table-lspace: 0pt;
+    mso-table-rspace: 0pt;
+    border-collapse: collapse;
+  }
+  img {
+    border: 0;
+    height: auto;
+    line-height: 100%;
+    outline: none;
+    text-decoration: none;
+    display: block;
+  }
+  body {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    background-color: #f1f5f9;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: #1e293b;
+  }
+  a[x-apple-data-detectors] {
+    color: inherit !important;
+    text-decoration: none !important;
+    font-size: inherit !important;
+    font-family: inherit !important;
+    font-weight: inherit !important;
+    line-height: inherit !important;
+  }
+  @media only screen and (max-width: 680px) {
+    .container {
+      width: 100% !important;
+      max-width: 100% !important;
     }
-    .stack{
-        display:block !important;
-        width:100% !important;
+    .mobile-pad {
+      padding-left: 16px !important;
+      padding-right: 16px !important;
     }
-    .mobile-padding{
-        padding:20px !important;
+    .stack-col {
+      display: block !important;
+      width: 100% !important;
+      max-width: 100% !important;
     }
-    .title{
-        font-size:22px !important;
-        line-height:28px !important;
-    }
-}
+  }
 </style>
 </head>
+<body bgcolor="#f1f5f9" style="margin: 0; padding: 0; background-color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: #1e293b;">
 
-<body>
+  <!-- Hidden Inbox Preheader -->
+  <div style="display: none; font-size: 1px; line-height: 1px; max-height: 0px; max-width: 0px; opacity: 0; overflow: hidden; mso-hide: all;">
+    {{advisory_title}} - {{severity_counts}}
+  </div>
 
-<!-- Preview Text -->
-<div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">
-{{advisory_title}} - {{severity_counts}}
-</div>
-
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${config.canvasBg}">
-<tr>
-<td align="center" style="padding:24px 12px;">
-
-<table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" class="container" style="width:680px;max-width:680px;background:${config.cardBg};border:1px solid #e2e8f0;border-radius:12px;">
-
-${classificationBanner}
-
-    <!-- HEADER -->
+  <!-- Outer Viewport Wrapper -->
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9" style="background-color: #f1f5f9; width: 100%;">
     <tr>
-        <td bgcolor="${config.headerBg}" style="padding:12px 20px 16px;border-radius:12px 12px 0 0;">
+      <td align="center" style="padding: 20px 10px;">
 
-            ${stampHtml}
+        <!--[if mso]>
+        <table role="presentation" align="center" border="0" cellspacing="0" cellpadding="0" width="680" style="width: 680px;">
+        <tr>
+        <td align="center" valign="top" width="680">
+        <![endif]-->
 
-            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:6px;">
+        <!-- Main Email Card -->
+        <table role="presentation" class="container" width="680" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="width: 680px; max-width: 680px; background-color: #ffffff; border: 1px solid #cbd5e1;">
+
+          <!-- Top Brand Accent Strip -->
+          <tr>
+            <td bgcolor="#1d4ed8" height="4" style="background-color: #1d4ed8; height: 4px; font-size: 1px; line-height: 1px;">&nbsp;</td>
+          </tr>
+
+          <!-- HEADER -->
+          <tr>
+            <td class="mobile-pad" bgcolor="#f8fafc" style="background-color: #f8fafc; padding: 16px 22px; border-bottom: 1px solid #cbd5e1;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%;">
                 <tr>
-                    <td>
-                        {{severity_header_badge}}
-                    </td>
+                  <td valign="top" align="left" style="padding-right: 12px;">
+                    <div style="font-size: 10px; line-height: 14px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; color: #1d4ed8; mso-line-height-rule: exactly;">
+                      DAILY VULNERABILITY DIGEST
+                    </div>
+                    <div style="padding-top: 3px; font-size: 19px; line-height: 24px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly;">
+                      BA Security Advisory
+                    </div>
+                    <div style="padding-top: 3px; font-size: 13px; line-height: 18px; font-weight: 600; color: #334155; mso-line-height-rule: exactly;">
+                      {{advisory_title}}
+                    </div>
+                  </td>
+                  <td valign="top" align="right" style="white-space: nowrap;">
+                    {{{severity_header_badge}}}
+                  </td>
                 </tr>
-            </table>
+              </table>
 
-             <div class="title" style="font-size:18px;line-height:22px;font-weight:700;color:${headerText};">
-                 BA Security Advisory
-             </div>
-
-             <div style="padding-top:3px;font-size:13px;line-height:18px;font-weight:600;color:${headerText};">
-                 {{advisory_title}}
-             </div>
-
-             <div style="padding-top:4px;font-size:11px;line-height:15px;color:${headerMuted};">
-                 Advisory ID: {{advisory_id}} | Generated: {{report_generated}}
-             </div>
-             <meta name="dispatch-date" content="{{dispatch_date}}">
-             <meta name="digest-severity" content="{{severity}}">
-
-        </td>
-    </tr>
-
-    <!-- SUMMARY -->
-    <tr>
-        <td class="mobile-padding" style="padding:16px 20px;border-bottom:1px solid #e2e8f0;">
-
-            <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:${config.accentColor};padding-bottom:4px;">
-                SUMMARY
-            </div>
-
-            <div style="font-size:13px;line-height:20px;color:${config.fontColor};">
-                {{executive_summary}}
-            </div>
-
-        </td>
-    </tr>
-
-    <!-- KPI DASHBOARD -->
-    <tr>
-        <td class="mobile-padding" style="padding:20px 20px 8px 20px;">
-
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:separate;border-spacing:6px 0;">
-
+              <!-- Metadata Bar -->
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%; margin-top: 12px; border-top: 1px solid #e2e8f0;">
                 <tr>
+                  <td style="padding-top: 10px; font-size: 11px; line-height: 15px; color: #475569; mso-line-height-rule: exactly;">
+                    <strong style="color: #0f172a;">Advisory ID:</strong> {{advisory_id}} &nbsp;&bull;&nbsp; <strong style="color: #0f172a;">Generated:</strong> {{report_generated}}
+                  </td>
+                  <td align="right" style="padding-top: 10px; font-size: 11px; line-height: 15px; color: #475569; mso-line-height-rule: exactly;">
+                    <strong style="color: #0f172a;">Summary:</strong> {{severity_counts}}
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
 
-                    <td align="center" bgcolor="#f8fafc" style="padding:14px 8px;border:1px solid #e2e8f0;border-radius:8px;">
-                        <div style="font-size:22px;line-height:26px;font-weight:bold;color:#0f172a;">{{finding_count}}</div>
-                        <div style="padding-top:3px;font-size:10px;line-height:14px;font-weight:700;letter-spacing:0.5px;color:#64748b;">TOTAL FINDINGS</div>
-                    </td>
+          <!-- 01 EXECUTIVE SUMMARY (Unshaded White) -->
+          <tr>
+            <td class="mobile-pad" bgcolor="#ffffff" style="background-color: #ffffff; padding: 18px 22px 16px 22px; border-bottom: 1px solid #e2e8f0;">
+              <div style="font-size: 11px; line-height: 15px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; color: #0f172a; padding-bottom: 6px; mso-line-height-rule: exactly;">
+                <span style="color: #1d4ed8;">01</span> &nbsp;EXECUTIVE SUMMARY
+              </div>
+              <div style="font-size: 12.5px; line-height: 19px; color: #334155; mso-line-height-rule: exactly;">
+                {{{executive_summary}}}
+              </div>
+            </td>
+          </tr>
 
-                    {{critical_kpi}}
-                    {{high_kpi}}
-                    {{medium_kpi}}
-                    {{low_kpi}}
+          <!-- 02 EXPOSURE & ASSET SNAPSHOT -->
+          <tr>
+            <td class="mobile-pad" bgcolor="#ffffff" style="background-color: #ffffff; padding: 16px 22px 6px 22px;">
+              <!-- Shaded Section Heading Bar -->
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9" style="width: 100%; background-color: #f1f5f9; border: 1px solid #e2e8f0;">
+                <tr>
+                  <td style="padding: 7px 12px; font-size: 11px; line-height: 15px; font-weight: 700; letter-spacing: 0.7px; text-transform: uppercase; color: #0f172a; mso-line-height-rule: exactly;">
+                    <span style="color: #1d4ed8;">02</span> &nbsp;24-HOUR EXPOSURE &amp; ASSET SNAPSHOT
+                  </td>
+                </tr>
+              </table>
 
-    <td align="center" bgcolor="#eff6ff" style="padding:14px 8px;border:1px solid #e2e8f0;border-radius:8px;">
-                        <div style="font-size:22px;line-height:26px;font-weight:bold;color:#2563eb;">{{asset_count}}</div>
-                        <div style="padding-top:3px;font-size:10px;line-height:14px;font-weight:700;letter-spacing:0.5px;color:#64748b;">ASSETS</div>
-                    </td>
+              <!-- KPI Dashboard Grid -->
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%; margin-top: 10px;">
+                <tr>
+                  <td align="center" valign="middle" bgcolor="#f8fafc" style="background-color: #f8fafc; padding: 12px 6px; border: 1px solid #cbd5e1;">
+                    <div style="font-size: 20px; line-height: 24px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly;">{{finding_count}}</div>
+                    <div style="padding-top: 3px; font-size: 9.5px; line-height: 13px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: #64748b; mso-line-height-rule: exactly;">TOTAL FINDINGS</div>
+                  </td>
 
+                  {{{critical_kpi}}}
+                  {{{high_kpi}}}
+                  {{{medium_kpi}}}
+                  {{{low_kpi}}}
+
+                  <td align="center" valign="middle" bgcolor="#eff6ff" style="background-color: #eff6ff; padding: 12px 6px; border: 1px solid #bfdbfe;">
+                    <div style="font-size: 20px; line-height: 24px; font-weight: 700; color: #1d4ed8; mso-line-height-rule: exactly;">{{asset_count}}</div>
+                    <div style="padding-top: 3px; font-size: 9.5px; line-height: 13px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: #1e40af; mso-line-height-rule: exactly;">ASSETS</div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- 03 DIGEST DETAILS & PLATFORM TELEMETRY -->
+          <tr>
+            <td class="mobile-pad" bgcolor="#ffffff" style="background-color: #ffffff; padding: 14px 22px 20px 22px;">
+              <!-- Shaded Section Heading Bar -->
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9" style="width: 100%; background-color: #f1f5f9; border: 1px solid #e2e8f0;">
+                <tr>
+                  <td style="padding: 7px 12px; font-size: 11px; line-height: 15px; font-weight: 700; letter-spacing: 0.7px; text-transform: uppercase; color: #0f172a; mso-line-height-rule: exactly;">
+                    <span style="color: #1d4ed8;">03</span> &nbsp;DIGEST DETAILS &amp; PLATFORM TELEMETRY
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Structured Telemetry Table -->
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%; margin-top: 10px; border: 1px solid #cbd5e1; font-size: 12px; line-height: 17px;">
+                <!-- SEVERITY BREAKDOWN -->
+                <tr>
+                  <td width="175" valign="top" bgcolor="#f8fafc" style="width: 175px; background-color: #f8fafc; padding: 9px 12px; border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; font-size: 10.5px; line-height: 15px; font-weight: 700; letter-spacing: 0.4px; color: #475569; text-transform: uppercase; mso-line-height-rule: exactly;">
+                    Severity Breakdown
+                  </td>
+                  <td valign="middle" bgcolor="#ffffff" style="background-color: #ffffff; padding: 9px 12px; border-bottom: 1px solid #e2e8f0; color: #1e293b; mso-line-height-rule: exactly;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%;">
+                      <tr>
+                        {{{critical_summary}}}{{{high_summary}}}{{{medium_summary}}}{{{low_summary}}}
+                      </tr>
+                    </table>
+                  </td>
                 </tr>
 
-            </table>
-
-        </td>
-    </tr>
-
-    <!-- DETAILS -->
-    <tr>
-        <td class="mobile-padding" style="padding:20px;">
-
-            <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:${config.accentColor};padding-bottom:8px;">
-                DETAILS
-            </div>
-
-             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border:1px solid #e2e8f0;font-size:13px;line-height:18px;">
-
-                 <!-- SEVERITY BREAKDOWN -->
-                 <tr>
-                     <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;">
-                         Severity Breakdown
-                     </td>
-                    <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;">
-                        <!-- One row, one cell per severity. Each summary
-                             fragment is a self-contained <td>, so they need a
-                             real <table>/<tr> parent; emitting them directly
-                             inside the value cell was invalid markup. -->
-                        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;">
-                            <tr>
-                                {{critical_summary}}{{high_summary}}{{medium_summary}}{{low_summary}}
-                            </tr>
-                        </table>
-                    </td>
+                <!-- FINDINGS (24H) -->
+                <tr>
+                  <td width="175" valign="top" bgcolor="#f8fafc" style="width: 175px; background-color: #f8fafc; padding: 9px 12px; border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; font-size: 10.5px; line-height: 15px; font-weight: 700; letter-spacing: 0.4px; color: #475569; text-transform: uppercase; mso-line-height-rule: exactly;">
+                    Findings (24h)
+                  </td>
+                  <td valign="top" bgcolor="#ffffff" style="background-color: #ffffff; padding: 9px 12px; border-bottom: 1px solid #e2e8f0; font-size: 12px; line-height: 17px; color: #1e293b; mso-line-height-rule: exactly;">
+                    {{{findings_summary}}}
+                  </td>
                 </tr>
 
-                 <!-- FINDINGS -->
-                 <tr>
-                     <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;border-bottom:1px solid #e2e8f0;vertical-align:top;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;">
-                         Findings (24h)
-                     </td>
-                     <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;">
-                         {{findings_summary}}
-                     </td>
-                 </tr>
+                <!-- CONFIDENCE FOLLOW-UP -->
+                <tr>
+                  <td width="175" valign="top" bgcolor="#f8fafc" style="width: 175px; background-color: #f8fafc; padding: 9px 12px; border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; font-size: 10.5px; line-height: 15px; font-weight: 700; letter-spacing: 0.4px; color: #475569; text-transform: uppercase; mso-line-height-rule: exactly;">
+                    Confidence Follow-Up
+                  </td>
+                  <td valign="top" bgcolor="#ffffff" style="background-color: #ffffff; padding: 9px 12px; border-bottom: 1px solid #e2e8f0; font-size: 12px; line-height: 17px; color: #1e293b; mso-line-height-rule: exactly;">
+                    {{{held_for_review}}}
+                  </td>
+                </tr>
 
-                 <!-- CONFIDENCE FOLLOW-UP -->
-                 <tr>
-                     <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;border-bottom:1px solid #e2e8f0;vertical-align:top;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;">
-                         Confidence Follow-up
-                     </td>
-                     <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:13px;">
-                         {{held_for_review}}
-                     </td>
-                 </tr>
+                <!-- PLATFORM HEALTH -->
+                <tr>
+                  <td width="175" valign="top" bgcolor="#f8fafc" style="width: 175px; background-color: #f8fafc; padding: 9px 12px; border-right: 1px solid #e2e8f0; font-size: 10.5px; line-height: 15px; font-weight: 700; letter-spacing: 0.4px; color: #475569; text-transform: uppercase; mso-line-height-rule: exactly;">
+                    Platform Health
+                  </td>
+                  <td valign="top" bgcolor="#ffffff" style="background-color: #ffffff; padding: 9px 12px; font-size: 12px; line-height: 17px; color: #1e293b; mso-line-height-rule: exactly;">
+                    {{{health_report}}}
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
 
-                 <!-- PLATFORM HEALTH -->
-                 <tr>
-                     <td width="180" bgcolor="#f8fafc" style="padding:8px 10px;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;vertical-align:top;">
-                         Platform Health
-                     </td>
-                     <td style="padding:8px 10px;">
-                         {{health_report}}
-                     </td>
-                 </tr>
+          <!-- FOOTER -->
+          <tr>
+            <td class="mobile-pad" bgcolor="#f8fafc" style="background-color: #f8fafc; padding: 14px 22px; border-top: 1px solid #cbd5e1;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%;">
+                <tr>
+                  <td valign="middle" align="left" style="font-size: 11.5px; line-height: 16px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly;">
+                    BA Security Operations
+                  </td>
+                  <td valign="middle" align="right" style="font-size: 11px; line-height: 16px; color: #475569; mso-line-height-rule: exactly;">
+                    Contact: <a href="mailto:DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com" style="color: #1d4ed8; font-weight: 600; text-decoration: none;">DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com</a>
+                  </td>
+                </tr>
+                <tr>
+                  <td colspan="2" style="padding-top: 6px; font-size: 11px; line-height: 16px; color: #64748b; mso-line-height-rule: exactly;">
+                    This digest provides a consolidated view of newly identified vulnerabilities and platform health status. Assess applicability and prioritize remediation according to asset criticality and established vulnerability management SLAs.
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
 
-             </table>
+        </table>
 
+        <!--[if mso]>
         </td>
+        </tr>
+        </table>
+        <![endif]-->
+
+      </td>
     </tr>
-
-    <!-- FOOTER -->
-    <tr>
-        <td style="padding:14px 20px;border-top:1px solid #d1d5db;background:#fafafa;border-radius:0 0 12px 12px;">
-
-            <div style="font-size:12px;font-weight:700;color:#0f172a;">
-                BA Security Operations
-            </div>
-
-             <div style="font-size:12px;line-height:18px;color:#64748b;padding-top:4px;">
-                 This digest provides a consolidated view of newly identified vulnerabilities and platform
-                 health status. Assess applicability and prioritize remediation according to asset
-                 criticality and established vulnerability management SLAs.
-             </div>
-
-             <div style="padding-top:8px;font-size:12px;color:#64748b;">
-                 Questions or assistance:
-                 <a href="mailto:DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com" style="color:${config.accentColor};text-decoration:underline;">DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com</a>
-             </div>
-
-        </td>
-    </tr>
-
-</table>
-
-</td>
-</tr>
-</table>
+  </table>
 
 </body>
 </html>`;
+
+/**
+ * Compiles the Daily Digest studio HTML for the operator's customization.
+ *
+ * The Template Studio preview is meant to show what the recipient gets. This
+ * function previously ignored `config` and returned the untouched default, so
+ * every colour, typography, stamp and classification change the operator made
+ * was discarded and the pane kept rendering the old stock layout.
+ *
+ * The stock markup is patched with targeted, anchored substitutions rather than
+ * rebuilt, so the document structure (tables, MSO conditionals, placeholders)
+ * is exactly the one that ships. Every anchor must still match: if the constant
+ * is edited and an anchor goes stale this throws, instead of quietly returning
+ * a half-styled document.
+ */
+export function compileDailyDigestTemplate(config: TemplateCustomization): string {
+  const safe = normalizeDigestConfig({ ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION, ...config });
+  const fontFamily = getFontFamilyCss(safe.fontFamily);
+  // At the stock accent, the darker tints the template pairs with it are kept.
+  const kpiLabelColor = safe.accentColor === '#1d4ed8' ? '#1e40af' : safe.accentColor;
+  const strapColor = safe.fontColor === '#1e293b' ? '#334155' : safe.fontColor;
+
+  let html = DEFAULT_DAILY_DIGEST_TEMPLATE;
+  const apply = (pattern: RegExp, value: string, label: string) => {
+    // test() on a /g/ regex advances lastIndex; use a fresh copy for the probe.
+    if (!new RegExp(pattern.source, pattern.flags.replace('g', '')).test(html))
+      throw new Error(`Daily digest template no longer contains the ${label} anchor`);
+    html = html.replace(pattern, value);
+  };
+
+  // Stylesheet body rule: canvas colour, base font, body text colour.
+  apply(
+    /(body \{\n    margin: 0 !important;\n    padding: 0 !important;\n    width: 100% !important;\n    background-color: )#f1f5f9;(\n    font-family: )[^\n]+;(\n    color: )#1e293b;/,
+    `$1${safe.canvasBg};$2${fontFamily};$3${safe.fontColor};`,
+    'stylesheet body rule',
+  );
+  // <body> element: colour only. Its font list is left exactly as written (the
+  // stock markup quotes it with single quotes while the stylesheet uses double
+  // quotes); rewriting it would change the default document for no benefit.
+  apply(
+    /(<body bgcolor=")#f1f5f9(" style="margin: 0; padding: 0; background-color: )#f1f5f9(; font-family: [^;]+; color: )#1e293b;/,
+    `$1${safe.canvasBg}$2${safe.canvasBg}$3${safe.fontColor};`,
+    'body element',
+  );
+  // Canvas-coloured viewport wrappers.
+  const wrapper = /(<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor=")#f1f5f9(" style=")([^"]*?background-color: )#f1f5f9;/g;
+  apply(wrapper, `$1${safe.canvasBg}$2$3${safe.canvasBg};`, 'viewport wrapper');
+  // Main card: background plus the configured border.
+  apply(
+    /(<table role="presentation" class="container" width="680" cellpadding="0" cellspacing="0" border="0" bgcolor=")#ffffff(" style="width: 680px; max-width: 680px; background-color: )#ffffff(; border: 1px solid #cbd5e1;)/,
+    `$1${safe.cardBg}$2${safe.cardBg}$3`.replace(
+      '; border: 1px solid #cbd5e1;',
+      `; border: ${safe.borderRadius} ${safe.borderStyle} #cbd5e1;`,
+    ),
+    'main card',
+  );
+  // Brand accent strip at the top of the card.
+  apply(
+    /(<td bgcolor=")#1d4ed8(" height="4" style="background-color: )#1d4ed8;/,
+    `$1${safe.accentColor}$2${safe.accentColor};`,
+    'brand accent strip',
+  );
+  // Header kicker ("DAILY VULNERABILITY DIGEST").
+  apply(
+    /(letter-spacing: 0\.8px; text-transform: uppercase; color: )#1d4ed8;( mso-line-height-rule: exactly;">\n\s+DAILY VULNERABILITY DIGEST)/,
+    `$1${safe.accentColor};$2`,
+    'header kicker',
+  );
+  // Numbered section accents (01 / 02 / 03).
+  apply(
+    /(<span style="color: )#1d4ed8(;">0[123]<\/span>)/g,
+    `$1${safe.accentColor}$2`,
+    'section numbers',
+  );
+  // Header band, headline and strap line.
+  apply(
+    /(<td class="mobile-pad" bgcolor=")#f8fafc(" style="background-color: )#f8fafc;/,
+    `$1${safe.headerBg}$2${safe.headerBg};`,
+    'header band',
+  );
+  apply(
+    /(font-size: 19px; line-height: 24px; font-weight: 700; color: )#0f172a;/,
+    `$1${safe.headingColor};`,
+    'header headline',
+  );
+  apply(
+    /(font-size: 13px; line-height: 18px; font-weight: 600; color: )#334155;/,
+    `$1${strapColor};`,
+    'header strap line',
+  );
+  // "ASSETS" KPI figure and label.
+  apply(
+    /(font-size: 20px; line-height: 24px; font-weight: 700; color: )#1d4ed8;/,
+    `$1${safe.accentColor};`,
+    'assets KPI figure',
+  );
+  apply(
+    /(font-size: 9\.5px; line-height: 13px; font-weight: 700; letter-spacing: 0\.5px; text-transform: uppercase; color: )#1e40af;/,
+    `$1${kpiLabelColor};`,
+    'assets KPI label',
+  );
+  // Footer contact link.
+  apply(
+    /(HoneywellProd\.onmicrosoft\.com" style="color: )#1d4ed8;/,
+    `$1${safe.accentColor};`,
+    'footer contact link',
+  );
+
+  // Optional blocks. Both are off at the stock defaults, so enabling them is
+  // the only case that changes the document structure.
+  if (safe.showStamp) {
+    apply(
+      /(<td class="mobile-pad" bgcolor="[^"]+" style="background-color: [^"]+; padding: 16px 22px; border-bottom: 1px solid #cbd5e1;">)/,
+      `$1<div style="font-size:10px;line-height:14px;font-weight:700;letter-spacing:1.5px;color:${safe.badgeStampColor};padding-bottom:4px;">${safe.badgeStampText}</div>`,
+      'header stamp slot',
+    );
+  }
+  if (safe.showClassificationBanner) {
+    apply(
+      /(<table role="presentation" class="container"[^>]*>)/,
+      `<tr><td style="padding:8px 22px;background-color:${safe.canvasBg};color:${safe.fontColor};font-size:10px;line-height:16px;letter-spacing:1px;text-align:center;">${safe.classificationText}</td></tr>$1`,
+      'classification banner slot',
+    );
+  }
+  return html;
 }
 export function renderDailyFindingSummary(findings: DigestFinding[], config: TemplateCustomization): string {
   const safe = normalizeDigestConfig(config);
@@ -666,9 +847,11 @@ export function renderDailyFindingSummary(findings: DigestFinding[], config: Tem
       const cards = items
         .slice(0, 25)
         .map((f) => {
+          // Links follow the operator's accent. This was hard-coded to the stock
+          // blue, so a customized digest still showed blue CVE links.
           const cveIdHtml = f.sourceUrl
-            ? `<a href="${digestEscapeHtml(f.sourceUrl)}" target="_blank" rel="noopener noreferrer" style="color:#1d4ed8;text-decoration:underline;text-underline-offset:2px;">${digestEscapeHtml(f.cveId)}</a>`
-            : `<strong style="color:#1d4ed8;">${digestEscapeHtml(f.cveId)}</strong>`;
+            ? `<a href="${digestEscapeHtml(f.sourceUrl)}" target="_blank" rel="noopener noreferrer" style="color:${safe.accentColor};text-decoration:underline;text-underline-offset:2px;">${digestEscapeHtml(f.cveId)}</a>`
+            : `<strong style="color:${safe.accentColor};">${digestEscapeHtml(f.cveId)}</strong>`;
           const tags: string[] = [];
           if (typeof f.cvssScore === 'number') {
             tags.push(`CVSS ${f.cvssScore.toFixed(1)}`);
@@ -1006,208 +1189,516 @@ const digestHeaderBadge = (severity: string): string => {
 };
 
 export function renderDailyDigest(config: TemplateCustomization, parts: DailyDigestParts, template?: string): string {
+  // Without a hand-authored template, compile the studio markup with the
+  // operator's customization. Using the bare constant here discarded every
+  // colour, font, stamp and classification choice they had made.
   const compiled = template || compileDailyDigestTemplate(config);
-  return compiled
-    .replace(/{{report_generated}}/g, digestEscapeHtml(parts.report_generated))
-    .replace(/{{finding_count}}/g, String(parts.finding_count))
-    .replace(/{{critical_count}}/g, String(parts.critical_count))
-    .replace(/{{high_count}}/g, String(parts.high_count))
-    .replace(/{{medium_count}}/g, String(parts.medium_count))
-    .replace(/{{low_count}}/g, String(parts.low_count))
-    .replace(/{{asset_count}}/g, String(parts.asset_count))
-    .replace(/{{advisory_title}}/g, digestEscapeHtml(parts.advisory_title))
-    .replace(/{{advisory_id}}/g, digestEscapeHtml(parts.advisory_id))
-    .replace(/{{recipient_name}}/g, digestEscapeHtml(parts.recipient_name))
-    .replace(/{{severity_counts}}/g, digestEscapeHtml(parts.severity_counts))
-    .replace(/{{dispatch_date}}/g, digestEscapeHtml(parts.dispatch_date))
-    .replace(/{{severity}}/g, digestEscapeHtml(parts.severity))
-    // The executive summary is composed server-side from fixed templates and
-    // anchors, not from inventory text, so it stays raw HTML. It is escaped here
-    // when it is not one of those compositions, so operator-editable input such
-    // as an asset name can never become live markup in a delivered email.
-    .replace(
-      /{{executive_summary}}/g,
-      // The replacement is a value, not a pattern: a `$` in operator text would
-      // otherwise be interpreted as a capture reference by String.replace.
-      () => digestSafeExecutiveSummary(parts.executive_summary),
-    )
-    .replace(/{{findings_summary}}/g, parts.findings_summary)
-    .replace(/{{health_report}}/g, parts.health_report)
-    .replace(/{{critical_summary}}/g, parts.critical_summary || '')
-    .replace(/{{high_summary}}/g, parts.high_summary || '')
-    .replace(/{{medium_summary}}/g, parts.medium_summary || '')
-    .replace(/{{low_summary}}/g, parts.low_summary || '')
-    .replace(/{{critical_kpi}}/g, parts.critical_kpi || '')
-    .replace(/{{high_kpi}}/g, parts.high_kpi || '')
-    .replace(/{{medium_kpi}}/g, parts.medium_kpi || '')
-    .replace(/{{low_kpi}}/g, parts.low_kpi || '')
-    .replace(/{{held_for_review}}/g, parts.held_for_review || '')
-    .replace(/{{severity_header_badge}}/g, digestHeaderBadge(parts.severity));
+  return renderEmailTemplate(compiled, {
+    dispatch_date: parts.dispatch_date,
+    severity: parts.severity,
+    advisory_title: parts.advisory_title,
+    advisory_id: parts.advisory_id,
+    severity_header_badge: digestHeaderBadge(parts.severity),
+    report_generated: parts.report_generated,
+    severity_counts: parts.severity_counts,
+    executive_summary: digestSafeExecutiveSummary(parts.executive_summary),
+    finding_count: String(parts.finding_count),
+    critical_kpi: parts.critical_kpi || '',
+    high_kpi: parts.high_kpi || '',
+    medium_kpi: parts.medium_kpi || '',
+    low_kpi: parts.low_kpi || '',
+    asset_count: String(parts.asset_count),
+    critical_summary: parts.critical_summary || '',
+    high_summary: parts.high_summary || '',
+    medium_summary: parts.medium_summary || '',
+    low_summary: parts.low_summary || '',
+    findings_summary: parts.findings_summary,
+    held_for_review: parts.held_for_review || '',
+    health_report: parts.health_report,
+  });
 }
 
-const newsHeaderBadge = () => {
-  return `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:#1e40af;color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">SECURITY NEWS</span>`;
-};
-
-export function compileNewsTemplate(config: TemplateCustomization): string {
-  config = normalizeDigestConfig(config);
-  const headerHex = config.headerBg.slice(1);
-  const expanded = headerHex.length === 3 ? [...headerHex].map((ch) => ch + ch).join('') : headerHex;
-  const luminance = [0, 2, 4]
-    .map((offset) => parseInt(expanded.slice(offset, offset + 2), 16) / 255)
-    .map((channel) => (channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4))
-    .reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
-  const headerText = luminance > 0.179 ? '#0f172a' : '#ffffff';
-  const headerMuted = luminance > 0.179 ? '#334155' : '#cbd5e1';
-  const stampHtml = config.showStamp
-    ? `<p style="margin:0 0 8px;font-size:11px;line-height:18px;letter-spacing:1.5px;font-weight:700;color:${config.badgeStampColor};">${config.badgeStampText}</p>`
-    : '';
-  const classificationBanner = config.showClassificationBanner
-    ? `<tr><td style="padding:12px 28px;background:${config.canvasBg};color:${config.fontColor};font-size:10px;line-height:16px;letter-spacing:1px;text-align:center;">${config.classificationText}</td></tr>`
-    : '';
-  return `<!DOCTYPE html>
-<html lang="en">
+/**
+ * News Template Studio HTML — delivered news email uses exactly this markup.
+ * Renders through the Handlebars-subset engine (`renderEmailTemplate`) which
+ * supports `{{#each news_sources}}` loops and `{{{triple}}}` raw HTML fields.
+ */
+export const DEFAULT_NEWS_EMAIL_TEMPLATE = `<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="x-apple-disable-message-reformatting">
-<title>Security News — Threat Intelligence</title>
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<title>{{news_title}} | BA Threat Intelligence</title>
 
-<style>
-body{
-    margin:0;
-    padding:0;
-    background:${config.canvasBg};
-    font-family:${getFontFamilyCss(config.fontFamily)};
-}
-table{
-    border-collapse:collapse;
-}
-img{
-    border:0;
-    display:block;
-}
-@media only screen and (max-width:600px){
-    .container{
-        width:100% !important;
+<!--[if gte mso 9]>
+<xml>
+  <o:OfficeDocumentSettings>
+    <o:AllowPNG/>
+    <o:PixelsPerInch>96</o:PixelsPerInch>
+  </o:OfficeDocumentSettings>
+</xml>
+<![endif]-->
+
+<!--
+  =============================================================================
+  HANDLEBARS / MUSTACHE JSON SCHEMA (OUTLOOK DESKTOP SAFE - NO MSO CONDITIONALS
+  AROUND LOOP OR IF TAGS)
+  =============================================================================
+  {
+    "news_title": "Weekly Cyber Threat & Vulnerability Briefing",
+    "news_subject": "Enterprise & Industrial Security Digest",
+    "news_subject_badge_text": "THREAT BRIEFING",
+    "news_date": "22 Nov 2026",
+    "news_count": 3,
+    "news_summary": "Key threat intelligence developments covering critical infrastructure exploitation trends, zero-day patching priorities, and active ransomware TTPs.",
+    "news_sources": [
+      {
+        "title": "CISA Adds Actively Exploited Network Appliance Flaws to KEV Catalog",
+        "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+        "source_name": "CISA Advisories",
+        "published_at": "22 Nov 2026",
+        "excerpt": "Federal cybersecurity officials confirmed active exploitation in the wild and urged immediate patching across perimeter appliances."
+      }
+    ],
+    "news_articles": "",
+    "news_footer": "For inquiries or threat intelligence support, contact BA Security Operations at DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com.",
+    "sources_hub_url": "https://www.cisa.gov/news-events/cybersecurity-advisories"
+  }
+  =============================================================================
+-->
+
+<style type="text/css">
+  body, table, td, p, a {
+    -webkit-text-size-adjust: 100%;
+    -ms-text-size-adjust: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  table, td {
+    mso-table-lspace: 0pt;
+    mso-table-rspace: 0pt;
+    border-collapse: collapse;
+  }
+  body {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    background-color: #f1f5f9;
+    color: #1e293b;
+  }
+  a {
+    color: #1d4ed8;
+    text-decoration: underline;
+  }
+  @media only screen and (max-width: 680px) {
+    .wrapper-table {
+      width: 100% !important;
+      max-width: 100% !important;
     }
-    .stack{
-        display:block !important;
-        width:100% !important;
+    .mobile-pad {
+      padding-left: 16px !important;
+      padding-right: 16px !important;
     }
-    .mobile-padding{
-        padding:20px !important;
-    }
-    .title{
-        font-size:22px !important;
-        line-height:28px !important;
-    }
-}
+  }
 </style>
 </head>
+<body bgcolor="#f1f5f9" style="margin: 0; padding: 0; background-color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: #1e293b;">
 
-<body>
+  <!-- Preheader -->
+  <div style="display: none; font-size: 1px; line-height: 1px; max-height: 0px; max-width: 0px; opacity: 0; overflow: hidden; mso-hide: all;">
+    BA Threat Intelligence: {{news_title}} ({{news_count}} updates)
+  </div>
 
-<!-- Preview Text -->
-<div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">
-{{news_title}} - {{news_count}} security news article{{#if news_count > 1}}s{{/if}}
-</div>
-
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${config.canvasBg}">
-<tr>
-<td align="center" style="padding:24px 12px;">
-
-<table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" class="container" style="width:680px;max-width:680px;background:${config.cardBg};border:1px solid #e2e8f0;border-radius:12px;">
-
-${classificationBanner}
-
-    <!-- HEADER -->
+  <!-- Outer Canvas -->
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9" style="background-color: #f1f5f9; width: 100%;">
     <tr>
-        <td bgcolor="${config.headerBg}" style="padding:12px 20px 16px;border-radius:12px 12px 0 0;">
+      <td align="center" style="padding: 20px 10px;">
 
-            ${stampHtml}
+        <!--[if (gte mso 9)|(IE)]>
+        <table role="presentation" align="center" border="0" cellspacing="0" cellpadding="0" width="680">
+        <tr>
+        <td align="center" valign="top" width="680">
+        <![endif]-->
 
-            {{news_subject_badge}}
+        <!-- Main 680px Container -->
+        <table role="presentation" class="wrapper-table" width="680" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="width: 680px; max-width: 680px; background-color: #ffffff; border: 1px solid #cbd5e1;">
 
-             <div class="title" style="font-size:18px;line-height:22px;font-weight:700;color:${headerText};">
-                 BA Threat Intelligence
-             </div>
+          <!-- Top Accent Bar -->
+          <tr>
+            <td height="4" bgcolor="#1d4ed8" style="height: 4px; background-color: #1d4ed8; font-size: 1px; line-height: 1px;">&nbsp;</td>
+          </tr>
 
-             <div style="padding-top:3px;font-size:13px;line-height:18px;font-weight:600;color:${headerText};">
-                 {{news_title}}
-             </div>
+          <!-- SIMPLE SOLID HEADER -->
+          <tr>
+            <td class="mobile-pad" bgcolor="#f8fafc" style="background-color: #f8fafc; padding: 16px 22px; border-bottom: 1px solid #cbd5e1;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%; table-layout: fixed;">
+                <tr>
+                  <td align="left" valign="middle" width="460" style="width: 460px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 10px; mso-line-height-rule: exactly; line-height: 14px; font-weight: 700; letter-spacing: 0.7px; text-transform: uppercase; color: #1d4ed8;">
+                    BA THREAT INTELLIGENCE
+                  </td>
+                  <td align="right" valign="middle" width="174" style="width: 174px; text-align: right;">
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="right" style="margin-left: auto; margin-right: 0;">
+                      <tr>
+                        <td bgcolor="#dbeafe" style="background-color: #dbeafe; border: 1px solid #93c5fd; color: #1e40af; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 10px; mso-line-height-rule: exactly; line-height: 12px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase; padding: 3px 8px; mso-padding-alt: 3px 8px;">
+                          {{news_subject_badge_text}}
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td colspan="2" style="padding-top: 6px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 18px; mso-line-height-rule: exactly; line-height: 23px; font-weight: 700; color: #0f172a;">
+                    {{news_title}}
+                  </td>
+                </tr>
+                <tr>
+                  <td colspan="2" style="padding-top: 4px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 11px; mso-line-height-rule: exactly; line-height: 15px; color: #475569;">
+                    <strong style="color: #1e293b;">{{news_subject}}</strong> &nbsp;&bull;&nbsp; Generated: {{news_date}} &nbsp;&bull;&nbsp; Articles: {{news_count}}
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
 
-             <div style="padding-top:4px;font-size:11px;line-height:15px;color:${headerMuted};">
-                 {{news_subject}} | Generated: {{news_date}}
-             </div>
+          <!-- 01 SUMMARY (Clean White Surface) -->
+          <tr>
+            <td class="mobile-pad" bgcolor="#ffffff" style="background-color: #ffffff; padding: 14px 22px 16px 22px; border-bottom: 1px solid #e2e8f0;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td style="padding-bottom: 6px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 11px; mso-line-height-rule: exactly; line-height: 15px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: #0f172a;">
+                    <span style="color: #1d4ed8;">01</span> &nbsp;Executive Summary
+                  </td>
+                </tr>
+                <tr>
+                  <td style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 12px; mso-line-height-rule: exactly; line-height: 18px; color: #334155;">
+                    {{{news_summary}}}
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
 
+          <!-- 02 SECURITY NEWS (Shaded Header Bar + Outlook-Safe Article Cards) -->
+          <tr>
+            <td class="mobile-pad" bgcolor="#ffffff" style="background-color: #ffffff; padding: 14px 22px 16px 22px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                <!-- Shaded Section Heading Bar -->
+                <tr>
+                  <td bgcolor="#f1f5f9" style="background-color: #f1f5f9; border: 1px solid #cbd5e1; padding: 7px 12px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 11px; mso-line-height-rule: exactly; line-height: 15px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: #0f172a;">
+                    <span style="color: #1d4ed8;">02</span> &nbsp;Security News &amp; Source Links ({{news_count}})
+                  </td>
+                </tr>
+                <tr>
+                  <td height="10" style="height: 10px; font-size: 1px; line-height: 1px;">&nbsp;</td>
+                </tr>
+
+                <!-- Loop-Safe Structured News Articles -->
+                {{#each news_sources}}
+                <tr>
+                  <td style="padding-bottom: 10px;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="width: 100%; border: 1px solid #cbd5e1; background-color: #ffffff;">
+                      <!-- Card Top Metadata Bar -->
+                      <tr>
+                        <td bgcolor="#f8fafc" style="background-color: #f8fafc; padding: 6px 12px; border-bottom: 1px solid #e2e8f0;">
+                          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%; table-layout: fixed;">
+                            <tr>
+                              <td align="left" valign="middle" width="430" style="width: 430px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 10px; mso-line-height-rule: exactly; line-height: 14px; color: #475569;">
+                                <strong style="color: #1d4ed8; text-transform: uppercase; letter-spacing: 0.3px;">{{source_name}}</strong> &nbsp;&bull;&nbsp; {{published_at}}
+                              </td>
+                              <td align="right" valign="middle" width="180" style="width: 180px; text-align: right; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 10px; mso-line-height-rule: exactly; line-height: 14px; font-weight: 700;">
+                                <a href="{{url}}" target="_blank" style="color: #1d4ed8; text-decoration: underline;">Source Link &#8599;</a>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                      </tr>
+                      <!-- Card Headline & Summary -->
+                      <tr>
+                        <td style="padding: 10px 12px;">
+                          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                            <tr>
+                              <td style="padding-bottom: 5px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 13px; mso-line-height-rule: exactly; line-height: 18px; font-weight: 700; color: #0f172a;">
+                                <a href="{{url}}" target="_blank" style="color: #0f172a; text-decoration: none;">{{title}}</a>
+                              </td>
+                            </tr>
+                            <tr>
+                              <td style="padding-bottom: 7px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 11px; mso-line-height-rule: exactly; line-height: 16px; color: #334155;">
+                                {{{excerpt}}}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 11px; mso-line-height-rule: exactly; line-height: 15px; font-weight: 600;">
+                                <a href="{{url}}" target="_blank" style="color: #1d4ed8; text-decoration: underline;">Read full advisory at {{source_name}} &#8599;</a>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                {{/each}}
+
+                <!-- Optional Pre-Rendered HTML Articles Slot -->
+                <tr>
+                  <td style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 12px; mso-line-height-rule: exactly; line-height: 18px; color: #334155;">
+                    {{{news_articles}}}
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- FOOTER (No TLP Tag, Includes Source Hub Link) -->
+          <tr>
+            <td class="mobile-pad" bgcolor="#f8fafc" style="background-color: #f8fafc; padding: 12px 22px; border-top: 1px solid #cbd5e1;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%; table-layout: fixed;">
+                <tr>
+                  <td align="left" valign="middle" width="430" style="width: 430px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 11px; mso-line-height-rule: exactly; line-height: 15px; font-weight: 700; color: #0f172a;">
+                    BA Threat Intelligence
+                  </td>
+                  <td align="right" valign="middle" width="204" style="width: 204px; text-align: right; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 10px; mso-line-height-rule: exactly; line-height: 14px; font-weight: 700;">
+                    <a href="{{sources_hub_url}}" target="_blank" style="color: #1d4ed8; text-decoration: underline;">Threat Intelligence Sources &#8599;</a>
+                  </td>
+                </tr>
+                <tr>
+                  <td colspan="2" style="padding-top: 5px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 11px; mso-line-height-rule: exactly; line-height: 15px; color: #64748b;">
+                    {{{news_footer}}}
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+        </table>
+
+        <!--[if (gte mso 9)|(IE)]>
         </td>
+        </tr>
+        </table>
+        <![endif]-->
+
+      </td>
     </tr>
-
-    <!-- SUMMARY -->
-    <tr>
-        <td class="mobile-padding" style="padding:16px 20px;border-bottom:1px solid #e2e8f0;">
-
-            <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:${config.accentColor};padding-bottom:4px;">
-                SUMMARY
-            </div>
-
-            <div style="font-size:13px;line-height:20px;color:${config.fontColor};">
-                {{news_summary}}
-            </div>
-
-        </td>
-    </tr>
-
-    <!-- NEWS ARTICLES -->
-    <tr>
-        <td class="mobile-padding" style="padding:20px;">
-
-            <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:${config.accentColor};padding-bottom:8px;">
-                SECURITY NEWS ({{news_count}})
-            </div>
-
-            {{news_articles}}
-
-        </td>
-    </tr>
-
-    <!-- FOOTER -->
-    <tr>
-        <td style="padding:14px 20px;border-top:1px solid #d1d5db;background:#fafafa;border-radius:0 0 12px 12px;">
-
-            <div style="font-size:12px;font-weight:700;color:#0f172a;">
-                BA Threat Intelligence
-            </div>
-
-             <div style="font-size:12px;line-height:18px;color:#64748b;padding-top:4px;">
-                 {{news_footer}}
-             </div>
-
-        </td>
-    </tr>
-
-</table>
-
-</td>
-</tr>
-</table>
+  </table>
 
 </body>
 </html>`;
+
+/**
+ * News Studio defaults.
+ *
+ * Mirrors `DEFAULT_NEWS_EMAIL_TEMPLATE` exactly (system font, slate text, blue
+ * accent, square card, no stamp), so the default compile is byte-identical and
+ * an operator who never opened the styling tools keeps the shipped layout.
+ */
+export const DEFAULT_NEWS_EMAIL_CUSTOMIZATION: TemplateCustomization = {
+  ...DEFAULT_TEMPLATE_CUSTOMIZATION,
+  fontFamily: 'system',
+  fontColor: '#1e293b',
+  headingColor: '#0f172a',
+  accentColor: '#1d4ed8',
+  canvasBg: '#f1f5f9',
+  cardBg: '#ffffff',
+  headerBg: '#f8fafc',
+  borderRadius: '1px',
+  showStamp: false,
+  badgeStampText: 'THREAT BRIEFING',
+};
+
+/**
+ * Compiles the News Template Studio HTML for the operator's customization.
+ *
+ * This used to ignore `config` and return the stock markup, so every colour and
+ * typography choice made in the studio was dropped: the preview rendered one
+ * document while the customization panel reported another. The stock markup is
+ * patched with anchored substitutions (structure untouched). Every anchor is
+ * asserted, so editing the constant cannot silently ship a half-styled mail.
+ *
+ * `DEFAULT_NEWS_EMAIL_CUSTOMIZATION` mirrors the stock document exactly, so the
+ * default compile is byte-identical to it.
+ */
+export function compileNewsTemplate(config: TemplateCustomization): string {
+  const safe = normalizeDigestConfig({ ...DEFAULT_NEWS_EMAIL_CUSTOMIZATION, ...config });
+  const fontFamily = getFontFamilyCss(safe.fontFamily);
+  // Tints the stock markup pairs with the accent.
+  const isStockAccent = safe.accentColor.toLowerCase() === '#1d4ed8';
+  const badgeBg = isStockAccent ? '#dbeafe' : safe.accentColor;
+  const badgeBorder = isStockAccent ? '#93c5fd' : safe.accentColor;
+  const badgeText = isStockAccent ? '#1e40af' : safe.accentColor;
+  const isStockText = safe.fontColor === '#1e293b';
+  const mutedText = isStockText ? '#475569' : safe.fontColor;
+  const softText = isStockText ? '#334155' : safe.fontColor;
+  // The meta line's emphasis keeps its own slate tone at the stock values.
+  const metaStrong = isStockText && safe.headingColor === '#0f172a' ? '#1e293b' : safe.headingColor;
+
+  let html = DEFAULT_NEWS_EMAIL_TEMPLATE;
+  const apply = (pattern: RegExp, value: string, label: string) => {
+    // test() on a /g/ regex advances lastIndex; probe with a fresh copy.
+    if (!new RegExp(pattern.source, pattern.flags.replace('g', '')).test(html))
+      throw new Error(`News template no longer contains the ${label} anchor`);
+    html = html.replace(pattern, value);
+  };
+
+  // Stylesheet: font stack and body colours.
+  apply(
+    /(font-family: )-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;/,
+    `$1${fontFamily};`,
+    'stylesheet font stack',
+  );
+  apply(
+    /(body \{\n    margin: 0 !important;\n    padding: 0 !important;\n    width: 100% !important;\n    background-color: )#f1f5f9;(\n    color: )#1e293b;/,
+    `$1${safe.canvasBg};$2${safe.fontColor};`,
+    'stylesheet body rule',
+  );
+  apply(/(\n  a \{\n    color: )#1d4ed8;/, `$1${safe.accentColor};`, 'stylesheet link colour');
+  // <body> element: colours only; its font list keeps the document's own quoting.
+  apply(
+    /(<body bgcolor=")#f1f5f9(" style="margin: 0; padding: 0; background-color: )#f1f5f9(; font-family: [^;]+; color: )#1e293b;/,
+    `$1${safe.canvasBg}$2${safe.canvasBg}$3${safe.fontColor};`,
+    'body element',
+  );
+  // Outer canvas.
+  apply(
+    /(<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor=")#f1f5f9(" style="background-color: )#f1f5f9;/,
+    `$1${safe.canvasBg}$2${safe.canvasBg};`,
+    'outer canvas',
+  );
+  // Main 680px container.
+  apply(
+    /(<table role="presentation" class="wrapper-table" width="680" cellpadding="0" cellspacing="0" border="0" bgcolor=")#ffffff(" style="width: 680px; max-width: 680px; background-color: )#ffffff(; border: 1px solid #cbd5e1;)/,
+    `$1${safe.cardBg}$2${safe.cardBg}$3`.replace(
+      '; border: 1px solid #cbd5e1;',
+      `; border: ${safe.borderRadius} ${safe.borderStyle} #cbd5e1;`,
+    ),
+    'main container',
+  );
+  // Top accent bar.
+  apply(
+    /(<td height="4" bgcolor=")#1d4ed8(" style="height: 4px; background-color: )#1d4ed8;/,
+    `$1${safe.accentColor}$2${safe.accentColor};`,
+    'top accent bar',
+  );
+  // Header band and its muted strap line.
+  apply(
+    /(<td class="mobile-pad" bgcolor=")#f8fafc(" style="background-color: )#f8fafc(; padding: 16px 22px; border-bottom: 1px solid #cbd5e1;">\n              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%; table-layout: fixed;">)/,
+    `$1${safe.headerBg}$2${safe.headerBg}$3`,
+    'header band',
+  );
+  // Kicker ("BA THREAT INTELLIGENCE") and the subject badge.
+  apply(
+    /(letter-spacing: 0\.7px; text-transform: uppercase; color: )#1d4ed8;/,
+    `$1${safe.accentColor};`,
+    'header kicker',
+  );
+  apply(
+    /(<td bgcolor=")#dbeafe(" style="background-color: )#dbeafe(; border: 1px solid )#93c5fd(; color: )#1e40af;/,
+    `$1${badgeBg}$2${badgeBg}$3${badgeBorder}$4${badgeText};`,
+    'subject badge',
+  );
+  // Headline and meta line.
+  apply(
+    /(font-size: 18px; mso-line-height-rule: exactly; line-height: 23px; font-weight: 700; color: )#0f172a;/,
+    `$1${safe.headingColor};`,
+    'header headline',
+  );
+  apply(
+    /(line-height: 15px; color: )#475569;(">\n\s+<strong style="color: )#1e293b;/,
+    `$1${mutedText};$2${metaStrong};`,
+    'header meta line',
+  );
+  // Section numbers and headings.
+  apply(
+    /(<span style="color: )#1d4ed8(;">0[123]<\/span>)/g,
+    `$1${safe.accentColor}$2`,
+    'section numbers',
+  );
+  apply(
+    /(line-height: 15px; font-weight: 700; letter-spacing: 0\.5px; text-transform: uppercase; color: )#0f172a;/,
+    `$1${safe.headingColor};`,
+    'section heading',
+  );
+  // Article/meta and summary prose.
+  apply(
+    /(line-height: 18px; color: )#334155;/,
+    `$1${softText};`,
+    'summary prose',
+  );
+  // Footer band and its source-hub link.
+  apply(
+    /(<td class="mobile-pad" bgcolor=")#f8fafc(" style="background-color: )#f8fafc(; padding: 12px 22px; border-top: 1px solid #cbd5e1;">)/,
+    `$1${safe.headerBg}$2${safe.headerBg}$3`,
+    'footer band',
+  );
+  apply(
+    /(<a href="\{\{sources_hub_url\}\}" target="_blank" style="color: )#1d4ed8;/,
+    `$1${safe.accentColor};`,
+    'footer source hub link',
+  );
+  // Per-source links inside the {{#each news_sources}} cards (three per card).
+  const sourceLink = /(style="color: )#1d4ed8(; text-decoration: underline;">(?:Source Link|Read full advisory|Source Link &#8599;))/g;
+  if (/style="color: #1d4ed8; text-decoration: underline;"/.test(html)) {
+    html = html.replace(sourceLink, `$1${safe.accentColor}$2`);
+  }
+  // Source name emphasis, subject line and excerpt colour.
+  apply(
+    /(<strong style="color: )#1d4ed8(; text-transform: uppercase; letter-spacing: 0\.3px;">)/,
+    `$1${safe.accentColor}$2`,
+    'source name',
+  );
+  apply(
+    /(color: )#0f172a(; text-decoration: none;">\{\{title\}\})/,
+    `$1${safe.headingColor}$2`,
+    'article title link',
+  );
+  apply(
+    /(line-height: 16px; color: )#334155;/,
+    `$1${softText};`,
+    'article excerpt',
+  );
+
+  if (safe.showStamp) {
+    apply(
+      /(<td class="mobile-pad" bgcolor="[^"]+" style="background-color: [^"]+; padding: 16px 22px; border-bottom: 1px solid #cbd5e1;">)/,
+      `$1<div style="font-family:${fontFamily};font-size:10px;line-height:14px;font-weight:700;letter-spacing:1.5px;color:${safe.badgeStampColor};padding-bottom:4px;">${safe.badgeStampText}</div>`,
+      'header stamp slot',
+    );
+  }
+  if (safe.showClassificationBanner) {
+    apply(
+      /(<table role="presentation" class="wrapper-table"[^>]*>)/,
+      `<tr><td style="padding:8px 22px;background-color:${safe.canvasBg};color:${safe.fontColor};font-size:10px;line-height:16px;letter-spacing:1px;text-align:center;">${safe.classificationText}</td></tr>$1`,
+      'classification banner slot',
+    );
+  }
+  return html;
 }
 
 export function renderNewsTemplate(config: TemplateCustomization, parts: NewsTemplateParts, template?: string): string {
+  // Without hand-authored HTML, compile the studio markup with the operator's
+  // customization instead of shipping the stock document.
   const compiled = template || compileNewsTemplate(config);
-  return compiled
-    .replace(/{{news_title}}/g, digestEscapeHtml(parts.news_title))
-    .replace(/{{news_subject}}/g, digestEscapeHtml(parts.news_subject))
-    .replace(/{{news_date}}/g, digestEscapeHtml(parts.news_date))
-    .replace(/{{news_count}}/g, String(parts.news_count))
-    .replace(/{{news_summary}}/g, digestEscapeHtml(parts.news_summary))
-    .replace(/{{news_articles}}/g, parts.news_articles)
-    .replace(/{{news_footer}}/g, digestEscapeHtml(parts.news_footer))
-    .replace(/{{news_subject_badge}}/g, newsHeaderBadge());
+  return renderEmailTemplate(compiled, {
+    news_title: parts.news_title,
+    news_subject_badge_text: parts.news_subject_badge_text,
+    news_subject: parts.news_subject,
+    news_date: parts.news_date,
+    news_count: parts.news_count,
+    news_summary: parts.news_summary,
+    news_sources: parts.news_sources,
+    news_articles: parts.news_articles,
+    sources_hub_url: parts.sources_hub_url,
+    news_footer: parts.news_footer,
+  });
+}
+
+export interface NewsSource {
+  title: string;
+  url: string;
+  source_name: string;
+  published_at: string;
+  excerpt: string;
 }
 
 export interface NewsTemplateParts {
@@ -1218,4 +1709,7 @@ export interface NewsTemplateParts {
   news_summary: string;
   news_articles: string;
   news_footer: string;
+  news_subject_badge_text: string;
+  news_sources: NewsSource[];
+  sources_hub_url: string;
 }

@@ -38,9 +38,10 @@ import type {
   MlFindingFeedbackResponse,
 } from '../types';
 import {
+  DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
+  DEFAULT_NEWS_EMAIL_CUSTOMIZATION,
   compileDailyDigestTemplate,
   compileNewsTemplate,
-  DEFAULT_DAILY_DIGEST_CUSTOMIZATION,
 } from '../utils/templateCompiler';
 
 const SESSION_RENEW_THRESHOLD_SEC = 60;
@@ -375,18 +376,19 @@ function useApplication() {
   const customization = draft || snapshot.templateCustomization;
   const dailyDigestCustomization =
     dailyDigestDraft || snapshot.dailyDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION;
+  // Always a document compiled from the current customization. Using the raw
+  // snapshot made the studio preview show a template that ignored every change
+  // made in the studio until it was saved. Returning the raw snapshot (or the
+  // stock constant) is what made the preview keep showing an old template.
   const dailyDigestTemplate =
-    dailyDigestCustomTemplate ||
-    (dailyDigestDraft
-      ? compileDailyDigestTemplate(dailyDigestDraft)
-      : snapshot.dailyDigestTemplate);
+    dailyDigestCustomTemplate || compileDailyDigestTemplate(dailyDigestCustomization);
+  // The news studio has its own stock defaults; the digest's must not leak in.
   const newsDigestCustomization =
-    newsDigestDraft || snapshot.newsDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION;
+    newsDigestDraft || snapshot.newsDigestCustomization || DEFAULT_NEWS_EMAIL_CUSTOMIZATION;
+  // Compiled from the live customization, so the studio preview and the saved
+  // template follow every colour and typography change.
   const newsDigestTemplate =
-    newsDigestCustomTemplate ||
-    (newsDigestDraft
-      ? compileNewsTemplate(newsDigestDraft)
-      : snapshot.newsDigestTemplate);
+    newsDigestCustomTemplate || compileNewsTemplate(newsDigestCustomization);
   const setDailyDigestCustomTemplatePersisted = (template: string | null) => {
     setDailyDigestCustomTemplate(template);
     try {

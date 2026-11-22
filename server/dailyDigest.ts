@@ -9,7 +9,7 @@ import {
   claimsForJob,
   reconcileDuplicateOutboxClaims,
 } from './deliveryClaims';
-import { uniqueEnabledEmailRecipients } from './emailRecipients';
+import { dailyDigestRecipients, uniqueEnabledEmailRecipients } from './emailRecipients';
 import { advisoryEmail } from './advisoryEmail';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine';
 import { shouldSelectForDigest } from './ml/integration';
@@ -440,9 +440,11 @@ export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promi
         // One physical mailbox receives at most one digest. Duplicate recipient
         // configurations that share an address are collapsed to the widest
         // subscription (the same rule the consolidated finding/news queues use).
-        const recipients = uniqueEnabledEmailRecipients(
-          allRecipients.filter((r) => r.dailyDigest),
-        );
+        // The digest is its own stream in the multi-select subscription list, so
+        // an operator opts in by selecting DAILY_DIGEST rather than relying on
+        // the separate boolean flag alone (which is still honoured by the
+        // normaliser for records written before multi-select).
+        const recipients = uniqueEnabledEmailRecipients(dailyDigestRecipients(allRecipients));
         // The day is claimed only when there is somebody to send to. Claiming it
         // first meant that a tick running before any recipient opted in (or with
         // every recipient temporarily disabled) burned the whole day: the claim

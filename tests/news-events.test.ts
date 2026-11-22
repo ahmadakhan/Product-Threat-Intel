@@ -479,6 +479,8 @@ test(
         role: 'ADMIN',
         deliveryGroup: 'SECURITY_TEAM',
         subscriptionTier: 'ALL_SEVERITIES',
+        // News is a subscription stream now: select it explicitly.
+        subscriptions: ['ALL_SEVERITIES', 'NEWS'],
         enabled: true,
         deliverySuccessRate: 100,
       } as EmailRecipient);
@@ -506,7 +508,9 @@ test(
       assert.equal(jobRow.payload.cveIds[0], 'CVE-2026-12345');
       assert.equal(jobRow.payload.newsEvidence.articles.length, 1);
       assert.equal(jobRow.payload.newsEvidence.articles[0].id, jobRow.payload.newsEvidence.article.id);
-      // The HTML body is the same document the attachment is rendered from.
+      // The HTML body is the News Template Studio document, and the same
+      // document the attachment is rendered from.
+      assert.match(jobRow.payload.html, /SECURITY NEWS/);
       assert.match(jobRow.payload.html, /Matched asset/);
       assert.match(jobRow.payload.html, /acme widget/);
       let emails = 0;
@@ -1038,6 +1042,9 @@ test(
         role: 'ADMIN',
         deliveryGroup: 'SECURITY_TEAM',
         subscriptionTier: 'ALL_SEVERITIES',
+        // News is a subscription stream now: the tier alone does not opt a
+        // recipient into it.
+        subscriptions: ['ALL_SEVERITIES', 'NEWS'],
         enabled: true,
         deliverySuccessRate: 100,
       };

@@ -16,9 +16,10 @@ import {
   renderConsolidatedNewsEmailWithin,
   selectUnnotifiedArticles,
   type ConsolidatedNewsItem,
+  type NewsEmailTemplateInput,
 } from './newsEmail.ts';
 import { activeClaims, attachClaimsToJob, claimItems, claimsForJob, reconcileDuplicateOutboxClaims } from './deliveryClaims.ts';
-import { uniqueEnabledEmailRecipients } from './emailRecipients.ts';
+import { newsRecipients, uniqueEnabledEmailRecipients } from './emailRecipients.ts';
 
 /**
  * True when `db` is a pool (no transaction open) rather than a checked-out
@@ -82,6 +83,12 @@ export interface NewsQueueResult {
 }
 
 export interface NewsQueueDeps {
+  /**
+   * The saved News Template Studio document. The delivered email body is
+   * rendered from it, so a template saved in the studio applies to future
+   * news findings. Omitted = the default studio HTML.
+   */
+  template?: NewsEmailTemplateInput;
   /** Enqueue one consolidated email; injectable so the pipeline owns delivery. */
   enqueue: (input: {
     db: Db;
@@ -209,10 +216,7 @@ export async function queueConsolidatedNews(
   deps: NewsQueueDeps,
 ): Promise<NewsQueueResult> {
   const result: NewsQueueResult = { emailsQueued: 0, articlesIncluded: 0, articlesSuppressed: 0 };
-  const selected = uniqueEnabledEmailRecipients(recipients.filter(
-    (recipient) =>
-      recipient.enabled && (recipient.deliveryGroup === 'SECURITY_TEAM' || recipient.deliveryGroup === undefined),
-  ));
+  const selected = uniqueEnabledEmailRecipients(newsRecipients(recipients));
   if (!selected.length || !matches.length) return result;
   const assetNameFor = (assetId: string) =>
     matches.find((match) => match.assetId === assetId)?.assetName || assetId;
@@ -255,10 +259,10 @@ export async function queueConsolidatedNews(
       continue;
     }
     // One consolidated message per recipient, not one message per 100 articles.
-    // The renderer keeps the styled HTML within an explicit size budget and
-    // lists any article that does not fit in a styled overflow summary, so the
-    // body is never replaced by the plain-text document (AUD-004).
-    const document = renderConsolidatedNewsEmailWithin(own);
+    // The renderer keeps the studio's styled HTML within an explicit size budget
+    // and lists any article that does not fit in a styled overflow summary, so
+    // the body is never replaced by the plain-text document (AUD-004).
+    const document = renderConsolidatedNewsEmailWithin(own, undefined, deps.template);
     const batch = own.filter((item) => !document.overflow.includes(item));
     const overflow = document.overflow;
     const cveIds = [...new Set(own.flatMap((item) => item.cveIds))].sort();
@@ -291,7 +295,7 @@ export async function queueConsolidatedNews(
       const grantedIdentities = new Set(claim.granted.map((request) => request.itemId));
       const owned = own.filter((item) => grantedIdentities.has(newsArticleIdentity(item.article)));
       const ownedRequests = claim.granted;
-      const ownedDocument = renderConsolidatedNewsEmailWithin(owned);
+      const ownedDocument = renderConsolidatedNewsEmailWithin(owned, undefined, deps.template);
       const ownedCveIds = [...new Set(owned.flatMap((item) => item.cveIds))].sort();
       const ownedArticleIds = owned.map((item) => item.article.id).sort();
       const ownedRevision = createHash('sha256')
@@ -366,14 +370,11 @@ const articleSetFingerprint = (articleIds: readonly string[]) =>
   createHash('sha256').update(articleIds.join(',')).digest('hex').slice(0, 24);
 
 /**
- * Recipients eligible for consolidated news. Kept here so the pipeline and any
- * caller share one definition of "the Security team".
+ * Recipients eligible for consolidated news. One definition shared by the
+ * pipeline and every caller (server/emailRecipients.ts): enabled, in an
+ * automatic-delivery group, and subscribed to the NEWS stream.
  */
-export const newsRecipients = (recipients: readonly EmailRecipient[]) =>
-  recipients.filter(
-    (recipient) =>
-      recipient.enabled && (recipient.deliveryGroup === 'SECURITY_TEAM' || recipient.deliveryGroup === undefined),
-  );
+export { newsRecipients } from './emailRecipients.ts';
 
 /** Loads enabled recipients once; small table, single query. */
 export const loadNewsRecipients = async (db: Db) => newsRecipients(await list<EmailRecipient>(db, 'recipients'));

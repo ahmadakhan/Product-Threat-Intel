@@ -631,6 +631,14 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
       }
       await put(db, 'recipients', newId, {
         ...input,
+        // Persist the normalised multi-select list. Without an explicit list the
+        // tier is the only finding subscription, plus DAILY_DIGEST when the
+        // legacy dailyDigest flag is set, so the list and the legacy fields can
+        // never disagree.
+        subscriptions:
+          input.subscriptions?.length
+            ? input.subscriptions
+            : [...new Set([input.subscriptionTier, ...(input.dailyDigest ? ['DAILY_DIGEST' as const] : [])])],
         id: newId,
         deliverySuccessRate: old?.deliverySuccessRate ?? 0,
       });
@@ -843,6 +851,8 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
       ...existing,
       dailyDigestCustomization: input.dailyDigestCustomization,
       dailyDigestCustomTemplate,
+      // Always the compiled document, so a customization-only save is reflected
+      // in the stored template rather than resetting to the stock markup.
       dailyDigestTemplate:
         dailyDigestCustomTemplate || compileDailyDigestTemplate(input.dailyDigestCustomization),
     });
@@ -865,6 +875,8 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
       ...existing,
       newsDigestCustomization: input.newsDigestCustomization,
       newsDigestCustomTemplate,
+      // Always the compiled document, so the saved template reflects the
+      // operator's customization rather than the stock markup.
       newsDigestTemplate:
         newsDigestCustomTemplate || compileNewsTemplate(input.newsDigestCustomization),
     });

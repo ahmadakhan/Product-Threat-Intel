@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Db } from '../db.ts';
 import { enqueue } from '../delivery.ts';
 import type { EmailRecipient, Finding } from '../../src/types/index.ts';
+import { recipientSubscriptions } from '../../src/types/index.ts';
 import {
   consolidatedFindingsDocument,
   deliveryRevisionEvidence,
@@ -93,7 +94,11 @@ export async function queueNativeNotifications(db: Db): Promise<number> {
   const recipientRows = await db.query<{
     data: EmailRecipient;
   }>(`SELECT data FROM records WHERE kind='recipients'
-    AND data->>'enabled'='true' AND data->>'subscriptionTier'='ALL_SEVERITIES' ORDER BY id LIMIT 1001`);
+    AND data->>'enabled'='true'
+    AND (
+      data->>'subscriptionTier'='ALL_SEVERITIES'
+      OR data->'subscriptions' ? 'ALL_SEVERITIES'
+    ) ORDER BY id LIMIT 1001`);
   const hookRows = await db.query<{ data: { id: string; enabled: boolean; events: string[] } }>(
     `SELECT data FROM records WHERE kind='webhooks'
     AND data->>'enabled'='true' ORDER BY id LIMIT 1001`);
@@ -123,8 +128,10 @@ export async function queueNativeNotifications(db: Db): Promise<number> {
   for (const { advisory_id: advisoryId } of articles.rows) {
     const evidence = await readNativeEvidence(db, advisoryId);
     if (!evidence) continue;
+    // Multi-select: the finding tier may live in the legacy scalar or in the
+    // subscription list, so both are consulted.
     const eligibleRecipients = recipients.filter(
-      (rec) => rec.enabled && rec.subscriptionTier === 'ALL_SEVERITIES',
+      (rec) => rec.enabled && recipientSubscriptions(rec).includes('ALL_SEVERITIES'),
     );
     // Webhooks are machine-to-machine: automated consumers only ever see HIGH-confidence evidence.
     const eligibleHooks =

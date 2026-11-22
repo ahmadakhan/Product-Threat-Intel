@@ -202,7 +202,7 @@ test('template.save persists custom HTML and preserves it when visual settings a
 test('dailyDigestTemplate.save preserves custom HTML when visual settings are saved', async () => {
   const { applyCommand } = await import('../server/commands.ts');
   const { loadConfig } = await import('../server/config.ts');
-  const { DEFAULT_DAILY_DIGEST_CUSTOMIZATION, compileDailyDigestTemplate } = await import(
+  const { DEFAULT_DAILY_DIGEST_CUSTOMIZATION, DEFAULT_DAILY_DIGEST_TEMPLATE } = await import(
     '../src/utils/templateCompiler.ts'
   );
   const config = loadConfig({
@@ -253,13 +253,13 @@ test('dailyDigestTemplate.save preserves custom HTML when visual settings are sa
     actor: 'admin',
   });
   assert.equal(template.dailyDigestCustomTemplate, null);
-  assert.equal(template.dailyDigestTemplate, compileDailyDigestTemplate(DEFAULT_DAILY_DIGEST_CUSTOMIZATION));
+  assert.equal(template.dailyDigestTemplate, DEFAULT_DAILY_DIGEST_TEMPLATE);
 });
 
 test('newsTemplate.save is reachable and preserves custom HTML when visual settings are saved', async () => {
   const { applyCommand } = await import('../server/commands.ts');
   const { loadConfig } = await import('../server/config.ts');
-  const { DEFAULT_TEMPLATE_CUSTOMIZATION, compileNewsTemplate } = await import(
+  const { DEFAULT_TEMPLATE_CUSTOMIZATION, DEFAULT_NEWS_EMAIL_TEMPLATE } = await import(
     '../src/utils/templateCompiler.ts'
   );
   const config = loadConfig({
@@ -314,7 +314,11 @@ test('newsTemplate.save is reachable and preserves custom HTML when visual setti
     actor: 'admin',
   });
   assert.equal(template.newsDigestCustomTemplate, null);
-  assert.equal(template.newsDigestTemplate, compileNewsTemplate(DEFAULT_TEMPLATE_CUSTOMIZATION));
+  // The saved document is the studio markup compiled from the saved
+  // customization, not the stock constant: with the advisory default applied,
+  // its accent differs from the news stock accent.
+  assert.notEqual(template.newsDigestTemplate, DEFAULT_NEWS_EMAIL_TEMPLATE);
+  assert.match(String(template.newsDigestTemplate), /\{\{news_title\}\}/);
 });
 
 test('pipeline state uses saved custom advisory HTML and falls back to the canonical product template', async () => {
