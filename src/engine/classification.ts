@@ -104,9 +104,30 @@ const NON_SUBJECT_PHRASES = [
  * boundaries so 'in'/'on'/'for' cannot false-positive on ordinary prose. */
 const NON_SUBJECT_WORDS = ['attacker', 'malware', 'c2', 'infrastructure'];
 
+/**
+ * Escapes a literal for use inside a RegExp.
+ * Vendor and product names legitimately contain `.` (`next.js`, `node.js`) and
+ * `+` (`c++`), which are regex metacharacters; without escaping, `node.js` would
+ * match `nodeXjs` and `c++` would throw or over-match.
+ */
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Whole-token containment test.
+ *
+ * A plain `String.prototype.includes` makes `c1` "match" inside `c10` and `ios`
+ * inside `bios`, so a product that is genuinely absent from the prose was
+ * treated as mentioned. That flipped the root-subject verdict (and therefore the
+ * case classification and whether the finding was dispatched at all) on ordinary
+ * text. Boundaries are required on both sides, which still matches the
+ * punctuation-bearing forms operators actually register.
+ */
+const mentionsToken = (text: string, token: string): boolean =>
+  token.length > 0 && new RegExp(`(^|[^a-z0-9])${escapeRegExp(token)}([^a-z0-9]|$)`, 'i').test(text);
+
 function nonSubjectContext(text: string): boolean {
   if (NON_SUBJECT_PHRASES.some((phrase) => text.includes(phrase))) return true;
-  return NON_SUBJECT_WORDS.some((word) => new RegExp(`\\b${word}\\b`).test(text));
+  return NON_SUBJECT_WORDS.some((word) => mentionsToken(text, word));
 }
 
 /**
@@ -169,8 +190,8 @@ function rootSubjectVerdict(
 
   // If the vendor/product only appear in CPE/PURL structured fields, the text
   // itself does not mention them as a subject — structured evidence stands alone.
-  const vMentioned = text.includes(v);
-  const pMentioned = text.includes(p);
+  const vMentioned = mentionsToken(text, v);
+  const pMentioned = mentionsToken(text, p);
   if (!vMentioned && !pMentioned) return 'UNKNOWN';
 
   // Look for root-subject indicators near the product/vendor mention.

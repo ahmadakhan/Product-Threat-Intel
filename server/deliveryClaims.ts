@@ -106,6 +106,10 @@ export async function claimItems(
      ON CONFLICT (recipient_id,kind,item_id) DO UPDATE
        SET state='CLAIMED', job_id=EXCLUDED.job_id, claimed_at=now(), expires_at=EXCLUDED.expires_at,
            delivered_at=NULL
+      -- Reclaimable only when the existing claim can no longer be honoured. A
+      -- reclaim requires an elapsed lease AND an owner that is no longer live:
+      -- a QUEUED or SENDING job never loses its claim, which is what prevents a
+      -- second email from being queued while the first may still be delivered.
       WHERE delivery_claims.state='CLAIMED'
         AND delivery_claims.expires_at < now()
         AND NOT EXISTS (

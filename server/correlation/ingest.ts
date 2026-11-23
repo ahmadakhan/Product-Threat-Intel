@@ -21,6 +21,17 @@ export const databaseCode = (error: unknown): string => {
  */
 export const ATTEMPT_BUDGET_MS = 20_000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/**
+ * Sentinel returned by the advisory-resolution step when a concurrent writer
+ * won the fingerprint UNIQUE constraint race.
+ *
+ * It is distinct from `null` because the two duplicate outcomes differ in what
+ * the caller must do: a `null` result leaves the transaction usable and is
+ * committed, while the race outcome has already been rolled back and must not be
+ * committed. Collapsing them would either commit an aborted transaction (an
+ * error) or skip a legitimate commit.
+ */
+const FINGERPRINT_RACE_DUPLICATE: unique symbol = Symbol('fingerprint-race-duplicate');
 export const transientDatabaseError = (error: unknown) =>
   /^(40001|40P01|08[A-Z0-9]{3}|57P0[123]|ECONNRESET|ECONNREFUSED|EPIPE|ETIMEDOUT|ENETUNREACH)$/.test(
     databaseCode(error),
@@ -213,22 +224,49 @@ export class AdvisoryIngestor {
           // Resolve (or create) the advisory row and report which case applied.
           // The URL is the natural key: the row is inserted, or an existing row
           // at this URL is updated in place when its content changed.
-          // A fingerprint already stored under a different URL is a duplicate;
-          // it is detected by probing for an existing row rather than by
-          // attempting a write that could raise a unique violation.
-          const advisoryId = await (async (): Promise<string | null> => {
-            const inserted = await query<{ id: string }>(
-              `INSERT INTO unstructured_advisories(id,title,content,url,fingerprint)
-               VALUES($1,$2,$3,$4,$5) ON CONFLICT (url) DO NOTHING RETURNING id`,
-              [randomUUID(), input.title, extracted.cleanContent, input.url, fingerprint],
-            );
+          // A fingerprint already stored under a different URL is a duplicate.
+          // `ON CONFLICT (url)` arbitrates only the URL, so a fingerprint that a
+          // concurrent transaction inserted under a *different* URL still raises
+          // the fingerprint's own UNIQUE violation (23505). That is not a fault:
+          // it is the same duplicate arriving twice, and it used to be dead-
+          // lettered because 23505 is deliberately absent from the transient-code
+          // set. It is therefore resolved here, where the intent is unambiguous.
+          const advisoryId = await (async (): Promise<string | null | typeof FINGERPRINT_RACE_DUPLICATE> => {
+            let inserted: { rowCount: number | null; rows: { id: string }[] };
+            try {
+              inserted = await query<{ id: string }>(
+                `INSERT INTO unstructured_advisories(id,title,content,url,fingerprint)
+                 VALUES($1,$2,$3,$4,$5) ON CONFLICT (url) DO NOTHING RETURNING id`,
+                [randomUUID(), input.title, extracted.cleanContent, input.url, fingerprint],
+              );
+            } catch (insertError) {
+              if (databaseCode(insertError) !== '23505') throw insertError;
+              // A unique violation aborts the transaction, so the duplicate
+              // cannot be reported through the normal `return null` path below,
+              // which COMMITs a still-valid transaction. Roll back here and let
+              // the caller take the duplicate exit without committing.
+              await query('ROLLBACK').catch(() => {});
+              this.telemetry.log('INFO', 'ingestion.duplicate_fingerprint_race', { trackingId });
+              return FINGERPRINT_RACE_DUPLICATE;
+            }
             if (inserted.rowCount) return inserted.rows[0].id;
             // The URL is known to exist (the INSERT above found a conflict), so a
             // matching fingerprint means duplicate content already stored. FOR
             // UPDATE locks any matching row so the merge below is race-free.
+            //
+            // ORDER BY id is mandatory, not cosmetic: the fingerprint column is
+            // UNIQUE, so a concurrent transaction can hold an uncommitted INSERT
+            // for this value and this SELECT then waits on that row. Two sessions
+            // that wait in opposite physical order form the classic deadlock
+            // shape (40P01), and without a deterministic order the planner may
+            // pick either. Ordering makes every waiter queue behind the same row.
             const duplicateFingerprint =
-              ((await query('SELECT 1 FROM unstructured_advisories WHERE fingerprint=$1 FOR UPDATE', [fingerprint]))
-                .rowCount ?? 0) > 0;
+              ((
+                await query(
+                  'SELECT 1 FROM unstructured_advisories WHERE fingerprint=$1 ORDER BY id FOR UPDATE',
+                  [fingerprint],
+                )
+              ).rowCount ?? 0) > 0;
             const current = await query<{ id: string; processed: boolean }>(
               `SELECT id, processed_at IS NOT NULL AS processed FROM unstructured_advisories WHERE url=$1`,
               [input.url],
@@ -256,6 +294,11 @@ export class AdvisoryIngestor {
             this.telemetry.log('INFO', 'ingestion.url_merged', { trackingId });
             return merged.rows[0].id;
           })();
+          if (advisoryId === FINGERPRINT_RACE_DUPLICATE) {
+            // The transaction was already rolled back by the insert handler.
+            this.telemetry.discard(trackingId);
+            return 'DUPLICATE';
+          }
           if (!advisoryId) {
             await query('COMMIT');
             this.telemetry.log('INFO', 'ingestion.duplicate', { trackingId });

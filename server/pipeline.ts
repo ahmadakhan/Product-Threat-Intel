@@ -84,7 +84,7 @@ import {
   consolidatedFindingsDocument,
   type Job,
 } from './delivery';
-import { attachClaimsToJob, claimsForJob } from './deliveryClaims';
+import { attachClaimsToJob, claimItems, claimsForJob } from './deliveryClaims';
 import { loadNewsRecipients, queueConsolidatedNews, newsArticleIdentity } from './newsQueue';
 import { renderAdvisory } from './advisoryRender';
 import { HttpError } from './validation';
@@ -95,7 +95,8 @@ export { renderAdvisory } from './advisoryRender';
 /**
  * Input captured inside the commit transaction so delivery queueing can run
  * post-commit without holding the pipeline-queue advisory lock. All fields are
- * snapshotted inside the transaction; the post-commit step reads them here.
+ * snapshotted inside the transaction; the post-commit step reads them from the
+ * per-attempt slot below.
  */
 interface PostCommitDeliveryInput {
   rateLimitedMatches: IntelligenceMatch[];
@@ -108,7 +109,21 @@ interface PostCommitDeliveryInput {
   queueStarted: number;
 }
 
-let postCommitDelivery: PostCommitDeliveryInput | undefined;
+/**
+ * The attempt-scoped slot carrying a run's {@link PostCommitDeliveryInput} from
+ * its commit transaction to its post-commit delivery block.
+ *
+ * This state used to be a module-level `let` written inside the commit
+ * transaction and read by the post-commit block. Two attempts of the same
+ * execution can run concurrently: the worker detaches an attempt whose
+ * cancellation did not settle within its grace period and starts a replacement
+ * while the old promise is still unwinding. When that happened, the replacement
+ * overwrote the module-level value and the first attempt's delivery block then
+ * queued the other run's findings under its own execution id. Scoping the slot
+ * to the attempt removes the shared cell entirely: each call can only observe
+ * the snapshot it published itself.
+ */
+type PostCommitDeliverySlot = { current?: PostCommitDeliveryInput };
 /**
  * Rebuilds a queued job's stored payload from current intelligence.
  *
@@ -336,6 +351,19 @@ export const CPE_REMATCH_MAX_RUNS = 5;
 export const CPE_REMATCH_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
+ * Lock-wait budget for the candidate-index refresh transactions.
+ *
+ * The index refresh deliberately raises `statement_timeout` (minutes on a large
+ * installation). Without a separate lock budget, a refresh that merely collided
+ * with a concurrent writer would wait on the index's row locks for that entire
+ * statement budget while holding a pool connection and the `match-index`
+ * advisory lock. Five seconds is far above the observed contention window and
+ * far below the stall watchdog, so a collision surfaces as a fast, retryable
+ * `55P03` instead of a run that appears wedged.
+ */
+export const MATCH_INDEX_LOCK_TIMEOUT_MS = 5_000;
+
+/**
  * Merges this run's CPE changes into the persisted re-match backlog and drops
  * entries that have been re-evaluated often enough or are too old to keep.
  *
@@ -407,12 +435,31 @@ function cveClusterIdentities(cve: NormalizedCVE): { vendor: string; product: st
 /** Bounded retries for a pre-CVE disposition bind that lost its lock race. */
 const DEFERRED_BIND_MAX_ATTEMPTS = 5;
 
+/** Upper bound for {@link recoveryBackoffMs}. */
+export const RECOVERY_BACKOFF_CAP_MS = 15 * 60_000;
+
 /**
- * Backoff (ms) between pipeline lock-loss recovery requeues. Grows linearly
- * with the recovery attempt so a repeatedly-flaky worker stops thrashing the
- * pool and the advisory lock.
+ * Backoff (ms) between pipeline lock-loss recovery requeues.
+ *
+ * The first recovery is immediate: a run that lost its lock connection has not
+ * been shown to be flaky yet, and making the very first hand-back wait means a
+ * single transient connection reset leaves the run QUEUED for half a minute with
+ * nothing running — the scheduler tick that could recover it is gated by this
+ * same value. Only a *repeated* loss is throttled, and that throttle is
+ * exponential with full jitter (base 30s, capped at 15 minutes) so a worker that
+ * keeps dropping its lock cannot make the installation retry in lockstep or
+ * spin faster than it can make progress.
+ *
+ * `rng` is injectable so the schedule can be asserted deterministically.
  */
-const recoveryBackoffMs = (attempt: number) => attempt * 30_000;
+export const recoveryBackoffMs = (attempt: number, rng: () => number = Math.random): number => {
+  const safeAttempt = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
+  // `attempt` is 1-based (the count including the recovery being scheduled).
+  // attempt <= 1 is the first hand-back and must not be delayed.
+  if (safeAttempt <= 1) return 0;
+  const base = Math.min(RECOVERY_BACKOFF_CAP_MS, 30_000 * 2 ** (safeAttempt - 2));
+  return Math.floor(rng() * (base + 1));
+};
 
 export async function queueRun(
   pool: pg.Pool,
@@ -757,8 +804,38 @@ export async function regroupStaleAdvisory(
         );
         if (!inserted) continue;
         if (job.channel === 'email') {
-          await attachClaimsToJob(db, inserted, claimsForJob(job.target_id, 'finding', included));
+          // Take the claims the replacement needs BEFORE attaching them. The
+          // replacement is built here, outside `queueDigestAdvisory`, so nothing
+          // has claimed its findings; attaching claims that were never granted is
+          // a no-op, which left the new job owning nothing. `activeClaims` then
+          // reported every finding as unclaimed and the next pipeline run queued
+          // a duplicate copy of the same bundle under a different advisory id.
+          // Claiming first (and only attaching what was actually granted) makes
+          // the replacement authoritative until it is delivered or terminally
+          // refused.
+          const granted = await claimItems(
+            db,
+            claimsForJob(job.target_id, 'finding', included),
+            { jobId: inserted },
+          );
+          if (!granted.granted.length) {
+            // Another live job already owns every finding: this replacement would
+            // duplicate it. Retire it as a superseded no-op instead of leaving an
+            // unclaimed live row behind.
+            await db.query(
+              `UPDATE outbox SET status='SUPERSEDED', delivery_outcome='NOT_ATTEMPTED', updated_at=now()
+                WHERE id=$1 AND status='QUEUED'`,
+              [inserted],
+            );
+            continue;
+          }
         }
+        // The source row is deliberately left FAILED. It is the durable record
+        // that this bundle could not be delivered as written, and the operator
+        // view (and the suite) relies on that status. Duplicate suppression does
+        // not depend on it: the replacement claims the findings below, and
+        // `activeClaims` will not hand a claim to a second job while a queued or
+        // sending owner holds it.
       } else {
         await db.query(
           `UPDATE outbox
@@ -907,6 +984,19 @@ const isPinnedLogLine = (line: string) => PINNED_LOG_MARKERS.some((marker) => li
 function countRecoveries(execution: PipelineExecution): number {
   return Math.max(
     Number.isFinite(Number(execution.stats.recoveryAttempts)) ? Number(execution.stats.recoveryAttempts) : 0,
+    0,
+  );
+}
+/**
+ * Counts lock-loss recoveries. A run from before the counter existed reports 0,
+ * which matches the historical behaviour (it fell back to the crash counter, and
+ * a run that had never crashed was at 0 there too).
+ */
+function countLockRecoveries(execution: PipelineExecution): number {
+  return Math.max(
+    Number.isFinite(Number(execution.stats.lockRecoveryAttempts))
+      ? Number(execution.stats.lockRecoveryAttempts)
+      : 0,
     0,
   );
 }
@@ -1101,6 +1191,9 @@ export async function processPipeline(
 
   let locked = false,
     execution: PipelineExecution | undefined;
+  // Per-attempt snapshot handed from the commit transaction to the post-commit
+  // delivery block. See PostCommitDeliverySlot.
+  const postCommitDelivery: PostCommitDeliverySlot = {};
   // Alerts for faults found inside this run's commit. They are dispatched only
   // AFTER the transaction succeeds: an alert sent from inside a transaction that
   // then rolls back would report a failure that never happened.
@@ -1754,7 +1847,14 @@ export async function processPipeline(
           productAliases,
         }),
       undefined,
-      { locks: ['match-index'], statementTimeoutMs: 60000 },
+      {
+        locks: ['match-index'],
+        statementTimeoutMs: 60000,
+        // Fail fast on a colliding writer instead of parking on a pooled
+        // connection (and the match-index lock) for the whole extended statement
+        // budget. `refreshCandidatePairs` already retries a transient 55P03.
+        lockTimeoutMs: MATCH_INDEX_LOCK_TIMEOUT_MS,
+      },
     );
     // Audit M-2/M-3: the preliminary pass used to run the *entire* matcher over
     // the whole corpus solely to decide which CVEs need EPSS scores. That is the
@@ -1857,36 +1957,60 @@ export async function processPipeline(
       for (const feed of feedUpdates) {
         const current = currentFeeds.get(feed.id);
         // A feed the operator disabled while ingestion was running, or whose
-        // source changed, is no longer ours to describe: writing the run's
-        // health/etag back would resurrect a stale `enabled=true` or overwrite
-        // the newly configured source's state. A successful probe against the
-        // still-configured endpoint is the exception: its cleared failure state
-        // is evidence about the current source, not about the obsolete request,
-        // and discarding it strands a recovered feed as DOWN with an open
-        // circuit. Retryable health (DOWN/DEGRADED) keeps the original rule.
+        // source changed (URL/type/auth), is no longer ours to describe: writing
+        // the run's health/etag back would resurrect a stale `enabled=true` or
+        // overwrite the newly configured source's state, and its ETag belongs to
+        // a response the operator has since redirected elsewhere. Such a feed is
+        // absent from `validSources` and is skipped here unconditionally.
+        //
+        // The recovery case is different and is why this is not simply a
+        // `validSources` check: a feed that is still configured identically but
+        // was DOWN with an open circuit is NOT in `validSources` either (a
+        // successful probe clears the circuit), and discarding its cleared
+        // failure state would strand a genuinely recovered feed as DOWN. For
+        // that case only, a HEALTHY result is carried forward onto the current
+        // row — but never its ETag, because the ETag describes the response of a
+        // probe that this run's source configuration no longer governs.
+        const configurationUnchanged = validSources.has(feed.id);
         const healthy = feed.healthStatus === 'HEALTHY';
-        if (!current || (!healthy && !validSources.has(feed.id))) continue;
-        await put(db, 'feeds', feed.id, {
-          ...current,
-          healthStatus: feed.healthStatus,
-          lastSync: feed.lastSync,
-          latencyMs: feed.latencyMs,
-          itemCountLastRun: feed.itemCountLastRun,
-          errorLog: feed.errorLog,
-          ssrfValidated: feed.ssrfValidated,
-          etag: healthy ? (feed.etag ?? current.etag) : feed.etag,
-          consecutiveFailures: feed.consecutiveFailures,
-          circuitOpenUntil: feed.circuitOpenUntil,
-          // The explicit carry-forward keeps a future refactor from resetting
-          // the recovery clock. A healthy probe clears it: it records the last
-          // *failed* recovery attempt, and `recoveryDue` refuses a new probe for
-          // its minimum interval whenever it is set, so keeping it after a
-          // recovery delayed the next one.
-          lastRecoveryAttemptAt: healthy
-            ? null
-            : (feed.lastRecoveryAttemptAt ?? current.lastRecoveryAttemptAt ?? null),
-          enabled: current.enabled,
-        });
+        if (!current) continue;
+        if (!configurationUnchanged && !healthy) continue;
+        // A changed source keeps EVERYTHING the operator just configured, and only
+        // has a stale open circuit cleared. A HEALTHY probe proves the endpoint it
+        // was sent to is reachable, which is not a claim about the new one.
+        const patch: ThreatFeed = configurationUnchanged
+          ? {
+              ...current,
+              healthStatus: feed.healthStatus,
+              lastSync: feed.lastSync,
+              latencyMs: feed.latencyMs,
+              itemCountLastRun: feed.itemCountLastRun,
+              errorLog: feed.errorLog,
+              ssrfValidated: feed.ssrfValidated,
+              etag: feed.etag,
+              consecutiveFailures: feed.consecutiveFailures,
+              circuitOpenUntil: feed.circuitOpenUntil,
+              // The explicit carry-forward keeps a future refactor from resetting
+              // the recovery clock. A healthy probe clears it: it records the last
+              // *failed* recovery attempt, and `recoveryDue` refuses a new probe for
+              // its minimum interval whenever it is set, so keeping it after a
+              // recovery delayed the next one.
+              lastRecoveryAttemptAt: healthy
+                ? null
+                : (feed.lastRecoveryAttemptAt ?? current.lastRecoveryAttemptAt ?? null),
+              enabled: current.enabled,
+            }
+          : {
+              // Source changed mid-run: keep the operator's configuration and
+              // state verbatim, and only clear the failure budget the obsolete
+              // probe would otherwise have consumed.
+              ...current,
+              consecutiveFailures: 0,
+              circuitOpenUntil: null,
+              lastRecoveryAttemptAt: null,
+              enabled: current.enabled,
+            };
+        await put(db, 'feeds', feed.id, patch);
       }
       if (feeds.length && !succeeded) {
         await appendAudit(
@@ -2366,7 +2490,11 @@ export async function processPipeline(
             productAliases: finalProductAliases,
           }),
         undefined,
-        { locks: ['match-index'], statementTimeoutMs: config.MATCH_INDEX_STATEMENT_TIMEOUT_MS },
+        {
+          locks: ['match-index'],
+          statementTimeoutMs: config.MATCH_INDEX_STATEMENT_TIMEOUT_MS,
+          lockTimeoutMs: MATCH_INDEX_LOCK_TIMEOUT_MS,
+        },
       );
       const correlated = runVulnerabilityPipeline(
         feeds,
@@ -2849,7 +2977,9 @@ export async function processPipeline(
         newsArticlesQueued = 0;
       // Snapshot all data needed for post-commit delivery queueing so the
       // pipeline-queue advisory lock can be released before delivery enqueues.
-      postCommitDelivery = {
+      // Run-scoped: see PostCommitDeliverySlot. A concurrent attempt must never
+      // be able to observe or overwrite this attempt's snapshot.
+      postCommitDelivery.current = {
         rateLimitedMatches,
         articles,
         snapshot,
@@ -2858,7 +2988,7 @@ export async function processPipeline(
         zeroDayDigestNotificationsQueued,
         executionId: execution!.id,
         queueStarted,
-      };
+      } satisfies PostCommitDeliveryInput;
       // Security news is consolidated into ONE email per recipient per run, and an
       // article already delivered to a recipient is never delivered again. The
       // per-match queue could not guarantee that: the matcher re-keys a match on
@@ -2995,6 +3125,11 @@ export async function processPipeline(
       let newsArticlesQueued = 0;
 
       const delivery = await transaction(pool, async (db) => {
+        // Read the immutable snapshot once. A missing snapshot means the commit
+        // transaction did not publish one, which is a programming error, not a
+        // delivery failure: fail loudly instead of queueing nothing silently.
+        const postCommit = postCommitDelivery.current;
+        if (!postCommit) throw new Error('Post-commit delivery snapshot was not published');
         const {
           rateLimitedMatches,
           articles,
@@ -3004,7 +3139,7 @@ export async function processPipeline(
           zeroDayDigestNotificationsQueued,
           executionId,
           queueStarted,
-        } = postCommitDelivery!;
+        } = postCommit;
 
         // Security news consolidation
         if (rateLimitedMatches.length) {
@@ -3181,17 +3316,17 @@ export async function processPipeline(
     // pool (a fresh connection, since the lock client is dead) instead.
     if (connectionLost) {
       if (!execution) throw e;
-      // Share the crash-recovery budget: the sweep counts stats.recoveryAttempts
-      // (falling back to the historical log marker), so a worker that keeps
-      // losing its lock exhausts 3 attempts total rather than 3 crashes plus
-      // 3 lock losses.
-      const lostLockExecution =
-        (await get<PipelineExecution>(pool, 'executions', execution.id).catch(() => undefined)) ?? undefined;
-      const lostLockRecoveries = lostLockExecution ? countRecoveries(lostLockExecution) : 0;
+      // Count lock-loss recoveries on their own counter. They used to share
+      // `stats.recoveryAttempts` with the crash sweep, so three related but
+      // distinct faults (crashes and dropped lock connections) exhausted one
+      // budget between them and parked a run that had hit neither limit. The
+      // counter is read under the row lock below, from the committed value.
       await transaction(pool, async (db) => {
         const current = await getForUpdate<PipelineExecution>(db, 'executions', execution!.id);
         if (!current || !['QUEUED', 'RUNNING'].includes(current.status)) return;
-        const nextAttempt = lostLockRecoveries + 1;
+        // Read the committed counter under the row lock, so two concurrent
+        // recoveries cannot both spend the same budget slot.
+        const nextAttempt = countLockRecoveries(current) + 1;
         if (current.stopRequestedAt) {
           const cancelled = {
             ...current,
@@ -3228,7 +3363,7 @@ export async function processPipeline(
             ),
           stats: {
             ...current.stats,
-            recoveryAttempts: nextAttempt,
+            lockRecoveryAttempts: nextAttempt,
             recoveryBackoffUntil: Date.now() + recoveryBackoffMs(nextAttempt),
           },
             logs: boundExecutionLogs([
@@ -3264,13 +3399,12 @@ export async function processPipeline(
           // half-applied — the run is exactly as resumable as an interrupted
           // one. Marking it FAILED made it unrecoverable, because the recovery
           // sweep only rescues RUNNING/QUEUED records. Hand the run back as
-          // QUEUED and count the restart against the same bounded recovery
-          // budget the crash path uses, so a genuinely broken worker still
-          // parks the run instead of looping forever.
+          // QUEUED and count the restart against the lock-loss budget, so a
+          // genuinely broken worker still parks the run instead of looping.
           status: 'QUEUED',
           stats: {
             ...current.stats,
-            recoveryAttempts: nextAttempt,
+            lockRecoveryAttempts: nextAttempt,
             recoveryBackoffUntil: Date.now() + recoveryBackoffMs(nextAttempt),
           },
           phases: current.phases.map((phase) =>
@@ -3410,7 +3544,17 @@ export async function processPipeline(
     if (heartbeat) clearInterval(heartbeat);
     if (locked && !released) {
       try {
-        await lock.query(`SELECT pg_advisory_unlock(800003, ${schemaLockKey})`);
+        // Inspect the boolean result. `pg_advisory_unlock` returns false (without
+        // throwing) when this session does not hold the lock, so awaiting the
+        // round-trip is NOT proof of release. A `false` result has to take the
+        // same path as a thrown error: the connection may still own the lock and
+        // must never return to the pool, where the next checkout would appear to
+        // hold the pipeline run lock.
+        const unlockQuery = await lock.query<{ released: boolean }>(
+          `SELECT pg_advisory_unlock(800003, ${schemaLockKey}) AS released`,
+        );
+        if (unlockQuery.rows[0]?.released !== true)
+          throw new Error('pg_advisory_unlock reported the lock was not held by this session');
         await writeEvent(lock, {
           category: 'PIPELINE',
           level: 'INFO',

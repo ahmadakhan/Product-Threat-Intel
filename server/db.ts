@@ -146,6 +146,21 @@ export const createPool = (url: string) => {
 export const schemaLockKey = 'hashtext(COALESCE(current_schema(), current_database()))';
 
 /**
+ * Renders a lock class for interpolation into an advisory-lock statement.
+ *
+ * Advisory locks are addressed as `(class, key)` where both are integers; the
+ * SQL helper accepts either a bare number or a hashtext expression. Lock classes
+ * in this codebase are always numeric constants, but the value is interpolated
+ * (it cannot be bound, because the sibling argument is an expression), so it is
+ * restricted to a safe numeric form rather than trusted.
+ */
+const advisoryLockClassArgument = (lockClass: number | string): string => {
+  if (typeof lockClass === 'number' && Number.isSafeInteger(lockClass)) return String(lockClass);
+  if (typeof lockClass === 'string' && /^\d{1,18}$/.test(lockClass)) return lockClass;
+  throw new Error('Invalid advisory lock class');
+};
+
+/**
  * The newest migration this build depends on. Production startup refuses to
  * run against an older schema instead of failing later on a missing column.
  *
@@ -239,9 +254,18 @@ const indexName = (statement: string): string | null =>
  * Unlock helper with observability.
  *
  * Session advisory locks acquired outside `transaction()` (the pipeline run
- * lock, the index-build lock) must be released on their own connection; this
- * wraps that unlock with structured logging so a failed release — which can
- * pin the lock until the connection dies — is visible in the process log.
+ * lock, the digest locks, the index-build lock) must be released on their own
+ * connection; this wraps that unlock with structured logging so a failed release
+ * — which can pin the lock until the connection dies — is visible in the process
+ * log.
+ *
+ * CRITICAL: `pg_advisory_unlock` reports whether this session actually held the
+ * lock via its `unlocked` result, and returns false (without erroring) when it
+ * did not. Treating a successful round-trip as a successful release is what
+ * hands a lock-holding connection back to the pool: the next request to check
+ * that client out then believes it owns the lock, while the real owner is gone.
+ * The boolean result is therefore inspected, not just awaited, and a `false`
+ * result is reported as a failure so the caller destroys the connection.
  */
 export async function safeAdvisoryUnlock(
   client: pg.PoolClient,
@@ -250,7 +274,28 @@ export async function safeAdvisoryUnlock(
   lockKey: string,
 ): Promise<boolean> {
   try {
-    await client.query('SELECT pg_advisory_unlock($1, $2)', [lockClass, schemaKey]);
+    const result = await client.query<{ released: boolean }>(
+      // `schemaKey` is a SQL *expression* (`schemaLockKey` is the literal text
+      // `hashtext(COALESCE(current_schema(), current_database()))`), not a value.
+      // Binding it as a parameter sent that text as the key, so the unlock looked
+      // up an advisory key literally named "hashtext(...)" and never matched the
+      // lock it was acquired under. It has always been interpolated at every other
+      // call site for this reason. `lockClass` is a caller-supplied constant; it is
+      // validated below because it is interpolated too.
+      `SELECT pg_advisory_unlock(${advisoryLockClassArgument(lockClass)}, ${schemaKey}) AS released`,
+    );
+    if (result.rows[0]?.released !== true) {
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          event: 'advisory_unlock_not_held',
+          lockClass,
+          lockKey,
+          timestamp: new Date().toISOString(),
+        }),
+      );
+      return false;
+    }
     console.log(
       JSON.stringify({
         level: 'info',
@@ -305,9 +350,13 @@ export async function applyIndexMigrations(pool: pg.Pool): Promise<void> {
       }
     } finally {
       try {
-        await client.query(
-          'SELECT pg_advisory_unlock(800005, hashtext(COALESCE(current_schema(), current_database())))',
+        // A `false` result means the lock was not held by this session and was
+        // therefore NOT released; like a thrown error it leaves the connection
+        // suspect, so it takes the same destroy path.
+        const unlocked = await client.query<{ released: boolean }>(
+          'SELECT pg_advisory_unlock(800005, hashtext(COALESCE(current_schema(), current_database()))) AS released',
         );
+        if (unlocked.rows[0]?.released !== true) failed = true;
       } catch {
         // If the release fails the session advisory lock stays pinned on this
         // connection. Destroying it prevents a recycled connection from handing
@@ -509,6 +558,77 @@ export async function migrate(pool: pg.Pool) {
   // CREATE INDEX CONCURRENTLY statements must not run inside a transaction.
   await applyIndexMigrations(pool);
 }
+/**
+ * Total acquisition order for every transaction-scoped advisory lock.
+ *
+ * `transaction()` sorts the *names* it is handed, which prevents a single
+ * transaction from self-deadlocking but says nothing about two different call
+ * sites that take different names in different orders. That cross-caller cycle
+ * is the one PostgreSQL reports as `40P01`, and it was only ever guarded by a
+ * comment asking developers to keep the order alphabetical.
+ *
+ * The order below is the executable form of that invariant. A name absent from
+ * the table sorts after every listed one, keeping unknown locks at the tail
+ * where they cannot be interleaved into an existing cycle.
+ *
+ * LOCK_ORDER must stay consistent with LOCK_CLASS_RANK: a lock acquired by hand
+ * (the session-scoped run, leadership and index-build locks) has to rank before
+ * anything its holder takes afterwards inside `transaction()`.
+ */
+export const LOCK_ORDER: readonly string[] = Object.freeze([
+  // Coarsest scope first: migration/schema, then the domains a long run holds.
+  'schema',
+  'match-index',
+  'pipeline-queue',
+  'audit-chain',
+  // Operator-managed identity domains. These are always leaves: their holders
+  // never take a pipeline or index lock afterwards.
+  'watchlist-identity',
+  'feed-source',
+  'recipients-unique',
+  'digest-buffer',
+]);
+
+const LOCK_RANK: ReadonlyMap<string, number> = new Map(LOCK_ORDER.map((name, index) => [name, index]));
+
+/**
+ * Rank used to order named locks. Unknown names rank last, preserving their
+ * relative order among themselves so the sort stays total and stable.
+ */
+export const lockRank = (name: string): number => LOCK_RANK.get(name) ?? LOCK_ORDER.length;
+
+/**
+ * Sorts lock names into the global acquisition order.
+ *
+ * Exported so call sites and tests can assert the order rather than trusting a
+ * comment. Sorting is stable by name for equal ranks, so two callers that hold
+ * the same set always acquire it in the same sequence.
+ */
+export const orderLocks = (names: readonly string[]): string[] =>
+  [...names].sort((a, b) => lockRank(a) - lockRank(b) || (a < b ? -1 : a > b ? 1 : 0));
+
+/**
+ * Rank of the session- and transaction-scoped lock *classes* (the first
+ * `pg_advisory_lock` argument).
+ *
+ * A holder of a class lock may open a `transaction()` afterwards and take a
+ * named lock there, so the two orderings must agree. Every class below is
+ * declared in increasing order of "how much the holder is entitled to take
+ * afterwards": leadership and schema/migration locks rank lowest, then the
+ * pipeline run lock, then the index-build lock.
+ *
+ * Keeping this table next to LOCK_ORDER is what makes the invariant checkable:
+ * two independent numeric namespaces with no declared relationship are exactly
+ * how the `match-index` / `watchlist-identity` cycle was introduced.
+ */
+export const LOCK_CLASS_RANK: ReadonlyMap<number, number> = new Map([
+  [800004, 0], // migration transaction; also used by daily digest and ML training
+  [800001, 1], // migration schema lock
+  [800003, 2], // pipeline run / burst digest
+  [784921, 3], // worker leadership
+  [800005, 4], // concurrent index build
+]);
+
 export interface TransactionOptions {
   /**
    * Optional named advisory locks acquired for the duration of the transaction.
@@ -547,6 +667,18 @@ export interface TransactionOptions {
    * large installations.
    */
   statementTimeoutMs?: number;
+  /**
+   * Override the pool-level `lock_timeout` for this transaction, in
+   * milliseconds, via `SET LOCAL`.
+   *
+   * A parked-in-catalogue/row lock wait is bounded only by `statement_timeout`
+   * (15s by default, but minutes for a transaction that raised it), so a commit
+   * transaction that collides with an operator write can hold a pool connection
+   * and its advisory locks for the whole statement budget. Setting a lock
+   * timeout makes the collision fail fast as `55P03` instead, which the callers'
+   * existing retry/recovery paths already handle.
+   */
+  lockTimeoutMs?: number;
 }
 
 /**
@@ -651,14 +783,22 @@ export async function transaction<T>(
     // work (e.g. correlation candidate-index refresh). Reverts on COMMIT/ROLLBACK.
     if (typeof options.statementTimeoutMs === 'number' && Number.isFinite(options.statementTimeoutMs))
       await db.query(`SET LOCAL statement_timeout = '${options.statementTimeoutMs}ms'`);
+    // Bound lock waits independently of the statement budget. A transaction that
+    // raised its statement timeout for expensive work must still fail fast when
+    // it merely collides with a concurrent writer, otherwise it parks on a pool
+    // connection (and its advisory locks) for the whole extended budget.
+    if (typeof options.lockTimeoutMs === 'number' && Number.isFinite(options.lockTimeoutMs))
+      await db.query(`SET LOCAL lock_timeout = '${Math.max(1, Math.floor(options.lockTimeoutMs))}ms'`);
     // Named, transaction-scoped locks replace the former global mutation lock.
     // Row-level locks on the records being mutated provide the per-record
-    // serialization that operators actually need. CRITICAL: acquire locks in
-    // global alphabetical order to prevent deadlocks from inconsistent ordering
-    // across different callers (e.g., schemaLockKey before pipeline-queue).
-    for (const lock of [...(options.locks ?? [])]
-      .filter((name) => !options.lockAcquired?.includes(name))
-      .sort())
+    // serialization that operators actually need. Locks are acquired in the
+    // global order declared by LOCK_ORDER, not merely alphabetically: an
+    // alphabetical sort is only total within one call, while LOCK_ORDER is the
+    // single sequence every caller observes, which is what prevents the
+    // cross-caller cycle PostgreSQL reports as 40P01.
+    for (const lock of orderLocks(
+      (options.locks ?? []).filter((name) => !options.lockAcquired?.includes(name)),
+    ))
       await db.query(`SELECT pg_advisory_xact_lock(hashtext($1), ${schemaLockKey})`, [lock]);
     const result = await fn(db);
     if (connectionError) throw connectionError;

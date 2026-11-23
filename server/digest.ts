@@ -8,6 +8,7 @@ import {
   getForUpdate,
   put,
   remove,
+  safeAdvisoryUnlock,
   schemaLockKey,
   transaction,
   type Db,
@@ -357,8 +358,13 @@ export async function flushDueDigest(pool: pg.Pool): Promise<number> {
     failed = true;
     throw error;
   } finally {
-    if (locked)
-      await client.query(`SELECT pg_advisory_unlock(800003, ${schemaLockKey})`).catch(() => {});
+    // Release through the shared helper, which inspects pg_advisory_unlock's
+    // boolean result. A lock that is *not* actually released must never return
+    // its connection to the pool: the next checkout would appear to hold the
+    // digest lock while nobody owns it. Destroying the connection is the only
+    // safe outcome, because PostgreSQL releases a session's advisory locks when
+    // the backend terminates.
+    if (locked && !(await safeAdvisoryUnlock(client, 800003, schemaLockKey, 'burst-digest'))) failed = true;
     client.release(failed);
   }
 }

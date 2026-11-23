@@ -892,6 +892,18 @@ export interface PipelineExecution {
      */
     recoveryAttempts?: number;
     /**
+     * How many times this run has been handed back after the worker lost its
+     * advisory-lock connection.
+     *
+     * Kept separate from {@link recoveryAttempts} because the two budgets cover
+     * different faults: a crashed worker is rescued by the recovery sweep, a
+     * dropped lock connection by the worker's own cleanup path. Sharing one
+     * counter meant a deployment with both problems exhausted its budget in
+     * three ticks and parked the run, even though neither fault alone came close
+     * to its own limit.
+     */
+    lockRecoveryAttempts?: number;
+    /**
      * Epoch-ms until which a lock-loss-recovered execution must stay QUEUED.
      * `queueRun` skips it until the backoff expires, so a repeatedly-flaky
      * worker cannot thrash the advisory lock by re-running immediately.

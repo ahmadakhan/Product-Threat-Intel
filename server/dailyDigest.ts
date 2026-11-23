@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import { get, getMany, list, put, transaction, schemaLockKey, type Db } from './db';
+import { get, getMany, list, put, safeAdvisoryUnlock, transaction, schemaLockKey, type Db } from './db';
 import { writeEvent } from './events';
 import { advisoryRevision, enqueue, findingRevision, revision, recipientAllows } from './delivery';
 import {
@@ -813,10 +813,14 @@ export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promi
     failed = true;
     throw error;
   } finally {
-    if (locked)
-      await client
-        .query(`SELECT pg_advisory_unlock(${DAILY_LOCK_CLASS}, ${schemaLockKey}) AS locked`)
-        .catch(() => {});
+    // Inspect the unlock result; a lock that was not actually released must not
+    // go back to the pool, or a later checkout would appear to own the daily
+    // digest lock and silently suppress the next day's send. Destroying the
+    // connection is safe because PostgreSQL drops a session's advisory locks
+    // when the backend terminates.
+    if (locked && !(await safeAdvisoryUnlock(client, DAILY_LOCK_CLASS, schemaLockKey, 'daily-digest'))) {
+      failed = true;
+    }
     client.release(failed);
   }
 }

@@ -15,6 +15,17 @@ export interface PendingBatch {
  * a database recovery, a deploy restart — while bounding the loop.
  */
 export const MAX_PENDING_ATTEMPTS = 20;
+/**
+ * Longest lease a pending row may hold, in seconds.
+ *
+ * The first lease must cover real work: a batch is processed inside it, and the
+ * worker renews at 60 s intervals. Later attempts back off exponentially
+ * (`60 * 2^attempts`) so a row that keeps failing does not consume a slot (and a
+ * database round trip) every minute for the whole attempt budget. The cap keeps
+ * the total horizon near MAX_PENDING_ATTEMPTS * 1 h for a permanently broken
+ * record.
+ */
+export const MAX_LEASE_SECONDS = 3600;
 export async function claimPending(db: Db, limit: number): Promise<PendingBatch> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 32) throw new Error('INVALID_CLAIM_LIMIT');
   const token = randomUUID();
@@ -22,9 +33,14 @@ export async function claimPending(db: Db, limit: number): Promise<PendingBatch>
     SELECT id FROM correlation_pending WHERE (lease_until IS NULL OR lease_until<now())
       AND attempts < $3
     ORDER BY created_at,id LIMIT $1 FOR UPDATE SKIP LOCKED)
-    UPDATE correlation_pending p SET lease_until=now()+interval '60 seconds',lease_token=$2,
+    UPDATE correlation_pending p SET
+      lease_until = now() + make_interval(secs =>
+        LEAST($4::int, 60 * (CASE LEAST(p.attempts, 6)
+          WHEN 0 THEN 1 WHEN 1 THEN 2 WHEN 2 THEN 4
+          WHEN 3 THEN 8 WHEN 4 THEN 16 WHEN 5 THEN 32 ELSE 64 END))),
+      lease_token=$2,
       attempts=attempts+1
-    FROM selected s WHERE p.id=s.id RETURNING p.id,p.payload`, [limit, token, MAX_PENDING_ATTEMPTS]));
+    FROM selected s WHERE p.id=s.id RETURNING p.id,p.payload`, [limit, token, MAX_PENDING_ATTEMPTS, MAX_LEASE_SECONDS]));
   return { token, jobs: result.rows };
 }
 /** A stale worker can neither delete nor extend another worker's claim. */

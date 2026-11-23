@@ -6,6 +6,7 @@ import {
   emailRetryDelayMs,
   emailRetryPolicy,
   emailRetrySchedule,
+  EMAIL_RETRY_JITTER_FRACTION,
   observedRetryDelay,
 } from '../server/delivery.ts';
 import { settingsSchema } from '../server/validation.ts';
@@ -33,7 +34,12 @@ test('ML retry recommendations are capped by the operator maximum and identify t
   });
   const result = emailRetryDelayPlan(2, policy);
   assert.equal(result.source, 'OPERATOR');
-  assert.ok(result.delayMs >= 0 && result.delayMs <= 2 * 60_000, `delayMs ${result.delayMs} out of bounds`);
+  const baseForAttempt2 = 1 * 60_000 * 2 ** 1;
+  const jitterSlack = Math.ceil(baseForAttempt2 * EMAIL_RETRY_JITTER_FRACTION);
+  assert.ok(
+    result.delayMs >= baseForAttempt2 && result.delayMs <= baseForAttempt2 + jitterSlack,
+    `delayMs ${result.delayMs} out of [${baseForAttempt2}, ${baseForAttempt2 + jitterSlack}]`,
+  );
 });
 
 test('first attempt is not reported as an observed zero-delay training sample', () => {
@@ -69,10 +75,14 @@ test('email retry backoff doubles and respects the configured ceiling', () => {
   });
   const ceilingMs = 10 * 60_000;
   const delays = [1, 2, 3, 4, 5].map((attempt) => emailRetryDelayMs(attempt, policy));
-  // Each jittered delay must be within [0, deterministic base delay ceiling].
+  // Each jittered delay must be within [baseDelayMs, baseDelayMs + 10% jitter].
   for (const [i, delayMs] of delays.entries()) {
     const base = Math.min(ceilingMs, 2 * 60_000 * 2 ** i);
-    assert.ok(delayMs >= 0 && delayMs <= base, `attempt ${i + 1}: delayMs ${delayMs} out of [0, ${base}]`);
+    const jitterSlack = Math.ceil(base * EMAIL_RETRY_JITTER_FRACTION);
+    assert.ok(
+      delayMs >= base && delayMs <= base + jitterSlack,
+      `attempt ${i + 1}: delayMs ${delayMs} out of [${base}, ${base + jitterSlack}]`,
+    );
   }
   // Schedule has one entry per attempt, each a valid minute within the ceiling.
   const schedule = emailRetrySchedule(policy);

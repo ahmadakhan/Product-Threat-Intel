@@ -79,7 +79,7 @@ import { randomUUID, createHmac, createHash } from 'node:crypto';
 import { mergeCveRecords, stableJson } from '../src/utils/deduplicator';
 import nodemailer from 'nodemailer';
 import type { Config } from './config';
-import { transaction, get, getMany, list, put, appendAudit, schemaLockKey } from './db';
+import { transaction, get, getForUpdate, getMany, list, put, appendAudit, schemaLockKey } from './db';
 import type { Db } from './db';
 import { createRequester, type Requester } from './network';
 import { isFindingDelivery } from '../src/utils/findingDelivery.ts';
@@ -364,20 +364,21 @@ export function emailRetryPolicy(settings?: Partial<AppSettings> | null): EmailR
 export const DEFAULT_EMAIL_RETRY_POLICY = emailRetryPolicy(DEFAULT_SETTINGS);
 
 /**
- * Maximum consecutive ambiguous delivery outcomes before a job is terminally
- * failed. An unresolvable provider (not allowlisted, console disabled, or
- * unreachable) should not burn the full retry ladder on an outcome that can
- * never be confirmed locally.
+ * Maximum ambiguous delivery outcomes before a job is terminally failed.
+ *
+ * `attempts` counts attempts *including* the one being performed (the claim
+ * increments it before this check runs), so the guard is `>`: attempt 1 is a
+ * first send, and attempts 2..MAX may each be an unresolvable confirmation. An
+ * unresolvable provider (not allowlisted, console disabled, or unreachable)
+ * therefore consumes its own bounded budget instead of either the full retry
+ * ladder or a premature terminal failure.
  */
 export const MAX_AMBIGUOUS_ATTEMPTS = 3;
 /**
- * Exponential backoff capped by the configured maximum, so a provider outage is
- * retried durably without hammering the relay and without retrying forever.
- */
-/**
  * Deterministic exponential backoff capped by the configured maximum, without
  * jitter. Used by `emailRetryDelayPlan` for ML source comparison so the
- * ML-vs-operator decision is stable regardless of jitter.
+ * ML-vs-operator decision is stable regardless of jitter, and by
+ * `emailRetrySchedule` so the operator-visible schedule describes the plan.
  */
 const baseEmailRetryDelayMs = (attempt: number, policy: EmailRetryPolicy) =>
   Math.min(
@@ -386,13 +387,29 @@ const baseEmailRetryDelayMs = (attempt: number, policy: EmailRetryPolicy) =>
   );
 
 /**
- * Exponential backoff with full jitter, so a provider outage is retried
- * durably without hammering the relay and without retrying forever. Jitter
- * decorrelates retry storms across recipients sharing the same policy.
+ * Exponential backoff with additive jitter.
+ *
+ * The operator's configured delay is a FLOOR, never a target to undershoot: a
+ * `3m` initial delay must produce a retry no sooner than three minutes, because
+ * retrying earlier than the configured policy is neither what the operator asked
+ * for nor enough time for a relay to recover. Jitter is therefore additive, up to
+ * JITTER_FRACTION of the base, which decorrelates a population of retries queued
+ * behind one provider outage without ever shortening the wait. (Full jitter over
+ * `[0, base]`, and even `[base/2, base]`, both let a 3-minute policy fire after
+ * ~1 minute.)
+ *
+ * `rng` is injectable so the bounds can be asserted deterministically.
  */
-export const emailRetryDelayMs = (attempt: number, policy: EmailRetryPolicy) => {
+export const EMAIL_RETRY_JITTER_FRACTION = 0.1;
+export const emailRetryDelayMs = (
+  attempt: number,
+  policy: EmailRetryPolicy,
+  rng: () => number = Math.random,
+) => {
   const baseDelayMs = baseEmailRetryDelayMs(attempt, policy);
-  return Math.floor(Math.random() * (baseDelayMs + 1));
+  // Adding jitter must not exceed the configured maximum delay either.
+  const jitter = Math.floor(baseDelayMs * EMAIL_RETRY_JITTER_FRACTION * rng());
+  return Math.min(policy.maxDelayMinutes * 60_000, baseDelayMs + jitter);
 };
 export function emailRetryDelayPlan(
   attempt: number,
@@ -418,12 +435,20 @@ export function observedRetryDelay(
     ? { delayMs: Math.max(0, attemptStartedAt - priorTime), observed: true }
     : { delayMs: 0, observed: false };
 }
-/** Human-readable schedule stored on the delivery log for operator visibility. */
+/**
+ * Human-readable schedule stored on the delivery log for operator visibility.
+ *
+ * Uses the deterministic base delay, not `emailRetryDelayMs`. That function
+ * applies full jitter, so rendering the schedule through it produced a random,
+ * sometimes decreasing list (`[2m, 1m]`) that misrepresented the policy the
+ * operator had configured. The stored schedule must describe the plan; only the
+ * actual retry at send time is jittered.
+ */
 export const emailRetrySchedule = (policy: EmailRetryPolicy) =>
   policy.enabled
     ? Array.from(
         { length: policy.maxAttempts },
-        (_, index) => `${Math.round(emailRetryDelayMs(index + 1, policy) / 60_000)}m`,
+        (_, index) => `${Math.round(baseEmailRetryDelayMs(index + 1, policy) / 60_000)}m`,
       )
     : [];
 /**
@@ -1888,7 +1913,16 @@ export async function deliverNext(
   config: Config,
   request: Requester,
   sendMail: MailSender,
+  /**
+   * Stops the worker between jobs. Checked before the claim and before the
+   * transport, so a detached or shut-down outbox pass stops after the job it is
+   * already sending instead of continuing through the rest of its batch. A claim
+   * that is already committed is finalised normally; only work not yet started
+   * is skipped.
+   */
+  signal?: AbortSignal,
 ): Promise<boolean> {
+  signal?.throwIfAborted();
   const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
   const job = await transaction(pool, async (db) => {
     const claimed = await db.query(
@@ -1925,22 +1959,44 @@ export async function deliverNext(
          SET status='SENDING',locked_at=now(),lock_token=$1,attempts=attempts+1,delivery_outcome='UNKNOWN',updated_at=now()
          FROM candidate AS c WHERE o.id=c.id
          RETURNING o.*,c.prior_attempt_at
-       ),
-       superseded AS (
-         UPDATE outbox
-         SET status='SUPERSEDED', updated_at=now()
-         FROM claimed
-         WHERE outbox.channel=claimed.channel
-           AND outbox.target_id=claimed.target_id
-           AND outbox.advisory_id=claimed.advisory_id
-           AND outbox.id <> claimed.id
-           AND outbox.status='QUEUED'
-         RETURNING outbox.id
        )
        SELECT * FROM claimed`,
       [randomUUID(), settings.emailEnabled !== false],
     );
-    return claimed.rows[0] as Job | undefined;
+    const claimedJob = claimed.rows[0] as Job | undefined;
+    if (claimedJob) {
+      /*
+       * Retire the older queued revisions of the bundle this claim won.
+       *
+       * This is a separate statement on purpose. As a CTE of the claim it was a
+       * correlated UPDATE whose target rows the executor was free to visit in any
+       * order; two concurrent claims that retired overlapping sets in opposite
+       * order could deadlock (40P01). Here the victims are selected by id order
+       * and every row is locked by a plain single-table `SELECT ... FOR UPDATE`,
+       * which removes the correlated join (the source of the unconstrained
+       * order) entirely. The UPDATE that follows writes only rows this
+       * transaction already holds, and both statements share one transaction, so
+       * the claim and the retirement still commit atomically.
+       */
+      const victims = await db.query<{ id: string }>(
+        `SELECT o.id
+           FROM outbox o
+          WHERE o.channel=$1 AND o.target_id=$2 AND o.advisory_id=$3
+            AND o.id <> $4 AND o.status='QUEUED'
+          ORDER BY o.id
+          FOR UPDATE OF o`,
+        [claimedJob.channel, claimedJob.target_id, claimedJob.advisory_id, claimedJob.id],
+      );
+      if (victims.rows.length) {
+        await db.query(
+          `UPDATE outbox
+              SET status='SUPERSEDED', updated_at=now()
+            WHERE id = ANY($1::uuid[]) AND status='QUEUED'`,
+          [victims.rows.map((row) => row.id)],
+        );
+      }
+    }
+    return claimedJob;
   });
   if (!job) return false;
   const attemptStartedAt = Date.now();
@@ -2329,7 +2385,9 @@ export async function deliverNext(
           // the job stays retryable and is re-confirmed on the next attempt.
           // Ambiguous outcomes consume a separate, bounded budget so an
           // unresolvable provider does not burn the full retry ladder.
-          if (job.attempts >= MAX_AMBIGUOUS_ATTEMPTS) {
+          // `attempts` already includes this attempt, so allow MAX_AMBIGUOUS_ATTEMPTS
+          // ambiguous outcomes (attempts 2..MAX) before failing terminally.
+          if (job.attempts > MAX_AMBIGUOUS_ATTEMPTS) {
             permanent = true;
             throw new Error(
               'Previous delivery outcome could not be confirmed after multiple attempts; marking failed',
@@ -2356,17 +2414,65 @@ export async function deliverNext(
       // Apply operator edits exactly once, before the transport sees the job.
       // The PDF attachment is built from `payload.html` inside the sender, so
       // this same value drives both the emailed body and the attachment.
+      //
+      // The last cancellation point before the transport. Everything above is
+      // reversible bookkeeping; once the message leaves, a stopped worker can no
+      // longer avoid the send. Aborting here re-queues the job (the catch/finalise
+      // path marks it retryable) instead of delivering work the operator or a
+      // watchdog already cancelled — and, because the attempt was recorded as
+      // SENDING, the next claim's confirmation check still protects against a
+      // duplicate.
+      signal?.throwIfAborted();
       transportAttempted = true;
       const result = await sendMail(applyJobEdits(job));
       providerId = typeof result === 'string' ? result : result.id;
       if (typeof result !== 'string') emailProvider = result.provider;
       if (providerId) {
-        await pool
-          .query(
-            `UPDATE outbox SET provider_id = $2, payload = jsonb_set(COALESCE(payload, '{}'::jsonb), '{unconfirmedProviderId}', to_jsonb($2::text)) WHERE id = $1`,
-            [job.id, providerId],
-          )
-          .catch(() => undefined);
+        // Persist the receipt *before* anything else can fail. This id is the only
+        // local evidence that lets a later retry ask the provider whether the
+        // message was accepted (see confirmPriorDelivery); without it the outcome
+        // is permanently `unknown` and the job is finally failed without a resend,
+        // or worse, resent when the lookup cannot answer. It used to be written
+        // with `.catch(() => undefined)`, so a transient database blip silently
+        // destroyed the duplicate-prevention evidence. Bounded retries here are
+        // cheap compared with a duplicate security advisory.
+        let persisted = false;
+        let lastError: unknown;
+        for (let attempt = 0; attempt < 3 && !persisted; attempt++) {
+          try {
+            await pool.query(
+              `UPDATE outbox SET provider_id = $2, payload = jsonb_set(COALESCE(payload, '{}'::jsonb), '{unconfirmedProviderId}', to_jsonb($2::text)) WHERE id = $1`,
+              [job.id, providerId],
+            );
+            persisted = true;
+          } catch (receiptError) {
+            lastError = receiptError;
+            if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+          }
+        }
+        if (!persisted) {
+          // Record the loss on the job. The stored text deliberately does NOT
+          // claim the provider rejected the message: the provider accepted it, we
+          // simply could not store the id. confirmPriorDelivery will therefore
+          // treat the outcome as unconfirmed and query the provider (or withhold
+          // the resend) instead of resending blindly, which is the safe side of
+          // an ambiguous send.
+          errorInfo = { ...errorInfo, receiptPersistFailed: true };
+          await pool
+            .query(
+              `UPDATE outbox SET error = COALESCE(error, $2) WHERE id = $1 AND status='SENDING'`,
+              [job.id, `Provider accepted the message (id ${providerId}) but the receipt could not be stored`],
+            )
+            .catch(() => undefined);
+          console.error(
+            JSON.stringify({
+              level: 'error',
+              event: 'delivery.receipt_persist_failed',
+              jobId: job.id,
+              error: lastError instanceof Error ? lastError.message : String(lastError),
+            }),
+          );
+        }
       }
     } else {
       const hook = await get<WebhookEndpoint>(pool, 'webhooks', job.target_id);
@@ -2436,12 +2542,34 @@ export async function deliverNext(
   } catch (e) {
     errorInfo = describeError(e);
     error = e instanceof Error ? e.message : 'Delivery failed';
+    // A cancellation is not a transport fault. Left to the classifiers below it
+    // would be recorded as an unclassified failure and could even be matched by
+    // the rejection regex, which would tell a later retry that the message was
+    // provably refused and skip the duplicate check. Record it as a retryable
+    // "not attempted" and keep `permanent` false so the job is re-queued at once.
+    //
+    // Do NOT rethrow here. Rethrowing skipped the finalise block, leaving the row
+    // in SENDING until its two-minute lease expired; every cancelled job would
+    // then be invisible to the operator for that long and re-claimed by lease
+    // expiry instead of being re-queued immediately. Falling through lets the
+    // normal finalise path write QUEUED/NOT_ATTEMPTED, which is the state a
+    // cancellation actually means.
+    if (signal?.aborted) {
+      transportAttempted = false;
+      error = 'Delivery attempt cancelled before transport; re-queued';
+      errorInfo = { ...errorInfo, cancelled: true };
+      transportRejected = false;
+    }
     // Audit M-6: classify *why* the attempt failed, not just whether it did.
     // A provable rejection (HTTP 4xx/5xx body from the provider, refused SMTP
     // session, or missing configuration) means the transport never accepted the
     // message — retrying cannot duplicate it. Everything else (timeout, socket
     // reset, dropped connection) leaves the outcome unknown, and only a
     // provider lookup can then decide whether a resend is safe.
+    //
+    // A cancellation deliberately skips this classification: `transportAttempted`
+    // is already false, so the finalise path records NOT_ATTEMPTED regardless of
+    // what the rejected-transport regex below would have inferred.
     const smtpFailure = e as { command?: unknown; responseCode?: unknown };
     const beforeSubmission =
       typeof smtpFailure?.command === 'string' &&
@@ -2451,12 +2579,17 @@ export async function deliverNext(
       typeof smtpFailure.responseCode === 'number' &&
       smtpFailure.responseCode >= 400 &&
       smtpFailure.responseCode < 600;
+    // A cancellation is not a transport classification: forced to false so a
+    // later attempt cannot be told the message was provably refused (which would
+    // skip the duplicate check).
     transportRejected =
-      e instanceof EmailProviderError
-        ? e.status >= 400 && e.status < 500
-        : beforeSubmission ||
-          rejectedData ||
-          /HTTP \d{3}\b|did not accept the recipient|not configured|is missing/i.test(error);
+      signal?.aborted
+        ? false
+        : e instanceof EmailProviderError
+          ? e.status >= 400 && e.status < 500
+          : beforeSubmission ||
+            rejectedData ||
+            /HTTP \d{3}\b|did not accept the recipient|not configured|is missing/i.test(error);
     if (e instanceof EmailProviderError) {
       permanent = e.status >= 400 && e.status < 500 && ![408, 429].includes(e.status);
       retryNotBefore = e.retryAt;
@@ -2568,7 +2701,13 @@ export async function deliverNext(
         );
       }
       if (job.channel === 'email') {
-        const log = await get<EmailDeliveryLog>(db, 'emailLogs', job.id);
+        // Row-locked read. This is a read-modify-write of a record the Action
+        // Center also mutates (actionStatus, review notes), and a plain `get`
+        // here could overwrite an operator's decision committed between the read
+        // and the `put` below. The lock is taken under the same transaction that
+        // fences the job with `lock_token`, so it serialises against those
+        // endpoints instead of racing them.
+        const log = await getForUpdate<EmailDeliveryLog>(db, 'emailLogs', job.id);
         if (log) {
           // Only stamp sentAt when the email is accepted; preserve the existing
           // value on RETRYING so a provider-accepted-but-temporarily-deferred
@@ -2608,7 +2747,9 @@ export async function deliverNext(
           });
         }
       } else {
-        const log = await get<WebhookDeliveryLog>(db, 'webhookLogs', job.id);
+        // Row-locked for the same reason as the email log above: the log is a
+        // read-modify-write record that operator tooling also updates.
+        const log = await getForUpdate<WebhookDeliveryLog>(db, 'webhookLogs', job.id);
         if (log)
           await put(db, 'webhookLogs', job.id, {
             ...log,
@@ -2824,6 +2965,9 @@ export async function deliverNext(
           channel: job.channel,
           attempt: job.attempts,
           advisoryId: job.advisory_id,
+          // Always included: a receipt that could not be stored is a fault on a
+          // *successful* attempt, so it must not be gated behind `error`.
+          ...(errorInfo.receiptPersistFailed ? { receiptPersistFailed: true } : {}),
           ...(error ? errorInfo : {}),
         },
       });

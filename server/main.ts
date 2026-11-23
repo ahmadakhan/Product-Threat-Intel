@@ -321,6 +321,8 @@ let outboxStartedAt = 0;
 let digestGeneration = 0;
 let pipelineController: AbortController | undefined;
 let outboxGeneration = 0;
+/** Cancels the in-flight outbox pass when it is superseded or the worker stops. */
+let outboxController: AbortController | undefined;
 /** In-flight self-healing check; prevents overlapping watchdog runs per tick. */
 let selfHealRunning: Promise<void> | null = null;
 /** In-flight memory pressure response; prevents overlapping restart attempts. */
@@ -466,15 +468,28 @@ const tick = () => {
   }
   if (outbox && Date.now() - outboxStartedAt > STUCK_PROMISE_MS) {
     void report('outbox')(new Error('Previous outbox promise is still running; starting a fresh attempt'));
+    // Abort the detached pass before dropping the reference. Without this the
+    // superseded loop kept claiming and sending for up to 20 jobs, competing with
+    // the replacement for the same queue and holding pool connections, while
+    // both were reported as "the" outbox worker. The pipeline, retention and
+    // digest loops all stop through their signal; the outbox loop was the one
+    // that could not.
+    outboxController?.abort(stampAborted(new Error('Outbox pass superseded by a fresh attempt')));
+    outboxController = undefined;
     outboxGeneration++;
     outbox = null;
   }
   if (!outbox) {
     outboxStartedAt = Date.now();
     const generation = ++outboxGeneration;
+    const controller = new AbortController();
+    outboxController = controller;
     outbox = (async () => {
       for (let i = 0; i < 20 && !stopping; i++) {
-        const delivered = await deliverNext(pool, config, request, sendMail);
+        // `deliverNext` re-throws the abort, which ends this pass. The catch below
+        // classifies it through `reasonAborted`, so a deliberate stop is not
+        // reported as an outbox failure.
+        const delivered = await deliverNext(pool, config, request, sendMail, controller.signal);
         if (!delivered) break;
         verboseLog('outbox.delivered');
       }
@@ -484,6 +499,7 @@ const tick = () => {
       // deleted by anything, so the table grew without bound. Running it at the
       // end of the delivery pass keeps it off the hot path and gives it the
       // same leadership/stopping guards as the pass itself.
+      if (controller.signal.aborted) return;
       try {
         const reclaimed = await transaction(pool, (db) => releaseExpiredClaims(db));
         if (reclaimed > 0)
@@ -492,8 +508,11 @@ const tick = () => {
         void report('claims.sweep')(error);
       }
     })()
-      .catch(report('outbox'))
+      .catch((error) => {
+        if (!reasonAborted(error)) report('outbox')(error);
+      })
       .finally(() => {
+        if (outboxController === controller) outboxController = undefined;
         if (outboxGeneration === generation) outbox = null;
       });
   }
@@ -1028,6 +1047,15 @@ async function shutdown() {
     const shutdownReason = new Error('Pipeline cancelled during shutdown');
     (shutdownReason as { [ABORT_REASON]?: boolean })[ABORT_REASON] = true;
     pipelineController.abort(shutdownReason);
+  }
+  // Stop the outbox pass too. Without this a shutdown could still send up to 20
+  // queued notifications after the operator asked the process to stop, and the
+  // pool would be closed underneath it.
+  if (outboxController) {
+    const outboxReason = new Error('Outbox pass cancelled during shutdown');
+    (outboxReason as { [ABORT_REASON]?: boolean })[ABORT_REASON] = true;
+    outboxController.abort(outboxReason);
+    outboxController = undefined;
   }
   clearInterval(timer);
   clearInterval(retentionTimer);

@@ -297,3 +297,58 @@ test('CaseClassification, MatchPrecision, SourceCategory, RootSubjectVerdict typ
   const subjects: RootSubjectVerdict[] = ['ROOT_SUBJECT', 'PREREQUISITE_OR_INTEGRATION', 'UNKNOWN'];
   assert.ok(subjects.includes('UNKNOWN'));
 });
+
+/**
+ * Regression: root-subject detection must match whole tokens, not substrings.
+ *
+ * `vendor: 'c1'` previously "appeared" inside `c10` via `String.includes`, which
+ * flipped the verdict from UNKNOWN to ROOT_SUBJECT and changed both the case
+ * classification and whether the finding was dispatched at all. The same defect
+ * made `ios` match inside `bios` and `node` inside `nodejs`.
+ */
+test('root subject: a vendor name is not matched as a substring of another product', () => {
+  const c = cve({
+    assignerShortName: 'mitre',
+    sourceFeeds: [],
+    title: 'Unrelated reader advisory',
+    // `c1` occurs only inside `c10`; the registered product is not mentioned.
+    description: 'Escalation in c10 readers allows local privilege abuse.',
+    cpeMatches: [],
+  });
+  const a = asset({ vendor: 'c1', product: 'c1-agent' });
+  const { rootSubject } = classifyMatch(c, a, feeds, 'VENDOR_PRODUCT_FALLBACK', 70);
+  assert.equal(rootSubject, 'UNKNOWN', 'no whole-token mention must not be treated as a subject');
+});
+
+test('root subject: punctuation-bearing product names still match as whole tokens', () => {
+  const c = cve({
+    assignerShortName: 'mitre',
+    sourceFeeds: [],
+    title: 'Runtime advisory',
+    description: 'A vulnerability in next.js allows request smuggling.',
+    cpeMatches: [],
+  });
+  const a = asset({ vendor: 'vercel', product: 'next.js' });
+  const { rootSubject } = classifyMatch(c, a, feeds, 'VENDOR_PRODUCT_FALLBACK', 70);
+  assert.equal(rootSubject, 'ROOT_SUBJECT');
+});
+
+/**
+ * Regression: the non-subject word list used an unescaped `\b` regex, so a
+ * product token adjacent to whitespace-only punctuation behaved inconsistently.
+ * `nonSubjectContext` now uses the same token matcher.
+ */
+test('root subject: non-subject terms are matched on token boundaries only', () => {
+  const c = cve({
+    assignerShortName: 'mitre',
+    sourceFeeds: [],
+    title: 'Attacker tooling note',
+    // "attacker" as a whole word, plus a subject indicator.
+    description: 'A vulnerability in acme gateway was used by attacker tooling.',
+    cpeMatches: [],
+  });
+  const a = asset();
+  const { rootSubject } = classifyMatch(c, a, feeds, 'VENDOR_PRODUCT_FALLBACK', 70);
+  // Both a root indicator and a non-subject context → ambiguous, never a guess.
+  assert.equal(rootSubject, 'UNKNOWN');
+});

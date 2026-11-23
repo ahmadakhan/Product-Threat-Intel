@@ -424,16 +424,18 @@ function normalizeDigestConfig(config: TemplateCustomization): TemplateCustomiza
  * (`renderEmailTemplate`) which supports `{{{triple}}}` raw HTML fields.
  */
 export const DEFAULT_DAILY_DIGEST_TEMPLATE = `<!DOCTYPE html>
-<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml"
+  xmlns:o="urn:schemas-microsoft-com:office:office">
+
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="X-UA-Compatible" content="IE=edge">
-<meta name="x-apple-disable-message-reformatting">
-<meta name="dispatch-date" content="{{dispatch_date}}">
-<meta name="digest-severity" content="{{severity}}">
-<title>{{advisory_id}} | Daily Vulnerability Notification</title>
-<!--[if gte mso 9]>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="x-apple-disable-message-reformatting">
+  <meta name="dispatch-date" content="{{dispatch_date}}">
+  <meta name="digest-severity" content="{{severity}}">
+  <title>{{advisory_id}} | Daily Vulnerability Notification</title>
+  <!--[if gte mso 9]>
 <xml>
   <o:OfficeDocumentSettings>
     <o:AllowPNG/>
@@ -441,66 +443,81 @@ export const DEFAULT_DAILY_DIGEST_TEMPLATE = `<!DOCTYPE html>
   </o:OfficeDocumentSettings>
 </xml>
 <![endif]-->
-<style type="text/css">
-  body, table, td, a {
-    -webkit-text-size-adjust: 100%;
-    -ms-text-size-adjust: 100%;
-  }
-  table, td {
-    mso-table-lspace: 0pt;
-    mso-table-rspace: 0pt;
-    border-collapse: collapse;
-  }
-  img {
-    border: 0;
-    height: auto;
-    line-height: 100%;
-    outline: none;
-    text-decoration: none;
-    display: block;
-  }
-  body {
-    margin: 0 !important;
-    padding: 0 !important;
-    width: 100% !important;
-    background-color: #f1f5f9;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    color: #1e293b;
-  }
-  a[x-apple-data-detectors] {
-    color: inherit !important;
-    text-decoration: none !important;
-    font-size: inherit !important;
-    font-family: inherit !important;
-    font-weight: inherit !important;
-    line-height: inherit !important;
-  }
-  @media only screen and (max-width: 680px) {
-    .container {
+  <style type="text/css">
+    body,
+    table,
+    td,
+    a {
+      -webkit-text-size-adjust: 100%;
+      -ms-text-size-adjust: 100%;
+    }
+
+    table,
+    td {
+      mso-table-lspace: 0pt;
+      mso-table-rspace: 0pt;
+      border-collapse: collapse;
+    }
+
+    img {
+      border: 0;
+      height: auto;
+      line-height: 100%;
+      outline: none;
+      text-decoration: none;
+      display: block;
+    }
+
+    body {
+      margin: 0 !important;
+      padding: 0 !important;
       width: 100% !important;
-      max-width: 100% !important;
+      background-color: #f1f5f9;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      color: #1e293b;
     }
-    .mobile-pad {
-      padding-left: 16px !important;
-      padding-right: 16px !important;
+
+    a[x-apple-data-detectors] {
+      color: inherit !important;
+      text-decoration: none !important;
+      font-size: inherit !important;
+      font-family: inherit !important;
+      font-weight: inherit !important;
+      line-height: inherit !important;
     }
-    .stack-col {
-      display: block !important;
-      width: 100% !important;
-      max-width: 100% !important;
+
+    @media only screen and (max-width: 680px) {
+      .container {
+        width: 100% !important;
+        max-width: 100% !important;
+      }
+
+      .mobile-pad {
+        padding-left: 16px !important;
+        padding-right: 16px !important;
+      }
+
+      .stack-col {
+        display: block !important;
+        width: 100% !important;
+        max-width: 100% !important;
+      }
     }
-  }
-</style>
+  </style>
 </head>
-<body bgcolor="#f1f5f9" style="margin: 0; padding: 0; background-color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: #1e293b;">
+
+<body bgcolor="#f1f5f9"
+  style="margin: 0; padding: 0; background-color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: #1e293b;">
 
   <!-- Hidden Inbox Preheader -->
-  <div style="display: none; font-size: 1px; line-height: 1px; max-height: 0px; max-width: 0px; opacity: 0; overflow: hidden; mso-hide: all;">
+  <div
+    style="display: none; font-size: 1px; line-height: 1px; max-height: 0px; max-width: 0px; opacity: 0; overflow: hidden; mso-hide: all;">
     {{advisory_title}} - {{severity_counts}}
   </div>
 
   <!-- Outer Viewport Wrapper -->
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9" style="background-color: #f1f5f9; width: 100%;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9"
+    style="background-color: #f1f5f9; width: 100%;">
     <tr>
       <td align="center" style="padding: 20px 10px;">
 
@@ -511,26 +528,33 @@ export const DEFAULT_DAILY_DIGEST_TEMPLATE = `<!DOCTYPE html>
         <![endif]-->
 
         <!-- Main Email Card -->
-        <table role="presentation" class="container" width="680" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="width: 680px; max-width: 680px; background-color: #ffffff; border: 1px solid #cbd5e1;">
+        <table role="presentation" class="container" width="680" cellpadding="0" cellspacing="0" border="0"
+          bgcolor="#ffffff"
+          style="width: 680px; max-width: 680px; background-color: #ffffff; border: 1px solid #cbd5e1;">
 
           <!-- Top Brand Accent Strip -->
           <tr>
-            <td bgcolor="#1d4ed8" height="4" style="background-color: #1d4ed8; height: 4px; font-size: 1px; line-height: 1px;">&nbsp;</td>
+            <td bgcolor="#1d4ed8" height="4"
+              style="background-color: #1d4ed8; height: 4px; font-size: 1px; line-height: 1px;">&nbsp;</td>
           </tr>
 
           <!-- HEADER -->
           <tr>
-            <td class="mobile-pad" bgcolor="#f8fafc" style="background-color: #f8fafc; padding: 16px 22px; border-bottom: 1px solid #cbd5e1;">
+            <td class="mobile-pad" bgcolor="#f8fafc"
+              style="background-color: #f8fafc; padding: 16px 22px; border-bottom: 1px solid #cbd5e1;">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%;">
                 <tr>
                   <td valign="top" align="left" style="padding-right: 12px;">
-                    <div style="font-size: 10px; line-height: 14px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; color: #1d4ed8; mso-line-height-rule: exactly;">
+                    <div
+                      style="font-size: 10px; line-height: 14px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; color: #1d4ed8; mso-line-height-rule: exactly;">
                       DAILY VULNERABILITY DIGEST
                     </div>
-                    <div style="padding-top: 3px; font-size: 19px; line-height: 24px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly;">
+                    <div
+                      style="padding-top: 3px; font-size: 19px; line-height: 24px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly;">
                       BA Security Advisory
                     </div>
-                    <div style="padding-top: 3px; font-size: 13px; line-height: 18px; font-weight: 600; color: #334155; mso-line-height-rule: exactly;">
+                    <div
+                      style="padding-top: 3px; font-size: 13px; line-height: 18px; font-weight: 600; color: #334155; mso-line-height-rule: exactly;">
                       {{advisory_title}}
                     </div>
                   </td>
@@ -541,12 +565,16 @@ export const DEFAULT_DAILY_DIGEST_TEMPLATE = `<!DOCTYPE html>
               </table>
 
               <!-- Metadata Bar -->
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%; margin-top: 12px; border-top: 1px solid #e2e8f0;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                style="width: 100%; margin-top: 12px; border-top: 1px solid #e2e8f0;">
                 <tr>
-                  <td style="padding-top: 10px; font-size: 11px; line-height: 15px; color: #475569; mso-line-height-rule: exactly;">
-                    <strong style="color: #0f172a;">Advisory ID:</strong> {{advisory_id}} &nbsp;&bull;&nbsp; <strong style="color: #0f172a;">Generated:</strong> {{report_generated}}
+                  <td
+                    style="padding-top: 10px; font-size: 11px; line-height: 15px; color: #475569; mso-line-height-rule: exactly;">
+                    <strong style="color: #0f172a;">Advisory ID:</strong> {{advisory_id}} &nbsp;&bull;&nbsp; <strong
+                      style="color: #0f172a;">Generated:</strong> {{report_generated}}
                   </td>
-                  <td align="right" style="padding-top: 10px; font-size: 11px; line-height: 15px; color: #475569; mso-line-height-rule: exactly;">
+                  <td align="right"
+                    style="padding-top: 10px; font-size: 11px; line-height: 15px; color: #475569; mso-line-height-rule: exactly;">
                     <strong style="color: #0f172a;">Summary:</strong> {{severity_counts}}
                   </td>
                 </tr>
@@ -556,8 +584,10 @@ export const DEFAULT_DAILY_DIGEST_TEMPLATE = `<!DOCTYPE html>
 
           <!-- 01 EXECUTIVE SUMMARY (Unshaded White) -->
           <tr>
-            <td class="mobile-pad" bgcolor="#ffffff" style="background-color: #ffffff; padding: 18px 22px 16px 22px; border-bottom: 1px solid #e2e8f0;">
-              <div style="font-size: 11px; line-height: 15px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; color: #0f172a; padding-bottom: 6px; mso-line-height-rule: exactly;">
+            <td class="mobile-pad" bgcolor="#ffffff"
+              style="background-color: #ffffff; padding: 18px 22px 16px 22px; border-bottom: 1px solid #e2e8f0;">
+              <div
+                style="font-size: 11px; line-height: 15px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; color: #0f172a; padding-bottom: 6px; mso-line-height-rule: exactly;">
                 <span style="color: #1d4ed8;">01</span> &nbsp;EXECUTIVE SUMMARY
               </div>
               <div style="font-size: 12.5px; line-height: 19px; color: #334155; mso-line-height-rule: exactly;">
@@ -570,20 +600,28 @@ export const DEFAULT_DAILY_DIGEST_TEMPLATE = `<!DOCTYPE html>
           <tr>
             <td class="mobile-pad" bgcolor="#ffffff" style="background-color: #ffffff; padding: 16px 22px 6px 22px;">
               <!-- Shaded Section Heading Bar -->
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9" style="width: 100%; background-color: #f1f5f9; border: 1px solid #e2e8f0;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9"
+                style="width: 100%; background-color: #f1f5f9; border: 1px solid #e2e8f0;">
                 <tr>
-                  <td style="padding: 7px 12px; font-size: 11px; line-height: 15px; font-weight: 700; letter-spacing: 0.7px; text-transform: uppercase; color: #0f172a; mso-line-height-rule: exactly;">
+                  <td
+                    style="padding: 7px 12px; font-size: 11px; line-height: 15px; font-weight: 700; letter-spacing: 0.7px; text-transform: uppercase; color: #0f172a; mso-line-height-rule: exactly;">
                     <span style="color: #1d4ed8;">02</span> &nbsp;24-HOUR EXPOSURE &amp; ASSET SNAPSHOT
                   </td>
                 </tr>
               </table>
 
               <!-- KPI Dashboard Grid -->
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%; margin-top: 10px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                style="width: 100%; margin-top: 10px;">
                 <tr>
-                  <td align="center" valign="middle" bgcolor="#f8fafc" style="background-color: #f8fafc; padding: 12px 6px; border: 1px solid #cbd5e1;">
-                    <div style="font-size: 20px; line-height: 24px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly;">{{finding_count}}</div>
-                    <div style="padding-top: 3px; font-size: 9.5px; line-height: 13px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: #64748b; mso-line-height-rule: exactly;">TOTAL FINDINGS</div>
+                  <td align="center" valign="middle" bgcolor="#f8fafc"
+                    style="background-color: #f8fafc; padding: 12px 6px; border: 1px solid #cbd5e1;">
+                    <div
+                      style="font-size: 20px; line-height: 24px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly;">
+                      {{finding_count}}</div>
+                    <div
+                      style="padding-top: 3px; font-size: 9.5px; line-height: 13px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: #64748b; mso-line-height-rule: exactly;">
+                      TOTAL FINDINGS</div>
                   </td>
 
                   {{{critical_kpi}}}
@@ -591,9 +629,14 @@ export const DEFAULT_DAILY_DIGEST_TEMPLATE = `<!DOCTYPE html>
                   {{{medium_kpi}}}
                   {{{low_kpi}}}
 
-                  <td align="center" valign="middle" bgcolor="#eff6ff" style="background-color: #eff6ff; padding: 12px 6px; border: 1px solid #bfdbfe;">
-                    <div style="font-size: 20px; line-height: 24px; font-weight: 700; color: #1d4ed8; mso-line-height-rule: exactly;">{{asset_count}}</div>
-                    <div style="padding-top: 3px; font-size: 9.5px; line-height: 13px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: #1e40af; mso-line-height-rule: exactly;">ASSETS</div>
+                  <td align="center" valign="middle" bgcolor="#eff6ff"
+                    style="background-color: #eff6ff; padding: 12px 6px; border: 1px solid #bfdbfe;">
+                    <div
+                      style="font-size: 20px; line-height: 24px; font-weight: 700; color: #1d4ed8; mso-line-height-rule: exactly;">
+                      {{asset_count}}</div>
+                    <div
+                      style="padding-top: 3px; font-size: 9.5px; line-height: 13px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: #1e40af; mso-line-height-rule: exactly;">
+                      ASSETS</div>
                   </td>
                 </tr>
               </table>
@@ -604,23 +647,29 @@ export const DEFAULT_DAILY_DIGEST_TEMPLATE = `<!DOCTYPE html>
           <tr>
             <td class="mobile-pad" bgcolor="#ffffff" style="background-color: #ffffff; padding: 14px 22px 20px 22px;">
               <!-- Shaded Section Heading Bar -->
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9" style="width: 100%; background-color: #f1f5f9; border: 1px solid #e2e8f0;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9"
+                style="width: 100%; background-color: #f1f5f9; border: 1px solid #e2e8f0;">
                 <tr>
-                  <td style="padding: 7px 12px; font-size: 11px; line-height: 15px; font-weight: 700; letter-spacing: 0.7px; text-transform: uppercase; color: #0f172a; mso-line-height-rule: exactly;">
+                  <td
+                    style="padding: 7px 12px; font-size: 11px; line-height: 15px; font-weight: 700; letter-spacing: 0.7px; text-transform: uppercase; color: #0f172a; mso-line-height-rule: exactly;">
                     <span style="color: #1d4ed8;">03</span> &nbsp;DIGEST DETAILS &amp; PLATFORM TELEMETRY
                   </td>
                 </tr>
               </table>
 
               <!-- Structured Telemetry Table -->
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%; margin-top: 10px; border: 1px solid #cbd5e1; font-size: 12px; line-height: 17px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                style="width: 100%; margin-top: 10px; border: 1px solid #cbd5e1; font-size: 12px; line-height: 17px;">
                 <!-- SEVERITY BREAKDOWN -->
                 <tr>
-                  <td width="175" valign="top" bgcolor="#f8fafc" style="width: 175px; background-color: #f8fafc; padding: 9px 12px; border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; font-size: 10.5px; line-height: 15px; font-weight: 700; letter-spacing: 0.4px; color: #475569; text-transform: uppercase; mso-line-height-rule: exactly;">
+                  <td width="175" valign="top" bgcolor="#f8fafc"
+                    style="width: 175px; background-color: #f8fafc; padding: 9px 12px; border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; font-size: 10.5px; line-height: 15px; font-weight: 700; letter-spacing: 0.4px; color: #475569; text-transform: uppercase; mso-line-height-rule: exactly;">
                     Severity Breakdown
                   </td>
-                  <td valign="middle" bgcolor="#ffffff" style="background-color: #ffffff; padding: 9px 12px; border-bottom: 1px solid #e2e8f0; color: #1e293b; mso-line-height-rule: exactly;">
-                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%;">
+                  <td valign="middle" bgcolor="#ffffff"
+                    style="background-color: #ffffff; padding: 9px 12px; border-bottom: 1px solid #e2e8f0; color: #1e293b; mso-line-height-rule: exactly;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                      style="width: 100%;">
                       <tr>
                         {{{critical_summary}}}{{{high_summary}}}{{{medium_summary}}}{{{low_summary}}}
                       </tr>
@@ -630,30 +679,36 @@ export const DEFAULT_DAILY_DIGEST_TEMPLATE = `<!DOCTYPE html>
 
                 <!-- FINDINGS (24H) -->
                 <tr>
-                  <td width="175" valign="top" bgcolor="#f8fafc" style="width: 175px; background-color: #f8fafc; padding: 9px 12px; border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; font-size: 10.5px; line-height: 15px; font-weight: 700; letter-spacing: 0.4px; color: #475569; text-transform: uppercase; mso-line-height-rule: exactly;">
+                  <td width="175" valign="top" bgcolor="#f8fafc"
+                    style="width: 175px; background-color: #f8fafc; padding: 9px 12px; border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; font-size: 10.5px; line-height: 15px; font-weight: 700; letter-spacing: 0.4px; color: #475569; text-transform: uppercase; mso-line-height-rule: exactly;">
                     Findings (24h)
                   </td>
-                  <td valign="top" bgcolor="#ffffff" style="background-color: #ffffff; padding: 9px 12px; border-bottom: 1px solid #e2e8f0; font-size: 12px; line-height: 17px; color: #1e293b; mso-line-height-rule: exactly;">
+                  <td valign="top" bgcolor="#ffffff"
+                    style="background-color: #ffffff; padding: 9px 12px; border-bottom: 1px solid #e2e8f0; font-size: 12px; line-height: 17px; color: #1e293b; mso-line-height-rule: exactly;">
                     {{{findings_summary}}}
                   </td>
                 </tr>
 
                 <!-- CONFIDENCE FOLLOW-UP -->
                 <tr>
-                  <td width="175" valign="top" bgcolor="#f8fafc" style="width: 175px; background-color: #f8fafc; padding: 9px 12px; border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; font-size: 10.5px; line-height: 15px; font-weight: 700; letter-spacing: 0.4px; color: #475569; text-transform: uppercase; mso-line-height-rule: exactly;">
+                  <td width="175" valign="top" bgcolor="#f8fafc"
+                    style="width: 175px; background-color: #f8fafc; padding: 9px 12px; border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; font-size: 10.5px; line-height: 15px; font-weight: 700; letter-spacing: 0.4px; color: #475569; text-transform: uppercase; mso-line-height-rule: exactly;">
                     Confidence Follow-Up
                   </td>
-                  <td valign="top" bgcolor="#ffffff" style="background-color: #ffffff; padding: 9px 12px; border-bottom: 1px solid #e2e8f0; font-size: 12px; line-height: 17px; color: #1e293b; mso-line-height-rule: exactly;">
+                  <td valign="top" bgcolor="#ffffff"
+                    style="background-color: #ffffff; padding: 9px 12px; border-bottom: 1px solid #e2e8f0; font-size: 12px; line-height: 17px; color: #1e293b; mso-line-height-rule: exactly;">
                     {{{held_for_review}}}
                   </td>
                 </tr>
 
                 <!-- PLATFORM HEALTH -->
                 <tr>
-                  <td width="175" valign="top" bgcolor="#f8fafc" style="width: 175px; background-color: #f8fafc; padding: 9px 12px; border-right: 1px solid #e2e8f0; font-size: 10.5px; line-height: 15px; font-weight: 700; letter-spacing: 0.4px; color: #475569; text-transform: uppercase; mso-line-height-rule: exactly;">
+                  <td width="175" valign="top" bgcolor="#f8fafc"
+                    style="width: 175px; background-color: #f8fafc; padding: 9px 12px; border-right: 1px solid #e2e8f0; font-size: 10.5px; line-height: 15px; font-weight: 700; letter-spacing: 0.4px; color: #475569; text-transform: uppercase; mso-line-height-rule: exactly;">
                     Platform Health
                   </td>
-                  <td valign="top" bgcolor="#ffffff" style="background-color: #ffffff; padding: 9px 12px; font-size: 12px; line-height: 17px; color: #1e293b; mso-line-height-rule: exactly;">
+                  <td valign="top" bgcolor="#ffffff"
+                    style="background-color: #ffffff; padding: 9px 12px; font-size: 12px; line-height: 17px; color: #1e293b; mso-line-height-rule: exactly;">
                     {{{health_report}}}
                   </td>
                 </tr>
@@ -663,19 +718,26 @@ export const DEFAULT_DAILY_DIGEST_TEMPLATE = `<!DOCTYPE html>
 
           <!-- FOOTER -->
           <tr>
-            <td class="mobile-pad" bgcolor="#f8fafc" style="background-color: #f8fafc; padding: 14px 22px; border-top: 1px solid #cbd5e1;">
+            <td class="mobile-pad" bgcolor="#f8fafc"
+              style="background-color: #f8fafc; padding: 14px 22px; border-top: 1px solid #cbd5e1;">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%;">
                 <tr>
-                  <td valign="middle" align="left" style="font-size: 11.5px; line-height: 16px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly;">
+                  <td valign="middle" align="left"
+                    style="font-size: 11.5px; line-height: 16px; font-weight: 700; color: #0f172a; mso-line-height-rule: exactly;">
                     BA Security Operations
                   </td>
-                  <td valign="middle" align="right" style="font-size: 11px; line-height: 16px; color: #475569; mso-line-height-rule: exactly;">
-                    Contact: <a href="mailto:DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com" style="color: #1d4ed8; font-weight: 600; text-decoration: none;">DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com</a>
+                  <td valign="middle" align="right"
+                    style="font-size: 11px; line-height: 16px; color: #475569; mso-line-height-rule: exactly;">
+                    Contact: <a href="mailto:DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com"
+                      style="color: #1d4ed8; font-weight: 600; text-decoration: none;">DL-HBS-Cyber-Operations@HoneywellProd.onmicrosoft.com</a>
                   </td>
                 </tr>
                 <tr>
-                  <td colspan="2" style="padding-top: 6px; font-size: 11px; line-height: 16px; color: #64748b; mso-line-height-rule: exactly;">
-                    This digest provides a consolidated view of newly identified vulnerabilities and platform health status. Assess applicability and prioritize remediation according to asset criticality and established vulnerability management SLAs.
+                  <td colspan="2"
+                    style="padding-top: 6px; font-size: 11px; line-height: 16px; color: #64748b; mso-line-height-rule: exactly;">
+                    This digest provides a consolidated view of newly identified vulnerabilities and platform health
+                    status. Assess applicability and prioritize remediation according to asset criticality and
+                    established vulnerability management SLAs.
                   </td>
                 </tr>
               </table>
@@ -695,6 +757,7 @@ export const DEFAULT_DAILY_DIGEST_TEMPLATE = `<!DOCTYPE html>
   </table>
 
 </body>
+
 </html>`;
 
 /**
@@ -727,25 +790,33 @@ export function compileDailyDigestTemplate(config: TemplateCustomization): strin
   };
 
   // Stylesheet body rule: canvas colour, base font, body text colour.
+  // Indentation is matched with `\s*` rather than a fixed number of spaces: the
+  // canonical document indents the head by two spaces, and an anchor hard-coded
+  // to four made every customization throw instead of rendering.
   apply(
-    /(body \{\n    margin: 0 !important;\n    padding: 0 !important;\n    width: 100% !important;\n    background-color: )#f1f5f9;(\n    font-family: )[^\n]+;(\n    color: )#1e293b;/,
+    /(body \{\s*margin: 0 !important;\s*padding: 0 !important;\s*width: 100% !important;\s*background-color: )#f1f5f9;(\s*font-family: )[^\n]+;(\s*color: )#1e293b;/,
     `$1${safe.canvasBg};$2${fontFamily};$3${safe.fontColor};`,
     'stylesheet body rule',
   );
   // <body> element: colour only. Its font list is left exactly as written (the
   // stock markup quotes it with single quotes while the stylesheet uses double
   // quotes); rewriting it would change the default document for no benefit.
+  // The canonical document wraps this tag across two lines, so the whitespace
+  // between its attributes is matched with `\s+` rather than a single space.
   apply(
-    /(<body bgcolor=")#f1f5f9(" style="margin: 0; padding: 0; background-color: )#f1f5f9(; font-family: [^;]+; color: )#1e293b;/,
+    /(<body bgcolor=")#f1f5f9("\s+style="margin: 0; padding: 0; background-color: )#f1f5f9(; font-family: [^;]+; color: )#1e293b;/,
     `$1${safe.canvasBg}$2${safe.canvasBg}$3${safe.fontColor};`,
     'body element',
   );
-  // Canvas-coloured viewport wrappers.
-  const wrapper = /(<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor=")#f1f5f9(" style=")([^"]*?background-color: )#f1f5f9;/g;
+  // Canvas-coloured viewport wrappers. The canonical document may wrap this tag
+  // across lines, so attribute whitespace is `\s*`.
+  const wrapper = /(<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor=")#f1f5f9("\s*style=")([^"]*?background-color: )#f1f5f9;/g;
   apply(wrapper, `$1${safe.canvasBg}$2$3${safe.canvasBg};`, 'viewport wrapper');
-  // Main card: background plus the configured border.
+  // Main card: background plus the configured border. Attributes may be wrapped
+  // across lines in the canonical document, so inter-attribute whitespace is
+  // `\s+`/`\s*` throughout.
   apply(
-    /(<table role="presentation" class="container" width="680" cellpadding="0" cellspacing="0" border="0" bgcolor=")#ffffff(" style="width: 680px; max-width: 680px; background-color: )#ffffff(; border: 1px solid #cbd5e1;)/,
+    /(<table role="presentation" class="container" width="680" cellpadding="0" cellspacing="0" border="0"\s+bgcolor=")#ffffff("\s*style="width: 680px; max-width: 680px; background-color: )#ffffff(; border: 1px solid #cbd5e1;)/,
     `$1${safe.cardBg}$2${safe.cardBg}$3`.replace(
       '; border: 1px solid #cbd5e1;',
       `; border: ${safe.borderRadius} ${safe.borderStyle} #cbd5e1;`,
@@ -754,7 +825,7 @@ export function compileDailyDigestTemplate(config: TemplateCustomization): strin
   );
   // Brand accent strip at the top of the card.
   apply(
-    /(<td bgcolor=")#1d4ed8(" height="4" style="background-color: )#1d4ed8;/,
+    /(<td bgcolor=")#1d4ed8("\s+height="4"\s+style="background-color: )#1d4ed8;/,
     `$1${safe.accentColor}$2${safe.accentColor};`,
     'brand accent strip',
   );
@@ -772,7 +843,7 @@ export function compileDailyDigestTemplate(config: TemplateCustomization): strin
   );
   // Header band, headline and strap line.
   apply(
-    /(<td class="mobile-pad" bgcolor=")#f8fafc(" style="background-color: )#f8fafc;/,
+    /(<td class="mobile-pad" bgcolor=")#f8fafc("\s+style="background-color: )#f8fafc;/,
     `$1${safe.headerBg}$2${safe.headerBg};`,
     'header band',
   );
@@ -799,7 +870,7 @@ export function compileDailyDigestTemplate(config: TemplateCustomization): strin
   );
   // Footer contact link.
   apply(
-    /(HoneywellProd\.onmicrosoft\.com" style="color: )#1d4ed8;/,
+    /(HoneywellProd\.onmicrosoft\.com"\s+style="color: )#1d4ed8;/,
     `$1${safe.accentColor};`,
     'footer contact link',
   );
@@ -808,7 +879,7 @@ export function compileDailyDigestTemplate(config: TemplateCustomization): strin
   // the only case that changes the document structure.
   if (safe.showStamp) {
     apply(
-      /(<td class="mobile-pad" bgcolor="[^"]+" style="background-color: [^"]+; padding: 16px 22px; border-bottom: 1px solid #cbd5e1;">)/,
+      /(<td class="mobile-pad"\s+bgcolor="[^"]+"\s+style="background-color: [^"]+; padding: 16px 22px; border-bottom: 1px solid #cbd5e1;">)/,
       `$1<div style="font-size:10px;line-height:14px;font-weight:700;letter-spacing:1.5px;color:${safe.badgeStampColor};padding-bottom:4px;">${safe.badgeStampText}</div>`,
       'header stamp slot',
     );
