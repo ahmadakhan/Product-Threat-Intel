@@ -1251,11 +1251,22 @@ const DIGEST_SEVERITY_BADGE: Record<string, { label: string; color: string }> = 
   HIGH: { label: 'HIGH SEVERITY', color: '#ea580c' },
   MEDIUM: { label: 'MEDIUM SEVERITY', color: '#ca8a04' },
   LOW: { label: 'LOW SEVERITY', color: '#16a34a' },
+  // A digest with no findings (or only un-scored ones) reduces to UNKNOWN. The
+  // template's header cell is `{{{severity_header_badge}}}` with nothing else in
+  // it, so returning '' rendered an empty box in the delivered mail and left
+  // `<meta name="digest-severity" content="UNKNOWN">`. Every digest now carries a
+  // valid, escaped badge label.
+  UNKNOWN: { label: 'NO NEW FINDINGS', color: '#475569' },
+};
+
+/** Severity a digest is headed with; anything unrecognised is reported as UNKNOWN. */
+export const digestBadgeSeverity = (severity: string | null | undefined): string => {
+  const upper = String(severity ?? '').trim().toUpperCase();
+  return upper in DIGEST_SEVERITY_BADGE ? upper : 'UNKNOWN';
 };
 
 const digestHeaderBadge = (severity: string): string => {
-  const badge = DIGEST_SEVERITY_BADGE[severity];
-  if (!badge) return '';
+  const badge = DIGEST_SEVERITY_BADGE[digestBadgeSeverity(severity)];
   return `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:${badge.color};color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">${digestEscapeHtml(badge.label)}</span>`;
 };
 
@@ -1266,7 +1277,9 @@ export function renderDailyDigest(config: TemplateCustomization, parts: DailyDig
   const compiled = template || compileDailyDigestTemplate(config);
   return renderEmailTemplate(compiled, {
     dispatch_date: parts.dispatch_date,
-    severity: parts.severity,
+    // Normalised so `<meta name="digest-severity">` never carries an empty or
+    // unexpected value (e.g. an un-scored finding's raw severity).
+    severity: digestBadgeSeverity(parts.severity),
     advisory_title: parts.advisory_title,
     advisory_id: parts.advisory_id,
     severity_header_badge: digestHeaderBadge(parts.severity),
