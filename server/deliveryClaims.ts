@@ -110,12 +110,22 @@ export async function claimItems(
       -- reclaim requires an elapsed lease AND an owner that is no longer live:
       -- a QUEUED or SENDING job never loses its claim, which is what prevents a
       -- second email from being queued while the first may still be delivered.
+      --
+      -- A FOR SHARE lock closes the read-committed blind spot. Each subquery
+      -- below reads the owning outbox row to decide whether the claim is still
+      -- held; a concurrent worker that has just moved that row to SENDING has NOT
+      -- committed yet, so without the lock it is invisible here and the claim is
+      -- wrongly reclaimed - the duplicate-send this WHERE clause exists to stop.
+      -- FOR SHARE on a row another transaction is updating makes this statement
+      -- WAIT for that transaction's outcome instead of reading a stale snapshot,
+      -- then re-evaluate against the committed state.
       WHERE delivery_claims.state='CLAIMED'
         AND delivery_claims.expires_at < now()
         AND NOT EXISTS (
           SELECT 1 FROM outbox o
            WHERE o.id = delivery_claims.job_id
              AND o.status IN ('QUEUED','SENDING')
+           FOR SHARE OF o
         )
         -- A FAILED job holds its claim whenever the finalize path has NOT
         -- released it. The failure may still turn out to be a delivery, and an
@@ -128,6 +138,7 @@ export async function claimItems(
           SELECT 1 FROM outbox o
            WHERE o.id = delivery_claims.job_id
              AND o.status = 'FAILED'
+           FOR SHARE OF o
         )
         -- A superseded job holds its claims only if a transport attempt may have
         -- reached the recipient (UNKNOWN) or succeeded (ACCEPTED). A job that was
@@ -138,6 +149,7 @@ export async function claimItems(
            WHERE o.id = delivery_claims.job_id
              AND o.status = 'SUPERSEDED'
              AND o.delivery_outcome IN ('UNKNOWN','ACCEPTED')
+           FOR SHARE OF o
         )
      RETURNING recipient_id,kind,item_id`,
     [

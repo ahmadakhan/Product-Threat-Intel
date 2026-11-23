@@ -1445,6 +1445,10 @@ export interface SystemHealth {
   };
   lastScheduledRun: string | null;
   nextScheduledRun: string | null;
+  /** Next daily-digest send instant, or null when the digest is disabled. */
+  nextDailyDigestAt: string | null;
+  /** Pipeline audit outcomes from the last 24 hours. */
+  pipelineJobs: { total: number; succeeded: number; failed: number };
   schedulerEnabled: boolean;
   schedulerIntervalMinutes: number;
   backlog: { status: string; count: number }[];

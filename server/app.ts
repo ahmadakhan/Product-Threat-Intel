@@ -130,6 +130,7 @@ import {
 } from './vulnerabilitySearch';
 import { computeThreatAnalytics } from './analytics';
 import type { AppState } from '../shared/state.ts';
+import { resolveTimezone } from '../src/utils/dateTime.ts';
 import type {
   AppSettings,
   ThreatFeed,
@@ -2253,6 +2254,58 @@ export function createApp(
         : null;
       const emailConfig =
         (await get<EmailConfiguration>(pool, 'emailConfig', 'main')) || DEFAULT_EMAIL_CONFIG;
+      // Pipeline outcomes and the next digest instant are part of the daily
+      // digest's Platform Health table. Computing them here keeps the studio's
+      // report on the same real data the worker writes to the delivered email.
+      const pipelineJobs = { total: 0, succeeded: 0, failed: 0 };
+      try {
+        const auditRows = (
+          await pool.query<{ event: string; count: number }>(
+            // The audit table has no `created_at` column: each entry stores its
+            // instant in `data->>'timestamp'` (this is how retention prunes it).
+            // Filtering on a non-existent column raised 42703 and the surrounding
+            // catch swallowed it, so Platform Health always reported 0/0/0.
+            `SELECT data->>'event' AS event, count(*)::int AS count
+             FROM audit
+             WHERE data->>'category' = 'PIPELINE'
+               AND (data->>'timestamp')::timestamptz > now() - interval '24 hours'
+               AND data->>'event' IN ('Pipeline queued','Pipeline completed','Pipeline failed','AUTHORITATIVE_AUTO_DISPATCH','Pipeline recovered')
+             GROUP BY data->>'event'`,
+          )
+        ).rows;
+        for (const row of auditRows) {
+          const count = Number(row.count);
+          pipelineJobs.total += count;
+          if (
+            row.event === 'Pipeline completed' ||
+            row.event === 'AUTHORITATIVE_AUTO_DISPATCH' ||
+            row.event === 'Pipeline recovered'
+          ) {
+            pipelineJobs.succeeded += count;
+          } else if (row.event === 'Pipeline failed') {
+            pipelineJobs.failed += count;
+          }
+        }
+      } catch {
+        // Informational only: a missing audit table must not take health down.
+      }
+      const dailyDigest = appSettings.dailyDigest ?? DEFAULT_SETTINGS.dailyDigest;
+      const [digestHour, digestMinute] = String(dailyDigest?.time ?? '09:00').split(':').map(Number);
+      const nextDailyDigestAt = dailyDigest?.enabled
+        ? ((
+            await pool.query<{ nextDailyDigestAt: Date }>(
+              `SELECT (($1::timestamptz AT TIME ZONE $2)::date + 1 + $3::time)
+                 AT TIME ZONE $2 AS "nextDailyDigestAt"`,
+              [
+                new Date().toISOString(),
+                resolveTimezone(appSettings.timezone),
+                `${Number.isFinite(digestHour) ? digestHour : 9}:${String(
+                  Number.isFinite(digestMinute) ? digestMinute : 0,
+                ).padStart(2, '0')}`,
+              ],
+            )
+          ).rows[0]?.nextDailyDigestAt.toISOString() ?? null)
+        : null;
       res.json({
         database: 'connected',
         databaseLatencyMs: dbMs,
@@ -2278,6 +2331,8 @@ export function createApp(
               : new Date(Date.now())
             : null
           )?.toISOString() ?? null,
+        nextDailyDigestAt,
+        pipelineJobs,
         schedulerEnabled: appSettings.schedulerEnabled,
         schedulerIntervalMinutes: appSettings.schedulerIntervalMinutes,
         backlog,
@@ -2672,12 +2727,27 @@ export function createApp(
       // canvas. Re-rendering here would make the test email a second document:
       // it would miss an unsaved editor draft and could use a stale stored
       // template. Callers that omit `html` still get the server-side render.
-      const { email, html: previewHtml } = z
+      const {
+        email,
+        html: previewHtml,
+        advisoryId,
+        advisoryTitle,
+        severity,
+        cveIds,
+      } = z
         .object({
           email: z.email().max(254),
           html: z.string().min(1).max(200_000).optional(),
+          // The studio renders the body itself, so its live advisory identity
+          // must reach the subject and envelope rather than a sample identity.
+          advisoryId: z.string().min(1).max(200).optional(),
+          advisoryTitle: z.string().min(1).max(500).optional(),
+          severity: z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']).optional(),
+          cveIds: z.array(z.string().min(1).max(64)).max(500).optional(),
         })
         .parse(req.body);
+      const testSeverity = severity ?? 'HIGH';
+      const testCveIds = cveIds?.length ? cveIds : ['CVE-2026-0001', 'CVE-2026-0002'];
       const id = await transaction(pool, async (db) => {
         const emailConfig =
           (await getForUpdate<EmailConfiguration>(db, 'emailConfig', 'main')) || DEFAULT_EMAIL_CONFIG;
@@ -2748,14 +2818,14 @@ export function createApp(
         });
         const executiveSummary = formatExecutiveSummary(sampleFindings.length, severityCounts);
         const parts: DailyDigestParts = {
-          advisory_id: `${data.settings.advisoryPrefix}DAILY-PREVIEW`,
+          advisory_id: advisoryId ?? `${data.settings.advisoryPrefix}DAILY-PREVIEW`,
           // The rendered <title> and header read this value, so it has to match
           // what a real digest is called. It previously said "Daily Vulnerability
           // Digest — preview" while the header said "Daily Vulnerability
           // Notification", which made the studio contradict the deliverable.
-          advisory_title: 'Daily Vulnerability Notification — preview',
+          advisory_title: advisoryTitle ?? 'Daily Vulnerability Notification — preview',
           dispatch_date: new Date().toISOString(),
-          severity: 'HIGH',
+          severity: testSeverity,
           finding_count: sampleFindings.length,
           severity_counts: '2 critical, 1 high, 1 medium, 1 low',
           findings_summary: renderDailyFindingSummary(sampleFindings, dailyConfig),
@@ -2786,8 +2856,8 @@ export function createApp(
         const testAdvisory: Advisory = {
           id: parts.advisory_id,
           title: parts.advisory_title,
-          severity: 'HIGH',
-          cveIds: ['CVE-2026-0001', 'CVE-2026-0002'],
+          severity: testSeverity,
+          cveIds: testCveIds,
           findingIds: [],
           createdDate: new Date().toISOString(),
           deliveryStatus: 'PENDING',

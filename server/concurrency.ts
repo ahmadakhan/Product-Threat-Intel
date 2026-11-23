@@ -13,6 +13,11 @@
  *
  * Results are written back by index, so the returned array preserves the
  * same order as `items` regardless of completion order.
+ *
+ * Dispatch pacing is measured with a monotonic clock (`hrtime.bigint()`), not
+ * wall-clock `Date.now()`: a backward NTP step would otherwise stall dispatch
+ * for the length of the skew and a forward step would release every worker at
+ * once.
  */
 export async function paceConcurrent<T, R>(
   items: T[],
@@ -23,6 +28,15 @@ export async function paceConcurrent<T, R>(
 ): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let nextIndex = 0;
+  // Pacing uses a MONOTONIC clock. `Date.now()` follows wall time, so an NTP
+  // correction that steps the clock backwards makes `nextAllowedDispatch` look
+  // far in the future (the loop sleeps for the whole skew: throughput collapse),
+  // and a forward step makes it look long past (every worker dispatches at once:
+  // a burst that can trip a provider's rate limit). `hrtime.bigint()` cannot
+  // move backwards, so the rate the caller asked for is the rate it gets.
+  // `sleep()` still takes milliseconds, so the monotonic delta is converted at
+  // each use rather than once, keeping the comparison in the clock's own units.
+  const monotonicMs = () => Number(process.hrtime.bigint() / 1_000_000n);
   let nextAllowedDispatch = 0;
   let failure: { error: unknown } | undefined;
   const worker = async () => {
@@ -34,13 +48,13 @@ export async function paceConcurrent<T, R>(
         // the event loop is busy. Reserve synchronously immediately before the
         // request so a delayed wakeup cannot dispatch a burst.
         while (true) {
-          const wait = nextAllowedDispatch - Date.now();
+          const wait = nextAllowedDispatch - monotonicMs();
           if (wait > 0) {
             await sleep(wait);
             if (failure) return;
             continue;
           }
-          nextAllowedDispatch = Date.now() + intervalMs;
+          nextAllowedDispatch = monotonicMs() + intervalMs;
           break;
         }
         if (failure) return;

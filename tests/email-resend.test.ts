@@ -130,10 +130,13 @@ test('POST /api/email/:id/resend re-queues a delivered advisory to one recipient
         subscriptions: ['ALL_SEVERITIES'],
       });
       // Create a delivered email log + outbox job for the delivery being resent.
+      // The outbox status must match the log: resend rejects a job that is still
+      // REVIEW/QUEUED/SENDING (400) because it may yet be delivered, so a
+      // terminal ACCEPTED row is what a genuinely delivered email looks like.
       const jobId = randomUUID();
       await pool.query(
         `INSERT INTO outbox(id,dedupe_key,channel,target_id,advisory_id,payload,status,attempts)
-         VALUES($1,$2,'email','sec-team',$3,$4,'SENDING',1)`,
+         VALUES($1,$2,'email','sec-team',$3,$4,'ACCEPTED',1)`,
         [jobId, 'dedupe-' + randomUUID().slice(0, 8), advisoryId, JSON.stringify({ subject: 'Fixture', text: 'Fixture', html: '<p>Fixture</p>', recipientEmail: 'sec@example.invalid', cveIds: ['CVE-2026-98201'] })],
       );
       await put(pool, 'emailLogs', jobId, {

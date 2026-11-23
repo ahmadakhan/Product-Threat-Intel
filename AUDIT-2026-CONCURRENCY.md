@@ -169,7 +169,46 @@ behaviour ("the pipeline heartbeat reports progress on every beat"); it now pins
 the opposite contract. Note the file-level tests for the old behaviour were
 removed deliberately, not weakened: they encoded the defect.
 
-## Disproved / verified-safe (do not re-report)
+## Second audit pass (21-item review): what was verified and fixed
+
+Each item was checked against the source before changing anything. Items marked
+**disproved** were reported as defects but are not; implementing them would have
+made the system worse.
+
+### Fixed
+
+| Item | Defect | Fix |
+| --- | --- | --- |
+| 2 | `paceConcurrent` paced dispatch with `Date.now()`, so an NTP step stalls dispatch for the skew (throughput collapse) or releases every worker at once (burst) | monotonic `hrtime.bigint()` clock; regression test proves the old code hangs under a backward step |
+| 3 | A hung `drain()` kept its in-flight guard forever, silently stopping ingestion, notification queueing, stale-match cleanup and retention sweeps | `withHardTimeout` (5 s) around each pass; timeout is reported as `pending.drain_timeout` |
+| 1 | `LOCK_CLASS_RANK` was documentation only: nothing read it | `assertClassLockOrder` + `acquireSessionClassLock`; the pipeline run lock now goes through it |
+| 5 | `claimItems` decided reclaims from a READ COMMITTED snapshot, so an uncommitted `SENDING` row was invisible and a live claim could be reclaimed (duplicate send) | `FOR SHARE OF o` on each `NOT EXISTS` outbox probe; verified with a two-transaction race test |
+| 8 | The drain loop re-claimed immediately after acknowledging, holding a connection continuously | 100 ms pause between batches |
+| 9 | `releaseRetention(false).catch(() => {})` swallowed the release failure, starving retention for up to 30 minutes | reported, then retried once on a fresh transaction |
+| 11 | Migration statement timeout hard-coded to 5 minutes | `MIGRATION_STATEMENT_TIMEOUT_MS` env knob, validated, default unchanged |
+| 15 | Session cleanup ran three `DELETE`s with no explicit transaction | single transaction |
+
+### Disproved / declined (do not re-report)
+
+- **6 - `tick()` interleaving.** `tick()` contains no `await`; it is fully
+  synchronous and cannot interleave. The long-running inner promises are already
+  guarded per job with generation counters.
+- **14 - terminal outcome left `UNKNOWN`.** That is the correct answer. The
+  transport was attempted and never proved rejection, so `UNKNOWN` suppresses a
+  resend; rewriting it to `REJECTED` on budget exhaustion would silently fabricate
+  a provable non-delivery and cause duplicate emails. Claim release on provable
+  outcomes is already handled by the finalize path.
+- **18 - allow mutations without an `Origin` header.** This would re-open CSRF:
+  any cross-site form post carries the session cookie. Same-origin SPA and the
+  documented API clients already send `Origin`; the header is the CSRF signal, not
+  an incidental requirement.
+- **4 - session lock leaks.** Largely already handled: `safeAdvisoryUnlock`
+  inspects the `pg_advisory_unlock` boolean result (a `false` means *not* released)
+  and the callers destroy the connection on failure. The index build already
+  releases in `finally`. Item 1 closed the remaining ordering gap.
+- **12, 13, 17, 19, 20, 21** - genuine product/design items, not defects, and
+  each is a behaviour change that needs a decision rather than a patch. Left for
+  an owner to prioritise.
 
 - **`WorkLimiter` over-admission.** `run()` increments `active`, then a queued
   caller's `admit()` resolves and the holder's `finally` decrements - which read

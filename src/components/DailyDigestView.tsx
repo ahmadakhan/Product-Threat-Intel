@@ -1,6 +1,7 @@
 import { PageHeading } from './PageHeading';
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
+import type { SystemHealth } from '../types';
 import { formatDateTime } from '../utils/dateTime';
 import { copyText } from '../utils/clipboard';
 import {
@@ -45,60 +46,75 @@ import {
   type DigestHealth,
 } from '../utils/templateCompiler';
 
-const SAMPLE_FINDINGS: DigestFinding[] = [
-  {
-    cveId: 'CVE-2026-0001',
-    severity: 'CRITICAL',
-    assetName: 'edge-router-01',
-    vendor: 'VendorX',
-    sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0001',
-  },
-  {
-    cveId: 'CVE-2026-0002',
-    severity: 'CRITICAL',
-    assetName: 'auth-service',
-    sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0002',
-  },
-  {
-    cveId: 'CVE-2026-0003',
-    severity: 'HIGH',
-    assetName: 'portal-web',
-    sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0003',
-  },
-  {
-    cveId: 'CVE-2026-0004',
-    severity: 'MEDIUM',
-    assetName: 'internal-api',
-    sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0004',
-  },
-  {
-    cveId: 'CVE-2026-0005',
-    severity: 'LOW',
-    assetName: 'monitoring-agent',
-    sourceUrl: 'https://nvd.nist.gov/vuln/detail/CVE-2026-0005',
-  },
-];
+const DIGEST_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-const SAMPLE_HEALTH: DigestHealth = {
-  database: 'connected',
-  databaseLatencyMs: 12,
-  workerStatus: 'HEALTHY',
-  workerHeartbeatAgeSeconds: 4,
-  nextScheduledAttempt: null,
-  nextDailyDigestAt: '2026-10-30T09:00:00.000Z',
-  backlog: [
-    { status: 'QUEUED', count: 0 },
-    { status: 'ACCEPTED', count: 12 },
-  ],
-  checkedAt: '2026-10-29T08:00:00.000Z',
-  systemUptime: '187 Days 14 Hours',
-  systemUptimePercentage: null,
-  pipelineJobs: { total: 0, succeeded: 0, failed: 0 },
+/** Calendar day in the workspace timezone, matching the server's digest key. */
+const digestDateKey = (timezone: string, at: Date): string =>
+  new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(at);
+
+/** `YYYY-MM-DD` to the `ddMMMyyyy` form used in the delivered digest title. */
+const formatDigestDate = (dateKey: string): string => {
+  const [year, month, day] = dateKey.split('-');
+  if (!year || !month || !day) return dateKey;
+  return `${day.padStart(2, '0')}${DIGEST_MONTHS[Number(month) - 1] ?? month}${year}`;
+};
+
+const DIGEST_SEVERITY_ORDER = ['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const;
+type DigestSeverity = (typeof DIGEST_SEVERITY_ORDER)[number];
+
+const countDigestSeverities = (findings: DigestFinding[]): Record<string, number> => {
+  const counts: Record<string, number> = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, UNKNOWN: 0 };
+  // Bucket by a NORMALISED severity. `finding.severity` is raw CVSS text and can
+  // be lowercase or padded upstream; keying the map with it created stray
+  // buckets (`high`, `Critical`) that formatSeverityCounts then printed next to
+  // the real ones, so the breakdown disagreed with the KPI totals. Anything
+  // unrecognised counts as UNKNOWN rather than inventing a bucket.
+  for (const finding of findings) {
+    const severity = String(finding.severity ?? '').trim().toUpperCase();
+    counts[severity in counts ? severity : 'UNKNOWN'] += 1;
+  }
+  return counts;
+};
+
+const formatSeverityCounts = (counts: Record<string, number>): string =>
+  Object.entries(counts)
+    .filter(([, count]) => count > 0)
+    .map(([severity, count]) => `${count} ${severity.toLowerCase()}`)
+    .join(', ');
+
+const highestDigestSeverity = (findings: DigestFinding[]): DigestSeverity => {
+  let highest: DigestSeverity = 'UNKNOWN';
+  for (const finding of findings) {
+    // Normalise before matching, exactly as countDigestSeverities does. Without
+    // it a lowercase `high` was counted in the HIGH tile but left the headline
+    // badge at UNKNOWN ("NO NEW FINDINGS"), so the header contradicted the KPI.
+    const candidate = String(finding.severity ?? '').trim().toUpperCase();
+    const severity: DigestSeverity = (DIGEST_SEVERITY_ORDER as readonly string[]).includes(candidate)
+      ? (candidate as DigestSeverity)
+      : 'UNKNOWN';
+    if (DIGEST_SEVERITY_ORDER.indexOf(severity) > DIGEST_SEVERITY_ORDER.indexOf(highest))
+      highest = severity;
+  }
+  return highest;
+};
+
+/** Process uptime in the same `N Days H Hours` form the delivered digest uses. */
+const formatUptime = (seconds: number): string => {
+  const days = Math.floor(Math.max(0, seconds) / 86400);
+  const hours = Math.floor((Math.max(0, seconds) % 86400) / 3600);
+  return `${days} ${days === 1 ? 'Day' : 'Days'} ${hours} ${hours === 1 ? 'Hour' : 'Hours'}`;
 };
 
 export const DailyDigestView: React.FC = () => {
   const {
     settings,
+    findings,
+    health,
     dailyDigestTemplate,
     dailyDigestCustomization,
     updateDailyDigestCustomization,
@@ -117,6 +133,7 @@ export const DailyDigestView: React.FC = () => {
   const [previewKey, setPreviewKey] = useState(0);
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'mobile'>('desktop');
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
+  const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null);
 
   // Enterprise Live Rendering & Scroll Management
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -125,6 +142,23 @@ export const DailyDigestView: React.FC = () => {
   const displayTimezone = settings.timezone;
   const previewDate = useRef(formatDateTime(new Date(), displayTimezone).replace(',', ' |')).current;
   const previewTimestamp = useRef(new Date().toISOString()).current;
+  // The context value is rebuilt on every poll; keep the latest health loader in
+  // a ref so the 30-second refresh below is not restarted by unrelated renders.
+  const healthRef = useRef(health);
+  healthRef.current = health;
+  useEffect(() => {
+    let active = true;
+    const loadHealth = async () => {
+      const snapshot = await healthRef.current();
+      if (active && snapshot) setSystemHealth(snapshot);
+    };
+    void loadHealth();
+    const timer = setInterval(loadHealth, 30_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, []);
   const [iframeHeight, setIframeHeight] = useState<number>(880);
   const [scrollMode, setScrollMode] = useState<'fit' | 'contained'>('fit');
   const [zoomLevel, setZoomLevel] = useState<number>(100);
@@ -217,30 +251,85 @@ export const DailyDigestView: React.FC = () => {
   // Active customization tool tab
   const [toolTab, setToolTab] = useState<'typography' | 'colors' | 'stamps' | 'tokens'>('colors');
 
+  // Real findings from the workspace snapshot, mapped to the digest shape the
+  // delivery renderer consumes (server/dailyDigest.ts). The studio used to show
+  // a hard-coded five-finding sample while the delivered digest carried live
+  // data, so the two never agreed.
+  const previewFindings = useMemo<DigestFinding[]>(
+    () =>
+      (findings ?? []).map((finding) => ({
+        cveId: finding.cveId,
+        severity: finding.cve.cvss.severity,
+        assetName: finding.matchedAssetName,
+        vendor: finding.matchedAssetVendor,
+        sourceUrl: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(finding.cveId)}`,
+        cvssScore: finding.cve.cvss.score,
+        exploitStatus: finding.cve.exploitStatus,
+        epssScore: finding.cve.epss?.score,
+        cisaKev: finding.cve.cisaKev?.isKev,
+      })),
+    [findings],
+  );
+  const previewSeverityCounts = useMemo(() => countDigestSeverities(previewFindings), [previewFindings]);
+  const previewSeverity = useMemo(() => highestDigestSeverity(previewFindings), [previewFindings]);
+  const heldForReview = useMemo(
+    () => (findings ?? []).filter((finding) => finding.notificationStatus === 'REVIEW_REQUIRED').length,
+    [findings],
+  );
+
+  // Map the authenticated health endpoint onto the digest's health shape so the
+  // Platform Health table reports the running system, not fixture values.
+  const digestHealth = useMemo<DigestHealth | null>(() => {
+    if (!systemHealth) return null;
+    return {
+      database: systemHealth.database === 'degraded' ? 'degraded' : 'connected',
+      databaseLatencyMs: systemHealth.databaseLatencyMs,
+      workerStatus: systemHealth.workerStatus,
+      workerHeartbeatAgeSeconds: systemHealth.heartbeatAgeSeconds,
+      nextScheduledAttempt: systemHealth.deliveryQueue?.nextScheduledAttempt ?? null,
+      nextDailyDigestAt: systemHealth.nextDailyDigestAt ?? null,
+      backlog: systemHealth.backlog ?? [],
+      checkedAt: systemHealth.checkedAt,
+      systemUptime: formatUptime(systemHealth.uptimeSeconds),
+      systemUptimePercentage: null,
+      pipelineJobs: systemHealth.pipelineJobs ?? { total: 0, succeeded: 0, failed: 0 },
+    };
+  }, [systemHealth]);
+
   const findingsSummary = useMemo(
-    () => renderDailyFindingSummary(SAMPLE_FINDINGS, dailyDigestCustomization),
-    [dailyDigestCustomization],
+    () => renderDailyFindingSummary(previewFindings, dailyDigestCustomization),
+    [previewFindings, dailyDigestCustomization],
   );
   const healthReport = useMemo(
-    () => renderDailyHealthReport(SAMPLE_HEALTH, { ...dailyDigestCustomization, timezone: displayTimezone }),
-    [dailyDigestCustomization, displayTimezone],
+    () => renderDailyHealthReport(digestHealth, { ...dailyDigestCustomization, timezone: displayTimezone }),
+    [digestHealth, dailyDigestCustomization, displayTimezone],
+  );
+  const digestDate = useMemo(() => digestDateKey(displayTimezone, new Date()), [displayTimezone]);
+  const previewAdvisoryId = `${settings.advisoryPrefix ?? ''}DAILY-PREVIEW`;
+  const previewAdvisoryTitle = useMemo(
+    () => `Daily Vulnerability Notification — ${formatDigestDate(digestDate)}`,
+    [digestDate],
+  );
+  const previewCveIds = useMemo(
+    () => [...new Set(previewFindings.map((finding) => finding.cveId))],
+    [previewFindings],
   );
 
   /**
    * The one rendered digest document the studio shows.
    *
    * This is `renderDailyDigest` — the exact renderer the delivered digest uses
-   * (`server/dailyDigest.ts`) — fed the preview sample data and the operator's
-   * live customization. It replaces a hand-rolled `.replace()` chain that had
-   * drifted from the renderer: it blanked `held_for_review`, hard-coded the
-   * severity badge, and skipped the `{{#if}}` branches, so the pane and the
-   * delivered mail disagreed even when the template was identical.
+   * (`server/dailyDigest.ts`) — fed the workspace's real findings and health and
+   * the operator's live customization. It replaces a hand-rolled `.replace()`
+   * chain that had drifted from the renderer: it blanked `held_for_review`,
+   * hard-coded the severity badge, and skipped the `{{#if}}` branches, so the
+   * pane and the delivered mail disagreed even when the template was identical.
    */
   const getRenderedHtml = (): string => {
-    const criticalCount = SAMPLE_FINDINGS.filter((f) => f.severity === 'CRITICAL').length;
-    const highCount = SAMPLE_FINDINGS.filter((f) => f.severity === 'HIGH').length;
-    const mediumCount = SAMPLE_FINDINGS.filter((f) => f.severity === 'MEDIUM').length;
-    const lowCount = SAMPLE_FINDINGS.filter((f) => f.severity === 'LOW').length;
+    const criticalCount = previewSeverityCounts.CRITICAL ?? 0;
+    const highCount = previewSeverityCounts.HIGH ?? 0;
+    const mediumCount = previewSeverityCounts.MEDIUM ?? 0;
+    const lowCount = previewSeverityCounts.LOW ?? 0;
     return renderDailyDigest(
       dailyDigestCustomization,
       {
@@ -248,12 +337,12 @@ export const DailyDigestView: React.FC = () => {
         // the preview ID must match the ID family in the delivered email (and in
         // server/app.ts test-daily-digest), or the email path legitimately treats
         // it as a different advisory and injects an identity line into the body.
-        advisory_id: `${settings.advisoryPrefix ?? ''}DAILY-PREVIEW`,
-        advisory_title: 'Daily Vulnerability Notification',
+        advisory_id: previewAdvisoryId,
+        advisory_title: previewAdvisoryTitle,
         dispatch_date: previewTimestamp,
-        severity: 'HIGH',
-        finding_count: SAMPLE_FINDINGS.length,
-        severity_counts: '2 critical, 1 high, 1 medium, 1 low',
+        severity: previewSeverity,
+        finding_count: previewFindings.length,
+        severity_counts: formatSeverityCounts(previewSeverityCounts),
         findings_summary: findingsSummary,
         health_report: healthReport,
         recipient_name: 'preview@example.invalid',
@@ -261,15 +350,10 @@ export const DailyDigestView: React.FC = () => {
         high_count: highCount,
         medium_count: mediumCount,
         low_count: lowCount,
-        asset_count: new Set(SAMPLE_FINDINGS.map((finding) => finding.assetName)).size,
-        executive_summary: formatExecutiveSummary(SAMPLE_FINDINGS.length, {
-          CRITICAL: criticalCount,
-          HIGH: highCount,
-          MEDIUM: mediumCount,
-          LOW: lowCount,
-        }),
+        asset_count: new Set(previewFindings.map((finding) => finding.assetName)).size,
+        executive_summary: formatExecutiveSummary(previewFindings.length, previewSeverityCounts),
         report_generated: previewDate,
-        held_for_review: renderHeldForReview(0, dailyDigestCustomization),
+        held_for_review: renderHeldForReview(heldForReview, dailyDigestCustomization),
         critical_summary: digestSeveritySummary('CRITICAL', criticalCount, dailyDigestCustomization),
         high_summary: digestSeveritySummary('HIGH', highCount, dailyDigestCustomization),
         medium_summary: digestSeveritySummary('MEDIUM', mediumCount, dailyDigestCustomization),
@@ -421,8 +505,14 @@ export const DailyDigestView: React.FC = () => {
     try {
       // Send the document the canvas and rendered pane are showing, not a
       // second server render of saved state: the preview clock and any unsaved
-      // template edit must reach the mailbox byte for byte.
-      const res = await sendTestDailyDigestEmail(testEmail.trim(), getRenderedHtml());
+      // template edit must reach the mailbox byte for byte. The advisory
+      // identity and severity travel with it so the subject matches the body.
+      const res = await sendTestDailyDigestEmail(testEmail.trim(), getRenderedHtml(), {
+        advisoryId: previewAdvisoryId,
+        advisoryTitle: previewAdvisoryTitle,
+        severity: previewSeverity,
+        cveIds: previewCveIds,
+      });
       if (res.success) {
         setTimeout(() => {
           setTestResult(null);

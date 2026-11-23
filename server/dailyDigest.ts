@@ -198,8 +198,15 @@ const formatSeverityCounts = (counts: Record<string, number>) =>
 
 const countSeverities = (findings: Finding[]): Record<string, number> => {
   const counts: Record<string, number> = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, UNKNOWN: 0 };
-  for (const finding of findings)
-    counts[finding.cve.cvss.severity] = (counts[finding.cve.cvss.severity] ?? 0) + 1;
+  // Normalise before bucketing: `cvss.severity` is raw provider text (NVD, OSV
+  // and RSS adapters do not all upper-case it). Keying the map with it created
+  // stray buckets that `formatSeverityCounts` printed, so the delivered email's
+  // breakdown disagreed with its own KPI tiles and executive summary. Anything
+  // unrecognised counts as UNKNOWN instead of inventing a bucket.
+  for (const finding of findings) {
+    const severity = String(finding.cve?.cvss?.severity ?? '').trim().toUpperCase();
+    counts[severity in counts ? severity : 'UNKNOWN'] += 1;
+  }
   return counts;
 };
 

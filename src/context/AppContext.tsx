@@ -45,6 +45,35 @@ import {
 } from '../utils/templateCompiler';
 
 const SESSION_RENEW_THRESHOLD_SEC = 60;
+/**
+ * Resolve which document a Template Studio shows.
+ *
+ * Precedence, highest first:
+ *
+ *  1. `override` - an unsaved "Apply to Preview" body held in memory. It wins
+ *     because the operator must see exactly what they just pasted.
+ *  2. `saved` - the template the SERVER stores (`snapshot.*CustomTemplate`). The
+ *     snapshot is the single source of truth: a save from another browser, another
+ *     machine, or a rebuilt canonical document must reach this studio. The value
+ *     used to be seeded from localStorage and never hydrated from the snapshot,
+ *     so a browser with an old (or absent) local copy kept showing a stale
+ *     template even though the server had the new one.
+ *  3. `compiled()` - the canonical document rendered with the operator's live
+ *     customization (colours, typography, stamps). Used when nothing is saved,
+ *     so the studio preview follows every control.
+ *
+ * `compiled` is a thunk so the (relatively expensive) template compilation only
+ * runs when it is actually selected.
+ */
+export function resolveStudioTemplate(
+  override: string | null | undefined,
+  saved: string | null | undefined,
+  compiled: () => string,
+): string {
+  if (override) return override;
+  if (saved) return saved;
+  return compiled();
+}
 
 function useApplication() {
   const [snapshot, setSnapshot] = useState<AppState>(emptyState);
@@ -65,21 +94,13 @@ function useApplication() {
   const [clock, setClock] = useState(Date.now()),
     [draft, setDraft] = useState<TemplateCustomization | null>(null),
     [dailyDigestDraft, setDailyDigestDraft] = useState<TemplateCustomization | null>(null),
-    [dailyDigestCustomTemplate, setDailyDigestCustomTemplate] = useState(() => {
-      try {
-        return localStorage.getItem('vulnstream_dailyDigestCustomTemplate');
-      } catch {
-        return null;
-      }
-    }),
+    // A session-only override for the template the operator has applied in the
+    // studio but not yet saved. The saved document is the server snapshot, so a
+    // browser without a local copy (or with a stale one from an older build)
+    // still opens on the template the workspace actually has.
+    [dailyDigestCustomTemplate, setDailyDigestCustomTemplate] = useState<string | null>(null),
     [newsDigestDraft, setNewsDigestDraft] = useState<TemplateCustomization | null>(null),
-    [newsDigestCustomTemplate, setNewsDigestCustomTemplate] = useState(() => {
-      try {
-        return localStorage.getItem('vulnstream_newsDigestCustomTemplate');
-      } catch {
-        return null;
-      }
-    }),
+    [newsDigestCustomTemplate, setNewsDigestCustomTemplate] = useState<string | null>(null),
     [refreshVersion, setRefreshVersion] = useState(0),
     [pending, setPending] = useState(0);
   const sessionRef = useRef(session);
@@ -381,37 +402,31 @@ function useApplication() {
   const customization = draft || snapshot.templateCustomization;
   const dailyDigestCustomization =
     dailyDigestDraft || snapshot.dailyDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION;
-  // Always a document compiled from the current customization. Using the raw
-  // snapshot made the studio preview show a template that ignored every change
-  // made in the studio until it was saved. Returning the raw snapshot (or the
-  // stock constant) is what made the preview keep showing an old template.
-  const dailyDigestTemplate =
-    dailyDigestCustomTemplate || compileDailyDigestTemplate(dailyDigestCustomization);
+  // The live preview must follow the customization controls. A saved custom
+  // body is authoritative only when the operator has not applied an unsaved
+  // edit; otherwise the compiled document is the one every control feeds.
+  //
+  // See resolveStudioTemplate for why the server snapshot sits between the two.
+  const dailyDigestTemplate = resolveStudioTemplate(
+    dailyDigestCustomTemplate,
+    snapshot.dailyDigestCustomTemplate,
+    () => compileDailyDigestTemplate(dailyDigestCustomization),
+  );
   // The news studio has its own stock defaults; the digest's must not leak in.
   const newsDigestCustomization =
     newsDigestDraft || snapshot.newsDigestCustomization || DEFAULT_NEWS_EMAIL_CUSTOMIZATION;
   // Compiled from the live customization, so the studio preview and the saved
   // template follow every colour and typography change.
-  const newsDigestTemplate = newsDigestCustomTemplate || compileNewsTemplate(newsDigestCustomization);
+  const newsDigestTemplate = resolveStudioTemplate(
+    newsDigestCustomTemplate,
+    snapshot.newsDigestCustomTemplate,
+    () => compileNewsTemplate(newsDigestCustomization),
+  );
   const setDailyDigestCustomTemplatePersisted = (template: string | null) => {
     setDailyDigestCustomTemplate(template);
-    try {
-      if (template) {
-        localStorage.setItem('vulnstream_dailyDigestCustomTemplate', template);
-      } else {
-        localStorage.removeItem('vulnstream_dailyDigestCustomTemplate');
-      }
-    } catch {}
   };
   const setNewsDigestCustomTemplatePersisted = (template: string | null) => {
     setNewsDigestCustomTemplate(template);
-    try {
-      if (template) {
-        localStorage.setItem('vulnstream_newsDigestCustomTemplate', template);
-      } else {
-        localStorage.removeItem('vulnstream_newsDigestCustomTemplate');
-      }
-    } catch {}
   };
 
   const renderAdvisoryPreview = useCallback(
@@ -812,7 +827,9 @@ function useApplication() {
       });
       if (success) {
         setDailyDigestDraft(null);
-        if (!customTemplate) setDailyDigestCustomTemplate(null);
+        // The save committed and refreshed the snapshot; drop the unsaved
+        // override so the studio renders the template the server now stores.
+        setDailyDigestCustomTemplate(null);
       }
       return success;
     },
@@ -828,7 +845,7 @@ function useApplication() {
       });
       if (success) {
         setNewsDigestDraft(null);
-        if (!customTemplate) setNewsDigestCustomTemplate(null);
+        setNewsDigestCustomTemplate(null);
       }
       return success;
     },
@@ -841,10 +858,20 @@ function useApplication() {
         success: false,
         message: 'Test could not be queued; see the error banner.',
       },
-    sendTestDailyDigestEmail: async (email: string, html?: string) =>
+    sendTestDailyDigestEmail: async (
+      email: string,
+      html?: string,
+      meta?: {
+        advisoryId?: string;
+        advisoryTitle?: string;
+        severity?: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN';
+        cveIds?: string[];
+      },
+    ) =>
       (await call<{ success: boolean; message: string }>('/test-daily-digest', {
         email,
         ...(html !== undefined ? { html } : {}),
+        ...(meta ?? {}),
       })) || {
         success: false,
         message: 'Test could not be queued; see the error banner.',

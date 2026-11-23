@@ -2,6 +2,7 @@ import { transaction } from '../db.ts';
 import { queueNativeNotifications } from './notifications.ts';
 import { retainCorrelationData, cleanupStaleMatches } from './operations.ts';
 import { Readable } from 'node:stream';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { Pool } from 'pg';
 import { CorrelationTelemetry } from './telemetry.ts';
 import { DeadLetterQueue } from './deadLetter.ts';
@@ -19,6 +20,58 @@ const samePayload = (left: unknown, right: unknown): boolean => {
     return false;
   }
 };
+
+/**
+ * Hard ceiling for one drain pass.
+ *
+ * A drain that never settles used to pin `this.draining` forever: every later
+ * tick returned early on the `this.draining` guard, so ingestion, notification
+ * queueing, stale-match cleanup and the retention sweeps all stopped, silently,
+ * while the worker still looked healthy. The guard is necessary (one pass at a
+ * time), so the fix is to bound the pass rather than drop the guard.
+ *
+ * Deliberately generous: a legitimate pass processes a bounded batch, so five
+ * seconds is already an order of magnitude above a normal pass and only trips on
+ * genuinely wedged work (a statement parked on a dead socket).
+ */
+const DRAIN_TIMEOUT_MS = 5_000;
+/** Pause between successful drain batches so the loop cannot spin hot. */
+const DRAIN_INTER_BATCH_MS = 100;
+
+/** Signals that a bounded operation exceeded its deadline. */
+class DrainTimeoutError extends Error {
+  constructor(
+    readonly label: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`${label} exceeded ${timeoutMs}ms`);
+    this.name = 'DrainTimeoutError';
+  }
+}
+
+/**
+ * Resolve/reject with `work`, or reject once `timeoutMs` elapses.
+ *
+ * The loser is not cancelled - `work` keeps running - but it is no longer
+ * awaited, which is what releases the caller's liveness guard. Any rejection the
+ * abandoned promise produces later is swallowed here, so a timed-out drain can
+ * never surface as an unhandled rejection (which would terminate the worker).
+ */
+async function withHardTimeout<T>(work: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  work.catch(() => undefined);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new DrainTimeoutError(label, timeoutMs)), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 import { Heartbeat } from './heartbeat.ts';
 export class CorrelationRuntime {
   readonly supervisor: PipelineSupervisor;
@@ -103,9 +156,15 @@ export class CorrelationRuntime {
     });
     this.timer = setInterval(() => {
       if (this.draining || this.stopped || this.supervisor.health !== 'HEALTHY') return;
-      this.draining = this.drain()
-        .catch(() => {
-          this.supervisor.ingestor.telemetry.log('ERROR', 'pending.drain_failed');
+      this.draining = withHardTimeout(this.drain(), DRAIN_TIMEOUT_MS, 'correlation drain')
+        .catch((error) => {
+          // Telemetry metrics are a fixed, scrubbed vocabulary; the timeout is
+          // encoded in the event name (`pending.drain_timeout`) rather than an
+          // ad-hoc field so it is queryable like every other correlation event.
+          this.supervisor.ingestor.telemetry.log(
+            error instanceof DrainTimeoutError ? 'CRITICAL' : 'ERROR',
+            error instanceof DrainTimeoutError ? 'pending.drain_timeout' : 'pending.drain_failed',
+          );
         })
         .finally(() => {
           this.draining = undefined;
@@ -261,6 +320,12 @@ export class CorrelationRuntime {
         await renewing;
       }
       await this.queueNotifications();
+      // Yield between batches. `acknowledgePending` deletes rows that are already
+      // gone from the claim query, so a busy queue lets this loop re-enter
+      // `claimPending` immediately and hold a pool connection (plus a claim and a
+      // notification transaction) continuously. A short pause lets the tick timer
+      // and other pool users run, and keeps the drain from starving them.
+      await delay(DRAIN_INTER_BATCH_MS);
     }
   }
   private async cleanupStaleMatches(): Promise<void> {

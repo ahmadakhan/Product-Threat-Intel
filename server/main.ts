@@ -35,7 +35,13 @@ import { enrichmentBacklogCandidates } from '../src/engine/pipelineEngine';
 import type { TrainingSummary } from './ml/train/orchestrator.ts';
 import { isTelemetryAnomaly, shouldSampleMlTelemetry } from './ml/integration.ts';
 import type { Db } from './db';
-import { processPipeline, setAbortReason, ABORT_REASON, PipelinePoolStarved } from './pipeline';
+import {
+  processPipeline,
+  setAbortReason,
+  ABORT_REASON,
+  PipelinePoolStarved,
+  releaseOrphanedRunningExecutions,
+} from './pipeline';
 import { runSelfHealCheck } from './selfHealing';
 import { runRetention } from './retention';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
@@ -436,6 +442,18 @@ const tick = () => {
       pipeline = null;
       pipelineController = undefined;
       pipelineAbortedAt = 0;
+      // Detaching the promise does not finish the RUN. The row it left behind is
+      // still RUNNING, and `queueRun()` treats any RUNNING row as the active run,
+      // so the next attempt would deduplicate against it and the pipeline would
+      // stay stuck with no worker. Reconcile the database from the owner of the
+      // run lock: the abort path has already released that lock, so no live
+      // worker can still be writing this row.
+      void releaseOrphanedRunningExecutions(
+        pool,
+        'worker detached a cancelled pipeline attempt that did not settle',
+      ).catch((error: unknown) => {
+        void report('pipeline')(error);
+      });
     }
   }
   if (!pipeline) {
@@ -677,7 +695,19 @@ const retentionTick = () => {
       await releaseRetention(true);
       verboseLog('retention.completed');
     } catch (error) {
-      await releaseRetention(false).catch(() => {});
+      // The claim MUST come back. If this release is lost, the row keeps
+      // `claimedAt` set until RETENTION_CLAIM_TTL_MS expires, and a failed release
+      // that nobody reported meant retention silently stopped running for that
+      // whole window. Report it, and retry once on a fresh connection: a release
+      // that failed because its transaction aborted succeeds immediately on a new
+      // one, while a genuine database outage is reported rather than swallowed.
+      await releaseRetention(false).catch(async (releaseError) => {
+        void report('retention.release')(releaseError);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await releaseRetention(false).catch((retryError) => {
+          void report('retention.release')(retryError);
+        });
+      });
       throw error;
     } finally {
       clearTimeout(timer);
@@ -1063,14 +1093,19 @@ const cleanup = setInterval(() => {
   // Session and login-attempt expiry are security invariants, not retained
   // business data. Queue rows and operational events follow the retention
   // policy in runRetention so an operator's configured window stays authoritative.
-  void pool
-    .query(
-      `DELETE FROM sessions WHERE expires_at<now();
-       DELETE FROM login_attempts WHERE window_start<now()-interval '1 day';
-       DELETE FROM password_reset_tokens WHERE expires_at<now();`,
-    )
-    .then((result) => {
-      verboseLog('session.cleanup', { removed: result?.rowCount ?? 0 });
+  //
+  // One explicit transaction, not three independent statements: a multi-statement
+  // `query()` is a simple-query batch that PostgreSQL runs as its own implicit
+  // transaction, so a failure part-way could leave expired sessions purged while
+  // login attempts were not. Wrapping them makes the sweep all-or-nothing and
+  // lets a single statement timeout fail it cleanly.
+  void transaction(pool, async (db) => {
+    await db.query('DELETE FROM sessions WHERE expires_at<now()');
+    await db.query("DELETE FROM login_attempts WHERE window_start<now()-interval '1 day'");
+    await db.query('DELETE FROM password_reset_tokens WHERE expires_at<now()');
+  })
+    .then(() => {
+      verboseLog('session.cleanup');
     })
     .catch(report('session-cleanup'));
 }, 60000);

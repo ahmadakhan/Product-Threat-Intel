@@ -505,8 +505,13 @@ export async function migrate(pool: pg.Pool) {
     // stalling the application behind an AccessExclusive DDL lock.
     await client.query("SET LOCAL lock_timeout = '10000ms'");
     // Migrations may include index builds; do not inherit the 15-second API
-    // statement timeout.
-    await client.query("SET LOCAL statement_timeout = '300000ms'");
+    // statement timeout. Configurable: a large data migration that legitimately
+    // needs longer than the 5-minute default would otherwise be cancelled
+    // mid-transaction and roll back, which on a big table can take as long again
+    // and fails the deploy for no defect. The default stays conservative; raise
+    // MIGRATION_STATEMENT_TIMEOUT_MS for a one-off heavy migration.
+    const migrationTimeoutMs = migrationStatementTimeoutMs();
+    await client.query(`SET LOCAL statement_timeout = '${migrationTimeoutMs}ms'`);
     // Extensions live in the database-global `pg_extension` catalog, not in the
     // per-schema search path. Two schemas migrating at the same time can both
     // see `pg_trgm` as absent and race on `CREATE EXTENSION`, failing with
@@ -628,6 +633,78 @@ export const LOCK_CLASS_RANK: ReadonlyMap<number, number> = new Map([
   [784921, 3], // worker leadership
   [800005, 4], // concurrent index build
 ]);
+
+/** Default statement budget for one migration transaction: five minutes. */
+const DEFAULT_MIGRATION_STATEMENT_TIMEOUT_MS = 300_000;
+/**
+ * Statement budget for migrations, overridable with
+ * MIGRATION_STATEMENT_TIMEOUT_MS.
+ *
+ * Validated rather than trusted: PostgreSQL is sent this value as SQL text, so a
+ * non-numeric or absurd value must not reach it. Out-of-range falls back to the
+ * default instead of failing a deploy on a typo in an optional knob.
+ */
+function migrationStatementTimeoutMs(): number {
+  const raw = process.env.MIGRATION_STATEMENT_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_MIGRATION_STATEMENT_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1_000 || parsed > 3_600_000)
+    return DEFAULT_MIGRATION_STATEMENT_TIMEOUT_MS;
+  return parsed;
+}
+
+/**
+ * Assert that session class locks are taken in LOCK_CLASS_RANK order.
+ *
+ * Named transaction locks are sorted by `orderLocks`, but the class locks are
+ * acquired by hand (`pg_try_advisory_lock` on a dedicated connection) and until
+ * now LOCK_CLASS_RANK was documentation only: nothing read it, so a call site
+ * that took two classes out of order would deadlock with `40P01` and the table
+ * would not have prevented it.
+ *
+ * Every holder here takes exactly one class lock, so today this is a guard
+ * rather than a re-ordering. It is checked at acquisition so that a future
+ * caller which takes a second class lock in the wrong order fails fast with a
+ * clear message instead of deadlocking in production. Acquiring is NOT reordered
+ * behind the caller's back: the order a lock is actually taken in must match the
+ * order this function asserts, or the assertion would be a lie.
+ */
+export function assertClassLockOrder( lockClass: number, held: readonly number[]): void {
+  const rank = LOCK_CLASS_RANK.get(lockClass);
+  if (rank === undefined) return; // unranked classes keep their historical freedom
+  for (const heldClass of held) {
+    const heldRank = LOCK_CLASS_RANK.get(heldClass);
+    if (heldRank === undefined) continue;
+    if (heldRank > rank)
+      throw new Error(
+        `Advisory lock class order violated: ${lockClass} (rank ${rank}) acquired while holding ${heldClass} (rank ${heldRank})`,
+      );
+  }
+}
+
+/**
+ * Acquire a session-scoped advisory lock through the documented order check.
+ *
+ * `held` is the set of class locks the caller already owns on this connection.
+ * Returns the `pg_try_advisory_lock` boolean so callers keep their existing
+ * "somebody else owns this run" control flow; `wait: true` uses the blocking
+ * form instead.
+ */
+export async function acquireSessionClassLock(
+  client: pg.PoolClient,
+  lockClass: number,
+  schemaKey: string,
+  options: { held?: readonly number[]; wait?: boolean } = {},
+): Promise<boolean> {
+  assertClassLockOrder(lockClass, options.held ?? []);
+  const fn = options.wait ? 'pg_advisory_lock' : 'pg_try_advisory_lock';
+  const result = await client.query<{ locked: boolean }>(
+    `SELECT ${fn}(${advisoryLockClassArgument(lockClass)}, ${schemaKey}) AS locked`,
+  );
+  // `pg_advisory_lock` returns void (a null `locked`); holding it is the success
+  // signal, so a null result is reported as acquired rather than as `false`.
+  return options.wait ? true : result.rows[0]?.locked === true;
+}
 
 export interface TransactionOptions {
   /**

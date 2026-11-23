@@ -4,6 +4,7 @@ import { formatExecutionName, formatAdvisoryId } from '../src/utils/executionNam
 import type pg from 'pg';
 import { randomUUID, createHash } from 'node:crypto';
 import {
+  acquireSessionClassLock,
   get,
   getForUpdate,
   getMany,
@@ -1038,6 +1039,109 @@ export async function stopRun(pool: pg.Pool, id: string, actor: string): Promise
   return stopRunWithClient(pool, id, actor);
 }
 
+/*
+ * Run-lock namespace. `processPipeline` takes this session advisory lock on its
+ * dedicated connection and holds it for the whole run, so "is this lock held?"
+ * is an exact answer to "does a live worker own this execution right now?".
+ */
+const PIPELINE_RUN_LOCK_CLASS = 800003;
+/** Canonical UUID, used where a `text` id is written to a `uuid` column. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Is the pipeline run lock currently held by any live session?
+ *
+ * Used by `stopRun` to distinguish a run a worker will stop at its next
+ * checkpoint from an orphaned row no worker will ever look at again. The probe
+ * must never wait: `pg_locks` is read instead of `pg_try_advisory_lock`, because
+ * taking the lock to test it would (a) block-free require a release on every
+ * path and (b) report "free" only after a real acquisition race. A plain read of
+ * `pg_locks` observes the holder without touching the lock at all.
+ *
+ * `granted` is filtered because a waiter waiting on the lock is not a holder.
+ * Advisory locks are two-part keys, so both halves are matched.
+ */
+async function isRunOwnedByLiveWorker(db: pg.PoolClient, runId: string): Promise<boolean> {
+  // `schemaLockKey` is a SQL expression, not a bindable value (it is
+  // `hashtext(COALESCE(current_schema(), current_database()))`), so it is
+  // interpolated exactly as the acquisition site does. The class is a numeric
+  // constant and is likewise safe to interpolate.
+  const result = await db.query<{ held: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM pg_locks
+        WHERE locktype = 'advisory'
+          AND granted
+          AND classid = ${PIPELINE_RUN_LOCK_CLASS}
+          AND objid = ${schemaLockKey}
+     ) AS held`,
+  );
+  // `runId` is accepted for readability at the call site and future per-run
+  // locking; the run lock is installation-scoped today, so the answer is the
+  // same for every RUNNING execution in this schema.
+  void runId;
+  return Boolean(result.rows[0]?.held);
+}
+
+/**
+ * Cancel RUNNING executions that no live worker owns.
+ *
+ * `queueRun()` refuses to start a new run while any execution is QUEUED or
+ * RUNNING, on the assumption that a worker is servicing it. A worker that
+ * crashed, was detached by the stall watchdog, or lost its lock connection can
+ * leave that row behind, and nothing else rewrites it: the crash-recovery sweep
+ * runs inside `processPipeline`, which the stuck row prevents from starting.
+ * That is a circle - the row blocks the only code that would clear it.
+ *
+ * This is the escape. It only touches rows with no lock holder, so it can never
+ * race a live worker: ownership is proven by `pg_locks`, not by age. Returns the
+ * ids it cancelled so the caller can report them.
+ */
+export async function releaseOrphanedRunningExecutions(pool: pg.Pool, reason: string): Promise<string[]> {
+  return transaction(pool, async (db) => {
+    if (await isRunOwnedByLiveWorker(db, '')) return [];
+    const stuck = await db.query<{ id: string }>(
+      `SELECT id FROM records
+        WHERE kind='executions' AND data->>'status'='RUNNING'
+        ORDER BY id
+        FOR UPDATE`,
+    );
+    const cancelled: string[] = [];
+    for (const row of stuck.rows) {
+      const current = await db.query<{ data: PipelineExecution }>(
+        "SELECT data FROM records WHERE kind='executions' AND id=$1 AND data->>'status'='RUNNING'",
+        [row.id],
+      );
+      const run = current.rows[0]?.data;
+      if (!run) continue;
+      const now = new Date().toISOString();
+      await put(db, 'executions', row.id, {
+        ...run,
+        status: 'CANCELLED',
+        endTime: now,
+        stopRequestedAt: run.stopRequestedAt ?? now,
+        phases: run.phases.map((phase) =>
+          ['RUNNING', 'PENDING'].includes(phase.status) ? { ...phase, status: 'CANCELLED' as const } : phase,
+        ),
+        logs: boundExecutionLogs([...run.logs, `Cancelled ${now}: ${reason}`]),
+      });
+      await writeEvent(db, {
+        category: 'PIPELINE',
+        level: 'WARNING',
+        code: 'pipeline.orphaned_run_cancelled',
+        message: 'Cancelled a RUNNING execution that no worker owned',
+        // `operational_events.run_id` is a uuid column, so a legacy or malformed
+        // execution id would make the event INSERT fail and abort the whole sweep
+        // transaction - leaving every orphan in place, which is exactly the state
+        // this function exists to clear. The id is always in the context.
+        ...(UUID.test(row.id) ? { runId: row.id } : {}),
+        context: { reason, executionId: row.id },
+      });
+      cancelled.push(row.id);
+    }
+    return cancelled;
+  });
+}
+
 /**
  * Record a stop in a queue-serialized transaction.
  *
@@ -1060,13 +1164,47 @@ export async function stopRunWithClient(
     async (db) => {
       const run = await getForUpdate<PipelineExecution>(db, 'executions', id);
       if (!run) throw new HttpError(404, 'Execution not found');
-      if (!['QUEUED', 'RUNNING'].includes(run.status) || run.stopRequestedAt) return run;
-      run.stopRequestedAt = new Date().toISOString();
-      if (run.status === 'QUEUED') {
+      /*
+       * A stop must always end the run, even when no worker is left to notice it.
+       *
+       * Writing `stopRequestedAt` alone only works when a live worker reaches a
+       * checkpoint. If the worker crashed, was detached by the stall watchdog, or
+       * lost its advisory connection, nothing ever transitions the row: it stays
+       * RUNNING forever, and because `queueRun()` treats any RUNNING row as the
+       * active run, every later request and scheduled tick is deduplicated against
+       * a run that no longer exists. The pipeline looks alive and stop "does
+       * nothing".
+       *
+       * Ownership decides which of the two correct behaviours applies:
+       *  - a live worker owns the run, so the stop is REQUESTED and that worker
+       *    finalizes the row at its next checkpoint;
+       *  - nobody owns it, so the stop is APPLIED here and the queue is released.
+       *
+       * Ownership evidence, strongest first: `workerLockClient` proves the caller
+       * is the worker; otherwise the run's session advisory lock, still held in
+       * `pg_locks`, proves a worker is alive. A QUEUED row a worker has already
+       * locked is mid-promotion and belongs to that worker too.
+       */
+      if (!['QUEUED', 'RUNNING'].includes(run.status)) return run;
+      const workerAlive = Boolean(workerLockClient) || (await isRunOwnedByLiveWorker(db, id));
+      // A live worker already told to stop needs no second write.
+      if (run.stopRequestedAt && workerAlive) return run;
+      const alreadyRequested = Boolean(run.stopRequestedAt);
+      run.stopRequestedAt ??= new Date().toISOString();
+      if (!workerAlive) {
         run.status = 'CANCELLED';
         run.endTime = run.stopRequestedAt;
+        run.phases = run.phases.map((phase) =>
+          ['RUNNING', 'PENDING'].includes(phase.status) ? { ...phase, status: 'CANCELLED' as const } : phase,
+        );
+        run.logs.push(
+          alreadyRequested
+            ? 'Operator requested stop (the earlier request was still pending; no worker owned this execution, so it is now cancelled)'
+            : 'Operator requested stop (no live worker owned this execution; cancelled immediately)',
+        );
+      } else {
+        run.logs.push('Operator requested stop');
       }
-      run.logs.push('Operator requested stop');
       await put(db, 'executions', id, run);
       await writeEvent(db, {
         category: 'PIPELINE',
@@ -1239,8 +1377,7 @@ export async function processPipeline(
       onAbort();
       signal.throwIfAborted();
     }
-    locked = (await lock.query(`SELECT pg_try_advisory_lock(800003, ${schemaLockKey}) AS locked`)).rows[0]
-      .locked;
+    locked = await acquireSessionClassLock(lock, PIPELINE_RUN_LOCK_CLASS, schemaLockKey);
     if (!locked) return false;
     // Only RUNNING executions can be recovered; the bounded query replaces a
     // load of every historical run on each tick.
