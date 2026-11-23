@@ -20,7 +20,7 @@ import { CorrelationRuntime } from './correlation/runtime.ts';
 import { describeError, writeEvent } from './events';
 import type { Finding } from '../src/types/index.ts';
 import { loadConfig } from './config';
-import { createPool, migrate, transaction, get, put, list, REQUIRED_SCHEMA_VERSION } from './db';
+import { createPool, migrate, transaction, get, getForUpdate, put, list, REQUIRED_SCHEMA_VERSION } from './db';
 import { createApp } from './app';
 import { createRequester } from './network';
 import { createMailSender, deliverNext } from './delivery';
@@ -888,22 +888,49 @@ const deadLetterRetryTick = async () => {
   if (stopping || config.WORKER_ENABLED !== 'true' || !leadership.isLeader || deadLetterRetryRunning) return;
   deadLetterRetryRunning = (async () => {
     try {
+      // The entire batch runs under one row-locked transaction. A bare SELECT on
+      // the pool cannot claim anything (its row locks end with the statement),
+      // so two worker replicas in the window before a stepped-down leader notices
+      // it lost the lock could both read and process the same 50 letters. Taking
+      // the locks for the whole pass makes the claim exclusive. `SKIP LOCKED`
+      // keeps a replica from parking behind a sibling's pass; because the letters
+      // are the batch's own working set, every successor is processed here, so
+      // the exceptions below are caught per letter and never abort the batch.
       const rows = await pool.query<{ id: string; data: unknown }>(
         `SELECT id, data FROM records WHERE kind='delivery_dead_letters'
          AND COALESCE(data->>'resolvedAt','')=''
          ORDER BY created_at ASC LIMIT 50`,
       );
       if (rows.rows.length === 0) return;
-      let retried = 0;
-      let exhausted = 0;
-      for (const row of rows.rows) {
-        try {
-          const deadLetter = parseRecordData<{ findingId?: string; id?: string }>(row.data);
-          const findingId = deadLetter.findingId || deadLetter.id;
-          await transaction(pool, async (db) => {
+      const outcomes = await transaction(pool, async (db) => {
+        let retried = 0;
+        let exhausted = 0;
+        const claimed = await db.query<{ id: string; data: unknown }>(
+          `SELECT id, data FROM records WHERE kind='delivery_dead_letters'
+           AND id = ANY($1::text[]) AND COALESCE(data->>'resolvedAt','')=''
+           ORDER BY id FOR UPDATE SKIP LOCKED`,
+          [rows.rows.map((row) => row.id)],
+        );
+        if (!claimed.rows.length) return { retried: 0, exhausted: 0 };
+        for (const row of claimed.rows) {
+          // One savepoint per letter. The letters share this transaction so the
+          // claim is exclusive for the whole pass, but a single poisonous letter
+          // must not abort it: without the savepoint any error leaves the
+          // transaction in `25P02` (aborted) and every remaining letter, plus
+          // every letter already handled, is rolled back.
+          await db.query('SAVEPOINT dead_letter_row');
+          try {
+            const deadLetter = parseRecordData<{ findingId?: string; id?: string }>(row.data);
+            const findingId = deadLetter.findingId || deadLetter.id;
             // Re-queue the finding through the normal pipeline path by marking
             // the finding as not-yet-dispatched so the next pipeline run picks it up.
-            const finding = findingId ? await get<Finding>(db, 'findings', findingId) : undefined;
+            //
+            // Row-locked: the body below is a read-modify-write of
+            // `deadLetterCount`/`notificationStatus`, and the pipeline's
+            // reconciliation and an operator's triage action write the same row.
+            // Without the lock each writer overwrote the others with a snapshot,
+            // so a click could be reverted or a retry budget double-incremented.
+            const finding = findingId ? await getForUpdate<Finding>(db, 'findings', findingId) : undefined;
             // The dead letter is always resolved: leaving it open would retry it
             // every tick forever, and its retry budget lives on the finding, not
             // on this row. An orphaned letter (no finding) has nothing to retry.
@@ -962,11 +989,20 @@ const deadLetterRetryTick = async () => {
               resolvedAt: new Date().toISOString(),
               resolvedBy: 'auto-retry',
             });
-          });
-        } catch (error) {
-          void report('deadLetter.retry')(error);
+            await db.query('RELEASE SAVEPOINT dead_letter_row').catch(() => {});
+          } catch (error) {
+            await db.query('ROLLBACK TO SAVEPOINT dead_letter_row').catch(() => {});
+            // A letter that cannot be processed is left unresolved deliberately: it
+            // is retried on the next tick, and because the batch shares one
+            // transaction, a per-letter failure must not discard the letters already
+            // handled. The failed row's own writes were discarded by the savepoint
+            // rollback above, so a partially applied letter never commits.
+            void report('deadLetter.retry')(error);
+          }
         }
-      }
+        return { retried, exhausted };
+      });
+      const { retried, exhausted } = outcomes;
       if (retried > 0) {
         await writeEvent(pool, {
           category: 'EMAIL',

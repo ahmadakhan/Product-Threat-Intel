@@ -869,6 +869,32 @@ export async function getForUpdate<T>(db: Db, kind: string, id: string): Promise
   return (await db.query('SELECT data FROM records WHERE kind=$1 AND id=$2 FOR UPDATE', [kind, id])).rows[0]
     ?.data;
 }
+/**
+ * `getMany` with a row lock on every returned record.
+ *
+ * The batch counterpart of `getForUpdate`, for a read-modify-write that touches
+ * several records of one kind. The caller must be inside a transaction (a lock
+ * taken on a pooled connection is released when the statement ends).
+ *
+ * Rows are locked in a fixed `id` order. PostgreSQL locks rows in the order the
+ * executor visits them, so two processes that lock the same set through a
+ * different plan or order can deadlock (`40P01`); pinning the order here makes
+ * every caller traverse them identically. The caller must also deduplicate the
+ * requested ids, since `= ANY` visits each id once but a duplicate in the
+ * returned map is meaningless.
+ */
+export async function getManyForUpdate<T>(
+  db: Db,
+  kind: string,
+  ids: readonly string[],
+): Promise<Map<string, T>> {
+  if (!ids.length) return new Map();
+  const rows = await db.query<{ id: string; data: T }>(
+    'SELECT id,data FROM records WHERE kind=$1 AND id = ANY($2::text[]) ORDER BY id FOR UPDATE',
+    [kind, [...ids]],
+  );
+  return new Map(rows.rows.map((row) => [row.id, row.data]));
+}
 export async function list<T>(db: Db, kind: string, limit?: number): Promise<T[]> {
   const safeLimit =
     typeof limit === 'number' && Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : null;

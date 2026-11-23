@@ -79,7 +79,17 @@ import { randomUUID, createHmac, createHash } from 'node:crypto';
 import { mergeCveRecords, stableJson } from '../src/utils/deduplicator';
 import nodemailer from 'nodemailer';
 import type { Config } from './config';
-import { transaction, get, getForUpdate, getMany, list, put, appendAudit, schemaLockKey } from './db';
+import {
+  transaction,
+  get,
+  getForUpdate,
+  getMany,
+  getManyForUpdate,
+  list,
+  put,
+  appendAudit,
+  schemaLockKey,
+} from './db';
 import type { Db } from './db';
 import { createRequester, type Requester } from './network';
 import { isFindingDelivery } from '../src/utils/findingDelivery.ts';
@@ -374,6 +384,16 @@ export const DEFAULT_EMAIL_RETRY_POLICY = emailRetryPolicy(DEFAULT_SETTINGS);
  * ladder or a premature terminal failure.
  */
 export const MAX_AMBIGUOUS_ATTEMPTS = 3;
+/**
+ * How many of a recipient's most recent outbox rows the advisory `
+ * deliverySuccessRate` is computed over.
+ *
+ * Bounded on purpose: the previous query scanned the recipient's whole history,
+ * so a long-lived deployment made the finalize transaction slower every day
+ * until it hit the statement timeout. This is a trailing health indicator, not
+ * a ledger, so a recent window is both cheaper and the correct statistic.
+ */
+export const DELIVERY_RATE_WINDOW = 200;
 /**
  * Deterministic exponential backoff capped by the configured maximum, without
  * jitter. Used by `emailRetryDelayPlan` for ML source comparison so the
@@ -2631,6 +2651,23 @@ export async function deliverNext(
   }
   let finalized = false;
   try {
+    /*
+     * ROW-LOCK ORDER for this transaction (every row lock taken below, in order):
+     *
+     *   outbox -> {emailLogs | webhookLogs} -> recipients -> advisories
+     *          -> alertedCves (id order) -> findings (id order)
+     *
+     * Several workers finalize the same bundle concurrently (one job per
+     * recipient, plus the webhook job), so they touch overlapping records. Two
+     * workers that acquired the SAME rows in DIFFERENT orders would deadlock
+     * (40P01) instead of serializing, so this sequence is an invariant, not a
+     * suggestion: any lock added to this block must be appended at the end, or
+     * inserted in a position that every worker also reaches in that same order.
+     * Within the multi-row locks the ids are sorted, which pins their order too.
+     *
+     * Each lock exists because the corresponding write is a read-modify-write of
+     * a record another writer also updates; see the comment at each site.
+     */
     await transaction(pool, async (db) => {
       const current = await db.query('SELECT status,lock_token FROM outbox WHERE id=$1 FOR UPDATE', [job.id]);
       if (current.rows[0]?.lock_token !== job.lock_token) return;
@@ -2768,21 +2805,45 @@ export async function deliverNext(
         }
       }
       if (job.channel === 'email' && job.target_id !== 'test') {
-        const recipient = await get<EmailRecipient>(db, 'recipients', job.target_id);
+        // Row-locked for the same reason as the advisory below: this record is an
+        // operator-visible read-modify-write that concurrent workers for the
+        // recipient also perform.
+        const recipient = await getForUpdate<EmailRecipient>(db, 'recipients', job.target_id);
         if (recipient) {
+          // Bounded window. This ran `count(*)` over the recipient's ENTIRE
+          // outbox history inside the finalize transaction, so its cost grew with
+          // the age of the deployment and eventually exceeded the statement
+          // timeout — failing the finalize of a job whose mail had already been
+          // accepted. The success rate is a trailing health signal, so a bounded
+          // window is the correct statistic as well as a cheaper one.
           const counts = (
             await db.query(
-              "SELECT count(*) FILTER (WHERE status='ACCEPTED')::int AS accepted, count(*) FILTER (WHERE status IN ('ACCEPTED','FAILED'))::int AS terminal FROM outbox WHERE channel='email' AND target_id=$1",
+              `SELECT count(*) FILTER (WHERE status='ACCEPTED')::int AS accepted,
+                      count(*) FILTER (WHERE status IN ('ACCEPTED','FAILED'))::int AS terminal
+                 FROM (SELECT status FROM outbox
+                        WHERE channel='email' AND target_id=$1
+                        ORDER BY updated_at DESC LIMIT ${DELIVERY_RATE_WINDOW}) recent`,
               [job.target_id],
             )
           ).rows[0];
+          // A recipient with no finished deliveries has no rate to report;
+          // recording 0% for that state made a brand-new mailbox look like a
+          // failing one and, worse, overwrote a real rate with 0 the moment the
+          // window held only in-flight rows.
           await put(db, 'recipients', recipient.id, {
             ...recipient,
-            deliverySuccessRate: counts.terminal ? (counts.accepted / counts.terminal) * 100 : 0,
+            deliverySuccessRate: counts.terminal
+              ? Math.round((counts.accepted / counts.terminal) * 1000) / 10
+              : recipient.deliverySuccessRate,
           });
         }
       }
-      const advisory = await get<Advisory>(db, 'advisories', job.advisory_id);
+      // Row-locked, not a plain read: this is a read-modify-write of a record the
+      // concurrent outbox workers serving other recipients of the same bundle also
+      // update, and the advisory is an operator-visible record. Taking the lock
+      // here also fixes the lock order (see the finding lock below): advisory -
+      // then findings, for every worker, so two workers cannot cycle.
+      const advisory = await getForUpdate<Advisory>(db, 'advisories', job.advisory_id);
       if (advisory) {
         const totals = (
           await db.query(
@@ -2807,7 +2868,14 @@ export async function deliverNext(
           const dispatchKey =
             job.payload.digestKey ?? job.dedupe_key.split(':email:')[0].split(':webhook:')[0];
           const dispatchIds = declaredCveIds.map((cveId) => `${cveId}:${dispatchKey}`);
-          const priorAlerts = await getMany<AlertedCVE>(db, 'alertedCves', declaredCveIds);
+          // Lock the alert counters before reading them. `dispatchCount` and
+          // `recipientEmails` are read-modify-write accumulations, and the outbox
+          // delivers one job per recipient concurrently: without the lock every
+          // worker read the same `prior` and wrote the same +1, so a digest sent
+          // to four cohorts recorded dispatchCount 1 and lost three recipients'
+          // addresses. Sorted so every worker takes the same row order.
+          const lockedCves = [...new Set(declaredCveIds)].sort();
+          const priorAlerts = lockedCves.length ? await getManyForUpdate<AlertedCVE>(db, 'alertedCves', lockedCves) : new Map();
           const priorDispatches = await getMany(db, 'alertDispatches', dispatchIds);
           for (const cveId of declaredCveIds) {
             const prior = priorAlerts.get(cveId);
@@ -2839,8 +2907,19 @@ export async function deliverNext(
             } satisfies AlertedCVE);
           }
         }
-        // Batch-fetch all finding rows in a single query instead of per-finding.
-        const findingMap = await getMany<Finding>(db, 'findings', advisory.findingIds);
+        // Fetch (and lock) the finding rows this finalize updates. This is a
+        // read-modify-write of `notificationStatus`/`autoDispatchedAt` and the
+        // outbox workers for every recipient of this bundle run concurrently on
+        // the same findings. A plain `getMany` let each worker write back the
+        // snapshot it had read, so a status a reconciliation committed in between
+        // was silently reverted and a finding was re-sent (or a failure erased).
+        // Rows are locked in id order so two workers that share findings cannot
+        // deadlock against each other.
+        const findingMap = await getManyForUpdate<Finding>(
+          db,
+          'findings',
+          [...new Set(advisory.findingIds)].sort(),
+        );
         // Only the findings this target actually delivered describe this
         // recipient's bundle. Assessment or digest bundles that are already
         // accepted must not be flipped back to FAILED because the digest window
