@@ -1113,20 +1113,40 @@ export const PIPELINE_HEARTBEAT_MS = 15_000;
 /**
  * Body of the pipeline heartbeat timer.
  *
- * Firing is itself proof the run is alive: the event loop is turning and this
- * pass is still holding its slot. That evidence must reach the supervisor's
- * stuck-promise backstop (`onProgress`), because `checkpoint()` only runs at
- * request boundaries — one slow but healthy source request otherwise produces
- * no progress signal at all and the run is cancelled as if it were wedged.
- *
- * Exported so the progress contract can be tested without a database.
+ * Reports LIVENESS only (the scheduler heartbeat row), never PROGRESS. See the
+ * contract below: a timer cannot distinguish a wedged statement from a slow but
+ * healthy one, so letting it feed the stall watchdog made an endless run
+ * invisible. Exported so the contract can be tested without a database.
  */
-export function pipelineHeartbeat(
-  onProgress: (() => void) | undefined,
-  options: { onBeat: () => void },
-): () => void {
+/*
+ * Progress vs. liveness - the two must not be conflated.
+ *
+ * Two independent clocks run against a pipeline attempt:
+ *
+ *  - PROGRESS: the run advanced. Only `checkpoint()` can attest to this: it
+ *    re-reads the execution row and throws when the run must stop. It fires at
+ *    every request boundary and between feed pages.
+ *
+ *  - LIVENESS: the process is still able to run timers and reach the database.
+ *    The heartbeat attests to this, and to nothing more.
+ *
+ * `main.ts` cancels an attempt that produces no PROGRESS for STUCK_PROMISE_MS,
+ * whose default is deliberately several times the longest legitimate silent
+ * stretch (one slow source request). The bug was that the heartbeat called the
+ * progress callback on every beat. `main.ts` reset `pipelineStartedAt` from that
+ * callback, so the stall clock was cleared by the heartbeat itself, forever: a
+ * run whose promise never settled (an aborted feed that ignored its signal, a
+ * query parked on a dead socket) never reached STUCK_PROMISE_MS, was never
+ * cancelled, and was never detached by PIPELINE_ABORT_GRACE_MS. The pipeline
+ * looked like it was still running, indefinitely.
+ *
+ * The heartbeat therefore no longer reports progress. `checkpoint()` remains the
+ * only progress signal, and STUCK_PROMISE_MS (documented at 5 minutes, against a
+ * 120 s worst-case request) is what keeps a slow-but-healthy run from being
+ * cancelled.
+ */
+export function pipelineHeartbeat(options: { onBeat: () => void }): () => void {
   return () => {
-    onProgress?.();
     options.onBeat();
   };
 }
@@ -1389,7 +1409,7 @@ export async function processPipeline(
     execution.startTime = new Date().toISOString();
     let heartbeatPending = false;
     heartbeat = setInterval(
-      pipelineHeartbeat(onProgress, {
+      pipelineHeartbeat({
         onBeat: () => {
           if (heartbeatPending) return;
           heartbeatPending = true;
