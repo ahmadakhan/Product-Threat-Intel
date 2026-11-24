@@ -351,7 +351,7 @@ export async function runSelfHealCheck(pool: Pool): Promise<void> {
         Date.parse(other.startTime) > Date.parse(latest.endTime!),
     );
     if (!recoveryPending && (await claimRecoverySlot(pool, 'PIPELINE', RECOVERY_RETRY_MS))) {
-      await queueRun(pool, undefined, 'auto-recovery');
+      await queueRun(pool, settings?.scopeHours, 'auto-recovery');
       await writeEvent(pool, {
         category: 'PIPELINE',
         level: 'WARNING',
@@ -488,7 +488,7 @@ export async function runSelfHealCheck(pool: Pool): Promise<void> {
     now - heartbeat > SCHEDULER_STALE_MS
   ) {
     if (await claimRecoverySlot(pool, 'SCHEDULER', RECOVERY_RETRY_MS)) {
-      await queueRun(pool, undefined, 'scheduler');
+      await queueRun(pool, settings?.scopeHours, 'scheduler');
     }
     await queueSecurityAlert(
       pool,
@@ -530,7 +530,7 @@ export async function runSelfHealCheck(pool: Pool): Promise<void> {
     // safe even if multiple settings changed in the same tick.
     const { queueRun } = await import('./pipeline');
     if (await claimRecoverySlot(pool, 'SETTINGS', RECOVERY_RETRY_MS)) {
-      await queueRun(pool, undefined, 'settings-change');
+      await queueRun(pool, settings?.scopeHours, 'settings-change');
       await writeEvent(pool, {
         category: 'SYSTEM',
         level: 'INFO',
