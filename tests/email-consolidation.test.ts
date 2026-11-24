@@ -543,11 +543,8 @@ test('the attached document declares UTF-8 without changing the body', () => {
   );
 });
 
-test('an oversized findings body fails loudly instead of silently dropping the attachment', () => {
-  assert.throws(
-    () => findingHtmlAttachment(job('FINDINGS:b', 'x'.repeat(4_000_001))),
-    /exceeds the attachment limit/,
-  );
+test('an oversized findings body is skipped instead of failing the send', () => {
+  assert.equal(findingHtmlAttachment(job('FINDINGS:b', 'x'.repeat(4_000_001))), undefined);
 });
 
 test('two recipient records for the same mailbox cannot create two jobs in one pass', () => {

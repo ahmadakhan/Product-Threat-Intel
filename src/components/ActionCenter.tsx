@@ -1116,19 +1116,6 @@ export const ActionCenter: React.FC = () => {
                       {/* Actions */}
                       <td className="py-3 px-4 text-right align-top">
                         <div className="flex flex-wrap items-center justify-end gap-1.5 whitespace-nowrap">
-                          {isFollowUpEligible(log) && (
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                openEmailEditor(log);
-                              }}
-                              className="inline-flex items-center space-x-1 rounded-lg border border-sky-500/20 bg-sky-500/10 px-2.5 py-1 text-xs font-medium text-sky-400 transition hover:bg-sky-500/20"
-                            >
-                              <Edit3 className="h-3 w-3" />
-                              <span>Update &amp; send</span>
-                            </button>
-                          )}
                           {isDelivered && (
                             <button
                               type="button"
@@ -1162,19 +1149,6 @@ export const ActionCenter: React.FC = () => {
                             >
                               <CheckCircle2 className="h-3 w-3" />
                               <span>{actionBusyId === log.id ? 'Saving…' : 'Done'}</span>
-                            </button>
-                          )}
-                          {!isDelivered && isEditable(log) && (
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                openEmailEditor(log);
-                              }}
-                              className="inline-flex items-center space-x-1 rounded-lg border border-sky-500/20 bg-sky-500/10 px-2.5 py-1 text-xs font-medium text-sky-400 transition hover:bg-sky-500/20"
-                            >
-                              <Edit3 className="h-3 w-3" />
-                              <span>Edit</span>
                             </button>
                           )}
                           {!isDelivered && !isEditable(log) && isRetryable && (

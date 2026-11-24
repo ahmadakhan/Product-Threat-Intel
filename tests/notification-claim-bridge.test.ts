@@ -277,11 +277,11 @@ test('a deferred Everyone delivery claims its findings and blocks a second copy'
   });
 });
 
-test('an oversized findings HTML attachment fails before any provider send', () => {
-  assert.throws(() => findingHtmlAttachment({
+test('an oversized findings HTML attachment is skipped instead of failing the send', () => {
+  assert.equal(findingHtmlAttachment({
     advisory_id: 'FINDINGS:too-large',
     payload: { html: '<html>' + 'x'.repeat(4_000_001) + '</html>' },
-  } as unknown as import('../server/delivery.ts').Job), /exceeds the attachment limit/);
+  } as unknown as import('../server/delivery.ts').Job), undefined);
 });
 
 test('a consolidated batch queues one webhook per event-subscribed hook; webhook-only findings still dispatch', { skip: !database }, async () => {

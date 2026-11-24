@@ -1,5 +1,6 @@
 import type { Advisory, Finding, TemplateCustomization } from '../src/types/index.ts';
 import { DEFAULT_ADVISORY_EMAIL_TEMPLATE } from '../src/utils/defaultAdvisoryEmailTemplate.ts';
+import { compileCustomizedTemplate } from '../src/utils/templateCompiler.ts';
 import { confidenceIsLimited, renderAdvisory } from './advisoryRender.ts';
 import { advisoryEmail } from './advisoryEmail.ts';
 import { mlComposeAdvisoryEmail } from './ml/integration.ts';
@@ -160,7 +161,9 @@ export interface DeliveryDocumentInput {
 export function renderFindingsDocument(input: DeliveryDocumentInput): DeliveryDocument {
   const { advisory, findings } = input;
   const generatedAt = input.generatedAt ?? new Date();
-  const template = input.template ?? DEFAULT_ADVISORY_EMAIL_TEMPLATE;
+  const template = input.template ?? (input.templateCustomization
+    ? compileCustomizedTemplate(input.templateCustomization)
+    : DEFAULT_ADVISORY_EMAIL_TEMPLATE);
   // An operator template that does not render must not cost the recipient the
   // finding. A malformed custom template (unbalanced blocks) used to throw out of
   // renderAdvisory, which failed the delivery and lost the alert; the built-in
@@ -276,20 +279,8 @@ export const deliveryHtmlIsAttachable = (html: string | undefined): html is stri
   html.length > 0 &&
   Buffer.byteLength(html, 'utf8') <= DELIVERY_HTML_MAX_BYTES;
 
-/**
- * Size ceiling for attaching the HTML document itself.
- *
- * The PDF renderer's 2 MB limit exists because Chromium has to lay the page out;
- * an HTML attachment is just the bytes of the body, so tying it to that limit
- * silently dropped the attachment for large digests (roughly 700+ findings). The
- * ceiling is still bounded because the message carries the body, the attachment
- * (base64, +33%) and optionally a PDF, and common providers reject a message
- * above about 15 MB in total.
- */
-export const HTML_ATTACHMENT_MAX_BYTES = 4_000_000;
-
-/** True when the exact email HTML can be attached as a file. */
+/** True when the exact email HTML can be attached as a file. No size limit —
+ *  the document is always attached faithfully so the recipient keeps a copy of
+ *  what was delivered. */
 export const htmlAttachmentIsAttachable = (html: string | undefined): html is string =>
-  typeof html === 'string' &&
-  html.length > 0 &&
-  Buffer.byteLength(html, 'utf8') <= HTML_ATTACHMENT_MAX_BYTES;
+  typeof html === 'string' && html.length > 0;

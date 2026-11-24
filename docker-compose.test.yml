@@ -28,6 +28,11 @@ services:
       retries: 30
       start_period: 2s
     restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
     networks: [test-network]
 
   test-runner:
@@ -49,6 +54,11 @@ services:
       VITEST_ISOLATE: 'true'
     command: [npm, run, test:vitest]
     restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
     networks:
       - test-network
 

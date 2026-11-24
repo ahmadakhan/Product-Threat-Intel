@@ -1,6 +1,7 @@
 import { PageHeading } from './PageHeading';
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
+import type { Advisory, Finding } from '../types/index.ts';
 import { copyText } from '../utils/clipboard';
 import {
   FileCode,
@@ -73,6 +74,120 @@ const REQUIRED_ACTIONS_BASELINE = [
 /** Baseline required actions followed by any per-record vendor mitigation. */
 const withRequiredActions = (vendorMitigations: readonly string[]): string[] => [
   ...new Set([...REQUIRED_ACTIONS_BASELINE, ...vendorMitigations]),
+];
+
+/** Sample advisory used as temp preview data when the workspace has no real advisories. */
+const SAMPLE_ADVISORY: Advisory = {
+  id: 'adv-sample-001',
+  title: 'Critical Authentication Bypass in Enterprise Firewall',
+  severity: 'CRITICAL',
+  cveIds: ['CVE-2026-0001', 'CVE-2026-0002'],
+  findingIds: ['finding-sample-001', 'finding-sample-002'],
+  createdDate: new Date().toISOString(),
+  deliveryStatus: 'DRAFT',
+  recipientCount: 0,
+  executiveSummary:
+    'Multiple critical vulnerabilities affect monitored enterprise assets. Immediate remediation is recommended.',
+  remediationInstructions: 'Apply vendor patches through change control.',
+  affectedSystems: ['edge-router-01', 'auth-service'],
+};
+
+/** Sample findings used as temp preview data when the workspace has no real findings. */
+const SAMPLE_FINDINGS: Finding[] = [
+  {
+    id: 'finding-sample-001',
+    cveId: 'CVE-2026-0001',
+    cve: {
+      cveId: 'CVE-2026-0001',
+      title: 'Critical Authentication Bypass in Enterprise Firewall',
+      description:
+        'An authentication bypass vulnerability allows unauthenticated remote access to administrative interfaces.',
+      publishedDate: '2026-01-15T00:00:00Z',
+      modifiedDate: '2026-01-20T00:00:00Z',
+      cvss: {
+        version: '3.1',
+        score: 9.8,
+        vector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H',
+        severity: 'CRITICAL',
+      },
+      cwe: ['CWE-287'],
+      cpeMatches: [],
+      applicabilityRequiresReview: false,
+      sourceFeeds: ['NVD'],
+      epss: { score: 0.85, percentile: 99 },
+      cisaKev: { isKev: true, dateAdded: '2026-01-20' },
+      exploitStatus: 'Active Weaponized',
+      remediation: {
+        patchUrl: 'https://example.com/vendor/patch',
+        vendorAdvisoryRef: 'VSA-2026-0001',
+        immediateActions: ['Apply vendor patch immediately'],
+        workarounds: ['Restrict network access to administrative interfaces'],
+        rollbackPlan: 'Restore from pre-patch backup',
+        stepByStep: ['Download patch', 'Test in staging', 'Apply to production'],
+      },
+    },
+    matchedAssetId: 'asset-001',
+    matchedAssetName: 'edge-router-01',
+    matchedAssetVendor: 'Cisco',
+    matchedAssetProduct: 'Enterprise Firewall',
+    matchedCpe: 'cpe:2.3:h:cisco:enterprise_firewall:-:*:*:*:*:*:*:*',
+    matchingMethod: 'strict_cpe',
+    matchingEvidence: 'CPE 2.3 match on Cisco Enterprise Firewall',
+    confidence: 95,
+    exploitRisk: 'WEAPONIZED_EXPLOIT',
+    notificationStatus: 'QUEUED_FOR_DISPATCH',
+    status: 'REMEDIATION_AVAILABLE',
+    autoDispatchedAt: null,
+    advisoryId: 'adv-sample-001',
+    timeline: [],
+  },
+  {
+    id: 'finding-sample-002',
+    cveId: 'CVE-2026-0002',
+    cve: {
+      cveId: 'CVE-2026-0002',
+      title: 'Remote Code Execution in Collaboration Suite',
+      description:
+        'A deserialization vulnerability allows remote code execution through crafted payloads.',
+      publishedDate: '2026-02-10T00:00:00Z',
+      modifiedDate: '2026-02-15T00:00:00Z',
+      cvss: {
+        version: '3.1',
+        score: 7.5,
+        vector: 'CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H',
+        severity: 'HIGH',
+      },
+      cwe: ['CWE-502'],
+      cpeMatches: [],
+      applicabilityRequiresReview: false,
+      sourceFeeds: ['NVD'],
+      epss: { score: 0.45, percentile: 75 },
+      cisaKev: { isKev: false },
+      exploitStatus: 'POC Available',
+      remediation: {
+        patchUrl: 'https://example.com/vendor/patch2',
+        vendorAdvisoryRef: 'VSA-2026-0002',
+        immediateActions: ['Apply vendor patch'],
+        workarounds: ['Disable deserialization of untrusted data'],
+        rollbackPlan: 'Restore from backup',
+        stepByStep: ['Download patch', 'Test in staging', 'Apply to production'],
+      },
+    },
+    matchedAssetId: 'asset-002',
+    matchedAssetName: 'auth-service',
+    matchedAssetVendor: 'ExampleCorp',
+    matchedAssetProduct: 'Collaboration Suite',
+    matchedCpe: 'cpe:2.3:a:examplecorp:collaboration_suite:-:*:*:*:*:*:*:*',
+    matchingMethod: 'strict_cpe',
+    matchingEvidence: 'CPE 2.3 match on ExampleCorp Collaboration Suite',
+    confidence: 88,
+    exploitRisk: 'HIGH_EPSS_PROBABILITY',
+    notificationStatus: 'QUEUED_FOR_DISPATCH',
+    status: 'REMEDIATION_AVAILABLE',
+    autoDispatchedAt: null,
+    advisoryId: 'adv-sample-001',
+    timeline: [],
+  },
 ];
 
 export const AdvisoryTemplateView: React.FC = () => {
@@ -185,23 +300,13 @@ const handleEnterEditor = () => {
       setViewFormat('preview');
     };
 
-  const handleApplyCustomTemplate = async () => {
+  const handleApplyCustomTemplate = () => {
     const trimmed = customTemplate.trim();
     if (!trimmed) return;
     isEditingRef.current = true;
-    try {
-      // Persist to the server immediately so changes are never lost when
-      // navigating away or refreshing. Settings-only changes (draft) are sent
-      // alongside; if no draft exists the server keeps existing settings.
-      await saveTemplate(trimmed);
-      setIsCustomTemplate(true);
-      setViewFormat('preview');
-    } catch {
-      // saveTemplate sets the error banner via safely(); keep the editor open
-      // so the user can fix and retry.
-    } finally {
-      isEditingRef.current = false;
-    }
+    setIsCustomTemplate(true);
+    setViewFormat('preview');
+    isEditingRef.current = false;
   };
 
     const tokenList = [
@@ -407,12 +512,15 @@ const handleInsertToken = (token: string) => {
     // substituted below. Kept in step with the replace() chain so the live
     // preview (and the test email built from it) never leaks unrendered
     // {{else}}/{{/if}} tags or bare {{token}} placeholders.
-    const previewAdvisory = selectedAdvisory ?? [...advisories]
-      .sort((a, b) => b.createdDate.localeCompare(a.createdDate))[0] ?? null;
-    const selectedIds = new Set(previewAdvisory?.findingIds ?? []);
-    const previewFindings = previewAdvisory
-      ? findings.filter((finding) => selectedIds.has(finding.id) || finding.advisoryId === previewAdvisory.id)
-      : [];
+    const previewAdvisory =
+      selectedAdvisory ??
+      [...advisories].sort((a, b) => b.createdDate.localeCompare(a.createdDate))[0] ??
+      SAMPLE_ADVISORY;
+    const selectedIds = new Set(previewAdvisory.findingIds);
+    const filteredFindings = findings.filter(
+      (finding) => selectedIds.has(finding.id) || finding.advisoryId === previewAdvisory.id,
+    );
+    const previewFindings = filteredFindings.length > 0 ? filteredFindings : SAMPLE_FINDINGS;
     const previewCves = previewAdvisory
       ? (previewFindings.length
           ? previewFindings.slice(0, PREVIEW_MAX_PRODUCTS).map((finding) => {

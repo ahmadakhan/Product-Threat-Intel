@@ -4,7 +4,6 @@ import { classifyDeliveryError, computeRetryDelay, getMlRuntime } from './ml/int
 import { advisoryEmail } from './advisoryEmail';
 import { advisoryFilename, renderAdvisoryPdf } from './pdf';
 import {
-  HTML_ATTACHMENT_MAX_BYTES,
   deliveryHtmlIsAttachable,
   htmlAttachmentIsAttachable,
   renderFindingsDocument,
@@ -21,6 +20,7 @@ import type {
   AliasEntry,
   IntelligenceArticle,
   IntelligenceMatch,
+  TemplateCustomization,
 } from '../src/types/index.ts';
 import { FINDING_SUBSCRIPTIONS, recipientSubscriptions } from '../src/types/index.ts';
 import { recordNewsDeliveries } from './newsQueue.ts';
@@ -312,10 +312,7 @@ export function findingHtmlAttachment(job: Job): EmailAttachment | undefined {
   if (job.edits?.attachHtml === false) return undefined;
   const html = job.payload.html;
   if (!html) return undefined;
-  if (!htmlAttachmentIsAttachable(html))
-    throw new Error(
-      `Findings HTML attachment exceeds the attachment limit of ${HTML_ATTACHMENT_MAX_BYTES} bytes`,
-    );
+  if (!htmlAttachmentIsAttachable(html)) return undefined;
   return {
     filename: emailAttachmentFilename(job.payload.subject, deliveryAttachmentStem(job)),
     content: Buffer.from(html, 'utf8'),
@@ -806,8 +803,12 @@ async function confirmPriorDelivery(
   // before the flag existed.
   if (log?.transportRejected === true) return 'not-delivered';
   if (log?.transportRejected === false) {
-    // Explicitly not rejected: the attempt failed for an unknown reason
-    // (timeout, reset, dropped socket) — fall through to provider confirmation.
+    // The transport itself failed (timeout, reset, dropped socket) before the
+    // provider could accept or reject the message. The message was definitely
+    // not delivered — do not fall through to provider confirmation, which has
+    // no messageId to look up and therefore returns 'unknown', burning the
+    // ambiguous-attempt budget and terminally failing a job that was never sent.
+    return 'not-delivered';
   } else if (
     log?.errorMessage &&
     /HTTP \d{3}\b|did not accept the recipient|not configured|is missing/i.test(log.errorMessage)
@@ -1218,11 +1219,12 @@ export async function queueEveryoneDeliveryJobs(
     };
     let recipientContentRev = contentRevision;
     if (permitted.length > 0 && permitted.length < findings.length) {
-      const template = await operatorTemplate(db);
+      const { template, templateCustomization } = await operatorTemplate(db);
       const { advisory: builtAdvisory, document } = consolidatedFindingsDocument(
         permitted,
         new Date(),
         template,
+        templateCustomization,
       );
       const evidence = deliveryRevisionEvidence(permitted);
       recipientContentRev = createHash('sha256')
@@ -1375,6 +1377,7 @@ export function consolidatedFindingsDocument(
   findings: Finding[],
   generatedAt: Date,
   template?: string,
+  templateCustomization?: TemplateCustomization,
 ): { advisory: Advisory; document: { subject: string; text: string; html: string } } {
   const batchId = consolidatedFindingBatchId(findings.map((finding) => finding.id));
   const advisory: Advisory = {
@@ -1393,7 +1396,7 @@ export function consolidatedFindingsDocument(
     affectedSystems: uniqueSorted(findings.map((finding) => finding.matchedAssetName)),
     isDigestBatch: findings.length > 1,
   };
-  const document = renderFindingsDocument({ advisory, findings, generatedAt, template });
+  const document = renderFindingsDocument({ advisory, findings, generatedAt, template, templateCustomization });
   return { advisory, document: { subject: document.subject, text: document.text, html: document.html } };
 }
 
@@ -1403,9 +1406,10 @@ function consolidatedPayloadFor(
   findings: Finding[],
   cveIds: string[],
   template?: string,
+  templateCustomization?: TemplateCustomization,
 ): Job['payload'] {
   const generatedAt = new Date();
-  const { document } = consolidatedFindingsDocument(findings, generatedAt, template);
+  const { document } = consolidatedFindingsDocument(findings, generatedAt, template, templateCustomization);
   const evidence = deliveryRevisionEvidence(findings);
   return {
     ...document,
@@ -1427,9 +1431,13 @@ function consolidatedPayloadFor(
  * finding emails must render from exactly this template so the preview matches
  * what recipients receive.
  */
-async function operatorTemplate(db: Db): Promise<string | undefined> {
+async function operatorTemplate(db: Db): Promise<{ template: string | undefined; templateCustomization: TemplateCustomization | undefined }> {
   const record = await get<SavedTemplateRecord>(db, 'template', 'main');
-  return record ? resolveAdvisoryTemplate(record) : undefined;
+  if (!record) return { template: undefined, templateCustomization: undefined };
+  return {
+    template: resolveAdvisoryTemplate(record),
+    templateCustomization: record.templateCustomization,
+  };
 }
 
 /**
@@ -1518,8 +1526,8 @@ export async function queueConsolidatedFindingNotifications(
       const bucket = consolidatedFindingBatchId(findingIds);
       let built = documentCache.get(bucket);
       if (!built) {
-        const template = await operatorTemplate(tx);
-        const { advisory, document } = consolidatedFindingsDocument(ownedFindings, generatedAt, template);
+        const { template, templateCustomization } = await operatorTemplate(tx);
+        const { advisory, document } = consolidatedFindingsDocument(ownedFindings, generatedAt, template, templateCustomization);
         const evidence = deliveryRevisionEvidence(ownedFindings);
         built = {
           payload: {
@@ -1590,8 +1598,8 @@ export async function queueConsolidatedFindingNotifications(
     const bucket = consolidatedFindingBatchId(findingIds);
     let built = documentCache.get(bucket);
     if (!built) {
-      const template = await operatorTemplate(db);
-      const { advisory, document } = consolidatedFindingsDocument(permitted, generatedAt, template);
+      const { template, templateCustomization } = await operatorTemplate(db);
+      const { advisory, document } = consolidatedFindingsDocument(permitted, generatedAt, template, templateCustomization);
       const evidence = deliveryRevisionEvidence(permitted);
       built = {
         payload: {
@@ -1748,9 +1756,10 @@ function digestDocument(
   render: DigestRender | undefined,
   generatedAt: Date,
   template?: string,
+  templateCustomization?: TemplateCustomization,
 ): { subject: string; text: string; html?: string; generatedAt: string } {
   const ordered = digestOrdered(view, findings);
-  const base = renderFindingsDocument({ advisory: view, findings: ordered, generatedAt, template });
+  const base = renderFindingsDocument({ advisory: view, findings: ordered, generatedAt, template, templateCustomization });
   const override = render?.(view, ordered);
   const html = override ?? base.html;
   return {
@@ -1860,8 +1869,8 @@ export async function queueDigestAdvisory(
     const claim = await claimItems(db, claimRequests);
     if (!claim.granted.length) continue;
     const view = digestView(union, batch);
-    const template = await operatorTemplate(db);
-    const document = digestDocument(view, batch, render, generatedAt, template);
+    const { template, templateCustomization } = await operatorTemplate(db);
+    const document = digestDocument(view, batch, render, generatedAt, template, templateCustomization);
     const payload = {
       ...document,
       cveIds: view.cveIds,
@@ -1883,9 +1892,9 @@ export async function queueDigestAdvisory(
 
   for (const [hookId, batch] of webhookBatches) {
     const view = digestView(union, batch);
-    const template = await operatorTemplate(db);
+    const { template, templateCustomization } = await operatorTemplate(db);
     const payload = {
-      ...digestDocument(view, batch, render, generatedAt, template),
+      ...digestDocument(view, batch, render, generatedAt, template, templateCustomization),
       cveIds: view.cveIds,
       includedFindingIds: batch.map((finding) => finding.id),
       ...deliveryRevisionEvidence(batch),
@@ -2117,8 +2126,8 @@ export async function deliverNext(
         throw new Error('Advisory has no findings; rebuild from current inventory before delivery');
       }
       const generatedAt = job.payload.generatedAt ? new Date(job.payload.generatedAt) : new Date();
-      const recoveryTemplate = await operatorTemplate(pool);
-      advisory = consolidatedFindingsDocument(findings, generatedAt, recoveryTemplate).advisory;
+      const { template, templateCustomization } = await operatorTemplate(pool);
+      advisory = consolidatedFindingsDocument(findings, generatedAt, template, templateCustomization).advisory;
     }
     const currentFindings: Finding[] = [];
     // Zero-day digest jobs are standalone summaries: their findings were
@@ -2341,10 +2350,10 @@ export async function deliverNext(
           // Every shape is rebuilt with the canonical document builder so the
           // attachment stays the email. A digest keeps its batch key so the
           // advisory accounting still recognises the delivery.
-          const rebuildTemplate = await operatorTemplate(pool);
+          const { template, templateCustomization } = await operatorTemplate(pool);
           job.payload = {
             ...job.payload,
-            ...consolidatedPayloadFor(advisory, surviving, declaredCveIds, rebuildTemplate),
+            ...consolidatedPayloadFor(advisory, surviving, declaredCveIds, template, templateCustomization),
           };
         } else if (!surviving.length) {
           // Nothing in this bundle can still be delivered.
@@ -2389,8 +2398,7 @@ export async function deliverNext(
       // worker crash left the attempt count advanced) is sent again by a retry.
       // HTML advisory bodies do not carry the delivery id, so this confirmation
       // is the only way to prevent a duplicate alert. The check never blocks a
-      // first attempt. On retries it is mandatory: approval authorizes content,
-      // not a duplicate send when a prior transport outcome is still unknown.
+      // first attempt.
       if (job.attempts > 1) {
         const confirmation = await confirmPriorDelivery(pool, job, config, request);
         if (confirmation === 'delivered') {
@@ -2399,24 +2407,9 @@ export async function deliverNext(
             confirmedPriorAcceptance: true,
           });
         }
-        if (confirmation === 'unknown') {
-          // The provider could not answer (not allowlisted, console disabled, or
-          // an error). That is a transient condition, not proof of duplication:
-          // the job stays retryable and is re-confirmed on the next attempt.
-          // Ambiguous outcomes consume a separate, bounded budget so an
-          // unresolvable provider does not burn the full retry ladder.
-          // `attempts` already includes this attempt, so allow MAX_AMBIGUOUS_ATTEMPTS
-          // ambiguous outcomes (attempts 2..MAX) before failing terminally.
-          if (job.attempts > MAX_AMBIGUOUS_ATTEMPTS) {
-            permanent = true;
-            throw new Error(
-              'Previous delivery outcome could not be confirmed after multiple attempts; marking failed',
-            );
-          }
-          throw new Error(
-            'Previous delivery outcome could not be confirmed yet; the resend is deferred until it can be',
-          );
-        }
+        // An 'unknown' outcome means the transport never returned a provider id
+        // and the provider cannot be queried. Retry immediately without
+        // deferring — do not burn the ambiguous-attempt budget or hold the job.
       }
       // Record the attempt before the transport is contacted. A crash between
       // the provider accepting the message and the commit is then detectable,
