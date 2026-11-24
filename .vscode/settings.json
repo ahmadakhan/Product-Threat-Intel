@@ -1,5 +1,27 @@
 {
-  "workbench.startupEditor": "readme",
-  "python.terminal.useEnvFile": true,
-  "CodeGPT.apiKey": "CodeGPT Plus Beta"
+  "python.analysis.indexing": false,
+  "python.analysis.diagnosticMode": "openFilesOnly",
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/node_modules/**": true,
+    "**/.venv/**": true,
+    "**/venv/**": true,
+    "**/data/**": true,
+    "**/logs/**": true,
+    "**/tmp/**": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/.venv": true,
+    "**/venv": true,
+    "**/data": true,
+    "**/logs": true
+  },
+  "python.analysis.exclude": [
+    "**/.venv",
+    "**/venv",
+    "**/data",
+    "**/logs",
+    "**/__pycache__"
+  ]
 }

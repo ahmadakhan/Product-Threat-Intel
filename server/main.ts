@@ -1143,9 +1143,26 @@ async function shutdown() {
   const deadline = setTimeout(() => process.exit(1), 30000);
   deadline.unref();
   await new Promise<void>((resolve) => server.close(() => resolve()));
-  await Promise.allSettled(
-    [pipeline, outbox, digest, retentionRunning, dailyDigestRunning, trainingRunning, mlTelemetryRunning].filter(Boolean) as Promise<unknown>[],
+  const workerEntries: Array<[string, Promise<unknown> | null]> = [
+    ['pipeline', pipeline],
+    ['outbox', outbox],
+    ['digest', digest],
+    ['retention', retentionRunning],
+    ['dailyDigest', dailyDigestRunning],
+    ['mlTraining', trainingRunning],
+    ['mlTelemetry', mlTelemetryRunning],
+  ];
+  const settled = await Promise.allSettled(
+    workerEntries.filter(([, p]) => p !== null).map(([, p]) => p!),
   );
+  let settledIndex = 0;
+  for (const [name, promise] of workerEntries) {
+    if (promise === null) continue;
+    const result = settled[settledIndex++];
+    if (result.status === 'rejected') {
+      report(`shutdown.${name}`)(result.reason);
+    }
+  }
   await correlation.stop();
   await closePdfRenderer();
   await leadership.close();

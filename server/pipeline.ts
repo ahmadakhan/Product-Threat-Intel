@@ -645,7 +645,10 @@ export async function rebuildFromCurrentInventory(
   });
   // Fresh replacement jobs are already queued. Only a wholly inapplicable
   // bundle needs correlation to reconcile inventory; policy holds await review.
-  if (!regrouped && !holdGated) await queueRun(pool, 24, 'delivery-rebuild');
+  if (!regrouped && !holdGated) {
+    const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
+    await queueRun(pool, settings.scopeHours, 'delivery-rebuild');
+  }
 }
 /** Regenerate unsent delivery subsets from current inventory and policy.
  * Queued jobs move to a fresh advisory; failed pre-transport attempts retain
@@ -1479,22 +1482,15 @@ export async function processPipeline(
       const schedulerNow = Date.now();
       const catchUpDue =
         settings.schedulerEnabled &&
-        (await list<FeedCursor>(pool, 'feedCursors')).some((cursor) => {
-          if (!cursor.hasMore) return false;
-          // `next_catchup_at` is a cooldown: "earliest time the next catch-up
-          // window may run". A cursor that is mid-catch-up but has no cooldown
-          // recorded (a legacy record, or a worker that stopped between the
-          // cursor write and the scheduler update) therefore has no reason to
-          // wait — treating a missing cooldown as "elapsed" is what lets an
-          // interrupted catch-up resume once scheduling is enabled instead of
-          // being stranded behind the interval gate forever.
-          if (!cursor.next_catchup_at) return true;
-          const nextCatchupAt = Date.parse(cursor.next_catchup_at);
-          return !Number.isFinite(nextCatchupAt) || nextCatchupAt <= schedulerNow;
-        });
+        (await pool.query<{ data: FeedCursor }>(
+          `SELECT data FROM records WHERE kind='feedCursors'
+           AND (data->>'hasMore')::boolean = true
+           AND (data->>'next_catchup_at' IS NULL OR (data->>'next_catchup_at')::timestamptz <= now())
+           LIMIT 1`,
+        )).rows.length > 0;
       const recoveryProbeDue =
         !settings.schedulerEnabled &&
-        (await list<ThreatFeed>(pool, 'feeds')).some((feed) => recoveryDue(feed, schedulerNow));
+        (await list<ThreatFeed>(pool, 'feeds', 500)).some((feed) => recoveryDue(feed, schedulerNow));
       if (
         shouldStartAutomaticRun(
           {
@@ -1512,7 +1508,7 @@ export async function processPipeline(
         // (an abort can destroy it mid-transaction). The `pipeline-queue` lock
         // `queueRun` acquires is a different namespace from the run lock, so
         // this cannot deadlock with the run already in progress.
-        execution = await queueRun(pool, undefined, 'scheduler');
+        execution = await queueRun(pool, settings.scopeHours, 'scheduler');
     }
     await pool.query('UPDATE scheduler_state SET heartbeat=now() WHERE id=1');
     if (!execution) return false;
@@ -1523,8 +1519,10 @@ export async function processPipeline(
     }
     const checkpoint = async (db: pg.Pool | pg.PoolClient = pool) => {
       signal?.throwIfAborted();
-      if (connectionLost) throw new Error('Pipeline worker lost its database lock connection');
       const current = await get<PipelineExecution>(db, 'executions', execution!.id);
+      // A successful database read confirms the lock connection is alive again:
+      // clear the flag so a transient error does not poison the entire run.
+      connectionLost = false;
       if (!current) throw new Error('Pipeline execution no longer exists');
       if (current?.stopRequestedAt || current?.status === 'CANCELLED') throw new PipelineStopped();
       signal?.throwIfAborted();
@@ -1912,7 +1910,7 @@ export async function processPipeline(
                 message: `${feed.name}: configuration error (not retryable)`,
                 runId: execution!.id,
                 context: { feedId: feed.id, error: message },
-              }).catch(() => undefined);
+              }).catch((err) => console.error(JSON.stringify({ level: 'error', event: 'feed.configuration_event', error: describeError(err) })));
             } else if (e instanceof FeedDeadlineExceeded) {
               // Audit R-2: a duration overrun is a capacity signal for this run,
               // not proof the source is unreachable. Recording it as a failure

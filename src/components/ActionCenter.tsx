@@ -17,7 +17,6 @@ import {
   Activity,
   FileText,
   Mail,
-  Eye,
   Bold,
   Italic,
   Underline,
@@ -39,18 +38,16 @@ import {
   AlignRight,
   Superscript,
   Subscript,
-  Save,
   Copy,
   RotateCcw,
   RotateCw,
   ChevronDown,
-  Image,
-  Table,
-  Trash2,
   Maximize,
 } from 'lucide-react';
 import { Pagination } from './Pagination';
 import { sanitizeEmailHtml } from '../utils/sanitizeEmailHtml';
+import { formatDateTime as fmtDateTime } from '../utils/dateTime';
+import type { EmailDeliveryLog, ReviewEdits } from '../types';
 
 function editableEmailBody(html: string): string {
   return new DOMParser().parseFromString(sanitizeEmailHtml(html), 'text/html').body.innerHTML;
@@ -64,8 +61,6 @@ function emailDocumentWithBody(sourceHtml: string, bodyHtml: string): string {
   document.body.innerHTML = bodyHtml;
   return `<!DOCTYPE html>\n${document.documentElement.outerHTML}`;
 }
-import { formatDateTime as fmtDateTime } from '../utils/dateTime';
-import type { EmailDeliveryLog, ReviewEdits } from '../types';
 import { PageHeading } from './PageHeading';
 import { isFindingDelivery } from '../utils/findingDelivery';
 import { useDialogFocus } from '../hooks/useDialogFocus';
@@ -172,7 +167,7 @@ export const ActionCenter: React.FC = () => {
     if (!editBusy) setEditing(null);
   }, !!editing);
   const [livePreviewDebounce, setLivePreviewDebounce] = useState<ReturnType<typeof setTimeout> | null>(null);
-  const editorRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<HTMLDivElement | null>(null);
   const editorHasFocusRef = useRef(false);
   const [resending, setResending] = useState<{ id: string; advisoryId: string; mode: RecipientMode; email: string; reason: string } | null>(null);
   const [resendBusy, setResendBusy] = useState(false);
@@ -230,13 +225,12 @@ export const ActionCenter: React.FC = () => {
         // First-attempt success rate is real signal derivable from the log:
         // a job delivered on attempt 1 never needed the retry schedule.
         const firstAttemptDelivered = recentDeliveries.filter((log) => log.attemptCount === 1).length;
-        const avgDeliveryTime = recentDeliveries.length > 0
+        const firstAttemptRate = recentDeliveries.length > 0
           ? (firstAttemptDelivered / recentDeliveries.length) * 100
           : 0;
 
-        // SLA compliance = deliveries that needed no retry at all, from the
-        // same 24-hour sample (previously a hard-coded 100).
-        const slaCompliance = avgDeliveryTime;
+        // SLA compliance = overall delivery rate within the 24-hour sample.
+        const slaCompliance = deliveryRate;
 
         const lastHour = new Date(now.getTime() - 60 * 60 * 1000);
         const lastHourDeliveries = emailLogs.filter(log =>
@@ -250,13 +244,13 @@ export const ActionCenter: React.FC = () => {
           failed,
           queued,
           pendingAction,
-          averageDeliveryTime: avgDeliveryTime,
+          averageDeliveryTime: firstAttemptRate,
           deliveryRate,
           slaCompliance,
           lastDeliveryWindow: {
             count: lastHourDeliveries.length,
             time: lastHourDeliveries.length > 0 ? 
-              `${lastHourDeliveries[0].sentAt} - ${now.toISOString()}` : 
+              `${lastHourDeliveries[lastHourDeliveries.length - 1].sentAt} - ${now.toISOString()}` : 
               'No deliveries'
           }
         });
@@ -276,10 +270,9 @@ export const ActionCenter: React.FC = () => {
   };
 
   const handleBulkAction = async (action: 'retry' | 'cancel' | 'send-now') => {
-    // "Retry" and "send now" both force the job back onto the queue (the
-    // server refuses in-flight/due jobs so this cannot double-send); "cancel"
-    // removes the queued job. Failures for one id must not abandon the rest.
-    setConfirmSend({ id: 'bulk', action: action === 'cancel' ? 'cancel' : 'send-now', label: `${selectedLogs.size} selected emails` });
+    // "Retry" re-queues failed jobs; "send now" forces delivery immediately;
+    // "cancel" removes the queued job. Failures for one id must not abandon the rest.
+    setConfirmSend({ id: 'bulk', action, label: `${selectedLogs.size} selected emails` });
   };
 
   const buildEdits = useCallback(
@@ -336,7 +329,9 @@ export const ActionCenter: React.FC = () => {
           [...selectedLogs].map((logId) =>
             action === 'cancel'
               ? deleteEmailQueueItem(logId)
-              : retryEmailDelivery(logId),
+              : action === 'send-now'
+                ? resendEmailDelivery(logId, { recipientMode: 'SECURITY_TEAM', reason: undefined })
+                : retryEmailDelivery(logId),
           ),
         );
         const failures = results.filter((r) => r.status === 'rejected').length;
@@ -348,6 +343,11 @@ export const ActionCenter: React.FC = () => {
         return;
       }
       if (action === 'retry') {
+        await retryEmailDelivery(id);
+        await reload();
+        return;
+      }
+      if (action === 'send-now') {
         await retryEmailDelivery(id);
         await reload();
         return;
@@ -426,14 +426,14 @@ export const ActionCenter: React.FC = () => {
         }).then((result) => {
           if (result) setPreviewHtml(result.html);
           setPreviewLoading(false);
+        }).catch((error) => {
+          console.error('Live preview failed:', error);
+          setPreviewLoading(false);
         });
       }, 500);
       setLivePreviewDebounce(timer);
     },
-    // livePreviewDebounce is intentionally not a dependency: the callback only
-    // cancels the previous timer and setState makes the new one visible to the
-    // cleanup effect without re-creating this closure.
-    [editing, subjectDraft, previewEmailEdits],
+    [editing, subjectDraft, previewEmailEdits, livePreviewDebounce],
   );
 
   // Pending live-preview request must not outlive the editor: clear it on unmount
@@ -464,11 +464,16 @@ export const ActionCenter: React.FC = () => {
 
   /** CVEs tracked by this delivery: advisory CVE ids plus the CVEs of its findings. */
   const trackedCves = useMemo(() => {
+    const findingsById = new Map<string, { cveId: string }>();
+    for (const finding of findings) {
+      findingsById.set(finding.id, finding);
+    }
     const byAdvisory = new Map<string, string[]>();
     for (const advisory of advisories) {
       const cves = new Set<string>(advisory.cveIds);
-      for (const finding of findings) {
-        if (advisory.findingIds.includes(finding.id)) cves.add(finding.cveId);
+      for (const findingId of advisory.findingIds) {
+        const finding = findingsById.get(findingId);
+        if (finding) cves.add(finding.cveId);
       }
       byAdvisory.set(advisory.id, [...cves].sort());
     }
@@ -536,7 +541,7 @@ export const ActionCenter: React.FC = () => {
         sel?.addRange(range);
       }
     }
-  }, [editing?.id, previewLoading, htmlMode]);
+  }, [editing?.id, previewLoading, htmlMode, htmlContent]);
 
   // HTML Editor Functions
   const commitVisualBody = useCallback((bodyHtml: string) => {
@@ -573,12 +578,14 @@ export const ActionCenter: React.FC = () => {
   const handleHtmlInput = useCallback(() => {
     if (editorRef.current) {
       editorHasFocusRef.current = true;
-      commitVisualBody(editorRef.current.innerHTML);
+      const body = editorRef.current.innerHTML;
+      const target = editableEmailBody(htmlContent);
+      if (body !== target) commitVisualBody(body);
       setTimeout(() => {
         editorHasFocusRef.current = false;
       }, 0);
     }
-  }, [commitVisualBody]);
+  }, [commitVisualBody, htmlContent]);
 
   const insertHtml = useCallback((html: string) => {
     if (editorRef.current) {
@@ -1093,20 +1100,24 @@ export const ActionCenter: React.FC = () => {
                       <td className="py-3 px-4 font-mono text-[11px]">
                         {log.nextRetryTime ? (
                           <div>
-                            <span
-                              className={
-                                new Date(log.nextRetryTime).getTime() <= Date.now()
-                                  ? 'text-rose-400'
-                                  : 'text-amber-400'
-                              }
-                            >
-                              {fmtDateTime(log.nextRetryTime, settings.timezone)}
-                            </span>
-                            <div className="text-[10px] text-zinc-500 mt-0.5">
-                              {new Date(log.nextRetryTime).getTime() <= Date.now()
-                                ? 'Due now'
-                                : `In ${Math.round((new Date(log.nextRetryTime).getTime() - Date.now()) / 60000)}m`}
-                            </div>
+                            {(() => {
+                              const retryTime = new Date(log.nextRetryTime).getTime();
+                              const overdue = Number.isFinite(retryTime) && retryTime <= Date.now();
+                              return (
+                                <>
+                                  <span className={overdue ? 'text-rose-400' : 'text-amber-400'}>
+                                    {fmtDateTime(log.nextRetryTime, settings.timezone)}
+                                  </span>
+                                  <div className="text-[10px] text-zinc-500 mt-0.5">
+                                    {overdue
+                                      ? 'Due now'
+                                      : Number.isFinite(retryTime)
+                                        ? `In ${Math.round((retryTime - Date.now()) / 60000)}m`
+                                        : 'Invalid retry time'}
+                                  </div>
+                                </>
+                              );
+                            })()}
                           </div>
                         ) : (
                           <span className="text-zinc-500">No retry scheduled</span>
@@ -1453,7 +1464,6 @@ export const ActionCenter: React.FC = () => {
                             />
                           ) : (
                             <textarea
-                              ref={(el) => { if (el) editorRef.current = el as any; }}
                               value={htmlContent}
                               onChange={(e) => {
                                 const updatedEdits = { ...edits, customBodyOverride: e.target.value };
@@ -1893,7 +1903,7 @@ export const ActionCenter: React.FC = () => {
           <div
             className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
             onMouseDown={(event) => {
-              if (event.target === event.currentTarget) setConfirmSend(null);
+              if (event.target === event.currentTarget && !actionBusyId) setConfirmSend(null);
             }}
           >
             <section

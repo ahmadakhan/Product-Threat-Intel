@@ -9,6 +9,13 @@ services:
       APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Set a strong runtime database password}
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    command: >
+      postgres
+      -c shared_buffers=256MB
+      -c work_mem=4MB
+      -c maintenance_work_mem=128MB
+      -c max_connections=80
+      -c effective_cache_size=768MB
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./deploy/init-db.sh:/docker-entrypoint-initdb.d/01-runtime-role.sh:ro
