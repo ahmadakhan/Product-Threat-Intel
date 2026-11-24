@@ -554,18 +554,20 @@ export function createApp(
   // evidence the process can still serve work. Two failure modes produce a dead
   // instance with a listening socket: (a) the event loop is wedged and the timer
   // that would answer never fires; (b) the process is alive but its queued work
-  // is not progressing. (a) is detectable here by comparing wall-clock drift: a
-  // 5s timer whose callback observes less than 5s elapsed means the loop was
-  // blocked, and a block longer than the threshold is reported on /live with a
-  // 503 so the orchestrator replaces the instance.
-  let lastHeartbeat = Date.now();
+  // is not progressing. (a) is detectable here by comparing monotonic-clock
+  // drift: a 5s timer whose callback observes less than 5s elapsed means the
+  // loop was blocked, and a block longer than the threshold is reported on
+  // /live with a 503 so the orchestrator replaces the instance.
+  // `process.uptime()` is monotonic (immune to NTP clock adjustments), unlike
+  // `Date.now()` which can step backwards or forwards under clock skew.
+  let lastHeartbeat = process.uptime() * 1000;
   const HANG_THRESHOLD_MS = 10_000;
   const hangTimer = setInterval(() => {
-    lastHeartbeat = Date.now();
+    lastHeartbeat = process.uptime() * 1000;
   }, 5_000);
   hangTimer.unref();
   app.get('/live', (_req, res) => {
-    const stalledFor = Date.now() - lastHeartbeat;
+    const stalledFor = process.uptime() * 1000 - lastHeartbeat;
     if (options.hangDetection && stalledFor > HANG_THRESHOLD_MS)
       return res.status(503).json({ status: 'stalled', stalledForMs: stalledFor });
     res.json({ status: 'live' });
@@ -988,8 +990,14 @@ export function createApp(
       // Starting the pipeline is idempotent while a run is queued or running:
       // queueRun returns that active execution instead of creating another.
       // Let duplicate start requests reach that deduplication path without
-      // draining the operator's general mutation quota (which otherwise made
-      // repeated clicks report 429 while the original run kept working).
+      // draining the operator's general mutation quota, which otherwise made
+      // repeated clicks report 429 while the original run kept working.
+      //
+      // This check must stay BEFORE the limiter and must not consume a token. It
+      // is read-only, bounded to one indexed lookup, and cannot be used to spam
+      // the queue: the route itself returns the already-active execution. Moving
+      // it after the limiter restored the double-click 429 and charged the
+      // operator for a request that does no work.
       if (req.method === 'POST' && route === '/api/pipeline') {
         const activeExecution = await pool.query(
           "SELECT 1 FROM records WHERE kind='executions' AND data->>'status' IN ('QUEUED','RUNNING') LIMIT 1",

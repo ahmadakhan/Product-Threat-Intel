@@ -25,8 +25,19 @@ import type pg from 'pg';
  * The statement timeout bounds the wait: a caller stalled behind a stuck
  * transaction fails as contention (55P03/57014) rather than hanging the client
  * indefinitely, which is the correct outcome for an operator-facing command.
+ *
+ * REQUIRES: `db` must be a `PoolClient` inside an active transaction. Passing a
+ * `Pool` would cause `pg_advisory_xact_lock` to acquire and release the lock
+ * within a single autocommit statement, providing zero mutual exclusion across
+ * the subsequent check-lock-act sequence.
  */
 const acquireAdvisoryLock = async (db: Db, lockName: string): Promise<boolean> => {
+  // Enforce that db is a PoolClient, not a Pool, to ensure the advisory lock
+  // is transaction-scoped (a Pool-level lock provides zero mutual exclusion across
+  // the subsequent check-lock-act sequence).
+  if ((db as { connect?: unknown }).connect !== undefined) {
+    throw new Error('acquireAdvisoryLock requires a PoolClient inside a transaction, not a Pool');
+  }
   try {
     return (
       (
@@ -67,7 +78,7 @@ import {
   templateSchema,
   HttpError,
 } from './validation.ts';
-import { encrypt, randomToken } from './secrets.ts';
+import { encrypt } from './secrets.ts';
 import { DEFAULT_SETTINGS, DEFAULT_EMAIL_CONFIG } from '../shared/state.ts';
 import { emailConfigSchema } from './validation.ts';
 import { emailEndpoint } from './emailProviders.ts';
@@ -204,7 +215,7 @@ function assertSpecificInventoryCpes(cpes: string[]) {
  * route and the seeding script — goes through here, so validation and encryption
  * cannot be bypassed by a second code path.
  */
-export async function applyCommand(db: Db, config: Config, request: CommandRequest): Promise<CommandResult> {
+export async function applyCommand(db: pg.PoolClient, config: Config, request: CommandRequest): Promise<CommandResult> {
   const { action, id, data, actor, ipAddress = '' } = request;
   // Reject null/empty payloads for actions that consume a record body before
   // any DB operations. Delete/toggle and other id-driven actions carry no
@@ -584,18 +595,31 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
     // The tombstone gets its own id so a *different* spelling of the same
     // canonical name can still be learned later. It carries the rejected pairs
     // in `revokedAliases`, which is never used for matching.
-    await remove(db, 'aliases', id);
-    await put(db, 'aliases', `revoked:${id}`, {
-      ...row,
-      id: `revoked:${id}`,
-      source: 'REVOKED',
-      provenance: undefined,
-      aliases: [],
-      revokedAliases: [...row.aliases].sort(),
-      expiresAt: undefined,
-      revokedAt: now,
-      notes: 'Revoked by an operator. This naming relation will not be learned again automatically.',
-    });
+    // Guard against id collision with a pre-existing `revoked:${id}` row.
+    const tombstoneId = `revoked:${id}`;
+    const existingTombstone = await get<AliasEntry>(db, 'aliases', tombstoneId);
+    if (existingTombstone) {
+      // Merge revoked aliases rather than overwriting a prior tombstone.
+      const mergedRevoked = [...new Set([...(existingTombstone.revokedAliases ?? []), ...row.aliases])].sort();
+      await put(db, 'aliases', tombstoneId, {
+        ...existingTombstone,
+        revokedAliases: mergedRevoked,
+        revokedAt: now,
+      });
+    } else {
+      await remove(db, 'aliases', id);
+      await put(db, 'aliases', tombstoneId, {
+        ...row,
+        id: tombstoneId,
+        source: 'REVOKED',
+        provenance: undefined,
+        aliases: [],
+        revokedAliases: [...row.aliases].sort(),
+        expiresAt: undefined,
+        revokedAt: now,
+        notes: 'Revoked by an operator. This naming relation will not be learned again automatically.',
+      });
+    }
     await appendAudit(
       db,
       'Alias revoked',
@@ -686,7 +710,7 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
       // silently would break the receiver without an explicit operator action.
       secretToken: input.secretToken
         ? encrypt(input.secretToken, encryptionKeys(config), `webhook:${newId}`)
-        : old?.secretToken || encrypt(randomToken(), encryptionKeys(config), `webhook:${newId}`),
+        : old?.secretToken || '',
       deliveryCount: old?.deliveryCount ?? 0,
     });
     
@@ -760,7 +784,13 @@ export async function applyCommand(db: Db, config: Config, request: CommandReque
         : old.provider === input.provider
           ? old.mailjetApiSecret
           : '';
-    if (!smtpProvider && !apiKey) throw new HttpError(400, 'Enter an API token for the selected provider');
+    if (!smtpProvider && !apiKey)
+      throw new HttpError(
+        400,
+        sameApiDestination === false
+          ? 'Changing the API endpoint or source domain invalidates the stored credential; enter a new API token'
+          : 'Enter an API token for the selected provider',
+      );
     if (input.provider === 'MAILJET_API' && !input.mailjetApiSecret && !mailjetApiSecret)
       throw new HttpError(400, 'Enter your Mailjet API secret');
     if (smtpProvider && input.smtpHost) {

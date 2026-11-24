@@ -581,7 +581,7 @@ export async function queueRun(
       return execution;
     },
     client,
-    client ? { locks: [], lockAcquired: ['pipeline-queue'] } : { locks: ['pipeline-queue'] },
+    { locks: ['pipeline-queue'] },
   );
 }
 /** Recover an unsent stale advisory after its failed attempt is committed.
@@ -1620,8 +1620,8 @@ export async function processPipeline(
     const canonicalCache = mergeCveRecords(cachedCves);
     const knownCveModifiedAt = new Map([...canonicalCache].map(([id, cve]) => [id, cve.modifiedDate]));
     const knownWithdrawalAt = new Map(cachedWithdrawals.map((entry) => [entry.cveId, entry.modifiedDate]));
-    let succeeded = 0,
-      rawCount = 0;
+    let rawCount = 0;
+    let succeeded = 0;
     /** Rejections from feeds whose run failed before returning a result. */
     const rejectedThisRun: CVERejection[] = [];
     const results: Awaited<ReturnType<typeof ingestFeed>>[] = [];
@@ -1645,7 +1645,9 @@ export async function processPipeline(
       const poolBound = Math.max(1, config.POOL_MAX_CONNECTIONS - 4);
       const concurrency = Math.min(ordered.length, config.FEED_CONCURRENCY, poolBound);
       let nextIndex = 0;
-      const worker = async () => {
+      const worker = async (): Promise<{ rawCount: number; succeeded: number }> => {
+        let localRawCount = 0;
+        let localSucceeded = 0;
         while (nextIndex < ordered.length) {
           const i = nextIndex++;
           const feed = ordered[i];
@@ -1784,8 +1786,8 @@ export async function processPipeline(
               result = { ...result, kev: cachedKev.kev };
             }
             results.push({ ...result, sourceId: feed.id });
-            rawCount += result.notModified ? 0 : result.count;
-            succeeded++;
+            localRawCount += result.notModified ? 0 : result.count;
+            localSucceeded++;
             if (feed.type === 'EPSS_API' && targets.length === 0) {
               execution!.logs.push(`Feed ${feed.id}: no applicable CVEs; EPSS network retrieval skipped`);
               // No request was needed: clear expired recovery state without claiming
@@ -1958,6 +1960,10 @@ export async function processPipeline(
               pushExecutionLog(execution!, `Feed ${feed.id}: ${message}`);
             }
           }
+          // Per-worker checkpoint: publish this worker's local counts into the
+          // shared execution record under the pipeline-queue advisory lock.
+          // Each worker only ever raises its own high-water mark, so concurrent
+          // transactions cannot clobber each other's progress.
           await transaction(
             pool,
             async (db) => {
@@ -1965,24 +1971,38 @@ export async function processPipeline(
               // throws at once (fails the feed) instead of waiting out the
               // statement timeout on a backend that is already gone.
               await checkpoint(db);
-              // Audit L-3: `rawCount`/`results`/`feedUpdates` are mutated by every
-              // concurrent worker, so the intermediate progress line raced and
-              // could report a count that went backwards. Publish from the
-              // execution object's own monotonic counter, and only ever raise it.
+              // Audit L-3: each worker publishes only its own high-water mark.
+              // The `Math.max` against the committed `rawIngested` ensures a
+              // slower worker never rolls back a faster worker's count.
               const seen = Number(execution!.stats.rawIngested) || 0;
               execution!.phases[0].durationMs = Date.now() - Date.parse(execution!.startTime);
-              execution!.phases[0].details = `${feeds.length} sources processed; ${Math.max(seen, rawCount)} records read`;
-              execution!.stats.rawIngested = Math.max(seen, rawCount);
+              execution!.phases[0].details = `${feeds.length} sources processed; ${Math.max(seen, localRawCount)} records read`;
+              execution!.stats.rawIngested = Math.max(seen, localRawCount);
               await saveActiveExecution(db, execution!);
             },
             undefined,
             { locks: ['pipeline-queue'], signal },
           );
         }
+        return { rawCount: localRawCount, succeeded: localSucceeded };
       };
       const workers = await Promise.allSettled(Array.from({ length: concurrency }, worker));
       const failure = workers.find((result) => result.status === 'rejected');
       if (failure?.status === 'rejected') throw failure.reason;
+      // Merge per-worker deltas serially after all workers complete. This
+      // eliminates the read-modify-write race on shared `rawCount`/`succeeded`
+      // that existed when workers mutated shared variables inside parallel
+      // transactions.
+      let mergedRawCount = 0;
+      let mergedSucceeded = 0;
+      for (const result of workers) {
+        if (result.status === 'fulfilled') {
+          mergedRawCount += result.value.rawCount;
+          mergedSucceeded += result.value.succeeded;
+        }
+      }
+      rawCount = mergedRawCount;
+      succeeded = mergedSucceeded;
     };
     const primaryIngestionStartedAt = Date.now();
     await ingestSources(feeds.filter((feed) => feed.type !== 'EPSS_API'));

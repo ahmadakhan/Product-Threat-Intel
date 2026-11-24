@@ -45,7 +45,10 @@ export class WorkLimiter {
         let timer: ReturnType<typeof setTimeout> | undefined;
         let onAbort: (() => void) | undefined;
         let entry: { admit: () => void };
+        let cleaned = false;
         const cleanup = () => {
+          if (cleaned) return;
+          cleaned = true;
           if (timer) clearTimeout(timer);
           if (onAbort && options?.signal) options.signal.removeEventListener('abort', onAbort);
           const index = this.waiting.indexOf(entry);

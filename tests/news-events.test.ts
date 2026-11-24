@@ -11,7 +11,7 @@ import {
   writeEvent,
   readEvents,
 } from '../server/events';
-import { createPool, migrate, put, get, state } from '../server/db.ts';
+import { createPool, migrate, put, get, state, transaction } from '../server/db.ts';
 import { queueRun, processPipeline } from '../server/pipeline';
 import { loadConfig } from '../server/config.ts';
 import { applyCommand } from '../server/commands.ts';
@@ -566,11 +566,13 @@ test(
       });
       await put(pool, 'settings', 'main', { ...DEFAULT_SETTINGS });
       assert.equal((await get<any>(pool, 'settings', 'main'))!.autoDispatchNewsToSecurityTeam, false);
-      const saved = await applyCommand(pool, config, {
-        action: 'settings.save',
-        data: { autoDispatchNewsToSecurityTeam: true },
-        actor: 'test',
-      });
+      const saved = await transaction(pool, (db) =>
+        applyCommand(db, config, {
+          action: 'settings.save',
+          data: { autoDispatchNewsToSecurityTeam: true },
+          actor: 'test',
+        }),
+      );
       assert.equal(saved.success, true);
       assert.equal(
         (await get<any>(pool, 'settings', 'main'))!.autoDispatchNewsToSecurityTeam,
@@ -578,11 +580,13 @@ test(
         'the flag must survive settings.save (not be stripped by the schema)',
       );
       // Toggling off must also round-trip; this guards against the zod strip regression.
-      await applyCommand(pool, config, {
-        action: 'settings.save',
-        data: { autoDispatchNewsToSecurityTeam: false },
-        actor: 'test',
-      });
+      await transaction(pool, (db) =>
+        applyCommand(db, config, {
+          action: 'settings.save',
+          data: { autoDispatchNewsToSecurityTeam: false },
+          actor: 'test',
+        }),
+      );
       assert.equal((await get<any>(pool, 'settings', 'main'))!.autoDispatchNewsToSecurityTeam, false);
     } finally {
       await pool.end();

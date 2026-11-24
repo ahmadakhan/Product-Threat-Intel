@@ -75,13 +75,47 @@ export function createDatabaseRateLimiter(
 ): MutationLimiter {
   if (!(capacity > 0) || !(refillPerMs > 0))
     throw new Error('Rate limiter capacity and refill rate must be positive');
+  // In-memory fallback used when the database-backed limiter is unreachable.
+  // Fail-open: allow the request through rather than blocking all mutations
+  // during a temporary DB outage. The fallback is a simple per-key token bucket
+  // that is eventually consistent with the database once it recovers.
+  const fallbackBuckets = new Map<string, { tokens: number; updatedAt: number }>();
   return async (key) => {
-    const result = await pool.query<{ allowed: boolean; retry_after_ms: number }>(
-      'SELECT allowed, retry_after_ms FROM consume_rate_limit_token($1, $2, $3)',
-      [key, capacity, refillPerMs],
-    );
-    const row = result.rows[0];
-    if (!row) throw new Error('Rate limiter returned no decision');
-    return { allowed: row.allowed, retryAfterMs: Number(row.retry_after_ms) };
+    try {
+      const result = await pool.query<{ allowed: boolean; retry_after_ms: number }>(
+        'SELECT allowed, retry_after_ms FROM consume_rate_limit_token($1, $2, $3)',
+        [key, capacity, refillPerMs],
+      );
+      const row = result.rows[0];
+      if (!row) throw new Error('Rate limiter returned no decision');
+      return { allowed: row.allowed, retryAfterMs: Number(row.retry_after_ms) };
+    } catch (error) {
+      // Database unreachable: fail-open using an in-memory bucket so mutations
+      // are not all blocked by a non-critical safety feature. Log the fallback
+      // so operators are aware the database-backed limiter is degraded.
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          event: 'rate_limiter_db_fallback',
+          key,
+          error: (error as Error).message,
+          timestamp: new Date().toISOString(),
+        }),
+      );
+      const now = Date.now();
+      const bucket = fallbackBuckets.get(key) ?? { tokens: capacity, updatedAt: now };
+      const elapsed = Math.max(0, now - bucket.updatedAt);
+      const tokens = Math.min(capacity, bucket.tokens + elapsed * refillPerMs);
+      if (tokens < 1) {
+        return {
+          allowed: false,
+          retryAfterMs: Math.ceil((1 - tokens) / refillPerMs),
+        };
+      }
+      bucket.tokens = tokens - 1;
+      bucket.updatedAt = now;
+      fallbackBuckets.set(key, bucket);
+      return { allowed: true, retryAfterMs: 0 };
+    }
   };
 }

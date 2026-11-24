@@ -883,10 +883,19 @@ export async function transaction<T>(
     return result;
   } catch (error) {
     failed = true;
-    // ROLLBACK can itself fail when the connection is already broken; swallow
-    // that secondary failure so the caller sees the original, more useful error.
+    // `connectionError` is set by two paths that are NOT statement failures:
+    // the client's `error` listener (fired for an idle or socket-level fault
+    // while `fn` may still be running) and `onAbort`. When either is the reason
+    // we got here, the transaction is already unusable or was deliberately
+    // cancelled, so a ROLLBACK is pointless or will race the cancel; the
+    // connection is destroyed below anyway.
+    //
+    // When, instead, a statement threw, always attempt ROLLBACK so server-side
+    // transaction resources (locks, snapshots, tuple locks) are unwound before
+    // the connection is reused. Swallow a secondary ROLLBACK failure so the
+    // caller sees the original, more useful error.
     if (!connectionError) await db.query('ROLLBACK').catch(() => {});
-    throw error;
+    throw connectionError ?? error;
   } finally {
     // Release with the failure flag so a connection left in a bad state by a
     // transport-level error is destroyed rather than returned to the pool,
