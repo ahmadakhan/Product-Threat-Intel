@@ -34,6 +34,24 @@ import { PDF_MAX_HTML_BYTES } from './pdf.ts';
  */
 export const DELIVERY_HTML_MAX_BYTES = PDF_MAX_HTML_BYTES;
 
+/**
+ * Size ceiling for attaching the HTML document itself.
+ *
+ * Independent of `DELIVERY_HTML_MAX_BYTES`: that limit exists because Chromium
+ * has to lay the page out for the PDF, while an HTML attachment is just the body
+ * bytes. Tying the two together silently dropped the attachment for large
+ * digests (roughly 700+ findings).
+ *
+ * The ceiling is still finite because one message carries the body, the
+ * attachment (base64, about +33%) and optionally a PDF, and providers reject
+ * messages above their own cap (commonly 15-25 MB) with a non-retryable 4xx.
+ * 20 MB covers the full size of the rendered document for any realistic
+ * digest while leaving room for the body and PDF within a 25 MB provider cap;
+ * above that the attachment is skipped (see `findingHtmlAttachment`) so the
+ * email body still reaches the recipient instead of the whole send failing.
+ */
+export const HTML_ATTACHMENT_MAX_BYTES = 20_000_000;
+
 export interface DeliveryDocument {
   subject: string;
   text: string;
@@ -279,8 +297,15 @@ export const deliveryHtmlIsAttachable = (html: string | undefined): html is stri
   html.length > 0 &&
   Buffer.byteLength(html, 'utf8') <= DELIVERY_HTML_MAX_BYTES;
 
-/** True when the exact email HTML can be attached as a file. No size limit —
- *  the document is always attached faithfully so the recipient keeps a copy of
- *  what was delivered. */
+/**
+ * True when the exact email HTML can be attached as a file: non-empty and within
+ * `HTML_ATTACHMENT_MAX_BYTES`. Measured in UTF-8 bytes, not UTF-16 code units,
+ * so a document of multi-byte CVE text is not under-counted.
+ *
+ * Callers skip the attachment when this is false; they must not fail the send,
+ * because the body itself is still deliverable.
+ */
 export const htmlAttachmentIsAttachable = (html: string | undefined): html is string =>
-  typeof html === 'string' && html.length > 0;
+  typeof html === 'string' &&
+  html.length > 0 &&
+  Buffer.byteLength(html, 'utf8') <= HTML_ATTACHMENT_MAX_BYTES;

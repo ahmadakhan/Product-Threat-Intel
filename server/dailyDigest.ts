@@ -366,14 +366,34 @@ async function computeHealth(
   const systemUptime = `${uptimeDays} ${dayWord} ${uptimeHours} ${hourWord}`;
   // Today's digest is already claimed. Use the next local calendar day, not
   // 24 elapsed hours, so DST changes preserve the configured send time.
+  // The row lock on the schedule row is already held by this transaction, but
+  // this statement and the heartbeat read below were NOT guarded: a failure
+  // (missing table, malformed `daily.time` such as "25:00" producing an invalid
+  // `time` literal) aborted the transaction *after* the day's findings were
+  // selected, and every subsequent tick failed the same way — a poison digest.
+  // Both are now savepoint-guarded like the outbox probes, degrading the health
+  // section instead of losing the day's delivery.
   const { hour, minute } = parseTime(time);
-  const nextDailyDigestAt = (
-    await db.query<{ nextDailyDigestAt: Date }>(
-      `SELECT (($1::timestamptz AT TIME ZONE $2)::date + 1 + $3::time)
-         AT TIME ZONE $2 AS "nextDailyDigestAt"`,
-      [new Date(now).toISOString(), timezone, `${hour}:${String(minute).padStart(2, '0')}`],
-    )
-  ).rows[0].nextDailyDigestAt.toISOString();
+  let nextDailyDigestAt: string;
+  try {
+    const nextRun = await guardedHealthQuery(() =>
+      db.query<{ nextDailyDigestAt: Date }>(
+        `SELECT (($1::timestamptz AT TIME ZONE $2)::date + 1 + $3::time)
+           AT TIME ZONE $2 AS "nextDailyDigestAt"`,
+        [new Date(now).toISOString(), timezone, `${hour}:${String(minute).padStart(2, '0')}`],
+      ),
+    );
+    const nextDate = nextRun?.rows[0]?.nextDailyDigestAt;
+    if (!(nextDate instanceof Date) || Number.isNaN(nextDate.getTime())) throw new Error('bad next-run row');
+    nextDailyDigestAt = nextDate.toISOString();
+  } catch {
+    database = 'degraded';
+    // Best-effort fallback: the server-side calendar expression is authoritative
+    // for DST correctness, but the digest must still render. One plain 24h
+    // offset can be wrong across a DST boundary; it is labelled degraded so the
+    // operator knows it is approximate.
+    nextDailyDigestAt = new Date(now + 86_400_000).toISOString();
+  }
   return {
     database,
     databaseLatencyMs,
@@ -535,16 +555,31 @@ export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promi
         // a single connection. Issuing four at once races the protocol queue and
         // the results are only ordered by luck.
         const cached = await getMany<NormalizedCVE>(db, 'cveData', ids);
-        const assets = await getMany<WatchListItem>(db, 'watchlist', [
-          ...new Set(candidates.map((f) => f.matchedAssetId)),
-        ]);
+        // The inventory is read as records, not as a map. `getMany` returns a
+        // `Map<id, data>`, so passing `.values()` handed the engine the raw JSONB
+        // values (plain objects with no methods, untyped) instead of
+        // `WatchListItem`s; every asset then failed `assetsForCve`, the rematch
+        // produced zero findings, and the digest fell through to the stored-
+        // finding path with an empty result. That is what rendered "0 TOTAL
+        // FINDINGS / 0 ASSETS" on a day with real matches. The pipeline's own
+        // snapshot uses `list<WatchListItem>`; this does the same.
+        const assets = await list<WatchListItem>(db, 'watchlist');
         const withdrawals = await getMany<{ modifiedDate: string }>(db, 'cveWithdrawals', ids);
         const aliases = await list<AliasEntry>(db, 'aliases');
-        const cves = new Map(candidates.map((f) => [f.cveId, cached.get(f.cveId) || f.cve]));
+        // Build the corpus from real CVE records only. `|| f.cve` was a truthiness
+        // check on a `Map#get` result, so a candidate whose cache row was pruned
+        // put the finding's own embedded copy (possibly a stale or partial object)
+        // into the corpus and reported itself as newly matched. A finding with no
+        // cached CVE is handled by the stored-deliverable fallback below.
+        const cves: NormalizedCVE[] = [];
+        for (const candidate of candidates) {
+          const cve = cached.get(candidate.cveId);
+          if (cve?.cveId) cves.push(cve);
+        }
         const current = runVulnerabilityPipeline(
           [],
-          [...cves.values()],
-          [...assets.values()],
+          cves,
+          assets,
           [],
           [],
           { ...DEFAULT_SETTINGS, ...settings, scopeHours: 0 },
@@ -560,7 +595,16 @@ export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promi
           const match = matches.get(`${f.cveId}:${f.matchedAssetId}`);
           const withdrawal = withdrawals.get(f.cveId);
           // A withdrawn CVE is never summarised: the advisory no longer applies.
-          if (withdrawal && Date.parse(f.cve?.modifiedDate || '') <= Date.parse(withdrawal.modifiedDate))
+          // The comparison is on the cached revision date. An unparseable or
+          // missing `modifiedDate` used to yield NaN, and `NaN <= x` is false, so
+          // a finding whose cached CVE had no revision date survived every
+          // withdrawal check and was summarised after the advisory was pulled.
+          // Unknown provenance now counts as potentially pre-withdrawal.
+          const modifiedMs = Date.parse(f.cve?.modifiedDate ?? '');
+          if (
+            withdrawal &&
+            (!Number.isFinite(modifiedMs) || modifiedMs <= Date.parse(withdrawal.modifiedDate))
+          )
             return [];
           // The rematch is authoritative when it produced a verdict. When it did
           // not, the finding must not silently vanish from the digest: that
@@ -592,7 +636,22 @@ export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promi
         const heldForReview = findingRows.rows.filter(
           (r) => r.data?.cveId && r.data.notificationStatus === 'REVIEW_REQUIRED',
         ).length;
-        const worker = (await db.query('SELECT heartbeat FROM scheduler_state WHERE id=1')).rows[0];
+        // The heartbeat read used to be unguarded; a missing or unreadable
+        // scheduler_state table aborted the whole transaction after the day had
+        // been selected, losing the digest over an informational field.
+        const workerRow = await (async () => {
+          try {
+            return await db.query<{ heartbeat: string | null }>(
+              'SELECT heartbeat FROM scheduler_state WHERE id=1',
+            );
+          } catch {
+            // Informational field only; a missing/unreadable scheduler_state
+            // table must not abort a transaction that already holds the day's
+            // claim and has the findings selected.
+            return undefined;
+          }
+        })();
+        const worker = workerRow?.rows[0];
         const health = daily.includeHealthReport
           ? await computeHealth(
               db,
@@ -692,14 +751,26 @@ export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promi
             const granted = new Set(claimed.map((request) => request.itemId));
             included = candidate.filter((finding) => granted.has(finding.id));
           }
-          if (!included.length && !health) continue;
+          // An email that carries no findings and no health report has nothing to
+          // say. Previously only the health-less case was skipped, so a recipient
+          // whose findings were all already delivered got a digest headed with
+          // "0 TOTAL FINDINGS / 0 ASSETS" beside a health table — a contradictory
+          // document that also read as "nothing happened today". The day is still
+          // recorded above, so this is not a reason to retry.
+          if (!included.length && !(health && healthReportHtml)) continue;
           const view = buildDailyDigestAdvisory(included, settings, todayKey);
           const severityCounts = countSeverities(included);
           const criticalCount = severityCounts.CRITICAL ?? 0;
           const highCount = severityCounts.HIGH ?? 0;
           const mediumCount = severityCounts.MEDIUM ?? 0;
           const lowCount = severityCounts.LOW ?? 0;
-          const uniqueAssets = new Set(findings.map((finding) => finding.matchedAssetId));
+          // `asset_count` is "assets with at least one finding in this email", the
+          // same scope as every other KPI on the card. When the recipient has no
+          // findings (health-report-only digest) it must be 0, not the size of a
+          // set built from an empty list under a different name.
+          const uniqueAssets = new Set(
+            included.map((finding) => finding.matchedAssetId).filter(Boolean),
+          );
           const reportGenerated = formatReportGenerated(new Date(), timezone);
           // Keep the narrative's scope and counts identical to the recipient's KPIs.
           const executiveSummary = formatExecutiveSummary(included.length, severityCounts);
@@ -708,7 +779,7 @@ export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promi
             advisory_title: view.title,
             dispatch_date: new Date().toISOString(),
             severity: view.severity,
-            finding_count: findings.length,
+            finding_count: included.length,
             severity_counts: formatSeverityCounts(severityCounts),
             findings_summary: renderDailyFindingSummary(
               included.map((finding) => ({

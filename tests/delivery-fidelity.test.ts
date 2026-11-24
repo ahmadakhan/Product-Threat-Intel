@@ -5,6 +5,7 @@ import type { Advisory, EmailConfiguration, Finding } from '../src/types/index.t
 import type { Job } from '../server/delivery.ts';
 import { sendProviderEmail } from '../server/emailProviders.ts';
 import {
+  HTML_ATTACHMENT_MAX_BYTES,
   deliveryHtmlIsAttachable,
   htmlAttachmentIsAttachable,
   renderFindingsDocument,
@@ -221,11 +222,11 @@ test('the plain-text part states each low-confidence finding and its reason', ()
   assert.ok(!confidentOnly.text.includes('Limited confidence'));
 });
 
-test('the HTML attachment has no size ceiling', () => {
+test('the HTML attachment has its own ceiling, independent of the PDF layout limit', () => {
   const html = `<html>${'x'.repeat(3_000_000)}</html>`;
   assert.equal(deliveryHtmlIsAttachable(html), false, 'too large for the PDF renderer');
-  assert.equal(htmlAttachmentIsAttachable(html), true, 'attachable regardless of size');
-  assert.equal(htmlAttachmentIsAttachable('x'.repeat(10_000_000)), true, 'attachable regardless of size');
+  assert.equal(htmlAttachmentIsAttachable(html), true, 'still attachable as a file');
+  assert.equal(htmlAttachmentIsAttachable('x'.repeat(HTML_ATTACHMENT_MAX_BYTES + 1)), false);
   assert.equal(htmlAttachmentIsAttachable(''), false);
   assert.equal(htmlAttachmentIsAttachable(undefined), false);
 });

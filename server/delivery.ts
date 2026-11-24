@@ -304,8 +304,11 @@ export function emailAttachmentFilename(subject: string | undefined, fallbackSte
  *
  * The HTML ceiling is deliberately separate from the PDF renderer's limit: an
  * HTML file is just the body bytes, so a large digest can still be attached
- * when a PDF cannot be rendered. An oversized document throws here, before any
- * provider call, instead of failing the send after the body has been prepared.
+ * when a PDF cannot be rendered. It is bounded by `HTML_ATTACHMENT_MAX_BYTES`
+ * (20 MB) so the message stays inside typical provider size caps; an oversized
+ * document is skipped here, before any provider call, and the body is still
+ * delivered. Failing the send instead would burn the retry budget on a payload
+ * that can never succeed.
  */
 export function findingHtmlAttachment(job: Job): EmailAttachment | undefined {
   if (!isFindingsEmail(job.advisory_id)) return undefined;

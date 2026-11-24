@@ -1847,6 +1847,48 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       assert.equal(delivered.status, 'ACCEPTED');
       assert.equal(delivered.error, null);
     });
+    await t.test('the delivered daily digest reports the real finding and asset counts', async () => {
+      // Regression: the digest read its inventory with `getMany(...).values()`,
+      // which hands back a Map's values collection rather than `WatchListItem`
+      // objects. The rematch then matched nothing, the stored-finding fallback
+      // found no deliverable status, and the email went out headed
+      // "0 TOTAL FINDINGS" / "0 ASSETS" on a day with a real match.
+      await reset();
+      await save('settings', 'main', { ...DEFAULT_SETTINGS });
+      await save('watchlist', 'asset', asset());
+      await save('cveData', vulnerability().cveId, vulnerability());
+      await run();
+      assert.equal((await list<Finding>(pool, 'findings')).length, 1);
+      await save('settings', 'main', {
+        ...DEFAULT_SETTINGS,
+        timezone: 'UTC',
+        schedulerEnabled: false,
+        dailyDigest: { enabled: true, time: '00:00', includeHealthReport: false },
+      });
+      await save('recipients', 'rec', {
+        id: 'rec',
+        name: 'Test',
+        email: 'test@example.invalid',
+        enabled: true,
+        dailyDigest: true,
+        deliveryGroup: 'SECURITY_TEAM',
+        subscriptionTier: 'ALL_SEVERITIES',
+      });
+      assert.equal(await runDailyDigest(pool), 1);
+      const payload = (await pool.query('SELECT payload FROM outbox')).rows[0].payload;
+      assert.deepEqual(payload.includedFindingIds.length, 1);
+      const html: string = payload.html;
+      // The KPI card renders the count as `<div style=...>` then `1</div>`, and
+      // the uppercase label sits in the adjacent cell. Matching the label keeps
+      // this assertion tied to the tile the operator actually sees.
+      const kpi = (label: string) =>
+        new RegExp(`>\\s*(\\d+)\\s*<\\/div>\\s*<div[^>]*>\\s*${label}`);
+      assert.equal(kpi('TOTAL FINDINGS').exec(html)?.[1], '1', 'TOTAL FINDINGS must be the real count');
+      assert.equal(kpi('ASSETS').exec(html)?.[1], '1', 'ASSETS must be the real count');
+      // Every substituted placeholder is real data, not an empty render.
+      assert.ok(!html.includes('{{'), 'no unresolved placeholders');
+      assert.match(html, /CVE-2026-98001/);
+    });
     await t.test('daily digest follows the Settings timezone, with a default when unset', async () => {
       await reset();
       await save('recipients', 'rec', {

@@ -12,6 +12,7 @@ import {
   selectUnnotifiedArticles,
 } from '../server/newsEmail.ts';
 import {
+  HTML_ATTACHMENT_MAX_BYTES,
   deliveryAdvisoryView,
   deliveryHtmlIsAttachable,
   renderFindingsDocument,
@@ -544,7 +545,10 @@ test('the attached document declares UTF-8 without changing the body', () => {
 });
 
 test('an oversized findings body is skipped instead of failing the send', () => {
-  assert.equal(findingHtmlAttachment(job('FINDINGS:b', 'x'.repeat(4_000_001))), undefined);
+  assert.equal(findingHtmlAttachment(job('FINDINGS:b', 'x'.repeat(HTML_ATTACHMENT_MAX_BYTES + 1))), undefined);
+  // Just under the ceiling the document is still attached, so a large digest is
+  // not silently stripped of its offline copy.
+  assert.ok(findingHtmlAttachment(job('FINDINGS:b', 'x'.repeat(HTML_ATTACHMENT_MAX_BYTES - 1))));
 });
 
 test('two recipient records for the same mailbox cannot create two jobs in one pass', () => {

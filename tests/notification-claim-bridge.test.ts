@@ -7,6 +7,7 @@ import { queueConsolidatedFindingNotifications, queueDigestAdvisory, consolidate
 import { runDailyDigest } from '../server/dailyDigest.ts';
 import { claimsForJob, claimItems, reconcileDuplicateOutboxClaims } from '../server/deliveryClaims.ts';
 import { newsArticleIdentity } from '../server/newsEmail.ts';
+import { HTML_ATTACHMENT_MAX_BYTES } from '../server/deliveryDocument.ts';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
 import type { Finding, EmailRecipient } from '../src/types/index.ts';
 
@@ -280,8 +281,14 @@ test('a deferred Everyone delivery claims its findings and blocks a second copy'
 test('an oversized findings HTML attachment is skipped instead of failing the send', () => {
   assert.equal(findingHtmlAttachment({
     advisory_id: 'FINDINGS:too-large',
-    payload: { html: '<html>' + 'x'.repeat(4_000_001) + '</html>' },
+    payload: { html: '<html>' + 'x'.repeat(HTML_ATTACHMENT_MAX_BYTES) + '</html>' },
   } as unknown as import('../server/delivery.ts').Job), undefined);
+  // One byte under the ceiling is still attached, so the gate is a ceiling and
+  // not an accidental blanket rejection of large documents.
+  assert.ok(findingHtmlAttachment({
+    advisory_id: 'FINDINGS:at-limit',
+    payload: { html: 'x'.repeat(HTML_ATTACHMENT_MAX_BYTES - 1) },
+  } as unknown as import('../server/delivery.ts').Job));
 });
 
 test('a consolidated batch queues one webhook per event-subscribed hook; webhook-only findings still dispatch', { skip: !database }, async () => {
