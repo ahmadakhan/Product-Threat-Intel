@@ -337,7 +337,7 @@ async function computeHealth(
         `SELECT data->>'event' AS event, count(*)::int AS count
          FROM audit
          WHERE data->>'category' = 'PIPELINE'
-           AND created_at > now() - interval '24 hours'
+           AND (data->>'timestamp')::timestamptz > now() - interval '24 hours'
            AND data->>'event' IN ('Pipeline queued','Pipeline completed','Pipeline failed','AUTHORITATIVE_AUTO_DISPATCH','Pipeline recovered')
          GROUP BY data->>'event'`,
       ),
