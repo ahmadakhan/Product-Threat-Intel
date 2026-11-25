@@ -1,0 +1,27 @@
+id,type,title,owner,requirement,test_file,code_file,evidence,status,verified_at
+REQ-0001,functional,Correlation drain guard cancellation,eng,REQ-0001,tests/correlation-drain-guard.test.ts,server/correlation/runtime.ts,tests/correlation-drain-guard.test.ts,passed,2026-11-25
+REQ-0002,functional,Bounded statement timeout,eng,REQ-0002,tests/rate-limit.test.ts,server/db.ts,server/db.ts (libpq statement_timeout),passed,2026-11-25
+REQ-0003,functional,Schema version gate,eng,REQ-0003,tests/migrations.test.ts,server/db.ts,server/migrate.ts,passed,2026-11-25
+REQ-0004,functional,Idempotent pipeline start,eng,REQ-0004,tests/pipeline.test.ts,server/pipeline.ts,pipeline deduplication test,passed,2026-11-25
+REQ-0005,functional,Delivery claims lifecycle,eng,REQ-0005,tests/delivery-confirmation.test.ts,server/deliveryClaims.ts,delivery-audit-regressions.test.ts,passed,2026-11-25
+REQ-0006,functional,Retention safety,eng,REQ-0006,tests/retention.test.ts,server/retention.ts,retention determinism tests,passed,2026-11-25
+REQ-0007,functional,Version range evaluation,eng,REQ-0007,tests/cvss.test.ts,src/utils/versionComparator.ts,version comparison tests,passed,2026-11-25
+REQ-0008,functional,Email template rendering,eng,REQ-0008,tests/advisory-template-canonical.test.ts,src/utils/templateCompiler.ts,template render tests,passed,2026-11-25
+REQ-0009,functional,Feed ingestion resilience,eng,REQ-0009,tests/feed-bootstrap.test.ts,server/ingestion.ts,feed bootstrap tests,passed,2026-11-25
+SEC-0001,security,Authentication required on /api,sec,SEC-0001,tests/route-authorization.test.ts,server/app.ts,route-authorization scan,passed,2026-11-25
+SEC-0002,security,Explicit role authorization on /api,sec,SEC-0002,tests/route-authorization.test.ts,server/app.ts,route-authorization scan,passed,2026-11-25
+SEC-0003,security,Role set is closed,sec,SEC-0003,tests/command-authorization.test.ts,shared/state.ts,Role type ADMIN|OPERATOR|VIEWER,passed,2026-11-25
+SEC-0004,security,Boundary validation (Zod 4),sec,SEC-0004,tests/config-auth.test.ts,server/config.ts,Zod boundary schemas,passed,2026-11-25
+SEC-0005,security,CSRF protection,sec,SEC-0005,tests/command-authorization.test.ts,server/app.ts,CSRF origin/token checks,passed,2026-11-25
+SEC-0006,security,Password policy,sec,SEC-0006,tests/config-auth.test.ts,server/auth.ts,passwordHash/minPasswordLen,passed,2026-11-25
+SEC-0007,security,Secrets handling,sec,SEC-0007,tests/*,server/secrets.ts,fixture keys only in tests,passed,2026-11-25
+SEC-0008,security,Audit log tamper evidence,sec,SEC-0008,tests/audit.test.ts,src/utils/cryptoChain.ts,hash-chain verification test,passed,2026-11-25
+SEC-0009,security,Error responses leak no secrets,sec,SEC-0009,tests/*,server/app.ts,single error middleware,passed,2026-11-25
+ARC-0001,architecture,Layering,eng,ARC-0001,tests/architecture-deps.test.ts,server/app.ts,dependency-graph scan,passed,2026-11-25
+ARC-0002,architecture,Persistence through db.ts helpers,eng,ARC-0002,tests/architecture-deps.test.ts,server/db.ts,db helper usage,passed,2026-11-25
+ARC-0003,architecture,Migration governance,eng,ARC-0003,tests/migrations.test.ts,server/migrate.ts,migration numbering + schema_migrations,passed,2026-11-25
+ARC-0004,architecture,Single-component monolith,eng,tests/*,src/App.tsx,App.tsx tab routing,passed,2026-11-25
+ARC-0005,architecture,Concurrency invariants,eng,tests/correlation-drain-guard.test.ts,server/correlation/supervisor.ts,deterministic stubbed-pool tests,passed,2026-11-25
+ARC-0006,architecture,Deterministic hermetic tests,eng,tests/*,tests/,injected clocks/fixed seeds,passed,2026-11-25
+ARC-0007,architecture,Regression testing,eng,tests/*,tests/*,-regressions.test.ts naming,passed,2026-11-25
+ARC-0008,architecture,Type soundness,eng,npm run lint,tsconfig.json,tsc --noEmit exit 0,passed,2026-11-25

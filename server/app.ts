@@ -1252,6 +1252,7 @@ export function createApp(
   app.get(
     '/api/events',
     requireAuth(pool, config),
+    requireRole('ADMIN', 'OPERATOR', 'VIEWER'),
     asyncRoute(async (req, res) => {
       // The operational event log is the read side of writeEvent(): any
       // authenticated role may page it. Query validation (category enum, cursor
@@ -1260,7 +1261,7 @@ export function createApp(
       res.json(await readEvents(pool, req.query));
     }),
   );
-  app.get('/api/session', requireAuth(pool, config), (req, res) =>
+  app.get('/api/session', requireAuth(pool, config), requireRole('ADMIN', 'OPERATOR', 'VIEWER'), (req, res) =>
     res.json({
       username: req.operator!.username,
       // The operator's own address. It is not a secret from them, and the
@@ -1541,6 +1542,7 @@ export function createApp(
   app.post(
     '/api/session/renew',
     requireAuth(pool, config),
+    requireRole('ADMIN', 'OPERATOR', 'VIEWER'),
     asyncRoute(async (req, res) => {
       const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
       // Rotate the CSRF token on every renewal so a captured token cannot be
@@ -1567,6 +1569,7 @@ export function createApp(
   app.post(
     '/api/logout',
     requireAuth(pool, config),
+    requireRole('ADMIN', 'OPERATOR', 'VIEWER'),
     asyncRoute(async (req, res) => {
       await pool.query('DELETE FROM sessions WHERE token_hash=$1', [req.operator!.sessionHash]);
       // __Host- cookies are only cleared when the deletion carries the same
@@ -1578,6 +1581,7 @@ export function createApp(
   app.post(
     '/api/password',
     requireAuth(pool, config),
+    requireRole('ADMIN', 'OPERATOR', 'VIEWER'),
     asyncRoute(async (req, res) => {
       const data = z
         .object({ currentPassword: z.string().min(1).max(128), newPassword: z.string().min(14).max(128) })
@@ -2265,6 +2269,7 @@ export function createApp(
     // mapping the deployment. `/live` and `/ready` stay unauthenticated so
     // orchestrator probes keep working.
     requireAuth(pool, config),
+    requireRole('ADMIN', 'OPERATOR', 'VIEWER'),
     asyncRoute(async (_req, res) => {
       const start = performance.now();
       await pool.query('SELECT 1');

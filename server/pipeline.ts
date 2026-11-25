@@ -2767,13 +2767,19 @@ export async function processPipeline(
         return asset.active && previousInventory?.[asset.id] !== fingerprint;
       });
       if (changedInventory.length) {
+        // Re-match newly/changed inventory against CVEs within the operator's
+        // scope window. Passing scopeHours: 0 here disabled the time filter and
+        // re-matched every historical CVE against the changed inventory, so the
+        // findings email carried all old records instead of only those within
+        // Settings > Pipeline scheduling Scope. CPE/applicability-changed CVEs
+        // still bypass the window via applicabilityChangedCveIds (final arg).
         const historical = runVulnerabilityPipeline(
           feeds,
           finalCves,
           changedInventory,
           snapshot.alertedCves,
           snapshot.findings,
-          { ...settings, scopeHours: 0 },
+          settings,
           'Inventory registration',
           true,
           finalVendorAliases,
