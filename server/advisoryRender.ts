@@ -177,10 +177,18 @@ function formattedDate(value?: string | null): string {
  * Findings are never withheld for confidence: every correlation is dispatched.
  * The flag drives the in-finding notice that names the limitation and its
  * reason, so reduced confidence is communicated instead of being dropped.
+ *
+ * A wildcard vendor/product or all-versions registration is a declared
+ * monitoring scope, not a limitation: the matcher scores it at 90% or above and
+ * the email must present it as a normal finding. Lower scores (70% unverified
+ * version, 85% alias) still carry their notice because those limitations are
+ * independent of the wildcard.
  */
 export function confidenceIsLimited(finding: Finding): boolean {
   const confidence = finding.confidence;
-  return typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 100;
+  const measured = typeof confidence === 'number' && Number.isFinite(confidence);
+  if (finding.wildcardScopeMatch && measured && confidence >= 90) return false;
+  return !measured || confidence < 100;
 }
 
 function confidencePercent(finding: Finding): string {

@@ -231,6 +231,23 @@ test('the HTML attachment has its own ceiling, independent of the PDF layout lim
   assert.equal(htmlAttachmentIsAttachable(undefined), false);
 });
 /**
+ * The attachment gate has to reflect the MESSAGE budget, not just the document.
+ *
+ * A document at the old 20 MB ceiling became about 26.7 MB once base64-encoded,
+ * which is already past a 25 MB provider cap before the body or the PDF is added,
+ * so the attachment was admitted here and then refused upstream as a
+ * non-retryable 4xx. These assertions pin the ceiling to a size that leaves room
+ * for the rest of the message inside the smallest common cap (15 MB).
+ */
+test('the HTML attachment ceiling leaves room for the body and PDF inside a provider cap', () => {
+  const base64Bytes = Math.ceil(HTML_ATTACHMENT_MAX_BYTES / 3) * 4;
+  assert.ok(base64Bytes < 15 * 1000 * 1000, `a ${HTML_ATTACHMENT_MAX_BYTES} byte attachment encodes to ${base64Bytes} bytes`);
+  assert.ok(
+    htmlAttachmentIsAttachable('x'.repeat(HTML_ATTACHMENT_MAX_BYTES - 1)),
+    'just under the ceiling is still attached',
+  );
+});
+/**
  * The body is the document. These assertions exist because a restored copy of
  * the provider module (a stale .backup) encoded attachments under keys that were
  * inconsistent with the payload, and nothing noticed: the attachment is the one

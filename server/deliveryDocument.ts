@@ -45,12 +45,16 @@ export const DELIVERY_HTML_MAX_BYTES = PDF_MAX_HTML_BYTES;
  * The ceiling is still finite because one message carries the body, the
  * attachment (base64, about +33%) and optionally a PDF, and providers reject
  * messages above their own cap (commonly 15-25 MB) with a non-retryable 4xx.
- * 20 MB covers the full size of the rendered document for any realistic
- * digest while leaving room for the body and PDF within a 25 MB provider cap;
- * above that the attachment is skipped (see `findingHtmlAttachment`) so the
- * email body still reaches the recipient instead of the whole send failing.
+ *
+ * This is a ceiling on the DOCUMENT, not on the message. A 20 MB document is
+ * about 26.7 MB once base64-encoded, which is already over a 25 MB provider cap
+ * before the body or the PDF is added, so such an attachment was admitted here
+ * and then rejected upstream. 10 MB keeps the encoded attachment near 13.3 MB,
+ * leaving room for the body and a PDF inside the smallest common provider cap
+ * (15 MB). Above it the attachment is skipped (see `findingHtmlAttachment`) so
+ * the email body still reaches the recipient instead of the whole send failing.
  */
-export const HTML_ATTACHMENT_MAX_BYTES = 20_000_000;
+export const HTML_ATTACHMENT_MAX_BYTES = 10_000_000;
 
 export interface DeliveryDocument {
   subject: string;

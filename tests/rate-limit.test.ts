@@ -5,6 +5,7 @@ import { createPool, migrate } from '../server/db.ts';
 import {
   consumeToken,
   createDatabaseRateLimiter,
+  MAX_FALLBACK_BUCKETS,
   type TokenBucket,
 } from '../server/rateLimit.ts';
 
@@ -88,3 +89,46 @@ test(
     }
   },
 );
+
+/**
+ * Degraded-posture regressions.
+ *
+ * These use a pool whose `query` always fails, which is exactly what the limiter
+ * sees during a database outage. The posture was previously implicit: a comment
+ * said "fail open", but the code actually enforced a per-process bucket, and
+ * nothing anywhere recorded that choice as deliberate. Each assertion below pins
+ * one behaviour an operator now relies on.
+ */
+const brokenPool = () =>
+  ({ query: async () => { throw new Error('connection refused'); } }) as unknown as Parameters<
+    typeof createDatabaseRateLimiter
+  >[0];
+
+test('memory posture still enforces the quota during a database outage', async () => {
+  const limiter = createDatabaseRateLimiter(brokenPool(), 3, 1 / 60_000, 'memory');
+  const decisions = [];
+  for (let i = 0; i < 4; i++) decisions.push(await limiter('rl:outage'));
+  assert.deepEqual(
+    decisions.map((d) => d.allowed),
+    [true, true, true, false],
+    'a database outage must not lift the mutation quota',
+  );
+  assert.ok(decisions[3].retryAfterMs > 0);
+  // A different key has its own bucket: the fallback is per operator, not global.
+  assert.equal((await limiter('rl:other')).allowed, true);
+});
+
+test('closed posture refuses mutations during a database outage', async () => {
+  const limiter = createDatabaseRateLimiter(brokenPool(), 3, 1 / 60_000, 'closed');
+  const decision = await limiter('rl:outage');
+  assert.equal(decision.allowed, false);
+  assert.ok(decision.retryAfterMs > 0, 'a refusal must tell the client when to retry');
+});
+
+test('the in-memory fallback is bounded so an outage cannot grow it without limit', async () => {
+  const limiter = createDatabaseRateLimiter(brokenPool(), 1, 1 / 60_000, 'memory');
+  for (let i = 0; i < MAX_FALLBACK_BUCKETS + 50; i++) await limiter(`rl:key-${i}`);
+  // The first key was evicted, so it is granted a fresh burst rather than being
+  // denied: eviction can under-count, and must never deny a legitimate caller.
+  assert.equal((await limiter('rl:key-0')).allowed, true);
+});

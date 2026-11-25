@@ -177,6 +177,7 @@ test('a generic inventory CPE resolves to the inventory vendor/product', () => {
   // confidence, not held for review.
   assert.equal(matched.confidence, 90);
   assert.equal(matched.applicabilityRequiresReview, false);
+  assert.equal(matched.wildcardScopeMatch, true);
 
   // A generic CPE must not remain an unrestricted wildcard that matches an
   // unrelated advisory product. Before resolution both components were `*`.
@@ -205,6 +206,7 @@ test('a wildcard vendor scores 90% and carries no low-confidence note', () => {
   assert.equal(matched.matched, true);
   assert.equal(matched.confidence, 90);
   assert.equal(matched.applicabilityRequiresReview, false);
+  assert.equal(matched.wildcardScopeMatch, true);
   assert.doesNotMatch(matched.evidence ?? '', /70%/, 'the note must agree with the 90% score');
   // Product-wide registration stays false: the vendor component is wildcarded,
   // so this is a partial pattern rather than an explicit all-versions scope.
@@ -227,6 +229,7 @@ test('a concrete all-versions registration dispatches without review', () => {
   assert.equal(matched.confidence, 90);
   assert.equal(matched.applicabilityRequiresReview, false);
   assert.equal(matched.productWideAllVersions, true);
+  assert.equal(matched.wildcardScopeMatch, true);
 });
 test('a CPE vendor/product mismatch falls through to the text fallback', () => {
   const result = matchesWatchlistItem(
@@ -303,4 +306,9 @@ test('a vuln-side partial wildcard version is review-gated even when it intersec
   assert.equal(matched.method, 'STRICT_CPE');
   assert.equal(matched.confidence, 90);
   assert.equal(matched.applicabilityRequiresReview, false);
+  assert.equal(
+    matched.wildcardScopeMatch,
+    false,
+    'a partial version pattern is not the all-versions wildcard scope',
+  );
 });

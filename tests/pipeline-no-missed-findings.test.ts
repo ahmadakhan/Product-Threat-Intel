@@ -137,17 +137,27 @@ test('strict CPE identity produces a finding', () => {
 });
 
 test('a product-wide registration (wildcard version) matches a concrete advisory version', () => {
-  assert.equal(run([cveRecord()], [assetRecord({ cpes: [cpe('*')] })]).length, 1);
+  const [finding] = run([cveRecord()], [assetRecord({ cpes: [cpe('*')] })]);
+  assert.ok(finding);
+  assert.equal(
+    finding.wildcardScopeMatch,
+    true,
+    'an all-versions registration is a normal wildcard match',
+  );
 });
 
 test('a wildcard product in the advisory matches a concrete inventory CPE', () => {
   const cve = cveRecord({ cpeMatches: ['cpe:2.3:a:acme:*:*:*:*:*:*:*:*:*'] });
-  assert.equal(run([cve], [assetRecord()]).length, 1);
+  const [finding] = run([cve], [assetRecord()]);
+  assert.ok(finding);
+  assert.equal(finding.wildcardScopeMatch, true);
 });
 
 test('a wildcard vendor in the advisory matches a concrete inventory CPE', () => {
   const cve = cveRecord({ cpeMatches: ['cpe:2.3:a:*:gateway:*:*:*:*:*:*:*:*'] });
-  assert.equal(run([cve], [assetRecord()]).length, 1);
+  const [finding] = run([cve], [assetRecord()]);
+  assert.ok(finding);
+  assert.equal(finding.wildcardScopeMatch, true);
 });
 
 test('an inventory version inside the advisory interval matches', () => {

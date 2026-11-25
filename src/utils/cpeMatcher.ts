@@ -303,6 +303,20 @@ function isGenericCpeComponent(value: string): boolean {
 }
 
 /**
+ * A wildcard vendor/product or an all-versions (`*`) version is a deliberate
+ * monitoring scope. Partial version patterns such as `1.*` stay confidence
+ * limited: they assert only a release family, not the whole product.
+ */
+function hasWildcardVendorProductScope(parsed: ParsedCPE): boolean {
+  return (
+    parsed.isValid &&
+    (isGenericCpeComponent(parsed.vendor) ||
+      isGenericCpeComponent(parsed.product) ||
+      parsed.version === '*')
+  );
+}
+
+/**
  * Free text is the weakest matching path, so a substring test is not enough:
  * a two-letter vendor such as `os` or `ai` occurs inside `most`, `cost` and
  * `maintain`. Require each identity word to appear as a whole token, and treat
@@ -830,6 +844,8 @@ export interface MatchResult {
   applicabilityRequiresReview?: boolean;
   /** Matched a complete product-wide registration (every component but vendor/product wildcarded). */
   productWideAllVersions?: boolean;
+  /** The match relied on a wildcard vendor/product or an all-versions (`*`) registration. */
+  wildcardScopeMatch?: boolean;
 }
 
 /**
@@ -935,10 +951,15 @@ export function matchesWatchlistItem(
       assetProduct,
     );
     const parsed = parseCPE23(assetCpe);
+    const rawParsed = parseCPE23(rawAssetCpe);
     return {
       assetCpe,
       genericIdentity,
       parsed,
+      // The raw CPE is checked before resolution: a generic `*:*` identity is
+      // substituted from the inventory fields above, which would otherwise hide
+      // the wildcard that made the registration broad.
+      wildcardVendorProductScope: hasWildcardVendorProductScope(rawParsed),
       // Product-level registrations cover all versions. Partial patterns still
       // require intersection checks; unknown concrete versions stay review-gated.
       versionUnasserted: parsed.isValid && (!parsed.version || parsed.version === '*'),
@@ -958,7 +979,13 @@ export function matchesWatchlistItem(
   const hasProductWideRegistration = preparedAssetCpes.some(({ genericIdentity, parsed, versionUnasserted }) =>
     isProductWideRegistration(parsed, versionUnasserted, genericIdentity),
   );
-  for (const { assetCpe, genericIdentity, parsed: assetParsed, versionUnasserted } of preparedAssetCpes) {
+  for (const {
+    assetCpe,
+    genericIdentity,
+    parsed: assetParsed,
+    versionUnasserted,
+    wildcardVendorProductScope: assetWildcardVendorProductScope,
+  } of preparedAssetCpes) {
     for (const vulnCpe of vulnCpeMatches) {
       const vulnParsed = parseCPE23(vulnCpe);
       const vulnConstrainsVersion =
@@ -979,6 +1006,8 @@ export function matchesWatchlistItem(
       if (matchRes.matched) {
         const asset = assetParsed;
         const vuln = vulnParsed;
+        const wildcardScopeMatch =
+          assetWildcardVendorProductScope || hasWildcardVendorProductScope(vuln);
         const rangeHasBounds = Boolean(versionRange && Object.values(versionRange).some(Boolean));
         const rangeNeedsReview = Boolean(
           rangeHasBounds &&
@@ -997,6 +1026,7 @@ export function matchesWatchlistItem(
             confidence: 85,
             matchedCpe: vulnCpe,
             evidence: `Matched structured CPE through the symmetric alias thesaurus (${asset.vendor}/${asset.product} -> ${vuln.vendor}/${vuln.product}) (85% confidence)`,
+            wildcardScopeMatch,
             applicabilityRequiresReview: Boolean(
               rangeNeedsReview || genericIdentity || (versionUnasserted && vulnConstrainsVersion),
             ),
@@ -1101,6 +1131,7 @@ export function matchesWatchlistItem(
                 : 'Matched strict CPE 2.3 component tokens (90% confidence)',
           applicabilityRequiresReview,
           productWideAllVersions,
+          wildcardScopeMatch,
         });
       }
     }

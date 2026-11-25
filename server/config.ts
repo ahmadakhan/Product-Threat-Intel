@@ -165,6 +165,15 @@ const poolSchema = {
   // pool-wide POOL_STATEMENT_TIMEOUT_MS (15s default) aborted a legitimate
   // refresh on a large corpus and rolled the whole pipeline run back.
   MATCH_INDEX_STATEMENT_TIMEOUT_MS: poolNumber(1_000, 900_000, 180_000),
+  // Posture of the mutation rate limiter while the database cannot make a
+  // decision. See RateLimitDegradedMode in server/rateLimit.ts. `memory` keeps
+  // mutations usable through a blip with a per-replica quota; `closed` refuses
+  // them so the quota is never exceeded. `permit` is NOT accepted: it is
+  // indistinguishable from having no limiter at all.
+  RATE_LIMIT_DEGRADED_MODE: z.preprocess(
+    (value) => (value === '' || value === undefined ? undefined : value),
+    z.enum(['memory', 'closed']).default('memory'),
+  ),
 };
 
 const schema = z.object({

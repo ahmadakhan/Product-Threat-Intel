@@ -62,24 +62,60 @@ export interface RateLimitDecision {
 export type MutationLimiter = (key: string) => Promise<RateLimitDecision>;
 
 /**
+ * What the limiter does when the database-backed decision cannot be made.
+ *
+ * There is no free choice here, only a trade-off, so it is made explicit and
+ * configurable instead of being settled silently in the code:
+ *
+ *  - `'memory'` (default): fall back to a per-process token bucket with the same
+ *    capacity and refill rate. Mutations keep working through a database blip,
+ *    but the quota is per replica, not installation-wide, so a client spreading
+ *    load across N replicas gets up to N times the quota for the duration. The
+ *    database is also usually down for the reason a mutation would fail anyway,
+ *    which bounds the exposure in practice.
+ *  - `'closed'`: deny with a retry hint. The quota is never exceeded, at the
+ *    cost of refusing every mutation for the length of the outage - including
+ *    the operator actions that might dial the system back or inspect it.
+ *
+ * Hard-fail-open (permit with no accounting at all) is deliberately not an
+ * option: it is the same as running without a limiter.
+ */
+export type RateLimitDegradedMode = 'memory' | 'closed';
+
+/** Retry hint returned in `'closed'` mode, matching the limiter's refill rate. */
+const DEGRADED_RETRY_HINT_MS = 1_000;
+/**
+ * Upper bound on remembered fallback buckets, so an outage cannot turn the
+ * limiter itself into an unbounded allocation. Keys are operator ids, so this is
+ * only reached by a very large account set; past it the oldest key is evicted,
+ * which can grant one extra burst and never denies a legitimate caller.
+ */
+export const MAX_FALLBACK_BUCKETS = 10_000;
+
+/**
  * Database-backed limiter shared by every application replica.
  *
  * The decision and the bucket update happen in one PostgreSQL function call, so
  * two replicas cannot both observe the last token. Keys are operator IDs, which
  * bounds the table to the number of accounts rather than the number of clients.
+ *
+ * `degradedMode` decides what happens when that call fails; see
+ * {@link RateLimitDegradedMode}. Whichever mode is chosen, the failure is logged
+ * so a degraded limiter is observable rather than assumed.
  */
 export function createDatabaseRateLimiter(
   pool: pg.Pool,
   capacity = MUTATION_LIMIT_CAPACITY,
   refillPerMs = MUTATION_LIMIT_REFILL_PER_MS,
+  degradedMode: RateLimitDegradedMode = 'memory',
 ): MutationLimiter {
   if (!(capacity > 0) || !(refillPerMs > 0))
     throw new Error('Rate limiter capacity and refill rate must be positive');
-  // In-memory fallback used when the database-backed limiter is unreachable.
-  // Fail-open: allow the request through rather than blocking all mutations
-  // during a temporary DB outage. The fallback is a simple per-key token bucket
-  // that is eventually consistent with the database once it recovers.
-  const fallbackBuckets = new Map<string, { tokens: number; updatedAt: number }>();
+  // In-memory fallback used when the database-backed limiter is unreachable. In
+  // `'memory'` mode it applies the same per-key token bucket so a database blip
+  // does not lift the quota entirely; the limits are per replica until the
+  // database recovers (see RateLimitDegradedMode).
+  const fallbackBuckets = new Map<string, TokenBucket>();
   return async (key) => {
     try {
       const result = await pool.query<{ allowed: boolean; retry_after_ms: number }>(
@@ -90,18 +126,20 @@ export function createDatabaseRateLimiter(
       if (!row) throw new Error('Rate limiter returned no decision');
       return { allowed: row.allowed, retryAfterMs: Number(row.retry_after_ms) };
     } catch (error) {
-      // Database unreachable: fail-open using an in-memory bucket so mutations
-      // are not all blocked by a non-critical safety feature. Log the fallback
-      // so operators are aware the database-backed limiter is degraded.
+      // Database unreachable: the installation-wide quota cannot be enforced. The
+      // chosen posture decides what replaces it, and either way the change is
+      // logged so a degraded limiter is visible to operators instead of assumed.
       console.error(
         JSON.stringify({
           level: 'error',
-          event: 'rate_limiter_db_fallback',
+          event: degradedMode === 'closed' ? 'rate_limiter_db_denied' : 'rate_limiter_db_fallback',
+          mode: degradedMode,
           key,
           error: (error as Error).message,
           timestamp: new Date().toISOString(),
         }),
       );
+      if (degradedMode === 'closed') return { allowed: false, retryAfterMs: DEGRADED_RETRY_HINT_MS };
       const now = Date.now();
       const bucket = fallbackBuckets.get(key) ?? { tokens: capacity, updatedAt: now };
       const elapsed = Math.max(0, now - bucket.updatedAt);
@@ -112,9 +150,14 @@ export function createDatabaseRateLimiter(
           retryAfterMs: Math.ceil((1 - tokens) / refillPerMs),
         };
       }
-      bucket.tokens = tokens - 1;
-      bucket.updatedAt = now;
-      fallbackBuckets.set(key, bucket);
+      // Re-insert so Map iteration order stays least-recently-used-first for the
+      // eviction below.
+      fallbackBuckets.delete(key);
+      fallbackBuckets.set(key, { tokens: tokens - 1, updatedAt: now });
+      if (fallbackBuckets.size > MAX_FALLBACK_BUCKETS) {
+        const oldest = fallbackBuckets.keys().next().value;
+        if (oldest !== undefined) fallbackBuckets.delete(oldest);
+      }
       return { allowed: true, retryAfterMs: 0 };
     }
   };

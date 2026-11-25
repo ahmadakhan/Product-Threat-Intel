@@ -109,6 +109,38 @@ test('the advisory states the confidence limitation on the finding itself', () =
   assert.ok(!single.includes('Low confidence'));
 });
 
+test('a wildcard CPE match is a normal finding with no low-confidence notice', () => {
+  const wildcard = finding({
+    id: 'f1',
+    cveId: 'CVE-2026-10001',
+    confidence: 90,
+    wildcardScopeMatch: true,
+    matchingEvidence: 'Matched strict CPE 2.3 component tokens (90% confidence)',
+  });
+  const exact = finding({
+    id: 'f2',
+    cveId: 'CVE-2026-10002',
+    confidence: 90,
+    matchingEvidence: 'Matched strict CPE 2.3 component tokens (90% confidence)',
+  });
+  const wildcardOnly = renderFindingsDocument({
+    advisory: deliveryAdvisoryView(advisory, [wildcard]),
+    findings: [wildcard],
+    generatedAt: new Date('2026-01-01T00:00:00Z'),
+  });
+  assert.ok(!wildcardOnly.html.includes('Low confidence'));
+  assert.ok(!wildcardOnly.text.includes('Limited confidence'));
+  // An exact match at the same score keeps the notice: the wildcard scope is
+  // what makes the finding normal, not the numeric score alone.
+  const exactOnly = renderFindingsDocument({
+    advisory: deliveryAdvisoryView(advisory, [exact]),
+    findings: [exact],
+    generatedAt: new Date('2026-01-01T00:00:00Z'),
+  });
+  assert.match(exactOnly.html, /Low confidence/);
+  assert.match(exactOnly.text, /Limited confidence/);
+});
+
 test('the email body is the document attached to it', () => {
   const findings = [finding({ id: 'f1', cveId: 'CVE-2026-10001' }), finding({ id: 'f2', cveId: 'CVE-2026-10002' })];
   const view = deliveryAdvisoryView(advisory, findings);
