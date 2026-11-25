@@ -1112,11 +1112,10 @@ export async function ingestFeed(
             throw error;
           }
           // Quarantined: persisted by the pipeline, then skipped so the cursor can
-          // advance. A cascade is refused so a broken provider cannot wipe a window.
-          if (quarantined.length > NVD_WINDOW_QUARANTINE_LIMIT) {
-            // Window continues past quarantined records; they are tracked individually
-            // and skipped on subsequent runs once the rejection count reaches the limit.
-          }
+          // advance. No window-level throw is intentional — see the matching note
+          // in the VulnCheck NVD++ adapter: a page of already-quarantined records
+          // must not re-block the source, and the per-record retry budget is what
+          // bounds the damage of a provider-wide schema break.
           continue;
         }
         cves.push(normalized);
@@ -1292,12 +1291,18 @@ export async function ingestFeed(
             error.rejections = [...rejections];
             throw error;
           }
-          // Quarantined: persisted by the pipeline, then skipped so the source
-          // can make progress. A cascade is refused so a broken provider cannot wipe a window.
-          if (quarantined.length > NVD_WINDOW_QUARANTINE_LIMIT) {
-            // Window continues past quarantined records; they are tracked individually
-            // and skipped on subsequent runs once the rejection count reaches the limit.
-          }
+          // Quarantined: persisted by the pipeline, then skipped so the cursor can
+          // advance. No window-level throw here, deliberately. Each quarantined
+          // record has already spent its per-record retry budget
+          // (NVD_RECORD_QUARANTINE_LIMIT), so a provider-wide schema break yields a
+          // page of individually-bounded quarantines and the window still moves
+          // forward, which is what keeps a broken provider from stalling the feed
+          // forever (tests/ingestion-quarantine.test.ts, "a provider-wide break
+          // fails the run instead of discarding the window"). A throw past
+          // NVD_WINDOW_QUARANTINE_LIMIT looked like a cascade guard but would
+          // re-block the source on exactly the case the test proves must advance.
+          // The limit therefore remains telemetry-only; rejections are already
+          // capped upstream so the list cannot grow without bound.
           continue;
         }
         cves.push(normalized);

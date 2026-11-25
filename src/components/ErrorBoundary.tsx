@@ -83,7 +83,7 @@ export class ErrorBoundary extends Component<Props, State> {
               corruption. You can copy diagnostics for SecOps engineering or reload the runtime.
             </p>
 
-            {this.state.error && (
+            {this.state.error && import.meta.env.DEV && (
               <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-3 mb-4 font-mono text-xs text-red-400 overflow-x-auto max-h-36">
                 <div className="font-bold mb-1">
                   {this.state.error.name}: {this.state.error.message}

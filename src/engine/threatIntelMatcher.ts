@@ -765,11 +765,18 @@ function normalizeInventory(value: unknown): NormalizedInventory[] {
       ]);
       const canonicalVendor = normalizeVendor(vendor);
       const canonicalProduct = normalizeProduct(product);
-      const wildcard =
-        hasWildcard(vendor) ||
-        hasWildcard(product) ||
-        cpes.some((cpe) => hasWildcard(cpe.vendor) || hasWildcard(cpe.product)) ||
-        purls.some((purl) => hasWildcard(purl.basePurl));
+      // Precision is derived from the DECLARED registration, not from every CPE
+      // in the list. An operator commonly registers the real product
+      // (`product: 'ios'`) and also adds a broad `cpe:2.3:a:cisco:*` entry to
+      // watch all Cisco advisories. ORing the CPE wildcards in (the previous
+      // `cpes.some(hasWildcard)`) relabelled that concrete product as WILDCARD,
+      // so `match_precision` below reported Wildcard and the finding was routed
+      // as Case 2 instead of Case 1. That contradicted classification.ts
+      // (`matchPrecision`), where the declared product is authoritative.
+      // `vendor` and `product` are always non-empty here (empty identity returns
+      // earlier), so there is no CPE-only case to fall back to in this engine;
+      // classification.ts still handles the CPE-only registration its own way.
+      const wildcard = hasWildcard(vendor) || hasWildcard(product);
 
       return {
         index,

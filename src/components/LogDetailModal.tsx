@@ -5,7 +5,15 @@ import { formatDateTime as fmtDateTime, timezoneLabel } from '../utils/dateTime'
 
 export interface LogDetailField {
   label: string;
-  value: React.ReactNode;
+  /**
+   * Field content. A plain string is ALWAYS rendered as text (React escapes it),
+   * never as markup: audit details, actor names and hashes come from operators and
+   * providers and must never be interpreted as HTML. A `ReactNode` is allowed so
+   * callers can supply a badge (the Outcome column does), but that node must be
+   * built from JSX, not from an HTML string — this component intentionally has no
+   * `dangerouslySetInnerHTML` path.
+   */
+  value: string | number | React.ReactNode;
   /** Render the value in the monospace/code font. */
   mono?: boolean;
   /** Render the value as a wrapped, scrollable block instead of a single line

@@ -70,8 +70,12 @@ interface SLAMetrics {
   failed: number;
   queued: number;
   pendingAction: number;
-  averageDeliveryTime: number;
+  /** Share of the 24h sample delivered on the first attempt, percent. */
+  firstAttemptRate: number;
+  /** Mean time from first attempt to acceptance over the 24h sample, ms. */
+  averageDeliveryTimeMs: number;
   deliveryRate: number;
+  /** Share of accepted deliveries inside SLA_TARGET_MS, percent. */
   slaCompliance: number;
   lastDeliveryWindow: { count: number; time: string };
 }
@@ -88,6 +92,8 @@ interface FilterOptions {
     | 'FAILED'
     | 'CANCELLED';
   provider: string;
+  /** Recipient type; matches the delivery group captured on the log. */
+  recipientType: 'ALL' | 'SECURITY_TEAM' | 'ADMINISTRATORS' | 'EVERYONE';
   actionStatus: 'ALL' | 'PENDING' | 'ACTIONED';
   advisoryId?: string;
 }
@@ -98,6 +104,33 @@ type RecipientMode = 'SINGLE_EMAIL' | 'SECURITY_TEAM' | 'EVERYONE';
 const DELIVERED_STATUSES = new Set(['ACCEPTED', 'DELIVERED']);
 
 const isDeliveredLog = (log: EmailDeliveryLog) => DELIVERED_STATUSES.has(log.status);
+
+const isDeliveredStatus = (status: string) => DELIVERED_STATUSES.has(status);
+
+/** Delivery is expected within this window; draws the SLA compliance line. */
+const SLA_TARGET_MS = 5 * 60 * 1000;
+
+/** Compact human duration for the average-latency readout (0 ms -> "—"). */
+const formatDuration = (ms: number) => {
+  if (!Number.isFinite(ms) || ms <= 0) return '—';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${(ms / 60_000).toFixed(1)}m`;
+};
+
+/**
+ * Time from a job's first attempt to its acceptance, in milliseconds.
+ *
+ * `createdAt` is not always present on legacy logs, so a log without both ends
+ * of the interval contributes no sample rather than a zero that would flatter
+ * the average.
+ */
+const deliveryLatencyMs = (log: EmailDeliveryLog): number | null => {
+  const start = log.queuedAt ? Date.parse(log.queuedAt) : NaN;
+  const end = log.sentAt ? Date.parse(log.sentAt) : NaN;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+  return end - start;
+};
 
 /**
  * A delivered finding email starts PENDING and stays there until an operator
@@ -128,6 +161,7 @@ export const ActionCenter: React.FC = () => {
     dateRange: 'week',
     status: 'ALL',
     provider: 'ALL',
+    recipientType: 'ALL',
     actionStatus: 'ALL',
   });
   const [selectedLogs, setSelectedLogs] = useState<Set<string>>(new Set());
@@ -182,6 +216,7 @@ export const ActionCenter: React.FC = () => {
   const {
     items: emailLogs,
     total,
+    facets,
     loading,
     reload,
   } = useCollection<EmailDeliveryLog>('emailLogs', {
@@ -191,6 +226,7 @@ export const ActionCenter: React.FC = () => {
     filters: {
       status: filters.status,
       provider: filters.provider === 'ALL' ? null : filters.provider,
+      deliveryGroup: filters.recipientType === 'ALL' ? null : filters.recipientType,
       actionStatus: filters.actionStatus,
       advisoryId: filters.advisoryId || undefined,
       dateRange: filters.dateRange,
@@ -202,22 +238,30 @@ export const ActionCenter: React.FC = () => {
     const calculateSLAMetrics = async () => {
       setIsCalculatingSLA(true);
       try {
-        // SLA metrics derived from the current page of delivery logs.
-        // ACCEPTED is the status the delivery worker actually writes when the
-        // transport accepts a message; DELIVERED is the legacy/confirmed value.
-        const delivered = emailLogs.filter(isDeliveredLog).length;
-        const pendingAction = emailLogs.filter(isActionPending).length;
-        const failed = emailLogs.filter(log => log.status === 'FAILED').length;
-        const queued = emailLogs.filter(log => ['QUEUED', 'SENDING', 'RETRYING'].includes(log.status)).length;
-        const totalLogs = emailLogs.length;
-        
-        // Calculate delivery rate
+        // Whole-collection counts from the server aggregate, NOT the page of
+        // `emailLogs` (at most `pageSize` rows). Counting the page made every
+        // headline number describe one page and change when the operator paged.
+        // `total` is the server-side count for the active filters; per-status
+        // counts come from the facet aggregate over the same filtered set.
+        const statusCounts = facets?.statusCounts ?? {};
+        const deliveredStatuses = Object.entries(statusCounts)
+          .filter(([status]) => isDeliveredStatus(status))
+          .reduce((sum, [, count]) => sum + count, 0);
+        const failed = statusCounts.FAILED ?? 0;
+        const queued = ['QUEUED', 'SENDING', 'RETRYING'].reduce(
+          (sum, status) => sum + (statusCounts[status] ?? 0),
+          0,
+        );
+        const delivered = deliveredStatuses;
+        const totalLogs = total;
+
+        // Calculate delivery rate over the whole filtered collection.
         const deliveryRate = totalLogs > 0 ? (delivered / totalLogs) * 100 : 0;
 
         const now = new Date();
         const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-        
-        // Recent deliveries define the 24-hour sample everything below uses.
+
+        // Recent deliveries (the visible page) define the latency sample below.
         const recentDeliveries = emailLogs
           .filter(log => isDeliveredLog(log) && log.sentAt && new Date(log.sentAt) >= yesterday)
           .slice(0, 50);
@@ -229,8 +273,29 @@ export const ActionCenter: React.FC = () => {
           ? (firstAttemptDelivered / recentDeliveries.length) * 100
           : 0;
 
-        // SLA compliance = overall delivery rate within the 24-hour sample.
-        const slaCompliance = deliveryRate;
+        // Real average delivery time for the 24-hour sample: time from the first
+        // attempt to transport acceptance. Previously the field held the
+        // first-attempt rate, which is not a duration at all.
+        const latencySamples = recentDeliveries
+          .map((log) => deliveryLatencyMs(log))
+          .filter((ms): ms is number => ms !== null);
+        const averageDeliveryTimeMs = latencySamples.length
+          ? latencySamples.reduce((sum, ms) => sum + ms, 0) / latencySamples.length
+          : 0;
+
+        // SLA compliance is the share of accepted deliveries inside the SLA
+        // window, not the raw lifetime rate. A raw rate says nothing about
+        // timeliness: a queue that eventually delivers everything still scores
+        // 100% however late. Uses the same 24-hour sample and the SLA target.
+        const withinSla = recentDeliveries.filter((log) => {
+          const latency = deliveryLatencyMs(log);
+          return latency !== null && latency <= SLA_TARGET_MS;
+        }).length;
+        const slaCompliance = recentDeliveries.length > 0
+          ? (withinSla / recentDeliveries.length) * 100
+          : 0;
+
+        const pendingAction = emailLogs.filter(isActionPending).length;
 
         const lastHour = new Date(now.getTime() - 60 * 60 * 1000);
         const lastHourDeliveries = emailLogs.filter(log =>
@@ -244,7 +309,8 @@ export const ActionCenter: React.FC = () => {
           failed,
           queued,
           pendingAction,
-          averageDeliveryTime: firstAttemptRate,
+          firstAttemptRate,
+          averageDeliveryTimeMs,
           deliveryRate,
           slaCompliance,
           lastDeliveryWindow: {
@@ -262,7 +328,22 @@ export const ActionCenter: React.FC = () => {
     };
     
     calculateSLAMetrics();
-  }, [emailLogs]);
+  }, [emailLogs, total, facets]);
+
+  // Live refresh. Delivery state changes server-side (a retry is accepted, a
+  // retry window elapses) with no client event to react to, so without a poll
+  // the Action Center showed a stale snapshot until the operator navigated away.
+  // The interval is cleared on unmount so a backgrounded tab cannot keep
+  // issuing requests, and the guard skips a tick while a previous reload is
+  // still resolving to avoid overlapping fetches on a slow connection.
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible' && !loading) reloadRef.current();
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, [loading]);
 
   const handleRetry = async (logId: string) => {
     const log = emailLogs.find((l) => l.id === logId);
@@ -757,7 +838,7 @@ export const ActionCenter: React.FC = () => {
               SLA: {slaMetrics?.slaCompliance.toFixed(1)}%
             </span>
             <span className={`text-xs font-medium ${slaStatusColor(slaMetrics?.slaCompliance || 0)}`}>
-              {slaMetrics?.averageDeliveryTime.toFixed(1)}% first-attempt
+              {slaMetrics?.firstAttemptRate.toFixed(1)}% first-attempt · {formatDuration(slaMetrics?.averageDeliveryTimeMs ?? 0)} avg
             </span>
           </div>
 
@@ -884,6 +965,21 @@ export const ActionCenter: React.FC = () => {
                   {provider}
                 </option>
               ))}
+            </select>
+
+            {/* Recipient Type Filter */}
+            <select
+              value={filters.recipientType}
+              onChange={(e) =>
+                setFilters((prev) => ({ ...prev, recipientType: e.target.value as FilterOptions['recipientType'] }))
+              }
+              className="px-3 py-1.5 rounded-xl bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 text-xs text-zinc-100 dark:text-zinc-100 light:text-zinc-900 focus:outline-none focus:border-zinc-600"
+              aria-label="Filter by recipient type"
+            >
+              <option value="ALL">All Recipients</option>
+              <option value="SECURITY_TEAM">Security team</option>
+              <option value="ADMINISTRATORS">Administrators</option>
+              <option value="EVERYONE">Everyone</option>
             </select>
 
             {/* Date Range Filter */}

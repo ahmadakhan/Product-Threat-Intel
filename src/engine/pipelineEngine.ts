@@ -77,12 +77,17 @@ export function validateSsrfSafety(value: string): { safe: boolean; reason?: str
   }
 }
 export function determineExploitRisk(cve: NormalizedCVE): ExploitRiskLevel {
+  // Most-severe-signal-first. Active weaponized exploitation outranks a bare
+  // "reported in wild" report; the previous order tested the reported/evidence
+  // branch first, so any `exploitationSources` entry (or a 'Reported In Wild'
+  // status) shadowed an 'Active Weaponized' status and downgraded the label. The
+  // risk level drives triage ordering and the UI, so the stronger signal must win.
   return cve.cisaKev?.isKev
     ? 'CISA_KEV_EXPLOITED'
-    : cve.exploitationSources?.length || cve.exploitStatus === 'Reported In Wild'
-      ? 'REPORTED_IN_WILD_EXPLOIT'
-      : cve.exploitStatus === 'Active Weaponized'
-        ? 'WEAPONIZED_EXPLOIT'
+    : cve.exploitStatus === 'Active Weaponized'
+      ? 'WEAPONIZED_EXPLOIT'
+      : cve.exploitationSources?.length || cve.exploitStatus === 'Reported In Wild'
+        ? 'REPORTED_IN_WILD_EXPLOIT'
         : (cve.epss?.score ?? 0) >= 0.4
           ? 'HIGH_EPSS_PROBABILITY'
           : cve.cvss.score >= 7
@@ -109,6 +114,17 @@ export {
  * a single advisory (the "zero-day digest" mode).
  */
 export const MAX_ZERO_DAYS_PER_RUN = 50;
+/**
+ * Upper bound on the assets a text-only CVE (no CPE and no PURL) is matched
+ * against in one run.
+ *
+ * Such a CVE cannot be narrowed by the vendor/product index, so without a bound
+ * each one costs O(assets) and a provider publishing many of them makes the run
+ * O(CVEs x assets). The limit is far above any realistic single-tenant
+ * inventory (thousands of assets), so ordinary deployments never hit it; it
+ * exists so a pathological corpus cannot turn one run into an unbounded scan.
+ */
+export const MAX_TEXT_ONLY_CANDIDATE_ASSETS = 5000;
 export interface ZeroDayDigest {
   advisoryId: string;
   vendor: string;
@@ -281,6 +297,8 @@ export function runVulnerabilityPipeline(
   let authoritativeSourceDispatchCount = 0;
   const nowMs = started.getTime();
   const newAuditLogs: AuditLog[] = [];
+  /** CVEs whose text-only candidate scan was truncated by the per-CVE cap. */
+  const textOnlyTruncations: string[] = [];
   const addAudit = (event: string, details: string, level: 'INFO' | 'WARNING' = 'INFO') => {
     newAuditLogs.push({
       id: randomUUID(),
@@ -457,7 +475,19 @@ export function runVulnerabilityPipeline(
       // A CVE with no structured identifiers has to use the text/alias fallback
       // against the whole inventory. A package-only advisory stays bounded to
       // the matching package buckets.
-      if (!cve.purls?.length) return activeAssets;
+      if (!cve.purls?.length) {
+        // Bound the text-only fan-out. Matching itself is O(candidates) per CVE,
+        // so a provider that publishes many CVEs with no CPE/PURL data would make
+        // a run O(CVEs x assets) with nothing to narrow it. The cap is far above
+        // any realistic inventory while keeping an adversarial or misconfigured
+        // corpus from turning one run into an unbounded scan; the truncation is
+        // logged so it is visible rather than silently lossy.
+        if (activeAssets.length > MAX_TEXT_ONLY_CANDIDATE_ASSETS) {
+          textOnlyTruncations.push(cve.cveId);
+          return activeAssets.slice(0, MAX_TEXT_ONLY_CANDIDATE_ASSETS);
+        }
+        return activeAssets;
+      }
       return [...candidates.values()];
     }
     for (const criterion of criteria) {
@@ -663,6 +693,7 @@ export function runVulnerabilityPipeline(
         matchedCpe: result.matchedCpe || '',
         matchingMethod: result.method,
         matchingEvidence: evidence,
+        wildcardScopeMatch: result.wildcardScopeMatch,
         confidence: result.confidence,
         exposure: asset.exposure,
         exploitRisk: determineExploitRisk(cve),
@@ -711,7 +742,11 @@ export function runVulnerabilityPipeline(
         name: 'Product matching',
         status: 'SUCCESS',
         durationMs: matchingDurationMs,
-        details: `${processed} CVEs evaluated against ${activeAssets.length} active products; ${newFindings.length} matches`,
+        details: `${processed} CVEs evaluated against ${activeAssets.length} active products; ${newFindings.length} matches${
+          textOnlyTruncations.length
+            ? `; ${textOnlyTruncations.length} text-only CVEs capped at ${MAX_TEXT_ONLY_CANDIDATE_ASSETS} candidate assets`
+            : ''
+        }`,
       },
     ],
     stats: {

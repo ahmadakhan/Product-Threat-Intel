@@ -95,12 +95,19 @@ export function reconcileFindings(
       old.matchedCpe !== candidate.matchedCpe ||
       old.matchedAssetVendor !== candidate.matchedAssetVendor ||
       old.matchedAssetProduct !== candidate.matchedAssetProduct ||
+      old.wildcardScopeMatch !== candidate.wildcardScopeMatch ||
       JSON.stringify(old.matchedAssetPurls ?? []) !== JSON.stringify(candidate.matchedAssetPurls ?? []) ||
       old.notificationStatus !== notificationStatus;
     return {
       ...old,
       cve: candidate.cve,
-      dispatchDeferred: candidate.dispatchDeferred,
+      // A deferral is an operator/policy decision already recorded against this
+      // finding, not a property the matcher re-derives. The matcher rebuilds a
+      // candidate with `dispatchDeferred: false`, so taking the candidate's value
+      // here silently un-deferred a finding that policy had held — the next run
+      // then dispatched it. Keep the stored decision and fall back to the fresh
+      // candidate only when the finding had none.
+      dispatchDeferred: old.dispatchDeferred ?? candidate.dispatchDeferred,
       matchedAssetName: candidate.matchedAssetName,
       matchedAssetVendor: candidate.matchedAssetVendor,
       matchedAssetProduct: candidate.matchedAssetProduct,
@@ -108,6 +115,7 @@ export function reconcileFindings(
       matchedCpe: candidate.matchedCpe,
       matchingMethod: candidate.matchingMethod,
        matchingEvidence: candidate.matchingEvidence,
+       wildcardScopeMatch: candidate.wildcardScopeMatch,
        confidence: candidate.confidence,
        exposure: candidate.exposure,
        // Announcement state is never reset by a re-evaluation: it records

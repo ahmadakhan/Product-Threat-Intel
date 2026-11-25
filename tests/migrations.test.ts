@@ -110,15 +110,22 @@ test('no transactional migration builds an index inline on a populated relation'
 test('every index build is CONCURRENTLY and statement-splittable', async () => {
   const files = (await readdir(indexesDir)).filter((file) => /^\d{3}_.*\.sql$/.test(file));
   assert.ok(files.length > 0, 'index migrations directory must not be empty');
+  // This directory runs OUTSIDE a transaction, which is what makes CONCURRENTLY
+  // legal and keeps a build from taking SHARE on a live table. The same property
+  // is required of a drop: a plain DROP INDEX locks the table and blocks writers,
+  // while DROP INDEX CONCURRENTLY does not. Every statement must therefore be a
+  // concurrent, idempotent safe operation: an index build, or a drop of one.
+  const concurrentBuild = /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+IF\s+NOT\s+EXISTS\s+\S+/i;
+  const concurrentDrop = /^DROP\s+INDEX\s+CONCURRENTLY\s+IF\s+EXISTS\s+\S+$/i;
   for (const file of files) {
     const sql = await readFile(path.join(indexesDir, file), 'utf8');
     const statements = indexStatements(sql);
     assert.ok(statements.length > 0, `${file} produced no executable statements`);
     for (const statement of statements) {
-      assert.match(
-        statement,
-        /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+IF\s+NOT\s+EXISTS\s+\S+/i,
-        `${file} has a statement that is not an idempotent concurrent index build: ${statement.slice(0, 80)}`,
+      const allowed = concurrentBuild.test(statement) || concurrentDrop.test(statement);
+      assert.ok(
+        allowed,
+        `${file} has a statement that is neither an idempotent concurrent index build nor a concurrent drop: ${statement.slice(0, 80)}`,
       );
     }
   }

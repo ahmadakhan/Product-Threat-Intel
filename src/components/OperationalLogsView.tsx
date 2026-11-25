@@ -52,7 +52,7 @@ const auditLevel = (level: AuditLog['level']) => (
 );
 
 const AuditTrailView: React.FC = () => {
-  const { fetchCollection, verifyAuditChainRemote, settings, csrfToken, session } = useApp();
+  const { fetchCollection, verifyAuditChainRemote, settings, csrfFetch, session } = useApp();
   const canDeleteLogs = session?.role === 'ADMIN';
   const [searchTerm, setSearchTerm] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -261,9 +261,8 @@ const AuditTrailView: React.FC = () => {
     setDeleteError('');
     setDeleteSuccess('');
     try {
-      const response = await fetch('/api/audit/cleanup', {
+      const response = await csrfFetch('/api/audit/cleanup', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
         body: JSON.stringify({ days }),
       });
       if (!response.ok) {
@@ -786,7 +785,7 @@ const AuditTrailView: React.FC = () => {
 };
 
 export const OperationalLogsView: React.FC = () => {
-  const { fetchEvents, settings, csrfToken, session } = useApp();
+  const { fetchEvents, settings, csrfFetch, session } = useApp();
   const canDeleteLogs = session?.role === 'ADMIN';
   const [tab, setTab] = useState<'events' | 'audit' | 'ml' | 'system'>('events');
   const [category, setCategory] = useState('');
@@ -818,9 +817,8 @@ export const OperationalLogsView: React.FC = () => {
     setEventsDeleteError('');
     setEventsDeleteSuccess('');
     try {
-      const response = await fetch('/api/events/cleanup', {
+      const response = await csrfFetch('/api/events/cleanup', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
         body: JSON.stringify({ days, scope: 'OPERATIONS' }),
       });
       if (!response.ok) {

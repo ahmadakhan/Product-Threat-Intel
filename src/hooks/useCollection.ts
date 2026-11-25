@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { CollectionKind } from '../../shared/state';
+import type { CollectionKind, CollectionFacets } from '../../shared/state';
 import { useApp } from '../context/AppContext';
 
 export interface UseCollectionOptions {
@@ -16,6 +16,8 @@ export interface UseCollectionOptions {
 export interface UseCollectionResult<T> {
   items: T[];
   total: number;
+  /** Whole-collection aggregates when the server returns them (emailLogs). */
+  facets?: CollectionFacets;
   loading: boolean;
   reload: () => void;
 }
@@ -35,6 +37,7 @@ export function useCollection<T>(
   const { page = 1, pageSize = 25, search = '', sort, order, filters, enabled = true } = options;
   const [items, setItems] = useState<T[]>([]);
   const [total, setTotal] = useState(0);
+  const [facets, setFacets] = useState<CollectionFacets | undefined>(undefined);
   const [loading, setLoading] = useState(enabled);
   const [localVersion, setLocalVersion] = useState(0);
   const requestId = useRef(0);
@@ -72,6 +75,7 @@ export function useCollection<T>(
         if (requestId.current !== id) return;
         setItems(result.items);
         setTotal(result.total);
+        setFacets(result.facets);
       })
       .catch(() => {
         // The app-level error banner is populated by the request helper; keep the
@@ -101,5 +105,5 @@ export function useCollection<T>(
   ]);
 
   const reload = useCallback(() => setLocalVersion((value) => value + 1), []);
-  return { items, total, loading, reload };
+  return { items, total, facets, loading, reload };
 }

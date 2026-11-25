@@ -46,6 +46,7 @@ import {
   put,
   appendAudit,
   list,
+  schemaLockKey,
   verifyStoredAudit,
 } from './db';
 import { queryCollection } from './collections';
@@ -108,6 +109,8 @@ import {
 import {
   createDatabaseRateLimiter,
   type MutationLimiter,
+  MUTATION_LIMIT_CAPACITY,
+  MUTATION_LIMIT_REFILL_PER_MS,
   INGEST_LIMIT_CAPACITY,
   INGEST_LIMIT_REFILL_PER_MS,
 } from './rateLimit';
@@ -953,10 +956,23 @@ export function createApp(
     // not persist changes and the Studio may request it repeatedly while open.
     '/api/advisory-template-render',
   ]);
-  const mutationLimiter = options.mutationLimiter ?? createDatabaseRateLimiter(pool);
+  // The degraded posture is an explicit operator decision (RATE_LIMIT_DEGRADED_MODE),
+  // not a silent default: it decides whether a database outage removes the
+  // mutation quota or refuses mutations outright.
+  const mutationLimiter = options.mutationLimiter ?? createDatabaseRateLimiter(
+    pool,
+    MUTATION_LIMIT_CAPACITY,
+    MUTATION_LIMIT_REFILL_PER_MS,
+    config.RATE_LIMIT_DEGRADED_MODE,
+  );
   const ingestLimiter =
     options.ingestLimiter ??
-    createDatabaseRateLimiter(pool, INGEST_LIMIT_CAPACITY, INGEST_LIMIT_REFILL_PER_MS);
+    createDatabaseRateLimiter(
+      pool,
+      INGEST_LIMIT_CAPACITY,
+      INGEST_LIMIT_REFILL_PER_MS,
+      config.RATE_LIMIT_DEGRADED_MODE,
+    );
   app.get(
     '/api/system-uptime',
     // Audit M-1: authenticated like every other /api read. The uptime payload
@@ -1738,6 +1754,7 @@ export function createApp(
           // emailLogs facets used by the Action Center. Without schema entries
           // Zod stripped them and the filters were silent no-ops on the wire.
           provider: z.string().max(40).optional(),
+          deliveryGroup: z.enum(['SECURITY_TEAM', 'ADMINISTRATORS', 'EVERYONE', 'ALL']).optional(),
           advisoryId: z.string().max(150).optional(),
           dateRange: z.enum(['today', 'week', 'month', 'quarter', 'year', 'custom']).optional(),
           notificationStatus: z.string().max(40).optional(),
@@ -1773,6 +1790,7 @@ export function createApp(
             severity: query.severity,
             status: query.status,
             provider: query.provider,
+            deliveryGroup: query.deliveryGroup,
             advisoryId: query.advisoryId,
             dateRange: query.dateRange,
             notificationStatus: query.notificationStatus,
@@ -1818,6 +1836,13 @@ export function createApp(
       const { days } = z.object({ days: z.number().int().min(1).max(3650) }).parse(req.body);
       const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
       await transaction(pool, async (db) => {
+        // Serialize with appendAudit, which holds this same lock while it reads
+        // the chain head and appends. Rewriting prevHash/hash for every remaining
+        // row without the lock races a concurrent append: the appender can read
+        // the old tail and commit an entry chained to a hash this pass is about to
+        // replace, forking the chain and making verifyStoredAudit report tampering
+        // that never happened.
+        await db.query(`SELECT pg_advisory_xact_lock(hashtext($1), ${schemaLockKey})`, ['audit-chain']);
         const deletedResult = await db.query(
           `DELETE FROM audit WHERE data->>'timestamp' < $1 RETURNING seq`,
           [cutoff],
@@ -2688,8 +2713,27 @@ export function createApp(
           smtpSecurity: z.string().optional(),
         })
         .parse(req.body);
+      // SSRF guard. This endpoint opens a raw TCP socket to an operator-supplied
+      // host:port, which without validation is a port scanner and a metadata
+      // probe (127.0.0.1, 169.254.169.254, container-internal services). The SMTP
+      // host is deliberately not constrained to EGRESS_ALLOWED_HOSTS - operators
+      // legitimately use private relays - but the address it resolves to must be
+      // a genuine public host, the same rule the outbound feed client applies.
+      // Resolve first and connect to the validated address, so a DNS answer that
+      // changes between the check and the connect cannot slip past it.
+      let target: { address: string; family: number };
+      try {
+        target = await resolvePublic(
+          new URL(`https://${smtpHost}:${smtpPort}`),
+          [smtpHost.trim().toLowerCase().replace(/\.$/, '')],
+          undefined,
+          [String(smtpPort)],
+        );
+      } catch (error) {
+        throw new HttpError(400, `SMTP host rejected: ${(error as Error).message}`);
+      }
       const start = Date.now();
-      const socket = net.createConnection(smtpPort, smtpHost);
+      const socket = net.createConnection({ port: smtpPort, host: target.address });
       let resolved = false;
       const promise = new Promise<{ ok: boolean; latency: number; error?: string }>((resolve, reject) => {
         const timeout = setTimeout(() => {

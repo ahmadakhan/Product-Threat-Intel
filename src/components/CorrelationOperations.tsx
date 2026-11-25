@@ -24,7 +24,7 @@ interface InventoryRow {
 const field = 'ui-field cr-operation-field';
 const button = 'ui-secondary';
 export function CorrelationOperations() {
-  const { session, csrfToken, settings } = useApp();
+  const { session, csrfFetch, settings } = useApp();
   const [state, setState] = useState<CorrelationWorkflows | null>(null);
   const [policy, setPolicy] = useState<CorrelationPolicy | null>(null);
   const [notice, setNotice] = useState('');
@@ -105,10 +105,8 @@ export function CorrelationOperations() {
     setNotice('');
     setNoticeError(false);
     try {
-      const response = await fetch('/api/correlation/' + path, {
+      const response = await csrfFetch('/api/correlation/' + path, {
         method,
-        credentials: 'same-origin',
-        headers: { 'content-type': 'application/json', 'x-csrf-token': csrfToken },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(10000),
       });
@@ -144,10 +142,8 @@ export function CorrelationOperations() {
     setNotice('');
     setNoticeError(false);
     try {
-      const response = await fetch('/api/correlation/fault/arming', {
+      const response = await csrfFetch('/api/correlation/fault/arming', {
         method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'content-type': 'application/json', 'x-csrf-token': csrfToken },
         body: JSON.stringify({ armed: confirmation.armed }),
         signal: AbortSignal.timeout(10000),
       });

@@ -122,8 +122,12 @@ services:
       replicas: 1
       resources:
         limits:
-          cpus: '1.5'
-          memory: 3G
+          # Single-instance topology contract: 2 CPUs / 2 GiB, matching
+          # deploy/kubernetes/ha.yaml and compose-topology.test.ts. Keep the V8
+          # heap (NODE_OPTIONS max-old-space-size=1536) below the 2 GiB limit so
+          # the base image, native buffers and Chromium retain headroom.
+          cpus: '2'
+          memory: 2G
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]

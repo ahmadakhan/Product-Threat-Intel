@@ -161,6 +161,19 @@ export interface CollectionPage<T> {
   total: number;
   limit: number;
   offset: number;
+  /**
+   * Server-side aggregates over the WHOLE filtered collection, not just the
+   * returned page. Optional: only collections that compute them (currently
+   * emailLogs) populate it. Views that summarise a collection (the Action Center
+   * SLA panel) must read these instead of counting the paginated `items`, which
+   * would describe at most one page.
+   */
+  facets?: CollectionFacets;
+}
+
+/** Per-status counts over the full filtered collection. */
+export interface CollectionFacets {
+  statusCounts?: Record<string, number>;
 }
 
 export interface AppState {

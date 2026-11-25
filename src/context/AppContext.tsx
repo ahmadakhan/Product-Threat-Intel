@@ -176,6 +176,32 @@ function useApplication() {
     return data;
   }
 
+  /**
+   * CSRF-aware fetch. Returns the raw `Response` so callers keep their own
+   * status/error handling, but attaches the session's CSRF header itself.
+   *
+   * Components must use this for their own POSTs instead of reading the CSRF
+   * token from context. Exposing the raw token as a context value meant every
+   * consumer could read and copy it, and it travelled through the whole React
+   * tree as visible state; keeping it inside the request path closes that surface
+   * (C-03) while preserving the double-submit the server requires. A sameSite=
+   * strict cookie alone is not sufficient here: requireAuth rejects a mutation
+   * without this header, so the header must still be sent.
+   */
+  const csrfFetch = useCallback(
+    (url: string, init: RequestInit = {}) =>
+      fetch(url, {
+        ...init,
+        credentials: 'same-origin',
+        headers: {
+          'content-type': 'application/json',
+          ...(init.headers as Record<string, string> | undefined),
+          ...(sessionRef.current ? { 'x-csrf-token': sessionRef.current.csrfToken } : {}),
+        },
+      }),
+    [],
+  );
+
   const [systemUptime, setSystemUptime] = useState<{ uptime: string }>({ uptime: 'unknown' });
 
   useEffect(() => {
@@ -482,7 +508,8 @@ function useApplication() {
     setSelectedFinding,
     selectedAdvisory,
     setSelectedAdvisory,
-    csrfToken: session?.csrfToken || '',
+    /** CSRF-aware POST helper; the token itself is never exposed (C-03). */
+    csrfFetch,
     /**
      * Renders a template through the SERVER renderer for the Studio preview.
      *

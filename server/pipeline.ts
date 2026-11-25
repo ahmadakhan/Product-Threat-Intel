@@ -16,6 +16,7 @@ import {
   appendAudit,
   pipelineState,
   schemaLockKey,
+  type Db,
 } from './db';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
 import type {
@@ -596,59 +597,78 @@ export async function rebuildFromCurrentInventory(
   options: { payloadRebuilt?: boolean } = {},
 ): Promise<void> {
   const rebuiltInPlace: string[] = [];
-  if (!options.payloadRebuilt) {
-    const legacy = await pool.query<Job>(
-      "SELECT * FROM outbox WHERE advisory_id=$1 AND status='QUEUED' AND payload->'cveRevisions' IS NULL",
-      [advisoryId],
-    );
-    for (const job of legacy.rows) {
-      if (await rebuildLegacyDeliveryPayload(pool, job).catch(() => false)) rebuiltInPlace.push(job.id);
-    }
-  }
-  // Regroup the still-deliverable jobs of this bundle before failing the rest,
-  // so a single held finding cannot silently drop the deliverable findings.
-  const { regrouped, holdGated } = await regroupStaleAdvisory(pool, advisoryId).catch(() => ({
-    regrouped: false,
-    holdGated: false,
-  }));
-  await transaction(pool, async (db) => {
-    const invalidated = await db.query<{ id: string; channel: string; attempts: number }>(
-      `UPDATE outbox
-         SET status='FAILED', delivery_outcome='NOT_ATTEMPTED', error=$1, next_attempt=now(),
-             locked_at=NULL, lock_token=NULL, updated_at=now()
-       WHERE advisory_id=$2 AND status='QUEUED'
-         AND id::text <> ALL($3::text[])
-       RETURNING id,channel,attempts`,
-      [reason, advisoryId, rebuiltInPlace],
-    );
-    if (invalidated.rows.length > 0) {
-      await db.query(`DELETE FROM delivery_claims WHERE job_id = ANY($1::uuid[]) AND state='CLAIMED'`, [
-        invalidated.rows.map((r) => r.id),
-      ]);
-    }
-    for (const row of invalidated.rows) {
-      if (row.channel === 'email') {
-        const log = await getForUpdate<EmailDeliveryLog>(db, 'emailLogs', row.id);
-        if (log)
-          await put(db, 'emailLogs', row.id, {
-            ...log,
-            status: 'FAILED',
-            attemptCount: row.attempts,
-            nextRetryTime: null,
-            errorMessage: reason,
-          });
-      } else {
-        const log = await getForUpdate<WebhookDeliveryLog>(db, 'webhookLogs', row.id);
-        if (log) await put(db, 'webhookLogs', row.id, { ...log, status: 'FAILED', errorMessage: reason });
+  // Read-rebuild-invalidate is one atomic unit under the pipeline-queue lock.
+  //
+  // As separate autocommit statements the legacy-job SELECT, every
+  // rebuildLegacyDeliveryPayload UPDATE and regroupStaleAdvisory each ran in
+  // their own transaction. Two concurrent rebuilds (two failing jobs of the same
+  // bundle, or a rebuild racing a pipeline queue pass) could both read the same
+  // stale QUEUED legacy rows and each regenerate a replacement, publishing
+  // duplicate advisory deliveries or clobbering the other's job. Holding
+  // `pipeline-queue` for the whole sequence makes only one rebuild observe and
+  // rewrite the bundle at a time, so exactly one replacement is created.
+  await transaction(
+    pool,
+    async (db) => {
+      if (!options.payloadRebuilt) {
+        const legacy = await db.query<Job>(
+          "SELECT * FROM outbox WHERE advisory_id=$1 AND status='QUEUED' AND payload->'cveRevisions' IS NULL FOR UPDATE",
+          [advisoryId],
+        );
+        for (const job of legacy.rows) {
+          if (await rebuildLegacyDeliveryPayload(db, job).catch(() => false)) rebuiltInPlace.push(job.id);
+        }
       }
+      // Regroup the still-deliverable jobs of this bundle before failing the rest,
+      // so a single held finding cannot silently drop the deliverable findings.
+      const { regrouped, holdGated } = await regroupStaleAdvisory(db, advisoryId).catch(() => ({
+        regrouped: false,
+        holdGated: false,
+      }));
+      const invalidated = await db.query<{ id: string; channel: string; attempts: number }>(
+        `UPDATE outbox
+           SET status='FAILED', delivery_outcome='NOT_ATTEMPTED', error=$1, next_attempt=now(),
+               locked_at=NULL, lock_token=NULL, updated_at=now()
+         WHERE advisory_id=$2 AND status='QUEUED'
+           AND id::text <> ALL($3::text[])
+         RETURNING id,channel,attempts`,
+        [reason, advisoryId, rebuiltInPlace],
+      );
+      if (invalidated.rows.length > 0) {
+        await db.query(`DELETE FROM delivery_claims WHERE job_id = ANY($1::uuid[]) AND state='CLAIMED'`, [
+          invalidated.rows.map((r) => r.id),
+        ]);
+      }
+      for (const row of invalidated.rows) {
+        if (row.channel === 'email') {
+          const log = await getForUpdate<EmailDeliveryLog>(db, 'emailLogs', row.id);
+          if (log)
+            await put(db, 'emailLogs', row.id, {
+              ...log,
+              status: 'FAILED',
+              attemptCount: row.attempts,
+              nextRetryTime: null,
+              errorMessage: reason,
+            });
+        } else {
+          const log = await getForUpdate<WebhookDeliveryLog>(db, 'webhookLogs', row.id);
+          if (log) await put(db, 'webhookLogs', row.id, { ...log, status: 'FAILED', errorMessage: reason });
+        }
+      }
+      return { regrouped, holdGated };
+    },
+    undefined,
+    { locks: ['pipeline-queue'] },
+  ).then(async ({ regrouped, holdGated }) => {
+    // Fresh replacement jobs are already queued. Only a wholly inapplicable
+    // bundle needs correlation to reconcile inventory; policy holds await review.
+    // queueRun takes the pipeline-queue lock itself, so this must run AFTER the
+    // rebuild transaction commits, not inside it.
+    if (!regrouped && !holdGated) {
+      const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
+      await queueRun(pool, settings.scopeHours, 'delivery-rebuild');
     }
   });
-  // Fresh replacement jobs are already queued. Only a wholly inapplicable
-  // bundle needs correlation to reconcile inventory; policy holds await review.
-  if (!regrouped && !holdGated) {
-    const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
-    await queueRun(pool, settings.scopeHours, 'delivery-rebuild');
-  }
 }
 /** Regenerate unsent delivery subsets from current inventory and policy.
  * Queued jobs move to a fresh advisory; failed pre-transport attempts retain
@@ -656,10 +676,10 @@ export async function rebuildFromCurrentInventory(
  * jobs are excluded. Only the retained findings bind to the new advisory.
  */
 export async function regroupStaleAdvisory(
-  pool: pg.Pool,
+  db: Db,
   advisoryId: string,
 ): Promise<{ regrouped: boolean; holdGated: boolean }> {
-  return transaction(pool, async (db) => {
+  {
     let advisory = await get<Advisory>(db, 'advisories', advisoryId);
     const jobs = (
       await db.query<Job>(
@@ -868,7 +888,7 @@ export async function regroupStaleAdvisory(
       context: { staleAdvisoryId: advisoryId, advisoryId: replacement.id, jobs: regroupedJobs },
     });
     return { regrouped: true, holdGated };
-  });
+  }
 }
 class PipelineStopped extends Error {
   constructor() {
@@ -1519,10 +1539,16 @@ export async function processPipeline(
     }
     const checkpoint = async (db: pg.Pool | pg.PoolClient = pool) => {
       signal?.throwIfAborted();
+      // Fail closed once the advisory-lock connection has been lost. The read
+      // below goes to the pool, not the lock connection, so its success says
+      // nothing about whether this worker still holds the run: another worker
+      // may already have re-acquired the lock and started the same execution.
+      // Clearing the flag here let a lock-lost run keep committing side effects
+      // (and reports) alongside its replacement, which is exactly the
+      // duplicate-work case the lock exists to prevent. The run is aborted and
+      // requeued by the lock-loss handler instead.
+      if (connectionLost) throw new Error('Pipeline worker lost its database lock connection');
       const current = await get<PipelineExecution>(db, 'executions', execution!.id);
-      // A successful database read confirms the lock connection is alive again:
-      // clear the flag so a transient error does not poison the entire run.
-      connectionLost = false;
       if (!current) throw new Error('Pipeline execution no longer exists');
       if (current?.stopRequestedAt || current?.status === 'CANCELLED') throw new PipelineStopped();
       signal?.throwIfAborted();

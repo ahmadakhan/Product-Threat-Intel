@@ -12,6 +12,24 @@ import {
   type SavedTemplateRecord,
 } from './deliveryDocument.ts';
 import type pg from 'pg';
+
+/**
+ * Distinguishes a `pg.Pool` from a checked-out `pg.PoolClient`.
+ *
+ * A pool client inherits `Client.prototype.connect` but also carries `release`,
+ * which only pg-pool adds when it hands a client out. The previous inline
+ * `(db as any).connect` test therefore needed two `as any` casts to express a
+ * fact the type system can state: a pool has `end()`, a client does not.
+ */
+function isPool(db: unknown): db is pg.Pool {
+  return (
+    typeof db === 'object' &&
+    db !== null &&
+    typeof (db as pg.Pool).connect === 'function' &&
+    typeof (db as pg.Pool).query === 'function' &&
+    typeof (db as { release?: unknown }).release !== 'function'
+  );
+}
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine';
 import { DEFAULT_SETTINGS, DEFAULT_EMAIL_CONFIG } from '../shared/state.ts';
 import type {
@@ -305,7 +323,7 @@ export function emailAttachmentFilename(subject: string | undefined, fallbackSte
  * The HTML ceiling is deliberately separate from the PDF renderer's limit: an
  * HTML file is just the body bytes, so a large digest can still be attached
  * when a PDF cannot be rendered. It is bounded by `HTML_ATTACHMENT_MAX_BYTES`
- * (20 MB) so the message stays inside typical provider size caps; an oversized
+ * (10 MB) so the message stays inside typical provider size caps; an oversized
  * document is skipped here, before any provider call, and the body is still
  * delivered. Failing the send instead would burn the retry budget on a payload
  * that can never succeed.
@@ -806,12 +824,15 @@ async function confirmPriorDelivery(
   // before the flag existed.
   if (log?.transportRejected === true) return 'not-delivered';
   if (log?.transportRejected === false) {
-    // The transport itself failed (timeout, reset, dropped socket) before the
-    // provider could accept or reject the message. The message was definitely
-    // not delivered — do not fall through to provider confirmation, which has
-    // no messageId to look up and therefore returns 'unknown', burning the
-    // ambiguous-attempt budget and terminally failing a job that was never sent.
-    return 'not-delivered';
+    // Explicitly NOT rejected: the attempt failed for an unknown reason (a socket
+    // reset or timeout during/after DATA, a dropped provider connection) after the
+    // message may already have been accepted. Fall through to provider
+    // confirmation, the only evidence that can prove the attempt did not deliver.
+    //
+    // Returning 'not-delivered' here would silently resend every ambiguous attempt
+    // and deliver the advisory twice. When no provider record can be queried the
+    // outcome is 'unknown', and the caller defers the resend (see deliverNext),
+    // which is the safe side of an ambiguous send.
   } else if (
     log?.errorMessage &&
     /HTTP \d{3}\b|did not accept the recipient|not configured|is missing/i.test(log.errorMessage)
@@ -1007,9 +1028,15 @@ export async function enqueue(
   if (channel === 'email') {
     const configuration = (await get<EmailConfiguration>(db, 'emailConfig', 'main')) || DEFAULT_EMAIL_CONFIG;
     const settings = (await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
+    // Capture the recipient's current delivery group on the log itself. The
+    // Action Center filters by recipient type, and resolving that through a join
+    // to the recipient record would break as soon as the recipient was edited or
+    // deleted while its delivery history remained.
+    const recipient = await get<EmailRecipient>(db, 'recipients', targetId);
     await put(db, 'emailLogs', insertedId, {
       id: insertedId,
       recipientEmail: payload.recipientEmail || '',
+      deliveryGroup: recipient?.deliveryGroup,
       advisoryId,
       subject: payload.subject,
       provider: EMAIL_PROVIDER_LABELS[configuration.provider],
@@ -1017,6 +1044,7 @@ export async function enqueue(
       attemptCount: 0,
       retrySchedule: emailRetrySchedule(emailRetryPolicy(settings)),
       nextRetryTime: new Date().toISOString(),
+      queuedAt: new Date().toISOString(),
       sentAt: '',
     } satisfies EmailDeliveryLog);
   } else {
@@ -1577,7 +1605,7 @@ export async function queueConsolidatedFindingNotifications(
     // delivery failed AFTER the findings had been persisted, the outer
     // transaction rolled back, and the run's findings were silently discarded.
     // A client is already inside a transaction; use it directly.
-    const isPoolDb = typeof (db as any).connect === 'function' && typeof (db as any).release !== 'function';
+    const isPoolDb = isPool(db);
     const didQueue = isPoolDb
       ? await transaction(db as pg.Pool, enqueueForRecipient)
       : await (async () => {
@@ -2410,9 +2438,25 @@ export async function deliverNext(
             confirmedPriorAcceptance: true,
           });
         }
-        // An 'unknown' outcome means the transport never returned a provider id
-        // and the provider cannot be queried. Retry immediately without
-        // deferring — do not burn the ambiguous-attempt budget or hold the job.
+        // An 'unknown' outcome means the transport may already have accepted a
+        // previous attempt and no evidence is available either way. Defer the
+        // resend instead of sending: this is the last line of defence against a
+        // duplicate email after an ambiguous failure. The job stays QUEUED
+        // (retryable) and is re-confirmed on the next attempt; an unresolvable
+        // provider consumes only the bounded ambiguous budget below.
+        if (confirmation === 'unknown') {
+          // `attempts` already includes this attempt, so this allows attempts
+          // 2..MAX_AMBIGUOUS_ATTEMPTS as ambiguous outcomes before failing.
+          if (job.attempts > MAX_AMBIGUOUS_ATTEMPTS) {
+            permanent = true;
+            throw new Error(
+              'Previous delivery outcome could not be confirmed after multiple attempts; marking failed',
+            );
+          }
+          throw new Error(
+            'Previous delivery outcome could not be confirmed yet; the resend is deferred until it can be',
+          );
+        }
       }
       // Record the attempt before the transport is contacted. A crash between
       // the provider accepting the message and the commit is then detectable,

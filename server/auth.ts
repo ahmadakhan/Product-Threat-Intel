@@ -258,7 +258,12 @@ export function loginHandler(pool: pg.Pool, config: Config) {
     const sourceThreshold = maxLoginAttempts * 5;
     const accountThreshold = maxLoginAttempts;
     // Increment before doing expensive password work, atomically across workers.
-    const allowed = await transaction(pool, async (db) => {
+    // The user row is read in the SAME transaction so the attempt count and the
+    // credential check observe one consistent snapshot: a lookup outside it could
+    // read a password hash changed (or an account disabled) between the increment
+    // commit and the read, letting a stale hash verify against a credential the
+    // operator has already rotated.
+    const attempt = await transaction(pool, async (db) => {
       for (const key of keys) {
         const result = await db.query(
           `INSERT INTO login_attempts(key,attempts,window_start,attempt_scope) VALUES($1,1,now(),$3)
@@ -266,15 +271,16 @@ export function loginHandler(pool: pg.Pool, config: Config) {
           [key, lockoutMins, userKey],
         );
         const threshold = key === ipKey ? sourceThreshold : accountThreshold;
-        if (result.rows[0].attempts > threshold) return false;
+        if (result.rows[0].attempts > threshold) return { allowed: false, user: undefined };
       }
-      return true;
+      const user = (await db.query('SELECT * FROM users WHERE username=$1', [username])).rows[0];
+      return { allowed: true, user };
     });
-    if (!allowed) {
+    if (!attempt.allowed) {
       res.setHeader('Retry-After', String(lockoutMins * 60));
       throw new HttpError(429, `Too many login attempts; retry in ${lockoutMins} minutes`);
     }
-    const user = (await pool.query('SELECT * FROM users WHERE username=$1', [username])).rows[0];
+    const user = attempt.user;
     // A fixed valid dummy hash keeps nonexistent accounts on the same password KDF path.
     const dummy = 'scrypt131072$00000000000000000000000000000000$' + '0'.repeat(128);
     const valid = await (async () => {
@@ -290,7 +296,32 @@ export function loginHandler(pool: pg.Pool, config: Config) {
         throw error;
       }
     })();
-    if (!user || user.disabled || !valid) throw new HttpError(401, 'Invalid username or password');
+    if (!user || user.disabled || !valid) {
+      // Persist the failed attempt before answering. Without this record a brute
+      // force, a credential-stuffing run, or a lockout was invisible: the only
+      // trace of a wrong password was a lockout row that the next successful login
+      // deletes. The reason is recorded coarsely (unknown account vs wrong
+      // credentials vs disabled account) so the log is useful to operators without
+      // letting an attacker mine the audit trail for valid usernames; the client
+      // response stays the single generic 401.
+      const reason = !user ? 'unknown account' : user.disabled ? 'account disabled' : 'wrong password';
+      await appendAudit(
+        pool,
+        'Login failed',
+        `Authentication failed (${reason})`,
+        username,
+        'SECURITY',
+        'WARNING',
+        req.ip || '',
+        {
+          action: 'session.create',
+          resourceType: 'operator',
+          resourceId: user ? user.id : '',
+          outcome: 'FAILURE',
+        },
+      ).catch(() => undefined);
+      throw new HttpError(401, 'Invalid username or password');
+    }
     const token = randomToken(),
       csrf = randomToken(),
       expires = new Date(Date.now() + effectiveSecurityPolicy(settings).sessionTimeoutMins * 60000);

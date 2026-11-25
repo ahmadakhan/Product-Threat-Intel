@@ -1,0 +1,13 @@
+-- Drop the redundant unique index on vendor_product_aliases(alias).
+--
+-- 001_correlation_indexes.sql created `correlation_alias_identity` as a UNIQUE
+-- index on `alias`, but `alias` is already the table's PRIMARY KEY
+-- (011_text_correlation.sql, 023_correlation_schema_contract.sql). PostgreSQL
+-- backs the primary key with its own unique btree, so the second index holds no
+-- information the first does not and only adds write amplification and storage
+-- on every alias insert/update. Dropping it changes no query plan that the PK
+-- index cannot already satisfy.
+--
+-- IF EXISTS keeps this idempotent for a database where the index was never
+-- created (a partial apply, or a fresh schema built after this file landed).
+DROP INDEX CONCURRENTLY IF EXISTS correlation_alias_identity;

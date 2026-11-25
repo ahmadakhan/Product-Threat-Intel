@@ -29,13 +29,22 @@ test('the app runs as a single instance with explicit 2 CPU / 2 GiB limits', () 
 });
 
 test('db and proxy have explicit CPU and memory limits', () => {
-  for (const name of ['db', 'proxy']) {
+  // Every service that consumes host resources must declare limits: db, app,
+  // proxy, and the one-shot migrate job (it runs a full migration pass and
+  // should not be able to starve the host during an upgrade). Changing the set
+  // of services requires updating this list deliberately.
+  const limited = ['db', 'migrate', 'app', 'proxy'];
+  for (const name of limited) {
     const block = serviceBlock(name);
     assert.match(block, /resources:/, `${name} must declare resources`);
     assert.match(block, /cpus:/, `${name} must limit CPU`);
     assert.match(block, /memory:/, `${name} must limit memory`);
   }
-  assert.equal((compose.match(/^\s{8}limits:$/gm) ?? []).length, 3, 'db, app, and proxy all need limits');
+  assert.equal(
+    (compose.match(/^\s{8}limits:$/gm) ?? []).length,
+    limited.length,
+    `${limited.join(', ')} each need an explicit limits block`,
+  );
 });
 
 test('long-running services restart after a crash or host reboot', () => {

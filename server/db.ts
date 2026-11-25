@@ -56,7 +56,17 @@ export const createPool = (url: string) => {
   // not supported by pg and is silently dropped, which left every query
   // unbounded.
   const settings = loadPoolSettings();
-  const pool = new pg.Pool({
+  // `pg` reads `maxLifetime`, `keepAlive` and `keepAliveInitialDelayMillis` at
+  // runtime but its published `PoolOptions` type omits them, so they are
+  // declared here rather than hidden behind an `as any` that also suppressed
+  // checking of every real option above.
+  type PoolOptionsWithLifecycle = pg.PoolConfig & {
+    maxLifetime?: number;
+    keepAlive?: boolean;
+    keepAliveInitialDelayMillis?: number;
+    timezone?: string;
+  };
+  const poolOptions: PoolOptionsWithLifecycle = {
     connectionString: withLibpqOption(url, `-c statement_timeout=${settings.statementTimeoutMs}`),
     max: settings.maxConnections,
     connectionTimeoutMillis: settings.connectionTimeoutMs,
@@ -75,7 +85,8 @@ export const createPool = (url: string) => {
     // `keepAliveDelay` was never read by pg or pg-pool and so did nothing.
     keepAlive: true,
     keepAliveInitialDelayMillis: settings.keepAliveDelayMs,
-  } as any);
+  };
+  const pool = new pg.Pool(poolOptions);
 
   // Monitor connection pool health
   pool.on('connect', () => {

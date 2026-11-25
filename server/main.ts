@@ -362,6 +362,18 @@ function checkMemoryPressure(): void {
       }
       if (heapPct >= 95) {
         void report('memory.pressure')(new Error(`Heap at ${heapPct.toFixed(0)}%; initiating graceful restart`));
+        // Hard-exit backstop. `shutdown()` can itself block (a hung query on the
+        // pool, an in-flight delivery that never settles, a wedged timer), and
+        // while it blocks the process keeps climbing toward an OOM kill that the
+        // orchestrator sees as a crash instead of the graceful restart this path
+        // intends. Arm an independent timer BEFORE awaiting shutdown so the exit
+        // is bounded even when shutdown never resolves. `unref()` keeps the timer
+        // from on its own holding the event loop open if shutdown finishes first.
+        const hardExit = setTimeout(() => {
+          console.error(JSON.stringify({ level: 'error', event: 'memory.pressure.hard_exit' }));
+          process.exit(1);
+        }, 10_000);
+        hardExit.unref();
         await shutdown();
         process.exit(1);
       }

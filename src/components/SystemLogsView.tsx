@@ -80,7 +80,7 @@ function systemCorrelations(event: OperationalEvent) {
 }
 
 export const SystemLogsView: React.FC = () => {
-  const { fetchEvents, settings, csrfToken, session } = useApp();
+  const { fetchEvents, settings, csrfFetch, session } = useApp();
   const canDeleteLogs = session?.role === 'ADMIN';
   const [query, setQuery] = useState('');
   const [level, setLevel] = useState('');
@@ -119,9 +119,8 @@ export const SystemLogsView: React.FC = () => {
     setDeleteError('');
     setDeleteSuccess('');
     try {
-      const response = await fetch('/api/events/cleanup', {
+      const response = await csrfFetch('/api/events/cleanup', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
         body: JSON.stringify({ days, scope: 'SYSTEM' }),
       });
       if (!response.ok) {

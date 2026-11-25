@@ -201,6 +201,8 @@ function recordConditions(kind: CollectionKind, query: CollectionQuery) {
         clauses.push(`data->>'advisoryId' = ${param(String(filters.advisoryId))}`);
       if (!isAll(filters.provider))
         clauses.push(`data->>'provider' = ${param(String(filters.provider))}`);
+      if (!isAll(filters.deliveryGroup))
+        clauses.push(`data->>'deliveryGroup' = ${param(String(filters.deliveryGroup))}`);
       if (!isAll(filters.actionStatus)) {
         if (filters.actionStatus === 'PENDING')
           // Delivered finding emails awaiting operator follow-up. Records
@@ -350,11 +352,27 @@ export async function queryCollection<T = unknown>(
   const count = (
     await pool.query<{ count: number }>(`SELECT count(*)::int AS count FROM records ${where}`, params)
   ).rows[0].count;
+  // Email delivery summaries (the Action Center SLA panel) need whole-collection
+  // counts. Computing them from the page below would describe at most `limit`
+  // rows, which made a 25-row page look like the entire delivery history. The
+  // aggregate is one extra indexed scan over the same filtered set.
+  let facets: CollectionPage<T>['facets'];
+  if (kind === 'emailLogs') {
+    const statusRows = (
+      await pool.query<{ status: string | null; count: number }>(
+        `SELECT data->>'status' AS status, count(*)::int AS count FROM records ${where} GROUP BY 1`,
+        params,
+      )
+    ).rows;
+    const statusCounts: Record<string, number> = {};
+    for (const row of statusRows) if (row.status) statusCounts[row.status] = Number(row.count);
+    facets = { statusCounts };
+  }
   const items = (
     await pool.query(
       `SELECT ${publicRecordData(kind)} AS data FROM records ${where} ORDER BY ${orderClause(kind as CollectionKind, query)} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset],
     )
   ).rows.map((row) => row.data as T);
-  return { items, total: Number(count), limit, offset };
+  return { items, total: Number(count), limit, offset, ...(facets ? { facets } : {}) };
 }

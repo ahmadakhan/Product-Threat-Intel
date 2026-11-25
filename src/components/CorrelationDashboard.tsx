@@ -43,7 +43,7 @@ const healthLabels = {
 const percent = (value: number) => Math.min(100, Math.max(0, value));
 
 export function CorrelationDashboard() {
-  const { csrfToken, session, settings } = useApp();
+  const { csrfFetch, session, settings } = useApp();
   const [snapshot, setSnapshot] = useState<CorrelationSnapshot | null>(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -130,10 +130,8 @@ export function CorrelationDashboard() {
     setNotice('');
     setNoticeError(false);
     try {
-      const response = await fetch(`/api/correlation/${path}`, {
+      const response = await csrfFetch(`/api/correlation/${path}`, {
         method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'content-type': 'application/json', 'x-csrf-token': csrfToken },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(10000),
       });

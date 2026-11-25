@@ -312,8 +312,22 @@ export const ThreatIntelligenceSearch: React.FC = () => {
     [],
   );
 
-  const nvdFeed = {};
-  const hasNvdApiKey = false;
+  // Resolve the configured NVD feed instead of hardcoding an empty object. The
+  // previous `nvdFeed = {}` / `hasNvdApiKey = false` made "save" a silent no-op:
+  // updateFeed sent `{...{}, authType, authSecretKey}` with no id, so the server
+  // could never find the row to update, and the banner always claimed no NVD
+  // feed was configured. The server derives the key from an NVD_API (NIST) or
+  // enabled VULNCHECK_NVD (VulnCheck NVD++) feed, so we resolve the same feed
+  // here. `authSecretKey` is stripped from the client snapshot, so presence is
+  // inferred from authType: the server stores a secret only for API_KEY/BEARER
+  // feeds, and the UI cannot otherwise tell.
+  const nvdFeed = useMemo(() => {
+    const nist = feeds.find((feed) => feed.type === 'NVD_API');
+    const vulncheck = feeds.find((feed) => feed.type === 'VULNCHECK_NVD');
+    return nist ?? vulncheck;
+  }, [feeds]);
+  const hasNvdApiKey =
+    Boolean(nvdFeed) && (nvdFeed!.authType === 'API_KEY' || nvdFeed!.authType === 'BEARER');
 
   const openApiKeyDialog = () => {
     setApiKeyInput('');
@@ -331,13 +345,20 @@ export const ThreatIntelligenceSearch: React.FC = () => {
     setConfirmingApiKey(false);
     setApiKeySaving(true);
     setApiKeyMessage('');
-    if (!hasNvdApiKey) {
+    if (!nvdFeed) {
       setApiKeyMessage('No NVD feed is configured. Add one under Feeds first.');
       setApiKeySaving(false);
       return;
     }
     try {
-      const ok = await updateFeed({...nvdFeed, authType: 'API_KEY', authSecretKey: apiKeyInput.trim()} as any);
+      // Send the resolved feed's full identity so the server updates THAT row
+      // (`feed.save` is keyed by feed.id). A NIST feed takes an API_KEY; the
+      // VulnCheck NVD++ feed authenticates with a Bearer token.
+      const ok = await updateFeed({
+        ...nvdFeed,
+        authType: nvdFeed.type === 'VULNCHECK_NVD' ? 'BEARER' : 'API_KEY',
+        authSecretKey: apiKeyInput.trim(),
+      });
       if (ok) {
         setApiKeyMessage('API key saved. Run a new search to pick it up.');
         setApiKeyInput('');

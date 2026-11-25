@@ -9,7 +9,7 @@ import type { Db } from './db.ts';
 import { get, getForUpdate, list, put, remove, appendAudit, schemaLockKey } from './db.ts';
 import { transaction } from './db.ts';
 import { encryptionKeys } from './secrets.ts';
-import type pg from 'pg';
+import pg from 'pg';
 
 /**
  * Acquire a transaction-scoped advisory lock, waiting for contention.
@@ -32,12 +32,18 @@ import type pg from 'pg';
  * the subsequent check-lock-act sequence.
  */
 const acquireAdvisoryLock = async (db: Db, lockName: string): Promise<boolean> => {
-  // Enforce that db is a PoolClient, not a Pool, to ensure the advisory lock
-  // is transaction-scoped (a Pool-level lock provides zero mutual exclusion across
-  // the subsequent check-lock-act sequence).
-  if ((db as { connect?: unknown }).connect !== undefined) {
-    throw new Error('acquireAdvisoryLock requires a PoolClient inside a transaction, not a Pool');
-  }
+  // Reject a Pool (or anything that is not a checked-out client) instead of
+  // skipping the lock. A `pg.Pool` cannot pass this: it hands connections out
+  // through `connect()` and has no `release()` of its own.
+  //
+  // Do NOT return `true` for a `pg.Client`. A pooled connection IS a Client, so
+  // `db instanceof pg.Client` is true for every real PoolClient: returning early
+  // there silently disabled the lock for every caller inside a transaction. That
+  // is how two concurrent `recipient.save` commands each read an empty recipient
+  // list and both committed the same address — the duplicate-recipient / duplicate
+  // email this lock exists to prevent. A checked-out client must still run the
+  // advisory lock below.
+  if (!(db instanceof pg.Client)) throw new Error('acquireAdvisoryLock requires a PoolClient inside a transaction');
   try {
     return (
       (

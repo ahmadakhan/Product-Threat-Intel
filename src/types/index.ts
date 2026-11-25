@@ -363,6 +363,13 @@ export interface Finding {
   matchedCpe: string;
   matchingMethod: string;
   matchingEvidence: string;
+  /**
+   * True when the successful match relied on a wildcard vendor/product CPE or
+   * an all-versions (`*`) registration. Wildcards are a declared monitoring
+   * scope, not a confidence limitation, so the delivered advisory must not
+   * label such a finding "Low confidence".
+   */
+  wildcardScopeMatch?: boolean;
   /** Match confidence (0–100). 0 indicates the version range could not be verified
    *  and the finding is an unverifiable match held for security-team review. */
   confidence?: number;
@@ -1083,6 +1090,14 @@ export interface WebhookDeliveryLog {
 export interface EmailDeliveryLog {
   id: string;
   recipientEmail: string;
+  /**
+   * Delivery group of the recipient this message was queued for, captured at
+   * enqueue time. The Action Center's recipient-type filter reads it; the log
+   * previously had no way to answer "who was this for?" without joining back to
+   * a recipient record that may since have been edited or removed. Absent on
+   * legacy logs, which predate the field.
+   */
+  deliveryGroup?: DeliveryGroup;
   advisoryId: string;
   subject: string;
   provider:
@@ -1102,6 +1117,13 @@ export interface EmailDeliveryLog {
   retrySchedule: string[];
   nextRetryTime: string | null;
   sentAt: string;
+  /**
+   * When the delivery was queued (first written to the outbox). Pairs with
+   * `sentAt` to give the Action Center a real end-to-end delivery latency, which
+   * a delivery-time/'attempt count' proxy cannot express. Absent on legacy logs,
+   * which are excluded from the latency sample.
+   */
+  queuedAt?: string;
   errorMessage?: string;
   /** Provider-assigned message id of the last attempt, when one was returned. */
   providerId?: string;
