@@ -157,6 +157,17 @@ const poolSchema = {
   // sessions; a fourth prevents ordinary API/worker traffic from consuming the
   // pipeline's final transaction slot.
   POOL_MAX_CONNECTIONS: poolNumber(4, 1_000, 25),
+  // Pool slots that feed ingestion must leave free.
+  //
+  // The leadership session and the pipeline run-lock session are pinned for the
+  // whole run, and the run's own progress/commit transactions need a slot while
+  // it executes. This reserve is subtracted from POOL_MAX_CONNECTIONS before
+  // feed concurrency is bounded, so a high FEED_CONCURRENCY cannot starve the
+  // checkpoints and API requests that keep the run stoppable. It used to be a
+  // hardcoded `- 4`; the default matches that behaviour. Validated against
+  // POOL_MAX_CONNECTIONS after parsing: a reserve that consumed the whole pool
+  // would clamp feed concurrency to 1 and defeat the setting.
+  POOL_RESERVED_CONNECTIONS: poolNumber(0, 1_000, 4),
   POOL_CONNECTION_TIMEOUT_MS: poolNumber(100, 600_000, 5_000),
   POOL_IDLE_TIMEOUT_MS: poolNumber(1_000, 3_600_000, 30_000),
   POOL_MAX_LIFETIME_MS: poolNumber(1_000, 86_400_000, 600_000),
@@ -222,6 +233,12 @@ const schema = z.object({
   SMTP_USER: z.string().default(''),
   SMTP_PASSWORD: z.string().default(''),
    SMTP_FROM: z.union([z.email(), z.literal('')]).default(''),
+  // Wall-clock ceiling for one provider send request, in milliseconds. It stays
+  // below the outbox stall budget (STUCK_PROMISE_MS) on purpose, so a slow
+  // provider produces a failed attempt the retry policy can classify instead of
+  // a worker that looks wedged. Raise it for a provider with a documented slow
+  // accept path.
+  EMAIL_PROVIDER_TIMEOUT_MS: poolNumber(1_000, 120_000, 30_000),
   // A PDF copy of each advisory is attached to outbound emails when enabled.
   // Rendering converts advisory HTML to text and generates a PDF server-side;
   // set ATTACH_ADVISORY_PDF=false to deliver HTML-only messages.
@@ -299,6 +316,24 @@ const schema = z.object({
 });
 export type Config = z.infer<typeof schema>;
 
+/**
+ * Highest feed concurrency the pool can sustain for one ingestion run.
+ *
+ * Leadership and the pipeline run lock each pin a session for the whole run, and
+ * the run's own progress/commit transactions need a slot while it executes, so
+ * those sessions are reserved before the remaining pool is shared with the feed
+ * workers. `Math.max(1, ...)` keeps a misconfigured reserve from disabling
+ * ingestion outright; `POOL_RESERVED_CONNECTIONS` is validated against the pool
+ * size at load time, so in practice the subtraction always leaves a slot.
+ *
+ * Exported so the bound is testable without running a pipeline.
+ */
+export function poolFeedBound(
+  config: Pick<Config, 'POOL_MAX_CONNECTIONS' | 'POOL_RESERVED_CONNECTIONS'>,
+): number {
+  return Math.max(1, config.POOL_MAX_CONNECTIONS - config.POOL_RESERVED_CONNECTIONS);
+}
+
 export interface PoolSettings {
   statementTimeoutMs: number;
   keepAliveDelayMs: number;
@@ -369,6 +404,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = schema.parse(env);
   if (parsed.FEED_RETRY_MAX_DELAY_MS < parsed.FEED_RETRY_BASE_DELAY_MS)
     throw new Error('FEED_RETRY_MAX_DELAY_MS must be >= FEED_RETRY_BASE_DELAY_MS');
+  // The reserve is subtracted from the pool bound for feed concurrency, so it
+  // must leave at least one connectable slot (see `poolFeedBound`).
+  if (parsed.POOL_RESERVED_CONNECTIONS >= parsed.POOL_MAX_CONNECTIONS)
+    throw new Error(
+      'POOL_RESERVED_CONNECTIONS must be less than POOL_MAX_CONNECTIONS: it is held back from feed concurrency, so a reserve of the whole pool leaves no connection to ingest with',
+    );
   const config = {
     ...parsed,
     INSTANCE_ID: parsed.INSTANCE_ID || randomUUID(),

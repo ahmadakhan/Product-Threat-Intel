@@ -752,6 +752,44 @@ test('CVE-less article without urgency language is not misclassified as zero-day
   assert.equal(matches[0].zeroDay, false);
 });
 
+test('news corroboration requires the vendor AND the product, even for a zero-day', () => {
+  // Relaxing this to vendor-only for zero-day articles is not safe: a headline
+  // naming a vendor and a DIFFERENT product would corroborate every asset from
+  // that vendor. Both identities stay mandatory.
+  const vendorOnly: IntelligenceArticle = {
+    id: 'zeroday-vendor-only',
+    url: 'https://example.com/zeroday',
+    title: 'Acme zero-day under active exploitation',
+    summary: 'Acme is investigating an unpatched flaw being exploited in the wild.',
+    publishedDate: '2026-10-01T00:00:00Z',
+    modifiedDate: '2026-10-01T00:00:00Z',
+    cveIds: [],
+    sourceFeeds: ['test'],
+    zeroDay: true,
+  };
+  assert.equal(matchIntelligence([vendorOnly], [asset], []).length, 0, 'a bare vendor is not identity evidence');
+
+  const productOnly: IntelligenceArticle = {
+    ...vendorOnly,
+    id: 'zeroday-product-only',
+    title: 'Widget zero-day under active exploitation',
+    summary: 'A critical unpatched flaw in Widget is being exploited in the wild.',
+  };
+  assert.equal(matchIntelligence([productOnly], [asset], []).length, 0, 'a bare product is not identity evidence');
+
+  // The same zero-day naming both remains eligible, and is still only
+  // corroboration (REVIEW_REQUIRED), never a confirmed finding.
+  const both: IntelligenceArticle = {
+    ...vendorOnly,
+    id: 'zeroday-both',
+    title: 'Acme Widget zero-day under active exploitation',
+    summary: 'Acme is investigating an unpatched flaw in Widget exploited in the wild.',
+  };
+  const matches = matchIntelligence([both], [asset], []);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].status, 'REVIEW_REQUIRED');
+});
+
 test('zero-day flag clears once a merged record carries a CVE ID', () => {
   const preCve: IntelligenceArticle = {
     id: 'zeroday-cve-later',

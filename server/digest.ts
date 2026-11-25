@@ -4,6 +4,7 @@ import { DEFAULT_TEMPLATE_CUSTOMIZATION, compileCustomizedTemplate } from '../sr
 import { formatAdvisoryId } from '../src/utils/executionName.ts';
 import type { Advisory, AppSettings, Finding, TemplateCustomization } from '../src/types/index.ts';
 import {
+  acquireSessionClassLock,
   get,
   getForUpdate,
   put,
@@ -197,12 +198,11 @@ export async function flushDueDigest(pool: pg.Pool): Promise<number> {
   let locked = false;
   let failed = false;
   try {
-    locked =
-      (
-        await client.query<{ locked: boolean }>(
-          `SELECT pg_try_advisory_lock(800003, ${schemaLockKey}) AS locked`,
-        )
-      ).rows[0]?.locked === true;
+    // Same class as a pipeline run (800003): a flush must never assign an
+    // advisory while the pipeline is still reconciling findings. Acquired
+    // through the order guard, not inline SQL, so a caller that already holds a
+    // lower-ranked class cannot deadlock with `40P01` here.
+    locked = await acquireSessionClassLock(client, 800003, schemaLockKey);
     if (!locked) return 0;
 
     return await transaction(

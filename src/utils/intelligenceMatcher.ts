@@ -407,6 +407,15 @@ export function matchIntelligence(
         // the earlier zero-day report was the same incident and the cluster
         // linkage (not loose phrasing) establishes that continuity.
         const clusterResolved = article.resolvedCveId && article.resolvedCveId === cveId;
+        // Identity evidence required before an article can corroborate an asset:
+        // BOTH the vendor and the product must be named. Relaxing this to
+        // vendor-only for zero-day articles (a tempting reading of "the product
+        // is often not in the headline") is not safe: a headline naming the vendor
+        // and a DIFFERENT product would then corroborate every asset from that
+        // vendor, so a "Palo Alto Networks GlobalProtect flaw" story would attach
+        // a zero-day finding to an inventory item running PAN-OS. The
+        // product-separation invariant is deliberate and pinned by
+        // tests/vendor-product-news-regressions.test.ts.
         if (!finding && !(vendorMentioned && productMentioned) && !clusterResolved) continue;
         const id = quickHash(`${cveId || article.id}:${asset.id}`);
         // NOT_APPLICABLE and VEX-suppressed findings are explicit exclusions:

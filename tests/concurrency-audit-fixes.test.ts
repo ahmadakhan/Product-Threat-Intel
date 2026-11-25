@@ -25,8 +25,18 @@ import {
   schemaLockKey,
 } from '../server/db.ts';
 import { claimItems } from '../server/deliveryClaims.ts';
+import { loadConfig, poolFeedBound } from '../server/config.ts';
 
 const database = process.env.TEST_DATABASE_URL;
+
+/** Minimal environment that satisfies `loadConfig`'s required variables. */
+const baseConfigEnv = (overrides: Record<string, string> = {}): NodeJS.ProcessEnv => ({
+  DATABASE_URL: database ?? 'postgres://user:pass@127.0.0.1:5432/vulnstream',
+  APP_ORIGIN: 'https://vulnstream.example.com',
+  ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64'),
+  NODE_ENV: 'test',
+  ...overrides,
+});
 
 /* ------------------------------------------------------------------ pacing */
 
@@ -78,6 +88,40 @@ test('the class-lock order helper rejects an out-of-order acquisition', () => {
   assert.doesNotThrow(() => assertClassLockOrder(800003, [800001]));
   // Unranked classes are not constrained by the table.
   assert.doesNotThrow(() => assertClassLockOrder(999999, [800005]));
+});
+
+test('acquireSessionClassLock enforces the order before touching the database', async () => {
+  // The raw-SQL call sites this helper replaced bypassed the guard entirely. It
+  // must reject out of order BEFORE issuing pg_try_advisory_lock, which is what
+  // the call counter below observes.
+  let queries = 0;
+  const client = {
+    query: async () => {
+      queries++;
+      return { rows: [{ locked: true }] };
+    },
+  } as unknown as Parameters<typeof acquireSessionClassLock>[0];
+  await assert.rejects(
+    () => acquireSessionClassLock(client, 800003, schemaLockKey, { held: [800005] }),
+    /lock class order violated/i,
+  );
+  assert.equal(queries, 0, 'an out-of-order acquisition must not reach PostgreSQL');
+  assert.equal(await acquireSessionClassLock(client, 800005, schemaLockKey, { held: [800003] }), true);
+  assert.equal(queries, 1);
+});
+
+test('poolFeedBound leaves the configured reserve for checkpoints and API work', () => {
+  assert.equal(poolFeedBound({ POOL_MAX_CONNECTIONS: 25, POOL_RESERVED_CONNECTIONS: 4 }), 21);
+  assert.equal(poolFeedBound({ POOL_MAX_CONNECTIONS: 25, POOL_RESERVED_CONNECTIONS: 2 }), 23);
+  // A misconfigured reserve can never disable ingestion outright.
+  assert.equal(poolFeedBound({ POOL_MAX_CONNECTIONS: 4, POOL_RESERVED_CONNECTIONS: 9 }), 1);
+});
+
+test('loadConfig rejects a reserve that consumes the whole pool', () => {
+  assert.throws(
+    () => loadConfig(baseConfigEnv({ POOL_MAX_CONNECTIONS: '8', POOL_RESERVED_CONNECTIONS: '8' })),
+    /POOL_RESERVED_CONNECTIONS must be less than POOL_MAX_CONNECTIONS/,
+  );
 });
 
 test(

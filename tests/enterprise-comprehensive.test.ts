@@ -76,6 +76,7 @@ import {
   reconcileFindings,
   countNewFindings,
   findingIdentity,
+  DELIVERY_FAILED_RETRY_HOURS,
 } from '../src/engine/reconcileFindings.ts';
 import {
   uniqueEnabledEmailRecipients,
@@ -740,11 +741,23 @@ describe('No Duplicate Findings', () => {
     assert.equal(result[0].notificationStatus, 'AUTO_DISPATCHED');
   });
 
-  test('reconcileFindings preserves DELIVERY_FAILED as terminal', () => {
-    const existing = [finding({ id: 'f1', cveId: 'CVE-2026-0001', notificationStatus: 'DELIVERY_FAILED', advisoryId: 'ADV-1' })];
+  test('reconcileFindings keeps a fresh DELIVERY_FAILED from auto-requeuing', () => {
+    // The failure is bounded, not terminal: it becomes dispatchable again once
+    // the recovery window has elapsed (see DELIVERY_FAILED_RETRY_HOURS), but a
+    // failure whose last delivery evidence is recent must not be re-sent by the
+    // very next run.
+    const existing = [finding({ id: 'f1', cveId: 'CVE-2026-0001', notificationStatus: 'DELIVERY_FAILED', advisoryId: 'ADV-1', autoDispatchedAt: NOW.toISOString() })];
     const candidates = [finding({ id: 'f1', cveId: 'CVE-2026-0001', notificationStatus: 'QUEUED_FOR_DISPATCH', advisoryId: 'ADV-1' })];
     const result = reconcileFindings(existing, candidates, NOW.toISOString());
     assert.equal(result[0].notificationStatus, 'DELIVERY_FAILED');
+  });
+
+  test('reconcileFindings retries DELIVERY_FAILED after the recovery window', () => {
+    const longAgo = new Date(NOW.getTime() - (DELIVERY_FAILED_RETRY_HOURS + 1) * 3_600_000).toISOString();
+    const existing = [finding({ id: 'f1', cveId: 'CVE-2026-0001', notificationStatus: 'DELIVERY_FAILED', advisoryId: 'ADV-1', autoDispatchedAt: longAgo })];
+    const candidates = [finding({ id: 'f1', cveId: 'CVE-2026-0001', notificationStatus: 'QUEUED_FOR_DISPATCH', advisoryId: 'ADV-1' })];
+    const result = reconcileFindings(existing, candidates, NOW.toISOString());
+    assert.equal(result[0].notificationStatus, 'QUEUED_FOR_DISPATCH');
   });
 
   test('reconcileFindings marks not-applicable findings correctly', () => {

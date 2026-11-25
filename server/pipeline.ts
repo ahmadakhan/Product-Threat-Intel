@@ -73,7 +73,7 @@ import { ingestionWindow, type FeedCursor } from './ingestionState';
 import { persistIngestionRejections, rejectionOccurrences } from './ingestionRejections';
 import type { Requester } from './network';
 import { withAbortSignal } from './network';
-import { feedEgressHosts, type Config } from './config';
+import { feedEgressHosts, poolFeedBound, type Config } from './config';
 import {
   enqueue,
   deliveryRevisionEvidence,
@@ -436,6 +436,16 @@ function cveClusterIdentities(cve: NormalizedCVE): { vendor: string; product: st
 
 /** Bounded retries for a pre-CVE disposition bind that lost its lock race. */
 const DEFERRED_BIND_MAX_ATTEMPTS = 5;
+
+/**
+ * Monotonic milliseconds since an arbitrary origin.
+ *
+ * Feed deadlines are durations, not calendar appointments: wall-clock
+ * `Date.now()` lets an NTP step extend or shorten them. `hrtime.bigint()` cannot
+ * move backwards, so the budget the operator configured is the budget a feed
+ * gets. The value is only compared with another reading from this clock.
+ */
+const monotonicMs = (): number => Number(process.hrtime.bigint() / 1_000_000n);
 
 /** Upper bound for {@link recoveryBackoffMs}. */
 export const RECOVERY_BACKOFF_CAP_MS = 15 * 60_000;
@@ -1663,10 +1673,12 @@ export async function processPipeline(
       // from the previous run, so the order is learned rather than hard-coded.
       const ordered = [...sources].sort((left, right) => (right.latencyMs ?? 0) - (left.latencyMs ?? 0));
       // The leadership and run-lock sessions are pinned for the whole run. Keep
-      // at least one additional pool slot for progress/commit transactions and
-      // another for unrelated worker/API work; otherwise high feed concurrency
-      // can starve the very checkpoints needed to stop feeds cleanly.
-      const poolBound = Math.max(1, config.POOL_MAX_CONNECTIONS - 4);
+      // the configured reserve (POOL_RESERVED_CONNECTIONS, default 4) free for
+      // progress/commit transactions and unrelated worker/API work; otherwise
+      // high feed concurrency can starve the very checkpoints needed to stop
+      // feeds cleanly. The reserve is a setting, not a literal, so an operator
+      // who raised POOL_MAX_CONNECTIONS can size the two together.
+      const poolBound = poolFeedBound(config);
       const concurrency = Math.min(ordered.length, config.FEED_CONCURRENCY, poolBound);
       let nextIndex = 0;
       const worker = async (): Promise<{ rawCount: number; succeeded: number }> => {
@@ -1687,11 +1699,16 @@ export async function processPipeline(
             );
             continue;
           }
-          const start = Date.now();
+          const start = monotonicMs();
           // MITRE can return up to 5,000 delta records; at its documented feed
           // pacing that bootstrap needs over 40 minutes for detail retrieval.
           // Give that source enough time to finish atomically while preserving
           // the configured limit for all other feeds.
+          //
+          // Measured on the MONOTONIC clock: `Date.now()` follows wall time, so a
+          // backward NTP step silently extended a feed's budget and a forward
+          // step abandoned a healthy source mid-ingest. `paceConcurrent` already
+          // derives its pacing from `hrtime.bigint()` for the same reason.
           const maxDurationSeconds = config.FEED_MAX_DURATION_SECONDS;
           const deadline = start + maxDurationSeconds * 1000;
           const configuredFeedHosts = config.EGRESS_ALLOWED_HOSTS.split(',')
@@ -1702,12 +1719,12 @@ export async function processPipeline(
           );
           const sourceCheckpoint = async () => {
             await checkpoint();
-            if (Date.now() >= deadline) throw new FeedDeadlineExceeded();
+            if (monotonicMs() >= deadline) throw new FeedDeadlineExceeded();
           };
           try {
             const checkedRequest: Requester = async (url, options) => {
               await sourceCheckpoint();
-              const remaining = Math.max(1, deadline - Date.now());
+              const remaining = Math.max(1, deadline - monotonicMs());
               const requestSignal =
                 signal && options?.signal
                   ? AbortSignal.any([signal, options.signal])
@@ -1729,13 +1746,13 @@ export async function processPipeline(
               return response;
             };
             const checkedSleep = async (ms: number, sleepSignal?: AbortSignal) => {
-              const until = Date.now() + ms;
-              while (Date.now() < until) {
+              const until = monotonicMs() + ms;
+              while (monotonicMs() < until) {
                 // `sourceCheckpoint` awaits a database read and a clock check, so
                 // the remaining time can cross zero between the loop test and the
                 // timer. A negative delay is clamped by Node only after warning,
                 // which flooded the worker log with TimeoutNegativeWarning.
-                const delay = until - Date.now();
+                const delay = until - monotonicMs();
                 await sourceCheckpoint();
                 if (delay <= 0) return;
                 const activeSignal = sleepSignal ?? signal;
@@ -3208,7 +3225,9 @@ export async function processPipeline(
       // accepted, so filtering on it dropped findings for every recipient who
       // had not been told yet — including recipients added later. The
       // per-recipient `delivery_claims` record inside the consolidated queue is
-      // what decides whether THIS recipient still needs THIS finding.
+      // what decides whether THIS recipient still needs THIS finding. For the
+      // same reason `reconcileFindings` does not treat the stamp as the reason to
+      // suppress a re-queue beyond reporting the lifecycle as dispatched.
       //
       // The input is the zero-day-capped set, not the raw persisted set: a finding
       // withheld by the cap is delivered through its digest and must never also

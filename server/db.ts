@@ -350,8 +350,16 @@ export async function applyIndexMigrations(pool: pg.Pool): Promise<void> {
     await client.query('SELECT set_config($1, current_schema(), false)', ['search_path']);
     // Serialize concurrent deploys of the same schema. Separate from the
     // migration lock because this runs outside that transaction.
-    await client.query(
-      'SELECT pg_advisory_lock(800005, hashtext(COALESCE(current_schema(), current_database())))',
+    //
+    // Routed through the documented order guard rather than inline SQL: this is
+    // the highest-ranked class (800005), so a caller that already holds a lower
+    // class on this connection must be rejected here instead of deadlocking with
+    // `40P01` once two deployers acquire the same classes in opposite orders.
+    await acquireSessionClassLock(
+      client,
+      800005,
+      'hashtext(COALESCE(current_schema(), current_database()))',
+      { wait: true },
     );
     try {
       for (const file of await indexMigrationFiles()) {
@@ -588,8 +596,9 @@ export async function migrate(pool: pg.Pool) {
  * where they cannot be interleaved into an existing cycle.
  *
  * LOCK_ORDER must stay consistent with LOCK_CLASS_RANK: a lock acquired by hand
- * (the session-scoped run, leadership and index-build locks) has to rank before
- * anything its holder takes afterwards inside `transaction()`.
+ * (the session-scoped run, leadership and index-build locks) has to rank after
+ * anything its holder already took, or two holders that take the same classes in
+ * opposite orders cycle and PostgreSQL reports `40P01`.
  */
 export const LOCK_ORDER: readonly string[] = Object.freeze([
   // Coarsest scope first: migration/schema, then the domains a long run holds.
@@ -636,6 +645,13 @@ export const orderLocks = (names: readonly string[]): string[] =>
  * Keeping this table next to LOCK_ORDER is what makes the invariant checkable:
  * two independent numeric namespaces with no declared relationship are exactly
  * how the `match-index` / `watchlist-identity` cycle was introduced.
+ *
+ * The table only prevents a deadlock if every raw acquisition consults it, so
+ * class locks are taken through `acquireSessionClassLock` (which calls
+ * `assertClassLockOrder`) rather than inline `SELECT pg_try_advisory_lock(...)`
+ * SQL. 800004, 800003 and 800005 each rank after everything a concurrent holder
+ * of a lower-ranked class can take, which is what makes "acquire in increasing
+ * rank" a total order across the deployment.
  */
 export const LOCK_CLASS_RANK: ReadonlyMap<number, number> = new Map([
   [800004, 0], // migration transaction; also used by daily digest and ML training
@@ -668,10 +684,10 @@ function migrationStatementTimeoutMs(): number {
  * Assert that session class locks are taken in LOCK_CLASS_RANK order.
  *
  * Named transaction locks are sorted by `orderLocks`, but the class locks are
- * acquired by hand (`pg_try_advisory_lock` on a dedicated connection) and until
- * now LOCK_CLASS_RANK was documentation only: nothing read it, so a call site
- * that took two classes out of order would deadlock with `40P01` and the table
- * would not have prevented it.
+ * acquired by hand on a dedicated connection. `LOCK_CLASS_RANK` on its own is
+ * documentation: a call site that took two classes out of order would deadlock
+ * with `40P01` and the table would not have prevented it. Every acquisition goes
+ * through `acquireSessionClassLock`, which calls this first.
  *
  * Every holder here takes exactly one class lock, so today this is a guard
  * rather than a re-ordering. It is checked at acquisition so that a future

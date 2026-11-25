@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import { get, getMany, list, put, safeAdvisoryUnlock, transaction, schemaLockKey, type Db } from './db';
+import { get, getMany, list, put, safeAdvisoryUnlock, transaction, schemaLockKey, acquireSessionClassLock, type Db } from './db';
 import { writeEvent } from './events';
 import { advisoryRevision, enqueue, findingRevision, revision, recipientAllows } from './delivery';
 import {
@@ -451,11 +451,9 @@ export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promi
     if (precheck?.lastKey === todayKey) return 0;
 
     // ATOMIC: Use try_advisory_lock to prevent race conditions
-    const lockResult = await client.query<{ locked: boolean }>(`
-      SELECT pg_try_advisory_lock(${DAILY_LOCK_CLASS}, ${schemaLockKey}) AS locked
-    `);
-
-    locked = lockResult.rows[0]?.locked === true;
+    // ATOMIC: take the digest class lock through the documented order guard so
+    // a concurrent holder of a lower-ranked class cannot deadlock here.
+    locked = await acquireSessionClassLock(client, DAILY_LOCK_CLASS, schemaLockKey);
     if (!locked) {
       // A peer holding the lock is normal multi-replica behaviour, not an
       // operational event worth a log row per minute.

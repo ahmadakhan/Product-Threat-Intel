@@ -1127,6 +1127,48 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       assert.equal((await get<any>(pool, 'alertedCves', cveId)).dispatchCount, 2);
       assert.equal((await list(pool, 'alertDispatches')).length, 2);
     });
+    await t.test('a payload that names one CVE twice records exactly one dispatch', async () => {
+      await reset();
+      await save('settings', 'main', { ...DEFAULT_SETTINGS, autoDispatchEnabled: true });
+      await save('watchlist', 'asset', asset());
+      await save('cveData', vulnerability().cveId, vulnerability());
+      await save('recipients', 'rec', {
+        id: 'rec',
+        name: 'Test',
+        email: 'test@example.invalid',
+        enabled: true,
+        subscriptionTier: 'ALL_SEVERITIES',
+      });
+      await run();
+      const cveId = vulnerability().cveId;
+      const findings = await list<Finding>(pool, 'findings');
+      assert.ok(findings.length > 0, 'the run must produce a finding to dispatch');
+      // The payload names the CVE twice (as two findings on one CVE would). The
+      // finalize loop used to visit it twice: the second visit re-read the
+      // pre-write snapshot and rewrote `dispatchCount` back to its old value,
+      // losing the increment this lock exists to protect, and wrote the same
+      // alertDispatches row twice.
+      const duplicateAdvisory: Advisory = {
+        id: 'ADV-DUPLICATE-CVE',
+        title: `Duplicate CVE payload for ${cveId}`,
+        severity: 'HIGH',
+        cveIds: [cveId, cveId],
+        findingIds: findings.map((f) => f.id),
+        createdDate: new Date().toISOString(),
+        deliveryStatus: 'PENDING',
+        recipientCount: 0,
+        executiveSummary: '',
+        remediationInstructions: '',
+        vendorLink: '',
+        affectedSystems: [],
+        isDigestBatch: false,
+      };
+      await transaction(pool, (db) => queueAdvisory(db, duplicateAdvisory, findings));
+      await deliverNext(pool, config, request, async () => 'accepted-duplicate');
+      const alerted = await get<any>(pool, 'alertedCves', cveId);
+      assert.equal(alerted.dispatchCount, 1, 'a repeated CVE id must count as one dispatch');
+      assert.equal((await list(pool, 'alertDispatches')).length, 1);
+    });
     await t.test('feed credential rotation resets validator, health history and cooldown', async () => {
       await reset();
       const data = {

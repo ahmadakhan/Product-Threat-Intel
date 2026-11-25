@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
 
-import { initMlRuntime, getMlRuntime, cpePreFilter, calibrateCredibilityScore, shouldAutoDispatch, rankReviewFindings, isTelemetryAnomaly, shouldSampleMlTelemetry, computeRetryDelay, predictRemediation } from '../server/ml/integration.ts';
+import { initMlRuntime, getMlRuntime, cpePreFilter, calibrateCredibilityScore, shouldAutoDispatch, rankReviewFindings, isTelemetryAnomaly, shouldSampleMlTelemetry, computeRetryDelay, predictRemediation, ML_TELEMETRY_SAMPLE_INTERVAL_MS } from '../server/ml/integration.ts';
 import type { TrainingDataSources } from '../server/ml/train/orchestrator.ts';
 import { TrainingOrchestrator } from '../server/ml/train/orchestrator.ts';
 import type { MetricFeatures } from '../server/ml/models/metricAnomalyDetector.ts';
@@ -110,10 +110,26 @@ describe('ML pipeline integration', () => {
   });
 
   describe('shouldSampleMlTelemetry', () => {
-    it('samples once before pending depth has ever been refreshed', () => {
+    it('samples on the first tick even with a negative depth', () => {
       assert.equal(shouldSampleMlTelemetry(-1, 0), true);
-      assert.equal(shouldSampleMlTelemetry(-1, 1), false);
-      assert.equal(shouldSampleMlTelemetry(0, 1), true);
+    });
+
+    it('does not sample again until the interval has elapsed', () => {
+      const now = 1_000_000_000;
+      assert.equal(shouldSampleMlTelemetry(0, now - 1_000, now), false);
+      assert.equal(shouldSampleMlTelemetry(0, now - ML_TELEMETRY_SAMPLE_INTERVAL_MS, now), true);
+    });
+
+    it('ignores a non-finite depth and recovers from a future sample timestamp', () => {
+      const now = 10 * ML_TELEMETRY_SAMPLE_INTERVAL_MS;
+      assert.equal(shouldSampleMlTelemetry(Number.NaN, 1, now), false);
+      // A clock step must not disable sampling forever.
+      assert.equal(shouldSampleMlTelemetry(0, now + ML_TELEMETRY_SAMPLE_INTERVAL_MS, now), true);
+    });
+
+    it('does not turn a persistent backlog into a per-tick sample', () => {
+      const now = 1_000_000_000;
+      assert.equal(shouldSampleMlTelemetry(10_000, now - 1_000, now), false);
     });
   });
 

@@ -572,6 +572,11 @@ export const findingRevision = (finding: Finding) =>
  * is idempotent; a materially changed advisory (new findings, revised severity,
  * summary, remediation, or changed CVE evidence) gets a new revision and can be
  * delivered again.
+ *
+ * The digest is the FULL SHA-256, not a truncation. Dedupe on this path is an
+ * `ON CONFLICT(dedupe_key)` that silently skips a duplicate, so a truncated
+ * revision made a birthday collision a lost delivery. The column is a
+ * 64-character `text`, so nothing is gained by shortening it.
  */
 export const advisoryRevision = (advisory: Advisory, findings: Finding[]) =>
   createHash('sha256')
@@ -609,8 +614,7 @@ export const advisoryRevision = (advisory: Advisory, findings: Finding[]) =>
           .sort(([left], [right]) => left.localeCompare(right)),
       }),
     )
-    .digest('hex')
-    .slice(0, 20);
+    .digest('hex');
 export const SEVERITY_ORDER = ['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const;
 const SEVERITY_COLORS: Record<string, string> = {
   CRITICAL: '#dc2626',
@@ -793,6 +797,16 @@ function deliveryAttachmentStem(job: Job): string {
 }
 
 export type DeliveryConfirmation = 'delivered' | 'not-delivered' | 'unknown';
+/** How long a provider delivery lookup answer is reused, in milliseconds. */
+const PROVIDER_LOOKUP_CACHE_TTL_MS = 30_000;
+/** Upper bound on cached message ids, so an outage cannot grow the map unbounded. */
+const PROVIDER_LOOKUP_CACHE_MAX = 1_000;
+/**
+ * Recent provider confirmations, keyed by provider and message id. Process-local
+ * on purpose: it coalesces the retries one worker re-issues, not a cross-replica
+ * decision, and a lost entry costs one lookup.
+ */
+const providerLookupCache = new Map<string, { verdict: DeliveryConfirmation; expiresAt: number }>();
 /**
  * Decides, without ever contacting the transport, whether a previous attempt
  * may already have delivered this message.
@@ -846,7 +860,35 @@ async function confirmPriorDelivery(
   if (!messageId) return 'unknown';
   const token = decrypt(saved.apiKey, encryptionKeys(config), `email-provider:${saved.provider}`);
   if (!token) return 'not-delivered';
-  return lookupProviderDelivery(saved, token, messageId, request);
+  // Cache the provider answer briefly. Every ambiguous attempt reaches this
+  // lookup, and during a provider outage every retry would otherwise spend
+  // another HTTP call on the same status endpoint — load that competes with the
+  // send path of the provider that is already failing. The verdict is a
+  // 'unknown'/'delivered' observation about one message id, so a short TTL is
+  // enough to collapse a retry storm into one probe without replaying an answer
+  // the provider has since changed.
+  const cacheKey = `${saved.provider}:${messageId}`;
+  const cached = providerLookupCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.verdict;
+  const verdict = await lookupProviderDelivery(saved, token, messageId, request);
+  // 'not-delivered' is deliberately not cached: it is the one answer that lets
+  // the caller resend, and it must be re-confirmed against the provider each time
+  // rather than replayed from memory.
+  if (verdict !== 'not-delivered') {
+    if (providerLookupCache.size >= PROVIDER_LOOKUP_CACHE_MAX) {
+      const now = Date.now();
+      for (const [key, entry] of providerLookupCache)
+        if (entry.expiresAt <= now) providerLookupCache.delete(key);
+      // Still full: drop the oldest inserted entry (Map preserves insertion
+      // order). The cache is an optimisation, never a correctness input.
+      if (providerLookupCache.size >= PROVIDER_LOOKUP_CACHE_MAX) {
+        const oldest = providerLookupCache.keys().next().value;
+        if (oldest !== undefined) providerLookupCache.delete(oldest);
+      }
+    }
+    providerLookupCache.set(cacheKey, { verdict, expiresAt: Date.now() + PROVIDER_LOOKUP_CACHE_TTL_MS });
+  }
+  return verdict;
 }
 
 export function createMailSender(
@@ -901,6 +943,7 @@ export function createMailSender(
           request,
           config.MAILJET_SANDBOX_MODE === 'true',
           attachments,
+          config.EMAIL_PROVIDER_TIMEOUT_MS,
         );
         return { id, provider };
       } catch (error) {
@@ -1007,6 +1050,13 @@ export async function enqueue(
        updated_at=now()
      WHERE outbox.status='FAILED'
        AND outbox.delivery_outcome NOT IN ('UNKNOWN','ACCEPTED')
+       -- A permanently bad recipient is never re-opened. The address was removed,
+       -- changed or disabled (or its subscription no longer permits the bundle),
+       -- so the same dedupe key would re-send to an address the operator already
+       -- took out of service. Every other branch below is a *bundle* fault that
+       -- revalidation can genuinely clear.
+       AND COALESCE(outbox.error,'') NOT LIKE '%Recipient removed, changed, or disabled%'
+       AND COALESCE(outbox.error,'') NOT LIKE 'Recipient subscription no longer permits%'
        AND (outbox.delivery_outcome IN ('NOT_ATTEMPTED','REJECTED')
          OR COALESCE(outbox.error,'') LIKE '%no longer applicable%'
          OR (outbox.advisory_id LIKE 'UNVERIFIABLE:%' AND COALESCE(outbox.error,'') LIKE 'Review notification%'))
@@ -1258,10 +1308,12 @@ export async function queueEveryoneDeliveryJobs(
         templateCustomization,
       );
       const evidence = deliveryRevisionEvidence(permitted);
+      // Full digest, like every other content revision: this value is part of a
+      // `dedupe_key` whose conflict is silently skipped, so a truncation made a
+      // collision a lost delivery.
       recipientContentRev = createHash('sha256')
         .update(stableJson({ findingIds: permitted.map((f) => f.id).sort(), ...evidence }))
-        .digest('hex')
-        .slice(0, 20);
+        .digest('hex');
       payload = {
         ...document,
         cveIds: builtAdvisory.cveIds,
@@ -1449,8 +1501,7 @@ function consolidatedPayloadFor(
     ...evidence,
     contentRevision: createHash('sha256')
       .update(stableJson({ findingIds: findings.map((finding) => finding.id).sort(), ...evidence }))
-      .digest('hex')
-      .slice(0, 20),
+      .digest('hex'),
     generatedAt: generatedAt.toISOString(),
     digestKey: advisory.id,
   };
@@ -1568,8 +1619,7 @@ export async function queueConsolidatedFindingNotifications(
             ...evidence,
             contentRevision: createHash('sha256')
               .update(stableJson({ findingIds: [...findingIds].sort(), ...evidence }))
-              .digest('hex')
-              .slice(0, 20),
+              .digest('hex'),
             generatedAt: generatedAt.toISOString(),
             digestKey: advisory.id,
           },
@@ -1640,8 +1690,7 @@ export async function queueConsolidatedFindingNotifications(
           ...evidence,
           contentRevision: createHash('sha256')
             .update(stableJson({ findingIds: [...findingIds].sort(), ...evidence }))
-            .digest('hex')
-            .slice(0, 20),
+            .digest('hex'),
           generatedAt: generatedAt.toISOString(),
           digestKey: advisory.id,
         },
@@ -2695,7 +2744,8 @@ export async function deliverNext(
      * ROW-LOCK ORDER for this transaction (every row lock taken below, in order):
      *
      *   outbox -> {emailLogs | webhookLogs} -> recipients -> advisories
-     *          -> alertedCves (id order) -> findings (id order)
+     *          -> alertedCves (id order) -> alertDispatches (id order)
+     *          -> findings (id order)
      *
      * Several workers finalize the same bundle concurrently (one job per
      * recipient, plus the webhook job), so they touch overlapping records. Two
@@ -2914,10 +2964,26 @@ export async function deliverNext(
           // worker read the same `prior` and wrote the same +1, so a digest sent
           // to four cohorts recorded dispatchCount 1 and lost three recipients'
           // addresses. Sorted so every worker takes the same row order.
+          // Both loops below iterate THIS de-duplicated list, never the raw
+          // `declaredCveIds`. A payload can name the same CVE twice (two findings
+          // for one CVE on different assets), and the second pass would re-read the
+          // `alertedCves` snapshot taken before the first write and then return
+          // `dispatchCount` to its old value — losing the increment this lock
+          // exists to protect. The duplicate `put` also took the same row lock
+          // twice for no reason.
           const lockedCves = [...new Set(declaredCveIds)].sort();
           const priorAlerts = lockedCves.length ? await getManyForUpdate<AlertedCVE>(db, 'alertedCves', lockedCves) : new Map();
-          const priorDispatches = await getMany(db, 'alertDispatches', dispatchIds);
-          for (const cveId of declaredCveIds) {
+          // Locked, not a plain read, for exactly the reason above: the same CVE is
+          // finalised by one worker per recipient, so two workers read the same
+          // `priorDispatches` entry, both conclude it was absent and both write
+          // it. Sorting and de-duplicating the ids keeps every worker taking the
+          // rows in the same order.
+          const priorDispatches = await getManyForUpdate<{ cveId: string; dispatchKey: string }>(
+            db,
+            'alertDispatches',
+            [...new Set(dispatchIds)].sort(),
+          );
+          for (const cveId of lockedCves) {
             const prior = priorAlerts.get(cveId);
             const now = new Date().toISOString();
             // Digest jobs carry one batch key across every recipient, so the same

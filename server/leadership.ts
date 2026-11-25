@@ -1,5 +1,14 @@
 import type pg from 'pg';
-import { put } from './db.ts';
+import { acquireSessionClassLock, put, safeAdvisoryUnlock } from './db.ts';
+
+/** Advisory-lock class for worker leadership (see LOCK_CLASS_RANK in db.ts). */
+const LEADERSHIP_LOCK_CLASS = 784921;
+/**
+ * The leadership session key. Deliberately `hashtext(current_schema())`, which is
+ * what earlier releases used: during a rolling upgrade the key must keep matching
+ * an older replica's sessions, or two leaders would be elected for one schema.
+ */
+const LEADERSHIP_LOCK_KEY = 'hashtext(current_schema())';
 
 /** A session lock is retained on a dedicated client until step-down. */
 export class WorkerLeadership {
@@ -32,10 +41,10 @@ export class WorkerLeadership {
     const client = await this.pool.connect();
     let retained = false;
     try {
-      const result = await client.query(
-        'SELECT pg_try_advisory_lock(784921, hashtext(current_schema())) AS locked',
-      );
-      if (!result.rows[0]?.locked || this.stopped) return;
+      // Acquired through the documented class-order guard rather than inline SQL,
+      // so this session cannot take the leadership class out of order.
+      const locked = await acquireSessionClassLock(client, LEADERSHIP_LOCK_CLASS, LEADERSHIP_LOCK_KEY);
+      if (!locked || this.stopped) return;
       // Re-check stopped after acquiring the lock: close() may have run in
       // the meantime and released this client. Never attach a released client
       // as the leader's session.
@@ -78,7 +87,10 @@ export class WorkerLeadership {
     client.removeListener('error', this.lost);
     client.removeListener('end', this.lost);
     try {
-      await client.query('SELECT pg_advisory_unlock(784921, hashtext(current_schema()))');
+      // Inspect the release result: the same shared helper unlocks every other
+      // session class and reports a lock this session did not actually hold.
+      if (!(await safeAdvisoryUnlock(client, LEADERSHIP_LOCK_CLASS, LEADERSHIP_LOCK_KEY, 'worker-leadership')))
+        console.error(JSON.stringify({ level: 'error', event: 'leadership.unlock_not_held', lockId: this.id }));
     } finally { client.release(true); }
   }
 }

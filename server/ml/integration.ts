@@ -212,9 +212,35 @@ export function isTelemetryAnomaly(
   return model.isAnomaly(features);
 }
 
-export function shouldSampleMlTelemetry(pendingDepth: number, pendingSampledAt: number): boolean {
-  return pendingSampledAt === 0 || pendingDepth >= 0;
+/**
+ * Whether this tick should record an ML telemetry sample.
+ *
+ * Sampling is rate-limited. The previous predicate combined `pendingSampledAt
+ * === 0` with `pendingDepth >= 0`, and a depth is never negative, so every tick
+ * sampled and a busy installation appended an ML event on every worker tick. A
+ * sample is taken on the first tick after start (`pendingSampledAt === 0`) and
+ * then at most once per interval.
+ *
+ * The backlog depth deliberately does NOT bypass the interval. A depth is a
+ * gauge, not an event: it can stay above any threshold for hours, so "deep,
+ * therefore sample" re-creates the every-tick flood this predicate exists to
+ * stop. The sample the interval allows carries the depth, so an anomalous
+ * backlog is still observable.
+ */
+export function shouldSampleMlTelemetry(
+  pendingDepth: number,
+  pendingSampledAt: number,
+  now = Date.now(),
+): boolean {
+  if (!Number.isFinite(pendingDepth) || !Number.isFinite(pendingSampledAt)) return false;
+  if (pendingSampledAt === 0) return true;
+  // A future `pendingSampledAt` (clock step) must not disable sampling forever.
+  const elapsed = now - pendingSampledAt;
+  return elapsed < 0 || elapsed >= ML_TELEMETRY_SAMPLE_INTERVAL_MS;
 }
+
+/** Minimum spacing between ML telemetry samples. */
+export const ML_TELEMETRY_SAMPLE_INTERVAL_MS = 60_000;
 
 /**
  * 6. Delivery Optimizer — computes retry delay using learned policy.

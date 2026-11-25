@@ -80,6 +80,14 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-}
+      # PostgreSQL pool size and the slots held back from feed ingestion. Feed
+      # concurrency is capped at POOL_MAX_CONNECTIONS - POOL_RESERVED_CONNECTIONS,
+      # so a deployment that raises FEED_CONCURRENCY without raising the pool
+      # silently keeps the old bound. Both are forwarded here because server
+      # config validates them at startup; leaving them out made the knobs
+      # unsettable in the supported deployment.
+      POOL_MAX_CONNECTIONS: ${POOL_MAX_CONNECTIONS:-25}
+      POOL_RESERVED_CONNECTIONS: ${POOL_RESERVED_CONNECTIONS:-4}
       FEED_MAX_DURATION_SECONDS: ${FEED_MAX_DURATION_SECONDS:-1800}
       FEED_RETRY_MAX_ATTEMPTS: ${FEED_RETRY_MAX_ATTEMPTS:-3}
       FEED_RETRY_VULNCHECK_MAX_ATTEMPTS: ${FEED_RETRY_VULNCHECK_MAX_ATTEMPTS:-5}

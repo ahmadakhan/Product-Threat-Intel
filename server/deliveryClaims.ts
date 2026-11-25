@@ -18,13 +18,13 @@ import { newsArticleIdentity } from './newsEmail.ts';
  *
  *  - `CLAIMED`   written when the consolidated message is queued. The claim is
  *                tied to its owning outbox job: while that job exists in a
- *                QUEUED, SENDING or FAILED-without-confirmation state, the
- *                claim does NOT expire (Finding 4) — a second email must not be
- *                queued while the first may still be delivered. A claim only
- *                becomes reclaimable once its job is terminally gone: terminally
- *                FAILED without confirmed transport acceptance (released
- *                immediately by the finalize path), abandoned (job row deleted
- *                by retention), or expired with no live job.
+ *                QUEUED, SENDING or unresolved FAILED state, the claim does NOT
+ *                expire (Finding 4) — a second email must not be queued while
+ *                the first may still be delivered. A claim only becomes
+ *                reclaimable once its job is terminally gone: terminally FAILED
+ *                without confirmed transport acceptance (released immediately by
+ *                the finalize path), abandoned (job row deleted by retention), or
+ *                expired with no live job.
  *  - `DELIVERED` written when the transport accepts the message. Permanent; it
  *                is the record that answers "has this recipient been told?".
  *
@@ -127,17 +127,27 @@ export async function claimItems(
              AND o.status IN ('QUEUED','SENDING')
            FOR SHARE OF o
         )
-        -- A FAILED job holds its claim whenever the finalize path has NOT
-        -- released it. The failure may still turn out to be a delivery, and an
-        -- UNKNOWN outcome (the transport may have accepted the message) is
-        -- exactly the case a resend would duplicate. Releasing on a recorded
-        -- outcome therefore re-sent alerts that had already been delivered.
-        -- The finalize path is the only thing that may release these claims:
-        -- it does so on a provable non-delivery (REJECTED or NOT_ATTEMPTED).
+        -- A FAILED job BLOCKS the reclaim of its claim while the finalize path
+        -- has not released it. Resending there would duplicate a message the
+        -- transport may already have accepted, so this EXISTS removes the claim
+        -- from the re-grantable set.
+        --
+        -- The exception narrows the blocker to failures the finalize path is
+        -- entitled to release. A permanent recipient fault — the address was
+        -- removed/changed/disabled, or the subscription no longer permits the
+        -- bundle — is in neither of those sets: finalize deliberately keeps the
+        -- claim, and the pipeline does not rebuild that bundle. Without this
+        -- exclusion a claim whose release was lost (finalize rolled back, or the
+        -- connection dropped mid-finalize) was pinned forever: the job is FAILED,
+        -- so the lease never helps, and no other path may delete the row.
         AND NOT EXISTS (
           SELECT 1 FROM outbox o
            WHERE o.id = delivery_claims.job_id
              AND o.status = 'FAILED'
+             AND (o.delivery_outcome NOT IN ('UNKNOWN','ACCEPTED')
+                  OR COALESCE(o.error,'') LIKE '%no longer applicable%')
+             AND COALESCE(o.error,'') NOT LIKE '%Recipient removed, changed, or disabled%'
+             AND COALESCE(o.error,'') NOT LIKE 'Recipient subscription no longer permits%'
            FOR SHARE OF o
         )
         -- A superseded job holds its claims only if a transport attempt may have

@@ -110,6 +110,20 @@ Authenticated `GET /api/ml/status` lists all 18 models, loaded versions, minimum
 
 With `WORKER_ENABLED=true`, training runs hourly by default (`ML_TRAINING_INTERVAL_MS`), uses `ML_LOOKBACK_DAYS`, signs artifacts with `ML_SIGNING_KEY`, and refreshes the in-process runtime after saving qualified models. `ML_SIGNING_KEY` (minimum 32 characters) is **required when `NODE_ENV=production`**: without it signature verification is a no-op, so startup now fails instead of loading unsigned artifacts. The install scripts generate one; set it explicitly for Compose deployments. Each cycle has a distinct artifact version so rollback history is retained. The standalone command is `node --import tsx --env-file=.env server/ml/train/cron.ts`; supply a valid `DATABASE_URL` and the same model directory/signing key as the API. Restart an API after externally running standalone training to load its artifacts.
 
+### PostgreSQL pool sizing and feed concurrency
+
+`FEED_CONCURRENCY` is only an upper bound: the effective value is
+`min(FEED_CONCURRENCY, POOL_MAX_CONNECTIONS - POOL_RESERVED_CONNECTIONS)`.
+The reserve exists because the leadership session and the pipeline's run-lock
+session are pinned for a whole run, and the run's own progress/commit
+transactions need a free slot; without it, high feed concurrency starves the
+checkpoints that keep a run stoppable. Defaults are 25 and 4, so at most 21
+feeds run at once. Raise `POOL_MAX_CONNECTIONS` (and the database's
+`max_connections`) before raising `FEED_CONCURRENCY` past that bound, and keep
+`POOL_RESERVED_CONNECTIONS` below `POOL_MAX_CONNECTIONS` — startup rejects a
+larger reserve. Both are forwarded by `compose.yaml`, so they can be set in the
+Compose env file.
+
 Real correlation telemetry is sampled once per minute; finalized email attempts record observed retry intervals and outcomes. Reviewed findings train applicability/ranking models. Labels not implied by those records (calibration, exploit-risk assessment, severity assessment, recipient digest relevance, zero-day cap outcomes and composition preferences) are accepted via **ADMIN/OPERATOR-only**, CSRF-protected `POST /api/ml/feedback`. Submit one analyst-verified sample at a time; validation rejects unknown fields, nonfinite/out-of-range features, unsupported labels, oversized payloads and mismatched zero-day outcome counts. For example:
 
 ```json

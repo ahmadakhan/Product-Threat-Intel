@@ -6,7 +6,7 @@ import { createPool, migrate, put, get } from '../server/db.ts';
 import { loadConfig } from '../server/config.ts';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
 import { runVulnerabilityPipeline } from '../src/engine/pipelineEngine.ts';
-import { reconcileFindings } from '../src/engine/reconcileFindings.ts';
+import { reconcileFindings, DELIVERY_FAILED_RETRY_HOURS } from '../src/engine/reconcileFindings.ts';
 import { deliverNext, enqueue, queueAdvisory, queueDigestAdvisory } from '../server/delivery.ts';
 import { isSmtpEmailProvider, type EmailProvider } from '../src/types/index.ts';
 import { emailIsConfigured } from '../server/emailProviders.ts';
@@ -38,7 +38,7 @@ const database = process.env.TEST_DATABASE_URL;
 // Pure logic: no database required.
 // ---------------------------------------------------------------------------
 
-test('reconciliation keeps a terminal DELIVERY_FAILED finding from being auto-requeued', () => {
+test('reconciliation does not auto-requeue a fresh DELIVERY_FAILED finding', () => {
   const cve = {
     cveId: 'CVE-2026-70001',
     title: 'Fixture',
@@ -76,28 +76,35 @@ test('reconciliation keeps a terminal DELIVERY_FAILED finding from being auto-re
     advisoryId: null,
     notificationStatus: 'QUEUED_FOR_DISPATCH',
   } as Finding;
+  // A candidate that still carries the finding's advisory (no rebuild signal).
+  const boundCandidate = { ...candidate, advisoryId: 'ADV-1' } as Finding;
+  // A recorded timestamp is what the recovery window measures; with none the
+  // failure is treated as old enough to retry.
+  const recentlyFailed = { ...failed, autoDispatchedAt: new Date().toISOString() } as Finding;
   assert.equal(
-    reconcileFindings([failed], [candidate])[0].notificationStatus,
+    reconcileFindings([recentlyFailed], [boundCandidate])[0].notificationStatus,
     'DELIVERY_FAILED',
-    'a failed delivery must not become an automatic resend on the next pipeline run',
+    'a recent failed delivery must not become an automatic resend on the next pipeline run',
   );
-  // A rebuild that re-queued the finding is still allowed to clear the failure.
-  const rebuilt = { ...failed, advisoryId: null } as Finding;
+  // A failure older than the recovery window becomes dispatchable again, even
+  // while its advisory still exists: without that, a failure caused by a provider
+  // outage stayed parked forever once the dead-letter budget was spent.
+  const longAgo = new Date(Date.now() - (DELIVERY_FAILED_RETRY_HOURS + 1) * 3_600_000).toISOString();
   assert.equal(
-    reconcileFindings([rebuilt], [candidate])[0].notificationStatus,
+    reconcileFindings([{ ...failed, autoDispatchedAt: longAgo } as Finding], [boundCandidate])[0]
+      .notificationStatus,
+    'QUEUED_FOR_DISPATCH',
+    'a failure older than the retry window is retried by a later run',
+  );
+  // A rebuild that re-queued the finding is still allowed to clear the failure:
+  // the pipeline clears `advisoryId` for a wholly rejected bundle, and that clear
+  // is the explicit rebuild signal.
+  assert.equal(
+    reconcileFindings([{ ...failed, advisoryId: null } as Finding], [candidate])[0].notificationStatus,
     'QUEUED_FOR_DISPATCH',
   );
-  // A finding whose only advisory was a rejected bundle keeps recovering: the
-  // pipeline clears `advisoryId` before reconciliation, which is the explicit
-  // operator-visible re-queue path (see `staleBundles` in processPipeline).
-  // NOTE: `autoDispatchedAt` must NOT be part of that decision. It is stamped by
-  // the *first* successful acceptance, so a later failed re-delivery of a
-  // finding that still carries its advisory used to satisfy the old
-  // `autoDispatchedAt || advisoryId === null` fallback and was re-queued — a
-  // duplicate email for unchanged content on the next run. That case is covered
-  // by the first assertion above (`failed`, which has an advisory and no
-  // autoDispatchedAt); this second one pins the cleared-advisory recovery path
-  // even when the finding was once accepted.
+  // A finding whose only advisory was a rejected bundle keeps recovering even
+  // when it was once accepted (see `staleBundles` in processPipeline).
   const failedAfterAcceptance = {
     ...failed,
     advisoryId: null,
@@ -110,13 +117,13 @@ test('reconciliation keeps a terminal DELIVERY_FAILED finding from being auto-re
   );
 });
 
-test('reconciliation never turns an already-announced finding back into a resend', () => {
-  // The matcher rebuilds its candidate set on every run, so a refreshed CVE
-  // record re-derives the finding and the candidate always starts as
-  // QUEUED_FOR_DISPATCH. `reviewNotifiedAt` is the durable record that the
-  // finding was delivered in a consolidated email; without this guard the next
-  // run queued the same finding again (a duplicate email for content the
-  // recipient already had).
+test('the announcement stamp does not suppress dispatch for un-notified recipients', () => {
+  // `reviewNotifiedAt` is stamped once ANY recipient's email was accepted, so it
+  // is not proof that a particular recipient was told. Filtering the *dispatch
+  // set* on it dropped the finding for recipients that had never been told. The
+  // per-recipient `delivery_claims` receipt decides who still needs the finding;
+  // reconciliation only reports the lifecycle. The regression pinned here is that
+  // a stamped finding is never presented as pending work again.
   const cve = {
     cveId: 'CVE-2026-70002',
     title: 'Fixture',
@@ -164,12 +171,15 @@ test('reconciliation never turns an already-announced finding back into a resend
     { ...announced, notificationStatus: 'QUEUED_FOR_DISPATCH', advisoryId: null } as Finding,
   ]) {
     const [reconciled] = reconcileFindings([existing], [candidate]);
-    assert.notEqual(
-      reconciled.notificationStatus,
-      'QUEUED_FOR_DISPATCH',
-      'an announced finding must not be re-selected for dispatch',
-    );
+    // The stamped finding must not look like pending work in the UI.
+    assert.equal(reconciled.notificationStatus, 'AUTO_DISPATCHED');
     assert.equal(reconciled.reviewNotifiedAt, '2026-01-02T00:00:00.000Z', 'the announcement stamp is preserved');
+  }
+  // A DISPATCHED status a finding had already reached is never downgraded back to
+  // a pending one by a re-evaluation.
+  for (const status of ['AUTO_DISPATCHED', 'DELIVERED'] as const) {
+    const [reconciled] = reconcileFindings([{ ...announced, notificationStatus: status } as Finding], [candidate]);
+    assert.notEqual(reconciled.notificationStatus, 'QUEUED_FOR_DISPATCH');
   }
 });
 

@@ -114,11 +114,17 @@ else correlation.supervisor.start();
 const mlRuntime = await initMlRuntime(pool, mlStorageOptions)
   .catch((error) => {
     console.error('ML runtime init failed:', error);
+    // ERROR, not WARNING: every ML entry point in `ml/integration.ts` silently
+    // falls back to its rule-based path when no runtime is loaded, so this event
+    // is the only evidence that calibration, ranking and threshold
+    // recommendations are degraded. A warning does not page anyone, and the
+    // subsystem then disappears without further symptoms.
     void writeEvent(pool, {
       category: 'ML',
-      level: 'WARNING',
+      level: 'ERROR',
       code: 'ml.runtime_init_failed',
-      message: 'ML runtime failed to initialize; confidence scoring and retry-delay optimization will degrade',
+      message:
+        'ML runtime failed to initialize; all ML features degrade to rule-based fallbacks (confidence calibration, review ranking, delivery optimisation and threshold recommendations are inactive)',
       context: { error: (error as Error).message },
     }).catch(() => undefined);
     return undefined;
@@ -515,10 +521,14 @@ const tick = () => {
     const controller = new AbortController();
     outboxController = controller;
     outbox = (async () => {
-      for (let i = 0; i < 20 && !stopping; i++) {
+      for (let i = 0; i < 20 && !stopping && !controller.signal.aborted; i++) {
         // `deliverNext` re-throws the abort, which ends this pass. The catch below
         // classifies it through `reasonAborted`, so a deliberate stop is not
-        // reported as an outbox failure.
+        // reported as an outbox failure. Checking the signal between jobs is what
+        // makes the pass abortable at all: one delivery can legitimately occupy
+        // the whole STUCK_PROMISE_MS budget (SMTP timeout plus a provider
+        // delivery lookup), and a superseded pass must stop claiming and sending
+        // the moment it is aborted rather than after its remaining 19 jobs.
         const delivered = await deliverNext(pool, config, request, sendMail, controller.signal);
         if (!delivered) break;
         verboseLog('outbox.delivered');
@@ -587,6 +597,13 @@ const tick = () => {
   // Guarded against overlap: a slow check would otherwise pile a new promise on
   // every 5 s tick until the pool is exhausted.
   if (!selfHealRunning) {
+    // Only the leader self-heals. The memory guard above still runs everywhere,
+    // but a self-heal check opens its own connections for the reachability probe
+    // and the recovery claims, so on a follower it spends pool capacity on work
+    // the leader already performs — and the alerts it queues can fire before the
+    // advisory locks serialise it. One check per tick on the leader is the whole
+    // contract.
+    if (!leadership.isLeader) return;
     selfHealRunning = runSelfHealCheck(pool)
       .catch((err) => {
         verboseLog('selfHeal.check_failed', { error: err instanceof Error ? err.message : String(err) });

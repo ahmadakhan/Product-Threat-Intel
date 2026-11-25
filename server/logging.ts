@@ -2,7 +2,7 @@
 import type pg from 'pg';
 import type { Db, PoolClient } from './db';
 import type { AuditLog } from '../src/types/index.ts';
-import { appendAudit } from './db';
+import { appendAudit, acquireSessionClassLock, safeAdvisoryUnlock } from './db';
 
 /**
  * Structured audit logger for critical operations
@@ -129,16 +129,18 @@ export class AuditLogger {
 export class LockManager {
   static async tryAcquireLock(
     client: PoolClient,
-    lockClass: number | string,
+    lockClass: number,
     schemaKey: string,
     lockKey: string,
     operation: string,
   ): Promise<{ locked: boolean; error?: string }> {
     try {
-      const query = `SELECT pg_try_advisory_lock(${lockClass}, ${schemaKey}) AS locked`;
-      const result = await client.query<{ locked: boolean }>(query);
-      
-      const locked = result.rows[0]?.locked === true;
+      // Same acquisition (and therefore the same class-order guard) as every
+      // other session lock. The previous inline query interpolated a
+      // `number | string` class straight into SQL; typing this as `number` is
+      // what the two class namespaces (LOCK_CLASS_RANK and LOCK_ORDER names)
+      // actually require, and it removes that injection surface.
+      const locked = await acquireSessionClassLock(client, lockClass, schemaKey);
       
       if (!locked) {
         console.log(JSON.stringify({
@@ -173,13 +175,27 @@ export class LockManager {
 
   static async releaseLock(
     client: PoolClient,
-    lockClass: number | string,
+    lockClass: number,
     schemaKey: string,
     lockKey: string,
     operation: string,
   ): Promise<boolean> {
     try {
-      await client.query(`SELECT pg_advisory_unlock(${lockClass}, ${schemaKey})`);
+      // Inspect the release result: `pg_advisory_unlock` returns false without
+      // erroring when this session does not hold the lock, and a connection that
+      // reports a release it did not perform must not be treated as clean.
+      const released = await safeAdvisoryUnlock(client, lockClass, schemaKey, lockKey);
+      if (!released) {
+        console.error(JSON.stringify({
+          level: 'error',
+          event: 'lock.release_not_held',
+          operation,
+          lockClass,
+          lockKey,
+          timestamp: new Date().toISOString(),
+        }));
+        return false;
+      }
       console.log(JSON.stringify({
         level: 'info',
         event: 'lock.release_success',
@@ -207,7 +223,7 @@ export class LockManager {
 
   static async safeReleaseLock(
     client: PoolClient,
-    lockClass: number | string,
+    lockClass: number,
     schemaKey: string,
     lockKey: string,
     operation: string,

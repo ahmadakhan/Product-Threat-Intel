@@ -83,6 +83,8 @@ export async function sendProviderEmail(
   request: Requester,
   sandboxMode = false,
   attachments: EmailAttachment[] = [],
+  /** Send-request ceiling; defaults to EMAIL_PROVIDER_TIMEOUT_MS's default (30 s). */
+  timeoutMs = 30000,
 ): Promise<string> {
   const endpoint = emailEndpoint(config);
   if (!endpoint) throw new Error('Select an API email provider');
@@ -231,8 +233,11 @@ export async function sendProviderEmail(
     method: 'POST',
     headers,
     body,
-    timeoutMs: 30000,
-    socketTimeoutMs: 15000,
+    timeoutMs,
+    // The socket ceiling stays below the request ceiling so a stalled TLS
+    // connection is torn down as a transport error the retry policy can see
+    // rather than consuming the whole request budget.
+    socketTimeoutMs: Math.min(15000, timeoutMs),
     maxResponseBytes: 256 * 1024,
   });
   const provider = EMAIL_PROVIDER_LABELS[config.provider];

@@ -8,8 +8,13 @@
  *
  * Fails closed: once any call throws, no further work is dispatched and the
  * first error is rethrown after in-flight work settles, matching the
- * all-or-nothing semantics of the serial loop it replaces (a partially
- * fetched batch is never returned as if it were complete).
+ * all-or-nothing semantics of the serial loop it replaces.
+ *
+ * Partial results are therefore intentionally DISCARDED: workers that finished
+ * before the failure did write their output into `results`, but the function
+ * throws instead of returning it, so no caller can mistake a partially fetched
+ * batch for a complete one. A caller that needs per-item outcomes must catch the
+ * error from `fn` itself and return a value for that item.
  *
  * Results are written back by index, so the returned array preserves the
  * same order as `items` regardless of completion order.

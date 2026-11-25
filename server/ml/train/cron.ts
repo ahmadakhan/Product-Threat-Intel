@@ -15,7 +15,7 @@
 import pg from 'pg';
 import { pathToFileURL } from 'node:url';
 import { basename, resolve } from 'node:path';
-import { schemaLockKey } from '../../db.ts';
+import { acquireSessionClassLock, safeAdvisoryUnlock, schemaLockKey } from '../../db.ts';
 import type { Db } from '../../db.ts';
 import type { ModelStorageOptions } from '../types.ts';
 import { TrainingOrchestrator, type TrainingDataSources, type TrainingSummary } from './orchestrator.ts';
@@ -161,14 +161,15 @@ export async function runScheduledTraining(
   try {
     let lockResult;
     try {
-      lockResult = await client.query<{ locked: boolean }>(
-        `SELECT pg_try_advisory_lock(${TRAINING_LOCK_NAMESPACE}, ${schemaLockKey}) AS locked`,
-      );
+      // Acquired through the documented class-order guard rather than inline SQL:
+      // training shares class 800004 with the daily digest and the migration
+      // transaction, so an out-of-order acquisition must fail fast, not deadlock.
+      lockResult = await acquireSessionClassLock(client, TRAINING_LOCK_NAMESPACE, schemaLockKey);
     } catch (error) {
       releaseWithError = true;
       throw error;
     }
-    if (lockResult.rows[0]?.locked !== true) throw new TrainingAlreadyRunningError();
+    if (!lockResult) throw new TrainingAlreadyRunningError();
     lockAcquired = true;
 
     const data = await dataCollector(client);
@@ -195,12 +196,7 @@ export async function runScheduledTraining(
     return summary;
   } finally {
     if (lockAcquired) {
-      try {
-        const result = await client.query<{ unlocked: boolean }>(
-          `SELECT pg_advisory_unlock(${TRAINING_LOCK_NAMESPACE}, ${schemaLockKey}) AS unlocked`,
-        );
-        if (result.rows[0]?.unlocked !== true) releaseWithError = true;
-      } catch {
+      if (!(await safeAdvisoryUnlock(client, TRAINING_LOCK_NAMESPACE, schemaLockKey, 'ml-training'))) {
         releaseWithError = true;
       }
     }
