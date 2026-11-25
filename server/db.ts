@@ -537,7 +537,9 @@ export async function migrate(pool: pg.Pool) {
     // `pg_extension_name_index`. Serialize migration transactions across
     // schemas; the per-schema lock below still allows independent operation
     // once migrations have completed.
+    assertClassLockOrder(800004, []);
     await client.query('SELECT pg_advisory_xact_lock(800004)');
+    assertClassLockOrder(800001, [800004]);
     await client.query(`SELECT pg_advisory_xact_lock(800001, ${schemaLockKey})`);
     const nativeContract = await correlationPreflight(client);
     if (!nativeContract.compatible)
@@ -1230,18 +1232,15 @@ async function attachCounts(db: Db, snapshot: AppState) {
 
 /** Pipeline-only snapshot avoids loading executions, delivery logs, recipients and audit history.
  *
- * `skipCveData` omits the CVE corpus from the single-query snapshot. The
- * pipeline already holds the full corpus in memory (loaded once outside the
- * commit, line-ref audit finding #11), so re-materializing the identical rows
- * inside the commit doubled peak memory and re-parsed every record. The
- * transaction path reconstructs `snapshot.cveData` from that in-memory copy
- * instead; other callers keep the unfiltered snapshot. */
-export async function pipelineState(db: Db, opts?: { skipCveData?: boolean }): Promise<AppState> {
+ * The pipeline already holds the full corpus in memory (loaded once outside the
+ * commit), so re-materializing the identical rows inside the commit doubled peak
+ * memory and re-parsed every record. Other callers keep the unfiltered snapshot. */
+export async function pipelineState(db: Db): Promise<AppState> {
   const snapshot = emptyState();
   const kinds: string[] = [
     'settings',
     'watchlist',
-    ...(opts?.skipCveData ? [] : (['cveData'] as const)),
+    'cveData',
     'findings',
     'alertedCves',
     'intelligenceArticles',

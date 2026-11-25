@@ -37,17 +37,14 @@ export function assessFinding(
 }
 
 /**
- * Opt-in ML review routing.
+ * ML review routing pass-through.
  *
- * This deliberately promotes only a finding whose hold reason is the
- * confidence policy. Applicability/version holds, source review-only holds,
- * circuit-breaker deferrals and every VEX decision remain authoritative. It
- * also requires both confidence models to be genuinely trained, so a missing
- * model can never silently change routing.
+ * All findings dispatch; no review queue exists. ML routing is informational
+ * only and does not gate delivery. The finding is returned unchanged so that
+ * callers can rely on a stable signature while ML assessment results live in
+ * `finding.mlAssessment` (populated by `assessFinding`).
  */
 export function applyMlReviewRouting(finding: Finding, settings?: AppSettings): Finding {
-  // All findings dispatch; no review queue exists. ML routing is informational
-  // only and does not gate delivery.
   return finding;
 }
 

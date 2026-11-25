@@ -23,5 +23,6 @@
     "**/data",
     "**/logs",
     "**/__pycache__"
-  ]
+  ],
+  "CodeGPT.apiKey": "CodeGPT Plus Beta"
 }

@@ -48,6 +48,7 @@ import {
   MAX_ZERO_DAYS_PER_RUN,
   rankAndRateLimitZeroDays,
   runVulnerabilityPipeline,
+  enrichmentBacklogCandidates,
 } from '../src/engine/pipelineEngine';
 import { ingestFeed, type IngestContext, type CVERejection, FeedDeferred } from './ingestion';
 import { assessFindings } from './ml/assessment.ts';
@@ -473,6 +474,129 @@ export const recoveryBackoffMs = (attempt: number, rng: () => number = Math.rand
   return Math.floor(rng() * (base + 1));
 };
 
+/**
+ * Core queue-run logic that operates on an already-opened transaction client.
+ * Does not take advisory locks or start its own transaction: the caller is
+ * responsible for both. Used by `queueRun` (public, takes its own transaction
+ * and `pipeline-queue` lock) and by `rebuildFromCurrentInventory` (already
+ * inside a `pipeline-queue` transaction, so calling `queueRun` here would
+ * nest `BEGIN` and fail). Advisory locks are re-entrant within the same
+ * PostgreSQL session, so holding `pipeline-queue` in the outer transaction is
+ * safe.
+ *
+ * Extracting this from `queueRun` makes the rebuild's replacement-write and
+ * its reconciliation `queueRun` decision atomic: a crash between the two
+ * can no longer leave durable replacement jobs without a follow-up run.
+ */
+async function queueRunWithClient(
+  db: pg.PoolClient,
+  scope: number | undefined,
+  actor: string,
+  incrementalFeeds?: boolean,
+): Promise<PipelineExecution> {
+  // Only the active execution matters here. `list('executions')` loaded
+  // every run ever recorded and de-serialised it in JavaScript, which on a
+  // long-lived installation grew past the 15 s pool statement timeout and
+  // turned "queue a run" into a 500. The JSONB status is indexed.
+  // The row is locked because this call may now rewrite the active run's
+  // scope and checkpoint settings; an unlocked read-then-write could race a
+  // worker that is promoting the same execution from QUEUED to RUNNING.
+  const active = await db.query<{ data: PipelineExecution }>(
+    "SELECT data FROM records WHERE kind='executions' AND data->>'status' IN ('QUEUED','RUNNING') ORDER BY updated_at DESC LIMIT 1 FOR UPDATE",
+  );
+  // Deduplication is about not running two pipelines at once, but the
+  // operator's request still carries intent the active run may not have:
+  // their explicit scope and their "use source checkpoints" choice. The
+  // previous version returned the active row untouched, so unticking
+  // "Use source checkpoints" while a run was queued/running silently did
+  // nothing, and an operator who asked for a wider window got the active
+  // run's window with no indication either value was ignored.
+  const existing = active.rows[0]?.data;
+  if (existing) {
+    const requestedScope = scope === undefined ? existing.scopeHours : scope;
+    const requestedIncremental = incrementalFeeds ?? existing.incrementalFeeds ?? true;
+    if (
+      existing.scopeHours === requestedScope &&
+      (existing.incrementalFeeds ?? true) === requestedIncremental
+    )
+      return existing;
+    // Only apply the request to a run that has not started ingesting. A
+    // RUNNING execution's window is already in use by live feed cursors;
+    // rewriting it mid-flight would make the recorded scope disagree with
+    // the data the run actually collected.
+    if (existing.status === 'RUNNING') {
+      await writeEvent(db, {
+        category: 'PIPELINE',
+        level: 'WARNING',
+        code: 'pipeline.request_ignored_while_running',
+        message:
+          'Requested scope/checkpoint settings were not applied because a run is already in progress',
+        runId: existing.id,
+        context: {
+          requestedScopeHours: requestedScope,
+          activeScopeHours: existing.scopeHours,
+          requestedIncrementalFeeds: requestedIncremental,
+          activeIncrementalFeeds: existing.incrementalFeeds ?? true,
+        },
+      });
+      return existing;
+    }
+    const updated: PipelineExecution = structuredClone({
+      ...existing,
+      scopeHours: requestedScope,
+      incrementalFeeds: requestedIncremental,
+      logs: [
+        ...(existing.logs ?? []),
+        `Queued-run settings updated by ${actor}: ingestion window ${existing.scopeHours}h -> ${requestedScope}h; source checkpoints ${(existing.incrementalFeeds ?? true) ? 'on' : 'off'} -> ${requestedIncremental ? 'on' : 'off'}`,
+      ],
+      // Same reason as the worker path: the success path must not hand the
+      // caller (or the shared active-row object) the mutable row by reference.
+    });
+    await put(db, 'executions', existing.id, updated);
+    await appendAudit(
+      db,
+      'Queued pipeline settings updated',
+      `Execution ${existing.id}; window ${existing.scopeHours}h -> ${requestedScope}h; checkpoints ${requestedIncremental ? 'on' : 'off'}`,
+      actor,
+      'PIPELINE',
+    );
+    return updated;
+  }
+  const settings = (await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
+  const id = randomUUID();
+  const execution: PipelineExecution = {
+    id,
+    name: formatExecutionName(id),
+    startTime: new Date().toISOString(),
+    endTime: null,
+    status: 'QUEUED',
+    scopeHours: scope ?? settings.scopeHours,
+    incrementalFeeds: incrementalFeeds ?? true,
+    phases: [],
+    stats: {
+      rawIngested: 0,
+      normalized: 0,
+      deduplicated: 0,
+      inRunDuplicatesDropped: 0,
+      matchedWatchlist: 0,
+      autoDispatchedNotifications: 0,
+      advisoriesDispatched: 0,
+      webhooksFired: 0,
+      vexSuppressedCount: 0,
+    },
+    logs: [],
+  };
+  await put(db, 'executions', id, execution);
+  await writeEvent(db, {
+    category: 'PIPELINE',
+    code: 'pipeline.queued',
+    message: 'Pipeline queued',
+    runId: id,
+  });
+  await appendAudit(db, 'Pipeline queued', `Execution ${id}`, actor, 'PIPELINE');
+  return execution;
+}
+
 export async function queueRun(
   pool: pg.Pool,
   scope: number | undefined,
@@ -480,116 +604,10 @@ export async function queueRun(
   incrementalFeeds?: boolean,
   client?: pg.PoolClient,
 ): Promise<PipelineExecution> {
-  // `incrementalFeeds === undefined` means "the caller expressed no preference"
-  // and must never be coerced to `true` before the active-run check: doing so
-  // turned a generic POST or a scheduler queue into an explicit "source
-  // checkpoints on" that overwrote the operator's choice on the queued run.
-  // A brand-new run still needs a concrete value, which is the `?? true` at the
-  // construction site below.
   return transaction(
     pool,
     async (db) => {
-      // Only the active execution matters here. `list('executions')` loaded
-      // every run ever recorded and de-serialised it in JavaScript, which on a
-      // long-lived installation grew past the 15 s pool statement timeout and
-      // turned "queue a run" into a 500. The JSONB status is indexed.
-      // The row is locked because this call may now rewrite the active run's
-      // scope and checkpoint settings; an unlocked read-then-write could race a
-      // worker that is promoting the same execution from QUEUED to RUNNING.
-      const active = await db.query<{ data: PipelineExecution }>(
-        "SELECT data FROM records WHERE kind='executions' AND data->>'status' IN ('QUEUED','RUNNING') ORDER BY updated_at DESC LIMIT 1 FOR UPDATE",
-      );
-      // Deduplication is about not running two pipelines at once, but the
-      // operator's request still carries intent the active run may not have:
-      // their explicit scope and their "use source checkpoints" choice. The
-      // previous version returned the active row untouched, so unticking
-      // "Use source checkpoints" while a run was queued/running silently did
-      // nothing, and an operator who asked for a wider window got the active
-      // run's window with no indication either value was ignored.
-      const existing = active.rows[0]?.data;
-      if (existing) {
-        const requestedScope = scope === undefined ? existing.scopeHours : scope;
-        const requestedIncremental = incrementalFeeds ?? existing.incrementalFeeds ?? true;
-        if (
-          existing.scopeHours === requestedScope &&
-          (existing.incrementalFeeds ?? true) === requestedIncremental
-        )
-          return existing;
-        // Only apply the request to a run that has not started ingesting. A
-        // RUNNING execution's window is already in use by live feed cursors;
-        // rewriting it mid-flight would make the recorded scope disagree with
-        // the data the run actually collected.
-        if (existing.status === 'RUNNING') {
-          await writeEvent(db, {
-            category: 'PIPELINE',
-            level: 'WARNING',
-            code: 'pipeline.request_ignored_while_running',
-            message:
-              'Requested scope/checkpoint settings were not applied because a run is already in progress',
-            runId: existing.id,
-            context: {
-              requestedScopeHours: requestedScope,
-              activeScopeHours: existing.scopeHours,
-              requestedIncrementalFeeds: requestedIncremental,
-              activeIncrementalFeeds: existing.incrementalFeeds ?? true,
-            },
-          });
-          return existing;
-        }
-        const updated: PipelineExecution = structuredClone({
-          ...existing,
-          scopeHours: requestedScope,
-          incrementalFeeds: requestedIncremental,
-          logs: [
-            ...(existing.logs ?? []),
-            `Queued-run settings updated by ${actor}: ingestion window ${existing.scopeHours}h -> ${requestedScope}h; source checkpoints ${(existing.incrementalFeeds ?? true) ? 'on' : 'off'} -> ${requestedIncremental ? 'on' : 'off'}`,
-          ],
-          // Same reason as the worker path: the success path must not hand the
-          // caller (or the shared active-row object) the mutable row by reference.
-        });
-        await put(db, 'executions', existing.id, updated);
-        await appendAudit(
-          db,
-          'Queued pipeline settings updated',
-          `Execution ${existing.id}; window ${existing.scopeHours}h -> ${requestedScope}h; checkpoints ${requestedIncremental ? 'on' : 'off'}`,
-          actor,
-          'PIPELINE',
-        );
-        return updated;
-      }
-      const settings = (await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
-      const id = randomUUID();
-      const execution: PipelineExecution = {
-        id,
-        name: formatExecutionName(id),
-        startTime: new Date().toISOString(),
-        endTime: null,
-        status: 'QUEUED',
-        scopeHours: scope ?? settings.scopeHours,
-        incrementalFeeds: incrementalFeeds ?? true,
-        phases: [],
-        stats: {
-          rawIngested: 0,
-          normalized: 0,
-          deduplicated: 0,
-          inRunDuplicatesDropped: 0,
-          matchedWatchlist: 0,
-          autoDispatchedNotifications: 0,
-          advisoriesDispatched: 0,
-          webhooksFired: 0,
-          vexSuppressedCount: 0,
-        },
-        logs: [],
-      };
-      await put(db, 'executions', id, execution);
-      await writeEvent(db, {
-        category: 'PIPELINE',
-        code: 'pipeline.queued',
-        message: 'Pipeline queued',
-        runId: id,
-      });
-      await appendAudit(db, 'Pipeline queued', `Execution ${id}`, actor, 'PIPELINE');
-      return execution;
+      return queueRunWithClient(db, scope, actor, incrementalFeeds);
     },
     client,
     { locks: ['pipeline-queue'] },
@@ -665,20 +683,23 @@ export async function rebuildFromCurrentInventory(
           if (log) await put(db, 'webhookLogs', row.id, { ...log, status: 'FAILED', errorMessage: reason });
         }
       }
+      // Fresh replacement jobs are already queued. Only a wholly inapplicable
+      // bundle needs correlation to reconcile inventory; policy holds await review.
+      // Call queueRunWithClient inside this transaction so the replacement-write
+      // and the reconciliation queueRun decision are atomic: a crash between
+      // them can no longer leave durable replacement jobs without a follow-up run.
+      // Advisory locks are re-entrant within the same PostgreSQL session, so
+      // holding pipeline-queue here is safe even though queueRunWithClient does
+      // not itself take the lock.
+      if (!regrouped && !holdGated) {
+        const settings = (await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
+        await queueRunWithClient(db, settings.scopeHours, 'delivery-rebuild');
+      }
       return { regrouped, holdGated };
     },
     undefined,
     { locks: ['pipeline-queue'] },
-  ).then(async ({ regrouped, holdGated }) => {
-    // Fresh replacement jobs are already queued. Only a wholly inapplicable
-    // bundle needs correlation to reconcile inventory; policy holds await review.
-    // queueRun takes the pipeline-queue lock itself, so this must run AFTER the
-    // rebuild transaction commits, not inside it.
-    if (!regrouped && !holdGated) {
-      const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
-      await queueRun(pool, settings.scopeHours, 'delivery-rebuild');
-    }
-  });
+  );
 }
 /** Regenerate unsent delivery subsets from current inventory and policy.
  * Queued jobs move to a fresh advisory; failed pre-transport attempts retain
@@ -2864,6 +2885,20 @@ export async function processPipeline(
         'findings',
         persistedFindings.map((f) => ({ id: f.id, data: f })),
       );
+      // Enrichment backlog: findings dispatched via an authoritative source
+      // without CPE data need a re-scan once CPE data becomes available.
+      // Surface the count so operators can see pending enrichment work.
+      const backlog = enrichmentBacklogCandidates(persistedFindings);
+      if (backlog.length > 0) {
+        await writeEvent(db, {
+          category: 'PIPELINE',
+          level: 'INFO',
+          code: 'pipeline.enrichment_backlog',
+          message: `${backlog.length} finding(s) await CPE enrichment re-evaluation`,
+          runId: execution!.id,
+          context: { count: backlog.length },
+        }).catch(() => undefined);
+      }
       // Persist engine-produced audit logs (authoritative autodispatch,
       // circuit breaker trips) with proper hash-chain chaining. Escalate
       // WARNING-level events to the operational event log so the security

@@ -319,11 +319,13 @@ function hasWildcardVendorProductScope(parsed: ParsedCPE): boolean {
 /**
  * Free text is the weakest matching path, so a substring test is not enough:
  * a two-letter vendor such as `os` or `ai` occurs inside `most`, `cost` and
- * `maintain`. Require each identity word to appear as a whole token, and treat
- * identities made only of very short words as too ambiguous for prose. Those
- * still match through strict CPE, alias or PURL evidence.
+ * `maintain`. Require each identity word to appear as a whole token. Short
+ * real product names (`os`, `ai`, `go`, `3m`) are now admitted — they still
+ * must match as whole tokens, so `os` does not match inside `most`.
+ * Identities made only of very short words remain too ambiguous for prose
+ * and still match through strict CPE, alias or PURL evidence.
  */
-const TEXT_IDENTITY_MIN_WORD = 3;
+const TEXT_IDENTITY_MIN_WORD = 2;
 const textWordPatterns = new Map<string, RegExp>();
 const MAX_TEXT_WORD_PATTERNS = 2000;
 
@@ -1110,7 +1112,7 @@ export function matchesWatchlistItem(
               (matchRes.unverifiedVersion && !wildcardExplainsUnverifiedVersion),
           );
 
-        const confidence = contextNeedsReview ? 90 : applicabilityRequiresReview ? 70 : versionRange ? 100 : 90;
+        const confidence = computeCpeConfidence(contextNeedsReview, applicabilityRequiresReview, versionRange);
         retain({
           matched: true,
           method: versionRange ? 'STRICT_CPE_INTERVAL' : 'STRICT_CPE',
@@ -1436,4 +1438,26 @@ export function generateCPE23(
   const cleanHw = targetHw && targetHw !== '*' ? escape(targetHw.trim()) : '*';
 
   return `cpe:2.3:${cleanPart}:${cleanVendor}:${cleanProduct}:${cleanVersion}:*:*:*:*:*:${cleanHw}:*`;
+}
+
+/**
+ * Pure confidence computation for strict CPE matches. Extracted from the inline
+ * ternary so the score and evidence text always agree: a wildcard-scored 90%
+ * match never carries a "(70% confidence)" evidence string.
+ *
+ * Precedence:
+ *   1. Context needs review (operator override) → 90, review gated
+ *   2. Applicability requires review (unverified version or range) → 70, review gated
+ *   3. Version range matched → 100, no review
+ *   4. Default strict match → 90, no review
+ */
+function computeCpeConfidence(
+  contextNeedsReview: boolean,
+  applicabilityRequiresReview: boolean,
+  versionRange: NvdVersionRange | undefined,
+): number {
+  if (contextNeedsReview) return 90;
+  if (applicabilityRequiresReview) return 70;
+  if (versionRange) return 100;
+  return 90;
 }

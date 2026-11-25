@@ -9,7 +9,14 @@ import { DeadLetterQueue } from './deadLetter.ts';
 import { AdvisoryIngestor } from './ingest.ts';
 import { PipelineSupervisor } from './supervisor.ts';
 import { AdvisoryStreamProcessor } from './stream.ts';
-import { claimPending, renewPending, acknowledgePending, acknowledgePendingExcept, MAX_PENDING_ATTEMPTS, sweepExhaustedPending } from './pending.ts';
+import {
+  claimPending,
+  renewPending,
+  acknowledgePending,
+  acknowledgePendingExcept,
+  MAX_PENDING_ATTEMPTS,
+  sweepExhaustedPending,
+} from './pending.ts';
 
 /** Structural equality for pending payloads (plain JSON values only). */
 const samePayload = (left: unknown, right: unknown): boolean => {
@@ -52,19 +59,29 @@ class DrainTimeoutError extends Error {
 /**
  * Resolve/reject with `work`, or reject once `timeoutMs` elapses.
  *
- * The loser is not cancelled - `work` keeps running - but it is no longer
- * awaited, which is what releases the caller's liveness guard. Any rejection the
- * abandoned promise produces later is swallowed here, so a timed-out drain can
- * never surface as an unhandled rejection (which would terminate the worker).
+ * The loser is NOT cancelled - `work` keeps running - so this only bounds how
+ * long the caller waits. It does not by itself release a liveness guard: the
+ * caller must keep observing the abandoned work (or cancel it) until it really
+ * exits, which is what `cancelDrain` and the per-pass guard in `start()` do. Any
+ * rejection the abandoned promise produces later is swallowed here, so a
+ * timed-out drain can never surface as an unhandled rejection (which would
+ * terminate the worker).
  */
-async function withHardTimeout<T>(work: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-  work.catch(() => undefined);
+async function withHardTimeout<T>(
+  work: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      work,
+      work(controller.signal),
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new DrainTimeoutError(label, timeoutMs)), timeoutMs);
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new DrainTimeoutError(label, timeoutMs));
+        }, timeoutMs);
         timer.unref?.();
       }),
     ]);
@@ -81,6 +98,15 @@ export class CorrelationRuntime {
   private timer?: ReturnType<typeof setInterval>;
   private schedulerTimer?: ReturnType<typeof setInterval>;
   private draining?: Promise<void>;
+  /**
+   * Cancels the pass currently holding `draining`.
+   *
+   * `withHardTimeout` stops awaiting a wedged pass but cannot stop it, so the
+   * timeout handler calls this and then keeps the guard set until the pass has
+   * genuinely finished. Without that, an abandoned pass and its replacement ran
+   * concurrently, each claiming batches and holding a lease heartbeat.
+   */
+  private cancelDrain?: () => void;
   private stopped = false;
   private lastMaintenance = 0;
   /**
@@ -126,7 +152,12 @@ export class CorrelationRuntime {
   ) {
     const telemetry = new CorrelationTelemetry();
     telemetry.verbosity = options.logLevel ?? 'standard';
-    const queue = new DeadLetterQueue(directory, keys, telemetry, options.deadLetterStorageMode === 'database');
+    const queue = new DeadLetterQueue(
+      directory,
+      keys,
+      telemetry,
+      options.deadLetterStorageMode === 'database',
+    );
     this.supervisor = new PipelineSupervisor(pool, new AdvisoryIngestor(telemetry, queue));
     this.processor = new AdvisoryStreamProcessor(this.supervisor);
     this.heartbeat = new Heartbeat({
@@ -136,7 +167,8 @@ export class CorrelationRuntime {
     });
     this.workerEnabled = process.env.WORKER_ENABLED !== 'false';
     // Default to the intervalSeconds, but allow override from callers
-    this.scheduledStateRefreshIntervalSeconds = options.scheduledStateRefreshIntervalSeconds ?? options.intervalSeconds;
+    this.scheduledStateRefreshIntervalSeconds =
+      options.scheduledStateRefreshIntervalSeconds ?? options.intervalSeconds;
     if (this.scheduledStateRefreshIntervalSeconds < 60) {
       this.scheduledStateRefreshIntervalSeconds = 60;
     }
@@ -150,24 +182,24 @@ export class CorrelationRuntime {
     // external receiver that it is safe to stay silent.
     this.heartbeat.start(() => {
       if (!this.workerEnabled) return { healthy: true, reason: 'WORKER_DISABLED_MONITORING_ONLY' };
-      if (this.supervisor.health !== 'HEALTHY')
-        return { healthy: false, reason: this.supervisor.health };
+      if (this.supervisor.health !== 'HEALTHY') return { healthy: false, reason: this.supervisor.health };
       return { healthy: true, reason: 'HEALTHY' };
     });
     this.timer = setInterval(() => {
       if (this.draining || this.stopped || this.supervisor.health !== 'HEALTHY') return;
-      this.draining = withHardTimeout(this.drain(), DRAIN_TIMEOUT_MS, 'correlation drain')
-        .catch((error) => {
-          // Telemetry metrics are a fixed, scrubbed vocabulary; the timeout is
-          // encoded in the event name (`pending.drain_timeout`) rather than an
-          // ad-hoc field so it is queryable like every other correlation event.
-          this.supervisor.ingestor.telemetry.log(
-            error instanceof DrainTimeoutError ? 'CRITICAL' : 'ERROR',
-            error instanceof DrainTimeoutError ? 'pending.drain_timeout' : 'pending.drain_failed',
-          );
-        })
+      // `withHardTimeout` now aborts the underlying work via AbortSignal when the
+      // timeout fires, so an abandoned pass stops taking new work instead of
+      // competing with its replacement. The pass's own rejection is always a
+      // telemetry event, never a crash.
+      const pass = this.drain();
+      this.draining = pass;
+      void pass
+        .catch(() => undefined)
         .finally(() => {
-          this.draining = undefined;
+          // Only the pass that owns the guard may clear it. A later pass can only
+          // start once this one has exited, so this identity check also protects
+          // against a slow `finally` of an earlier pass clearing a newer one.
+          if (this.draining === pass) this.draining = undefined;
           // Refresh the queue depth the stuck-ingestion alert depends on. A
           // failure leaves the previous sample rather than reporting zero, which
           // would read as "nothing queued" during a database outage.
@@ -179,6 +211,17 @@ export class CorrelationRuntime {
             })
             .catch(() => {});
         });
+      void pass.catch((error) => {
+        // Telemetry metrics are a fixed, scrubbed vocabulary; the timeout is
+        // encoded in the event name (`pending.drain_timeout`) rather than an
+        // ad-hoc field so it is queryable like every other correlation event.
+        this.supervisor.ingestor.telemetry.log(
+          error instanceof DrainTimeoutError ? 'CRITICAL' : 'ERROR',
+          error instanceof DrainTimeoutError ? 'pending.drain_timeout' : 'pending.drain_failed',
+        );
+        // Ask the abandoned pass to stop taking new work at its next boundary.
+        this.cancelDrain?.();
+      });
     }, 1000);
     this.timer.unref();
     this.schedulerTimer = setInterval(() => {
@@ -205,9 +248,42 @@ export class CorrelationRuntime {
       // successful sample, which is the correct semantics for outage scraping.
     }
   }
-  private async drain(): Promise<void> {
+
+  /**
+   * One drain pass, exposed for testing. `isCancelled` is polled at every point
+   * where the pass could still take work, so an abandoned pass winds down instead
+   * of competing. The pass is wrapped in `withHardTimeout` so an abandoned pass is
+   * aborted via AbortSignal rather than left running beside its replacement.
+   */
+  async drain(): Promise<void> {
+    let cancelled = false;
+    const markCancelled = () => {
+      cancelled = true;
+    };
+    this.cancelDrain = markCancelled;
+    try {
+      await withHardTimeout(
+        (signal) => this.drainPass(() => cancelled || signal.aborted),
+        DRAIN_TIMEOUT_MS,
+        'correlation drain',
+      );
+    } finally {
+      if (this.cancelDrain === markCancelled) this.cancelDrain = undefined;
+    }
+  }
+
+  /**
+   * One drain pass. `isCancelled` is polled at every point where the pass could
+   * still take work, so an abandoned pass winds down instead of competing.
+   */
+  private async drainPass(isCancelled: () => boolean): Promise<void> {
+    // First checkpoint is before any stage, not after the first one: a pass
+    // abandoned before it began must not open a transaction at all.
+    if (isCancelled()) return;
     await this.cleanupStaleMatches();
+    if (isCancelled()) return;
     await this.queueNotifications();
+    if (isCancelled()) return;
     // Rows the claim no longer offers have exhausted MAX_PENDING_ATTEMPTS. Log
     // their count once per drain pass: silently leaving them in the table would
     // make a poisoned advisory invisible while `pending` still counts it.
@@ -221,48 +297,34 @@ export class CorrelationRuntime {
     } catch {
       // Metrics on a missing column (pre-032 database) must not block draining.
     }
-    // Back off for the full interval only after success; retry sooner after a
-    // failure, bounded so a broken sweep cannot spin.
-    //
-    // Bug fix: this used to be `now - lastMaintenanceAttempt >= 60_000 || now -
-    // lastMaintenance >= 10_000`. `lastMaintenance` only advances on SUCCESS,
-    // so once a sweep starts failing it stops advancing altogether, and "now -
-    // lastMaintenance >= 10_000" becomes true on every tick for the rest of the
-    // outage (the drain loop runs every 1000ms) rather than once every 10s -
-    // the opposite of "bounded so a broken sweep cannot spin". It hammered the
-    // database with a retry roughly once a second for as long as the failure
-    // persisted, piling extra load onto whatever (e.g. a lock timeout during a
-    // VACUUM) was already causing the failure.
-    //
-    // Fix: pick ONE floor per tick, based on whether the last attempt actually
-    // succeeded - 60s after a success, 10s after a failure - and gate on the
-    // time since the last attempt either way, so retries are throttled no
-    // matter which branch applies.
-    const failingSweep = this.lastMaintenanceAttempt > this.lastMaintenance;
-    const maintenanceFloorMs = failingSweep ? 10_000 : 60_000;
-    if (Date.now() - this.lastMaintenanceAttempt >= maintenanceFloorMs) {
-      this.lastMaintenanceAttempt = Date.now();
-      const retained = await transaction(this.pool, (db) => retainCorrelationData(db)).then(
-        () => true,
-        () => {
-          this.supervisor.ingestor.telemetry.log('ERROR', 'retention.failed');
-          return false;
-        },
-      );
-      if (retained) this.lastMaintenance = Date.now();
-    }
+    // Retention is re-checked here rather than once per pass: a pass can keep
+    // looping for far longer than a floor (one batch per 100ms), so a single
+    // evaluation left a failing sweep retried on every iteration.
+    await this.maybeRunRetention();
+    if (isCancelled()) return;
     // Sweep exhausted pending rows to prevent poison advisories from blocking the queue
-    const swept = await sweepExhaustedPending(this.pool).catch(() => 0);
+    const swept = await sweepExhaustedPending(
+      this.pool,
+      this.supervisor.ingestor.deadLetterQueue,
+    ).catch(() => 0);
     if (swept) {
       this.supervisor.ingestor.telemetry.log('INFO', 'pending.exhausted_swept', { count: swept });
     }
     while (!this.stopped && this.supervisor.health === 'HEALTHY') {
+      // Check cancellation BEFORE claiming. Claiming first meant an abandoned
+      // pass still took a fresh lease and ingested one more batch after the tick
+      // had already started a replacement — the overlap this pass exists to avoid.
+      if (isCancelled()) return;
       // Leased SKIP LOCKED claims survive crashes; final ingestion is idempotent.
       // Claim at most concurrency slots, so leases don't expire behind a local queue.
       const batch = await claimPending(this.pool, this.supervisor.concurrencyLimit);
       if (!batch.jobs.length) return;
       let renewing: Promise<unknown> | undefined;
       const heartbeat = setInterval(() => {
+        if (isCancelled()) {
+          clearInterval(heartbeat);
+          return;
+        }
         if (renewing) return;
         // Add timeout to prevent hung renewals from piling up
         const timeoutMs = 10_000;
@@ -270,7 +332,9 @@ export class CorrelationRuntime {
           try {
             await Promise.race([
               renewPending(this.pool, batch),
-              new Promise<never>((_, reject) => setTimeout(() => reject(new Error('LEASE_RENEWAL_TIMEOUT')), timeoutMs)),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('LEASE_RENEWAL_TIMEOUT')), timeoutMs),
+              ),
             ]);
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -319,7 +383,12 @@ export class CorrelationRuntime {
         clearInterval(heartbeat);
         await renewing;
       }
+      if (isCancelled()) return;
       await this.queueNotifications();
+      // Retention is time-gated, so calling it each iteration is cheap when the
+      // floor has not elapsed. Keeping it inside the loop is what bounds a
+      // failing sweep to one attempt per floor even when the pass is long.
+      await this.maybeRunRetention();
       // Yield between batches. `acknowledgePending` deletes rows that are already
       // gone from the claim query, so a busy queue lets this loop re-enter
       // `claimPending` immediately and hold a pool connection (plus a claim and a
@@ -327,6 +396,30 @@ export class CorrelationRuntime {
       // and other pool users run, and keeps the drain from starving them.
       await delay(DRAIN_INTER_BATCH_MS);
     }
+  }
+
+  /**
+   * Run the retention sweep at most once per floor.
+   *
+   * Floors: 60s after a success, 10s after a failure. `lastMaintenance` only
+   * advances on SUCCESS, so the failure floor is derived from
+   * `lastMaintenanceAttempt > lastMaintenance` and re-evaluated at every call —
+   * evaluating it once per pass meant a long pass retried a failing sweep on
+   * every 100ms iteration.
+   */
+  private async maybeRunRetention(): Promise<void> {
+    const failingSweep = this.lastMaintenanceAttempt > this.lastMaintenance;
+    const floorMs = failingSweep ? 10_000 : 60_000;
+    if (Date.now() - this.lastMaintenanceAttempt < floorMs) return;
+    this.lastMaintenanceAttempt = Date.now();
+    const retained = await transaction(this.pool, (db) => retainCorrelationData(db)).then(
+      () => true,
+      () => {
+        this.supervisor.ingestor.telemetry.log('ERROR', 'retention.failed');
+        return false;
+      },
+    );
+    if (retained) this.lastMaintenance = Date.now();
   }
   private async cleanupStaleMatches(): Promise<void> {
     await transaction(this.pool, (db) => cleanupStaleMatches(db)).catch(() => {

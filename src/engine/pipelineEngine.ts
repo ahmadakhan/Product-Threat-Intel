@@ -155,25 +155,15 @@ export interface ZeroDayDigest {
  * digest, so the structured fields are the source of truth whenever present.
  */
 function assetIdentity(match: IntelligenceMatch): { vendor: string; product: string; tag: string } {
-  if (match.assetVendor && match.assetProduct)
-    return {
-      vendor: match.assetVendor,
-      product: match.assetProduct,
-      tag: match.assetName.split(' (')[0]?.trim() || match.assetName.trim(),
-    };
-  // Legacy fallback: anchor on the LAST '(' because the asset tag itself may
-  // contain a parenthesis (`prod (legacy) (acme web)`). Anything unparseable
-  // degrades to the tag rather than inventing structured identity.
-  const assetName = match.assetName;
-  const openParen = assetName.lastIndexOf('(');
-  const closeParen = openParen >= 0 ? assetName.indexOf(')', openParen) : -1;
-  const tail = openParen >= 0 && closeParen > openParen ? assetName.slice(openParen + 1, closeParen) : '';
-  const words = tail.split(/\s+/).filter(Boolean);
-  const tag = openParen > 0 ? assetName.slice(0, openParen).trim() : assetName.trim();
+  // Structured identity is authoritative; never parse `assetName` for vendor or
+  // product — a product name containing parentheses or spaces corrupts the split.
+  if (!match.assetVendor || !match.assetProduct) {
+    return { vendor: 'unknown', product: 'unknown', tag: match.assetName };
+  }
   return {
-    vendor: words[0] || tag || 'unknown',
-    product: words.length > 1 ? words.slice(1).join(' ') : tag || 'unknown',
-    tag,
+    vendor: match.assetVendor,
+    product: match.assetProduct,
+    tag: match.assetName.split(' (')[0]?.trim() || match.assetName.trim(),
   };
 }
 

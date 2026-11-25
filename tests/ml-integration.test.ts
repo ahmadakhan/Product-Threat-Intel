@@ -12,6 +12,7 @@ import type { RemediationFeatures } from '../server/ml/models/advisoryRemediatio
 import type { ThresholdSample } from '../server/ml/models/autoDispatchThreshold.ts';
 import type { Finding } from '../src/types/index.ts';
 import type { Db } from '../server/db.ts';
+import { DEFAULT_SETTINGS } from '../shared/state.ts';
 
 const tmpDir = () => join(os.tmpdir(), `ml-int-test-${Math.random().toString(36).slice(2)}`);
 const mockDb: Db = { query: async () => ({ rows: [] }) } as unknown as Db;
@@ -73,10 +74,15 @@ describe('ML pipeline integration', () => {
   });
 
   describe('shouldAutoDispatch', () => {
-    it('always returns true (no review queue)', () => {
-      assert.equal(shouldAutoDispatch(0), true);
-      assert.equal(shouldAutoDispatch(50), true);
+    it('falls back to default 90 threshold when no model or settings', () => {
+      assert.equal(shouldAutoDispatch(0), false);
+      assert.equal(shouldAutoDispatch(89), false);
+      assert.equal(shouldAutoDispatch(90), true);
       assert.equal(shouldAutoDispatch(100), true);
+    });
+    it('respects operator-configured threshold from settings', () => {
+      assert.equal(shouldAutoDispatch(50, { ...DEFAULT_SETTINGS, mlAutoDispatchThreshold: 50 }), true);
+      assert.equal(shouldAutoDispatch(49, { ...DEFAULT_SETTINGS, mlAutoDispatchThreshold: 50 }), false);
     });
   });
 
@@ -120,11 +126,13 @@ describe('ML pipeline integration', () => {
       assert.equal(shouldSampleMlTelemetry(0, now - ML_TELEMETRY_SAMPLE_INTERVAL_MS, now), true);
     });
 
-    it('ignores a non-finite depth and recovers from a future sample timestamp', () => {
+    it('ignores a non-finite depth and clamps a future sample timestamp', () => {
       const now = 10 * ML_TELEMETRY_SAMPLE_INTERVAL_MS;
       assert.equal(shouldSampleMlTelemetry(Number.NaN, 1, now), false);
-      // A clock step must not disable sampling forever.
-      assert.equal(shouldSampleMlTelemetry(0, now + ML_TELEMETRY_SAMPLE_INTERVAL_MS, now), true);
+      // A clock step that sets pendingSampledAt into the future clamps elapsed
+      // to 0, reading as "just sampled" — the normal interval applies instead
+      // of forcing a sample on every tick.
+      assert.equal(shouldSampleMlTelemetry(0, now + ML_TELEMETRY_SAMPLE_INTERVAL_MS, now), false);
     });
 
     it('does not turn a persistent backlog into a per-tick sample', () => {

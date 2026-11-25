@@ -25,6 +25,12 @@ interface ManifestArtifactEntry {
 interface ModelManifestEntry {
   activeVersion: string;
   artifacts: ManifestArtifactEntry[];
+  challenger?: {
+    metadata: ModelMetadata;
+    loadedAt: string;
+    shadowCount: number;
+    cumulativeError: number;
+  };
 }
 
 interface ModelManifest {
@@ -501,6 +507,16 @@ export class ModelRegistry {
       shadowCount: 0,
       cumulativeError: 0,
     };
+    // Persist challenger metadata to the manifest so shadow state survives restart.
+    const manifestEntry = this.manifest[modelId];
+    if (manifestEntry) {
+      manifestEntry.challenger = {
+        metadata,
+        loadedAt: entry.challenger.loadedAt,
+        shadowCount: 0,
+        cumulativeError: 0,
+      };
+    }
     this.saveManifest();
     return true;
   }
@@ -537,6 +553,12 @@ export class ModelRegistry {
     const actual = typeof signal.actual === 'boolean' ? (signal.actual ? 1 : 0) : signal.actual;
     const predicted = challengerPred.probability ?? challengerPred.score;
     entry.challenger.cumulativeError += (predicted - actual) ** 2;
+    // Persist updated shadow metrics to the manifest for restart survival.
+    const manifestEntry = this.manifest[modelId];
+    if (manifestEntry?.challenger) {
+      manifestEntry.challenger.shadowCount = entry.challenger.shadowCount;
+      manifestEntry.challenger.cumulativeError = entry.challenger.cumulativeError;
+    }
     this.saveManifest();
   }
 
@@ -569,6 +591,8 @@ export class ModelRegistry {
     entry.loadedAt = new Date().toISOString();
     entry.status = 'ACTIVE';
     entry.challenger = undefined;
+    const manifestEntry = this.manifest[modelId];
+    if (manifestEntry) manifestEntry.challenger = undefined;
     this.saveManifest();
     return { promoted: true, challengerError: challengerAvgError };
   }

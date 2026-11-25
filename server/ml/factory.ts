@@ -83,7 +83,7 @@ export async function createMlRuntime(options: ModelStorageOptions): Promise<MlR
   const zeroDayRateLimit = new ZeroDayRateLimitOptimizer();
   const digestSelector = new DigestFindingSelector();
   const severityTier = new SeverityTierModel();
-  const feedRecoveryBackoff = new FeedRecoveryBackoffOptimizer();
+  let feedRecoveryBackoff = new FeedRecoveryBackoffOptimizer();
   const aliasConfidence = new AliasConfidenceModel();
   const advisoryComposer = new AdvisoryComposerModel();
   const emailSummarizer = new EmailSummarizerModel();
@@ -120,7 +120,6 @@ export async function createMlRuntime(options: ModelStorageOptions): Promise<MlR
    * hardcoded parameters and logs the quality issue for operator attention.
    */
   const qualityGate = feedRecoveryBackoff.isTrained() ? feedRecoveryBackoff : null;
-  let mlRecoveryDisabled = false;
   if (qualityGate && qualityGate.getRecoveryRate() < 0.6) {
     const recoveryRate = qualityGate.getRecoveryRate();
     console.error(JSON.stringify({
@@ -132,18 +131,25 @@ export async function createMlRuntime(options: ModelStorageOptions): Promise<MlR
       version: qualityGate.serialize().metadata.version,
       message: 'ML feed recovery model below quality threshold; disabling ML-backed recovery'
     }));
-    // Disable ML-backed recovery: revert to hardcoded parameters when quality gate fails.
-    // This prevents a suboptimal model from degrading feed recovery behavior.
-    feedRecoveryBackoff.getPolicy = () => ({
-      initialDelayMinutes: 5,
-      backoffMultiplier: 2,
-      maxDelayMinutes: 1440,
-      maxSteps: 6,
-      maxAttempts: 5,
-    });
-    mlRecoveryDisabled = true;
-  }
-  if (mlRecoveryDisabled) {
+    // Disable ML-backed recovery by returning a wrapper that reports itself as
+    // untrained. Callers (computeFeedRecoveryDelay) check isTrained() before
+    // using the model, so they automatically fall back to hardcoded defaults.
+    // This avoids mutating the original model instance (which would corrupt
+    // serialize()/load() round-trips and surprise callers expecting the real
+    // model object).
+    const disabledFeedRecovery: FeedRecoveryBackoffOptimizer = {
+      ...feedRecoveryBackoff,
+      isTrained: () => false,
+      getRecoveryRate: () => 0,
+      getPolicy: () => ({
+        initialDelayMinutes: 5,
+        backoffMultiplier: 2,
+        maxDelayMinutes: 1440,
+        maxSteps: 6,
+        maxAttempts: 5,
+      }),
+    } as unknown as FeedRecoveryBackoffOptimizer;
+    feedRecoveryBackoff = disabledFeedRecovery;
     console.error(JSON.stringify({
       level: 'ERROR',
       event: 'ml.recovery_disabled',

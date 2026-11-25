@@ -150,8 +150,14 @@ export function calibrateCredibilityScore(rawScore: number): {
  * the static policy.
  */
 export function shouldAutoDispatch(confidence: number, settings?: AppSettings): boolean {
-  // All findings dispatch; there is no review queue or threshold gate.
-  return true;
+  // A trained auto-dispatch-threshold model is authoritative when available.
+  const model = ctx.runtime?.autoDispatchThreshold;
+  if (model?.isTrained?.()) {
+    return model.shouldDispatch(confidence);
+  }
+  // Fall back to operator-configured threshold (0-100), then to the default 90%.
+  const threshold = settings?.mlAutoDispatchThreshold ?? 90;
+  return confidence >= threshold;
 }
 
 /** Whether a named model is loaded *and* trained. Used to gate opt-in routing. */
@@ -235,8 +241,10 @@ export function shouldSampleMlTelemetry(
   if (!Number.isFinite(pendingDepth) || !Number.isFinite(pendingSampledAt)) return false;
   if (pendingSampledAt === 0) return true;
   // A future `pendingSampledAt` (clock step) must not disable sampling forever.
-  const elapsed = now - pendingSampledAt;
-  return elapsed < 0 || elapsed >= ML_TELEMETRY_SAMPLE_INTERVAL_MS;
+  // Clamp negative elapsed to 0 so a clock step reads as "just sampled" and the
+  // normal interval applies, instead of forcing a sample on every call.
+  const elapsed = Math.max(0, now - pendingSampledAt);
+  return elapsed >= ML_TELEMETRY_SAMPLE_INTERVAL_MS;
 }
 
 /** Minimum spacing between ML telemetry samples. */
@@ -845,7 +853,16 @@ export function mlShadowPredict(modelId: string, features: Record<string, number
   try {
     const { active, challenger } = runtime.registry.shadowPredict(modelId, features);
     return { active, challenger, modelId };
-  } catch {
+  } catch (error) {
+    // Shadow evaluation failures are invisible without logging: a missing
+    // challenger and a registry error both return null, but only the latter
+    // indicates a problem worth investigating.
+    console.error(JSON.stringify({
+      level: 'ERROR',
+      event: 'ml.shadow_predict_failed',
+      modelId,
+      error: error instanceof Error ? error.message : String(error),
+    }));
     return null;
   }
 }
@@ -924,7 +941,14 @@ export function mlOnlineLearn(signal: FeedbackSignal): void {
       };
       model.partialFit(sample);
       // Persist the updated model incrementally (best-effort, non-blocking).
-      void runtime.registry.save(model, signal.modelId, entry.metadata).catch(() => {});
+      void runtime.registry.save(model, signal.modelId, entry.metadata).catch((error) => {
+        console.error(JSON.stringify({
+          level: 'ERROR',
+          event: 'ml.online_learn_save_failed',
+          modelId: signal.modelId,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      });
     } catch {
       /* partialFit failures never block the pipeline */
     }

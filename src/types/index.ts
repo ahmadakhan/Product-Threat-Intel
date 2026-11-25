@@ -1329,6 +1329,14 @@ export interface AppSettings {
    * vulnerability findings.
    */
   autoDispatchNewsToSecurityTeam: boolean;
+  /**
+   * Confidence threshold (0-100) above which ML-trained findings are
+   * auto-dispatched without analyst review. Falls back to the trained
+   * auto-dispatch-threshold model when available; defaults to 90.
+   * Only consulted when `shouldAutoDispatch` is invoked with a confidence
+   * score and no trained model exists.
+   */
+  mlAutoDispatchThreshold: number;
   digestBatchingEnabled: boolean;
   digestWindowMinutes: number;
   /**

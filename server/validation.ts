@@ -489,6 +489,9 @@ export const settingsSchema = z
     // News evidence auto-dispatch is opt-in so existing deployments keep their
     // review-only behavior for intelligence matches.
     autoDispatchNewsToSecurityTeam: z.boolean().default(false),
+    // Confidence threshold (0-100) for ML auto-dispatch. Falls back to the
+    // trained auto-dispatch-threshold model when available; defaults to 90.
+    mlAutoDispatchThreshold: z.number().int().min(0).max(100).default(90),
     // Everyone-group recipients are held for operator review until a Security-team
     // delivery is confirmed accepted, then queued with the same payload for live
     // editing and approval. Opt-in: existing deployments keep simultaneous dispatch.

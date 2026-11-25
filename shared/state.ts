@@ -72,6 +72,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   // Every finding is dispatched; there is no review queue. The advisory states
   // the limitation on the finding itself.
   autoDispatchNewsToSecurityTeam: false,
+  mlAutoDispatchThreshold: 90,
   deferEveryoneUntilSecurityDelivered: false,
   digestBatchingEnabled: true,
   digestWindowMinutes: 5,

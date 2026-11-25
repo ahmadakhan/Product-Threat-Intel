@@ -784,6 +784,7 @@ export const INITIAL_SETTINGS: AppSettings = {
   advisoryPrefix: 'ADV-2026-',
   emailEnabled: true,
   autoDispatchNewsToSecurityTeam: false,
+  mlAutoDispatchThreshold: 90,
   // Seed fixtures use standard alert flow: EVERYONE recipients receive the email
   // at the same time as the Security team for immediate distribution.
   deferEveryoneUntilSecurityDelivered: false,

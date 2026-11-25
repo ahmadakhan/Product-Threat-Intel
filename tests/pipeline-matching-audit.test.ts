@@ -149,7 +149,9 @@ test('C-2: digests report the group size, not the size of the whole match array'
 });
 
 test('C-2 / M-4: zero-day digests consolidate by vendor + product, not by asset', () => {
-  const matches = Array.from({ length: 120 }, (_, i) => match(i));
+  const matches = Array.from({ length: 120 }, (_, i) =>
+    match(i, { assetVendor: 'acme', assetProduct: 'widget' }),
+  );
   const { digests } = rankAndRateLimitZeroDays([], matches);
   assert.equal(digests.length, 1, 'one advisory per product, not one per asset');
   assert.equal(digests[0].vendor, 'acme');
@@ -158,7 +160,11 @@ test('C-2 / M-4: zero-day digests consolidate by vendor + product, not by asset'
 
 test('C-2: a parenthesised asset tag does not corrupt the parsed identity', () => {
   const matches = Array.from({ length: 120 }, (_, i) =>
-    match(i, { assetName: `prod (legacy) (acme widget)` }),
+    match(i, {
+      assetName: `prod (legacy) (acme widget)`,
+      assetVendor: 'acme',
+      assetProduct: 'widget',
+    }),
   );
   const { digests } = rankAndRateLimitZeroDays([], matches);
   assert.equal(digests[0].vendor, 'acme');
