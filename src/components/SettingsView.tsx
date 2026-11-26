@@ -312,6 +312,7 @@ export function SettingsView() {
     (form.autoDispatchNewsToSecurityTeam ?? false) !== (settings.autoDispatchNewsToSecurityTeam ?? false) ||
     (form.deferEveryoneUntilSecurityDelivered ?? false) !==
       (settings.deferEveryoneUntilSecurityDelivered ?? false) ||
+    (form.mlAutoDispatchThreshold ?? 90) !== (settings.mlAutoDispatchThreshold ?? 90) ||
     (form.emailRetryEnabled ?? true) !== (settings.emailRetryEnabled ?? true) ||
     (form.emailRetryMaxAttempts ?? 6) !== (settings.emailRetryMaxAttempts ?? 6) ||
     (form.emailRetryInitialDelayMinutes ?? 1) !== (settings.emailRetryInitialDelayMinutes ?? 1) ||
@@ -393,6 +394,7 @@ export function SettingsView() {
       digestWindowMinutes: form.digestWindowMinutes,
       autoDispatchNewsToSecurityTeam: form.autoDispatchNewsToSecurityTeam,
       deferEveryoneUntilSecurityDelivered: form.deferEveryoneUntilSecurityDelivered,
+      mlAutoDispatchThreshold: form.mlAutoDispatchThreshold,
       emailRetryEnabled: form.emailRetryEnabled,
       emailRetryMaxAttempts: form.emailRetryMaxAttempts,
       emailRetryInitialDelayMinutes: form.emailRetryInitialDelayMinutes,
@@ -1077,6 +1079,29 @@ export function SettingsView() {
                         />
                       </ProcessingField>
                       <ProcessingField
+                        id="processing-ml-autodispatch"
+                        label="ML auto-dispatch threshold"
+                        unit="%"
+                        hint="Confidence percentage required for automatic dispatch when an ML confidence model is active (default 90%)."
+                      >
+                        <input
+                          id="processing-ml-autodispatch"
+                          type="number"
+                          min={0}
+                          max={100}
+                          required
+                          aria-describedby="processing-ml-autodispatch-hint"
+                          className={field}
+                          value={form.mlAutoDispatchThreshold ?? 90}
+                          onChange={(event) =>
+                            setForm({
+                              ...form,
+                              mlAutoDispatchThreshold: Math.min(100, Math.max(0, Number(event.target.value) || 0)),
+                            })
+                          }
+                        />
+                      </ProcessingField>
+                      <ProcessingField
                         id="processing-logs"
                         label="Operational log detail"
                         hint="Warnings and errors are recorded at both levels."
@@ -1485,8 +1510,13 @@ export function SettingsView() {
                       setAccountMessage('Enter a valid email address, for example name@company.com.');
                       return;
                     }
-                    if (password.length < 14) {
-                      setAccountMessage('Password must be at least 14 characters.');
+                    // Match the server's authoritative policy minimum so the form
+                    // rejects a short password before submit instead of surfacing a
+                    // 400 from the API when an operator has raised the minimum above
+                    // the historical default of 14.
+                    const minPasswordLen = settings.securityPolicy?.minPasswordLen ?? 14;
+                    if (password.length < minPasswordLen) {
+                      setAccountMessage(`Password must be at least ${minPasswordLen} characters.`);
                       return;
                     }
                     if (!/^[a-zA-Z0-9._@-]{3,100}$/.test(username)) {
@@ -1523,7 +1553,7 @@ export function SettingsView() {
                       type="password"
                       autoComplete="new-password"
                       required
-                      minLength={14}
+                      minLength={settings.securityPolicy?.minPasswordLen ?? 14}
                       maxLength={128}
                       className={field}
                       value={password}
@@ -1747,12 +1777,12 @@ export function SettingsView() {
               type="password"
               autoComplete="new-password"
               required
-              minLength={14}
+              minLength={settings.securityPolicy?.minPasswordLen ?? 14}
               maxLength={128}
               className={field}
               value={resetPassword}
               onChange={(e) => setResetPassword(e.target.value)}
-              placeholder="New password (min 14 characters)"
+              placeholder={`New password (min ${settings.securityPolicy?.minPasswordLen ?? 14} characters)`}
             />
             <div className="flex justify-end gap-2 mt-4">
               <button
@@ -1765,7 +1795,7 @@ export function SettingsView() {
               <button
                 type="button"
                 className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold disabled:opacity-50 transition"
-                disabled={pending > 0 || resetPassword.length < 14}
+                disabled={pending > 0 || resetPassword.length < (settings.securityPolicy?.minPasswordLen ?? 14)}
                 onClick={async () => {
                   const ok = await resetUserPassword(resetUserId!, resetPassword);
                   if (ok) {

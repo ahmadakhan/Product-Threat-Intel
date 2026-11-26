@@ -19,7 +19,7 @@ import { backfillCorrelationInventory } from './correlation/inventory.ts';
 import { CorrelationRuntime } from './correlation/runtime.ts';
 import { describeError, writeEvent } from './events';
 import type { Finding } from '../src/types/index.ts';
-import { loadConfig } from './config';
+import { loadConfig, boundedEnvInt } from './config';
 import { createPool, migrate, transaction, get, getForUpdate, put, list, REQUIRED_SCHEMA_VERSION } from './db';
 import { createApp } from './app';
 import { createRequester } from './network';
@@ -613,7 +613,7 @@ const tick = () => {
       });
   }
 };
-const WORKER_TICK_MS = Number(process.env.WORKER_TICK_MS ?? 5000);
+const WORKER_TICK_MS = boundedEnvInt(process.env.WORKER_TICK_MS, 5000, 250, 3_600_000);
 const timer = setInterval(tick, WORKER_TICK_MS);
 // These timers only exist to drive background work. They must not be the
 // reason the event loop stays alive: a harness (or a supervisor draining the
@@ -785,9 +785,9 @@ const dailyDigestTick = () => {
       dailyDigestController = undefined;
     });
 };
-const ML_TRAINING_INTERVAL_MS = Number(process.env.ML_TRAINING_INTERVAL_MS ?? 60 * 60_000);
+const ML_TRAINING_INTERVAL_MS = boundedEnvInt(process.env.ML_TRAINING_INTERVAL_MS, 60 * 60_000, 60_000, 24 * 60 * 60_000);
 const ML_TRAINING_SCHEDULE_ID = 'ml-training-schedule';
-const ENRICHMENT_BACKLOG_INTERVAL_MS = Number(process.env.ENRICHMENT_BACKLOG_INTERVAL_MS ?? 6 * 60 * 60_000);
+const ENRICHMENT_BACKLOG_INTERVAL_MS = boundedEnvInt(process.env.ENRICHMENT_BACKLOG_INTERVAL_MS, 6 * 60 * 60_000, 60_000, 24 * 60 * 60_000);
 const ENRICHMENT_BACKLOG_SCHEDULE_ID = 'enrichment-backlog-schedule';
 let trainingRunning: Promise<unknown> | null = null;
 let trainingStartedAt = 0;

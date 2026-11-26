@@ -529,3 +529,36 @@ test('NVD ingests a corrected CVE whose lastModified did not advance', async () 
   assert.equal(changed.cves[0].remediation.vendorAdvisoryRef, 'https://example.com/advisory');
   void unchanged;
 });
+
+// A provider schema break must reject a single record cleanly, not throw out of
+// normalization: a throw here aborts the whole ingestion window and the feed
+// stalls forever. Each case uses a shape a real provider has emitted (a numeric
+// description value, an object where an array belongs).
+test('normalizeNvd rejects malformed shapes instead of throwing', () => {
+  const base = nvd();
+  const withField = (patch: (c: Record<string, unknown>) => void) => {
+    const item = structuredClone(base) as { cve: Record<string, unknown> };
+    patch(item.cve);
+    return item;
+  };
+
+  // A numeric description value would otherwise call `.slice` on a number.
+  assert.doesNotThrow(() =>
+    normalizeNvd(withField((c) => (c.descriptions = [{ lang: 'en', value: 12345 }])), 'f1'),
+  );
+  // `weaknesses` as an object (not an array) would otherwise throw in flatMap.
+  assert.doesNotThrow(() =>
+    normalizeNvd(withField((c) => (c.weaknesses = { en: [] })), 'f1'),
+  );
+  // `cpeMatch` as an object would otherwise throw in `for...of`.
+  assert.doesNotThrow(() =>
+    normalizeNvd(withField((c) => (c.configurations = [{ nodes: [{ cpeMatch: { a: 1 } }] }])), 'f1'),
+  );
+  // `configurations` as a non-array must be ignored, not iterated.
+  assert.doesNotThrow(() => normalizeNvd(withField((c) => (c.configurations = { bad: true })), 'f1'));
+
+  // The coercions still yield a valid normalized record when the rest is sound.
+  const salvaged = normalizeNvd(withField((c) => (c.descriptions = [{ lang: 'en', value: 12345 }])), 'f1');
+  assert.ok(salvaged, 'a numeric description must still produce a normalized CVE');
+  assert.equal(salvaged?.cpeMatches.length, 1, 'the sound configuration must survive');
+});

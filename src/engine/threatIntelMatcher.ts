@@ -1376,8 +1376,16 @@ export function extractVulnerablePurls(record: unknown): PurlCriterion[] {
     out.push({ purl: value.trim(), range, versions: uniqueStrings(versions) });
   };
   const addObject = (entry: JsonRecord, trusted: boolean) => {
+    // An explicit non-vulnerable marker always excludes the entry (it names the
+    // platform a vulnerable product runs on, not the vulnerable product).
     if (entry.vulnerable === false || entry.vulnerable === 'false' || entry.vulnerable === 0) return;
-    if (!trusted && entry.vulnerable === false) return;
+    // Mirrors `extractVulnerableCpes.addObject`: an UNTRUSTED entry (a raw
+    // `cpeMatch`/`configurations` node) must assert `vulnerable: true` to count.
+    // Trusted entries — normalized `purls`/`identifiers` and OSV `affected` — are
+    // vulnerability identity by construction and carry no such flag, so they are
+    // accepted without it. The previous `!trusted && entry.vulnerable === false`
+    // was unreachable dead code: the line above already returned on `=== false`.
+    if (!trusted && entry.vulnerable !== true) return;
     const purl = firstString(entry.purl, entry.packageUrl, entry.package_url, entry.value);
     const versions = asArray(entry.versions)
       .map((version) => (typeof version === 'string' ? version : firstString(version)))

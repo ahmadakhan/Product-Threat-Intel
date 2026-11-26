@@ -319,6 +319,14 @@ export class CorrelationRuntime {
       // Claim at most concurrency slots, so leases don't expire behind a local queue.
       const batch = await claimPending(this.pool, this.supervisor.concurrencyLimit);
       if (!batch.jobs.length) return;
+      // Re-check after the (awaited) claim. Cancellation can arrive while the
+      // claim query is in flight; the pre-claim check above cannot cover that
+      // window. Without this, an abandoned pass ingests one last batch after the
+      // replacement tick started — the overlap this pass exists to avoid. The
+      // claimed rows are left leased: deleting them would discard durable
+      // pending work, and the replacement pass re-claims them once the lease
+      // expires, exactly as it does after a crash.
+      if (isCancelled()) return;
       let renewing: Promise<unknown> | undefined;
       const heartbeat = setInterval(() => {
         if (isCancelled()) {

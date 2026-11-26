@@ -334,6 +334,29 @@ export function poolFeedBound(
   return Math.max(1, config.POOL_MAX_CONNECTIONS - config.POOL_RESERVED_CONNECTIONS);
 }
 
+/**
+ * Parse a numeric environment variable that is not part of the main config
+ * schema (background timer intervals, retry budgets).
+ *
+ * `Number(process.env.X ?? fallback)` yields `NaN` for a non-numeric value, and
+ * `setInterval(fn, NaN)` fires roughly every millisecond, turning a typo in an
+ * optional knob into a busy loop that pins a core. This clamps to a finite
+ * integer in [min, max] and falls back to the default when the value is absent
+ * or unparseable, so a bad override degrades to the shipped cadence instead of
+ * spinning.
+ */
+export function boundedEnvInt(
+  raw: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(parsed)));
+}
+
 export interface PoolSettings {
   statementTimeoutMs: number;
   keepAliveDelayMs: number;

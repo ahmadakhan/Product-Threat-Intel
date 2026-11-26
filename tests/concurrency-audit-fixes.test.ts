@@ -25,7 +25,7 @@ import {
   schemaLockKey,
 } from '../server/db.ts';
 import { claimItems } from '../server/deliveryClaims.ts';
-import { loadConfig, poolFeedBound } from '../server/config.ts';
+import { loadConfig, poolFeedBound, boundedEnvInt } from '../server/config.ts';
 
 const database = process.env.TEST_DATABASE_URL;
 
@@ -115,6 +115,20 @@ test('poolFeedBound leaves the configured reserve for checkpoints and API work',
   assert.equal(poolFeedBound({ POOL_MAX_CONNECTIONS: 25, POOL_RESERVED_CONNECTIONS: 2 }), 23);
   // A misconfigured reserve can never disable ingestion outright.
   assert.equal(poolFeedBound({ POOL_MAX_CONNECTIONS: 4, POOL_RESERVED_CONNECTIONS: 9 }), 1);
+});
+
+test('boundedEnvInt never returns NaN or a zero interval for a bad override', () => {
+  // `Number('abc')` is NaN, which `setInterval` treats as ~0ms (a busy loop).
+  assert.equal(boundedEnvInt('abc', 5000, 250, 3_600_000), 5000);
+  assert.equal(boundedEnvInt('', 5000, 250, 3_600_000), 5000);
+  assert.equal(boundedEnvInt(undefined, 5000, 250, 3_600_000), 5000);
+  assert.equal(boundedEnvInt('Infinity', 5000, 250, 3_600_000), 5000);
+  // A valid value is honoured, floored and clamped into range.
+  assert.equal(boundedEnvInt('10000', 5000, 250, 3_600_000), 10000);
+  assert.equal(boundedEnvInt('12.9', 5000, 250, 3_600_000), 250);
+  assert.equal(boundedEnvInt('300.9', 5000, 250, 3_600_000), 300);
+  assert.equal(boundedEnvInt('-5', 5000, 250, 3_600_000), 250);
+  assert.equal(boundedEnvInt('99999999', 5000, 250, 3_600_000), 3_600_000);
 });
 
 test('loadConfig rejects a reserve that consumes the whole pool', () => {

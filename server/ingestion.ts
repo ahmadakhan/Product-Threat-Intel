@@ -182,7 +182,10 @@ function normalizeOpenCve(detail: any, feedId: string): NormalizedCVE | null {
   const walk = (node: any) => {
     if (!node || typeof node !== 'object') return;
     if (node.negate || node.operator === 'AND') applicabilityRequiresReview = true;
-    for (const match of node.cpeMatch || []) {
+    // A provider schema break can send a non-array here; iterating it would throw
+    // out of normalization and abort the whole window on one bad record.
+    const matches = Array.isArray(node.cpeMatch) ? node.cpeMatch : [];
+    for (const match of matches) {
       if (match.vulnerable !== true || typeof match.criteria !== 'string') continue;
       const criteria = match.criteria.trim();
       if (!criteria.startsWith('cpe:2.3:')) continue;
@@ -193,9 +196,15 @@ function normalizeOpenCve(detail: any, feedId: string): NormalizedCVE | null {
         versionEndExcluding: match.versionEndExcluding,
       } });
     }
-    for (const child of node.nodes || node.children || []) walk(child);
+    const children = Array.isArray(node.nodes)
+      ? node.nodes
+      : Array.isArray(node.children)
+        ? node.children
+        : [];
+    for (const child of children) walk(child);
   };
-  for (const config of detail.nvd_cpe_configurations || []) walk(config);
+  for (const config of Array.isArray(detail.nvd_cpe_configurations) ? detail.nvd_cpe_configurations : [])
+    walk(config);
   const score = Number(metric?.score || 0);
   const description = String(detail.title || detail.cve_id).slice(0, 30000);
   try {
@@ -245,9 +254,13 @@ export function normalizeNvd(item: any, feedId: string): NormalizedCVE | null {
   );
   const details: NonNullable<NormalizedCVE['cpeMatchDetails']> = [];
   const walk = (node: any) => {
+    if (!node || typeof node !== 'object') return;
     // Complex AND / negated configurations cannot safely be flattened into an OR.
     if (node.negate || node.operator === 'AND') applicabilityRequiresReview = true;
-    for (const m of node.cpeMatch || [])
+    // A provider schema break can send a non-array here; iterating it would throw
+    // out of normalization and abort the whole window on one bad record.
+    const matches = Array.isArray(node.cpeMatch) ? node.cpeMatch : [];
+    for (const m of matches)
       if (m.vulnerable === true) {
         const { versionStartIncluding, versionStartExcluding, versionEndIncluding, versionEndExcluding } = m;
         details.push({
@@ -255,11 +268,25 @@ export function normalizeNvd(item: any, feedId: string): NormalizedCVE | null {
           range: { versionStartIncluding, versionStartExcluding, versionEndIncluding, versionEndExcluding },
         });
       }
-    for (const child of node.nodes || node.children || []) walk(child);
+    const children = Array.isArray(node.nodes)
+      ? node.nodes
+      : Array.isArray(node.children)
+        ? node.children
+        : [];
+    for (const child of children) walk(child);
   };
-   for (const config of cve.configurations || []) walk(config);
+   for (const config of Array.isArray(cve.configurations) ? cve.configurations : []) walk(config);
   const validDetails = details.filter((d) => cpePreFilter(d.criteria) && parseCPE23(d.criteria).isValid);
-  const description = (cve.descriptions?.find((d: any) => d.lang === 'en')?.value || cve.id).slice(0, 30000);
+  // `descriptions` can be malformed (non-array, or a non-string value). Coerce to
+  // a string before `.slice`; the schema parse below still validates the result.
+  const englishDescription = Array.isArray(cve.descriptions)
+    ? cve.descriptions.find((d: any) => d && d.lang === 'en')
+    : undefined;
+  const rawDescription = englishDescription?.value ?? cve.id;
+  const description = (typeof rawDescription === 'string' ? rawDescription : String(rawDescription ?? '')).slice(
+    0,
+    30000,
+  );
   const score = metric?.baseScore ?? 0;
   try {
     return cveSchema.parse({
@@ -281,8 +308,8 @@ export function normalizeNvd(item: any, feedId: string): NormalizedCVE | null {
       // sentinel case the comment above describes, not a real CVSS 0.0.
       severity: !metric || metric.baseScore == null ? 'UNKNOWN' : cvssSeverity(score),
     },
-    cwe: (cve.weaknesses || [])
-      .flatMap((w: any) => (w.description || []).filter((d: any) => d.lang === 'en').map((d: any) => d.value))
+    cwe: (Array.isArray(cve.weaknesses) ? cve.weaknesses : [])
+      .flatMap((w: any) => (Array.isArray(w?.description) ? w.description : []).filter((d: any) => d && d.lang === 'en').map((d: any) => d.value))
       .slice(0, 100),
     cpeMatches: validDetails.map((d) => d.criteria),
     cpeMatchDetails: validDetails,
@@ -1487,7 +1514,10 @@ function normalizeNvdItem(item: any, feedId: string): NormalizeNvdItemResult {
   const walk = (node: any) => {
     if (!node || typeof node !== 'object') return;
     if (node.negate || node.operator === 'AND') applicabilityRequiresReview = true;
-    for (const m of node.cpeMatch || []) {
+    // A provider schema break can send a non-array here; iterating it would throw
+    // out of normalization and abort the whole window on one bad record.
+    const matches = Array.isArray(node.cpeMatch) ? node.cpeMatch : [];
+    for (const m of matches) {
       if (m.vulnerable === true && typeof m.criteria === 'string' && m.criteria.startsWith('cpe:2.3:')) {
         details.push({
           criteria: m.criteria,
@@ -1500,18 +1530,31 @@ function normalizeNvdItem(item: any, feedId: string): NormalizeNvdItemResult {
         });
       }
     }
-    for (const child of node.nodes || node.children || []) walk(child);
+    const children = Array.isArray(node.nodes)
+      ? node.nodes
+      : Array.isArray(node.children)
+        ? node.children
+        : [];
+    for (const child of children) walk(child);
   };
 
-  for (const config of cve.configurations || []) walk(config);
+  for (const config of Array.isArray(cve.configurations) ? cve.configurations : []) walk(config);
   const validDetails = details.filter((d) => cpePreFilter(d.criteria) && parseCPE23(d.criteria).isValid);
 
-  const description =
-    (cve.descriptions?.find((d: any) => d.lang === 'en')?.value || cve.id || '').slice(0, 30000);
+  // Coerce the description to a string before `.slice`: a malformed value (a
+  // number, or a non-array `descriptions`) must not throw out of normalization.
+  const englishDescription = Array.isArray(cve.descriptions)
+    ? cve.descriptions.find((d: any) => d && d.lang === 'en')
+    : undefined;
+  const rawDescription = englishDescription?.value ?? cve.id;
+  const description = (typeof rawDescription === 'string' ? rawDescription : String(rawDescription ?? '')).slice(
+    0,
+    30000,
+  );
 
   const cwe =
-    (cve.weaknesses || [])
-      .flatMap((w: any) => (w.description || []).filter((d: any) => d.lang === 'en').map((d: any) => d.value))
+    (Array.isArray(cve.weaknesses) ? cve.weaknesses : [])
+      .flatMap((w: any) => (Array.isArray(w?.description) ? w.description : []).filter((d: any) => d && d.lang === 'en').map((d: any) => d.value))
       .slice(0, 100) || [];
 
   const cpeMatches = validDetails.map((d) => d.criteria);

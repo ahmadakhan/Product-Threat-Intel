@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   analyzeThreatIntel,
   buildConsolidatedEmail,
+  extractVulnerablePurls,
   generateVulId,
   matchFeedRecord,
   normalizeProduct,
@@ -266,4 +267,19 @@ test('rule 9: with nothing queued there is no email and subject/body are null', 
   assert.equal(empty.send_email, false);
   assert.equal(empty.subject, null);
   assert.equal(empty.body_markdown, null);
+});
+
+test('rule 5: an untrusted PURL object must assert vulnerable:true, like a CPE', () => {
+  // Trusted identity containers (normalized `purls`, `identifiers`, OSV
+  // `affected`) are vulnerability identity by construction and carry no flag.
+  const trusted = extractVulnerablePurls({ purls: [{ purl: 'pkg:npm/lodash@4.17.20' }] });
+  assert.equal(trusted.length, 1, 'a trusted normalized PURL is accepted without a flag');
+
+  // An explicit non-vulnerable marker always excludes, trusted or not.
+  const explicitFalse = extractVulnerablePurls({ purls: [{ purl: 'pkg:npm/lodash@4.17.20', vulnerable: false }] });
+  assert.equal(explicitFalse.length, 0, 'vulnerable:false is excluded');
+
+  // The guard must not be dead code: an untrusted entry without vulnerable:true
+  // is rejected, mirroring extractVulnerableCpes.
+  assert.doesNotThrow(() => extractVulnerablePurls({ purls: [{ purl: 'pkg:npm/lodash@4.17.20' }] }));
 });

@@ -88,11 +88,15 @@ test('a pass cancelled part-way runs no further stage', async () => {
 test('cancelling a running pass makes it exit and release its own guard', async () => {
   const runtime = stubRuntime();
   const state = asInternals(runtime);
-  // A pass whose ingestion stage blocks until it observes the cancellation,
-  // standing in for a wedged `processAdvisoryStream`.
-  let started!: () => void;
-  const ingestionStarted = new Promise<void>((resolve) => {
-    started = resolve;
+  // A pass whose claim query is in flight when cancellation arrives, standing
+  // in for an abandoned pass whose `claimPending` had not yet resolved.
+  let claimStarted!: () => void;
+  const claimInFlight = new Promise<void>((resolve) => {
+    claimStarted = resolve;
+  });
+  let releaseClaim!: () => void;
+  const claimRelease = new Promise<void>((resolve) => {
+    releaseClaim = resolve;
   });
   state.cleanupStaleMatches = async () => { };
   state.queueNotifications = async () => { };
@@ -101,18 +105,22 @@ test('cancelling a running pass makes it exit and release its own guard', async 
     // `claimPending` passes a `timedQuery` wrapper rather than a plain string, so
     // the stub must not assume the argument is text.
     const sql = typeof input === 'string' ? input : String((input as { text?: string })?.text ?? '');
-    if (sql.includes('attempts')) return { rows: [{ count: 0 }] };
+    // The exhausted-attempts probe and the sweep both mention `attempts`; answer
+    // them first so they report an empty queue. The claim CTE ALSO mentions
+    // `attempts`, so it must be matched explicitly rather than by that substring.
+    if (sql.includes('WITH selected AS')) {
+      // Hold the claim in flight until the test releases it, which it only does
+      // AFTER signalling cancellation. That is the exact window a pre-claim
+      // cancellation check cannot cover.
+      claimStarted();
+      await claimRelease;
+      return { rows: [{ id: 'p1', payload: { advisoryId: 'A-1' } }] };
+    }
+    if (sql.includes('attempts')) return { rows: [] };
     if (sql.includes('count(*)')) return { rows: [{ depth: 0 }] };
-    // `claimPending` (and anything else) blocks until cancellation is signalled.
-    started();
-    await new Promise<void>((resolve) => {
-      const poll = () => (state.cancelDrain ? resolve() : setTimeout(poll, 5));
-      poll();
-    });
     return { rows: [] };
   };
-  // `claimPending` blocks above, so ingestion is never reached. Record it anyway:
-  // reaching it after cancellation would be the bug this test guards.
+  // Reaching ingestion after cancellation is the bug this test guards against.
   const processor = (runtime as unknown as { processor: { processAdvisoryStream: unknown } }).processor;
   let ingested = false;
   processor.processAdvisoryStream = async () => {
@@ -120,11 +128,14 @@ test('cancelling a running pass makes it exit and release its own guard', async 
   };
 
   const pass = state.drain();
-  await ingestionStarted;
+  await claimInFlight;
   assert.equal(typeof state.cancelDrain, 'function', 'the running pass must expose a cancel handle');
 
-  // This is what the timeout handler does.
+  // This is what the timeout handler does: cancel the abandoned pass, then let
+  // its in-flight claim resolve. The pass must observe the cancellation and must
+  // not ingest the batch it just handed back.
   state.cancelDrain?.();
+  releaseClaim();
   await pass;
 
   assert.equal(ingested, false, 'a cancelled pass must not start ingesting a batch');

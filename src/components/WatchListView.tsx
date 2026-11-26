@@ -1828,7 +1828,7 @@ export const WatchListView: React.FC = () => {
                           id="registration-part"
                           disabled={!editingItem && selectedNvdCpes.length > 0}
                           value={cpePart}
-                          onChange={(e) => setCpePart(e.target.value as any)}
+                          onChange={(e) => setCpePart(e.target.value as 'a' | 'o' | 'h')}
                           className="w-full bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-50 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-xl p-2.5 text-zinc-100 dark:text-zinc-100 light:text-zinc-900 focus:border-zinc-600 focus:outline-none"
                         >
                           <option value="a">Application (a)</option>
