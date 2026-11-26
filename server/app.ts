@@ -197,6 +197,7 @@ const STATE_COLLECTION_LIMITS = {
   intelligenceArticles: 50,
   intelligenceMatches: 100,
   zeroDayDigests: 50,
+  watchlist: 200,
 } as const;
 const invalidId = () => new HttpError(400, 'Invalid identifier');
 /**

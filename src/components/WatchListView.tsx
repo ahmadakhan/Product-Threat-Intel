@@ -104,6 +104,7 @@ const BULK_ACTION_CLASS: Record<BulkRegistrationChange['action'], string> = {
 export const WatchListView: React.FC = () => {
   const {
     watchlist,
+    counts,
     addWatchlistItem,
     updateWatchlistItem,
     toggleWatchlistItemActive,
@@ -394,7 +395,7 @@ export const WatchListView: React.FC = () => {
 
   /** Counts for the status filter, taken before the filter is applied. */
   const inventoryStatusCounts = {
-    ALL: watchlist.length,
+    ALL: counts.watchlist,
     ENABLED: watchlist.filter((item) => item.active).length,
     DISABLED: watchlist.filter((item) => !item.active).length,
   };

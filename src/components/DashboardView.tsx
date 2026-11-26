@@ -47,7 +47,7 @@ export const DashboardView: React.FC = () => {
           ingestion and notification delivery across your workspace.
         </PageHeading>
         <button onClick={() => setActiveTab('watchlist')} className="ui-secondary">
-          Monitored products ({watchlist.length})
+          Monitored products ({counts.watchlist})
         </button>
       </div>
 
@@ -59,14 +59,14 @@ export const DashboardView: React.FC = () => {
           onClick={() => setActiveTab('watchlist')}
           className="group w-full cursor-pointer rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4 text-left shadow-sm transition hover:border-zinc-600 hover:bg-zinc-900/70 dark:border-zinc-800/80 dark:bg-zinc-900/40 dark:hover:border-zinc-600 light:border-zinc-200 light:bg-white light:hover:border-zinc-400"
           title="Click to view and manage Monitored Products"
-          aria-label={`View ${watchlist.length} monitored products`}
+          aria-label={`View ${counts.watchlist} monitored products`}
         >
           <div className="flex items-center justify-between text-zinc-400 dark:text-zinc-400 light:text-zinc-500 text-xs mb-1.5">
             <span className="group-hover:text-zinc-200 transition">Products</span>
             <Server className="w-3.5 h-3.5 text-zinc-400 group-hover:text-zinc-200 transition" />
           </div>
           <div className="text-2xl font-bold text-zinc-100 dark:text-zinc-100 light:text-zinc-900 font-mono flex items-center justify-between">
-            <span>{watchlist.length}</span>
+            <span>{counts.watchlist}</span>
             <ChevronRight className="w-4 h-4 text-zinc-600 group-hover:text-zinc-300 group-hover:translate-x-0.5 transition" />
           </div>
           <div className="text-[11px] text-zinc-500 mt-1 font-medium">{totalCpesCount} Strict CPEs</div>
@@ -287,7 +287,7 @@ export const DashboardView: React.FC = () => {
                 type="button"
                 onClick={() => setActiveTab('watchlist')}
                 className="w-full cursor-pointer p-3 rounded-xl bg-zinc-950/60 dark:bg-zinc-950/60 light:bg-zinc-50 border border-zinc-800/80 dark:border-zinc-800/80 light:border-zinc-200 hover:border-zinc-700 transition text-left"
-                aria-label={`Open product inventory: ${watchlist.length} assets`}
+                aria-label={`Open product inventory: ${counts.watchlist} assets`}
               >
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-zinc-300 dark:text-zinc-300 light:text-zinc-700 font-medium flex items-center gap-2">
@@ -295,7 +295,7 @@ export const DashboardView: React.FC = () => {
                     <span>Protected Product Assets</span>
                   </span>
                   <span className="font-mono text-zinc-100 dark:text-zinc-100 light:text-zinc-900 font-bold text-sm">
-                    {watchlist.length} Assets
+                    {counts.watchlist} Assets
                   </span>
                 </div>
                 <div className="text-[11px] text-zinc-500 light:text-zinc-600 mt-1 pl-6">
