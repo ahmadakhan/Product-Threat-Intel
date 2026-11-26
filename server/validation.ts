@@ -543,12 +543,26 @@ export const settingsSchema = z
     emailRetryMaxDelayMinutes: z.number().int().min(1).max(10080).default(60),
     // Egress policy is configuration, not a setting: redirect handling and IP
     // blocking live in the network client so the UI cannot weaken them.
-    securityPolicy: z.object({
-      sessionTimeoutMins: z.number().int().min(5).max(60).default(30),
-      minPasswordLen: z.number().int().min(14).max(128).default(14),
-      maxLoginAttempts: z.number().int().min(1).max(20).default(5),
-      lockoutMins: z.number().int().min(1).max(60).default(15),
-    }),
+    //
+    // Each field defaults, and the object itself defaults, so a legacy row that
+    // predates `securityPolicy` (or omits one field) parses cleanly instead of
+    // failing the whole settings save. `autoAliasTtlDays` is part of the type and
+    // read by the alias lifecycle; without it here zod stripped it on every save.
+    securityPolicy: z
+      .object({
+        sessionTimeoutMins: z.number().int().min(5).max(60).default(30),
+        minPasswordLen: z.number().int().min(14).max(128).default(14),
+        maxLoginAttempts: z.number().int().min(1).max(20).default(5),
+        lockoutMins: z.number().int().min(1).max(60).default(15),
+        autoAliasTtlDays: z.number().int().min(1).max(365).default(30),
+      })
+      .default({
+        sessionTimeoutMins: 30,
+        minPasswordLen: 14,
+        maxLoginAttempts: 5,
+        lockoutMins: 15,
+        autoAliasTtlDays: 30,
+      }),
     // Defaults to 'standard' so an older client that omits the field cannot
     // silently switch an installation into high-volume forensic logging.
     logVerbosity: z.enum(['standard', 'verbose']).default('standard'),

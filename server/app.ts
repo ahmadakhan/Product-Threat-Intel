@@ -34,6 +34,7 @@ import {
   accountEmail,
   createUser,
   deleteUser,
+  effectiveSecurityPolicy,
   sessionCookieOptions,
   updateUser,
 } from './auth';
@@ -907,7 +908,7 @@ export function createApp(
         })
         .parse(req.body);
       const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
-      if (newPassword.length < settings.securityPolicy.minPasswordLen)
+      if (newPassword.length < effectiveSecurityPolicy(settings).minPasswordLen)
         throw new HttpError(400, 'Password does not meet configured minimum');
       const codeHash = tokenHash(code);
       // Reject bad codes before admitting expensive password work. Consumption
@@ -1559,7 +1560,7 @@ export function createApp(
       const row = (
         await pool.query(
           "UPDATE sessions SET expires_at=LEAST(now()+($2::int * interval '1 minute'),absolute_expires_at),csrf=$3 WHERE token_hash=$1 RETURNING expires_at",
-          [req.operator!.sessionHash, settings.securityPolicy.sessionTimeoutMins, csrf],
+          [req.operator!.sessionHash, effectiveSecurityPolicy(settings).sessionTimeoutMins, csrf],
         )
       ).rows[0];
       // A session can be invalidated between requireAuth and this handler
@@ -1599,7 +1600,7 @@ export function createApp(
       if (!(await checkPassword(data.currentPassword, user.password_hash)))
         throw new HttpError(400, 'Current password is incorrect');
       const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
-      if (data.newPassword.length < settings.securityPolicy.minPasswordLen)
+      if (data.newPassword.length < effectiveSecurityPolicy(settings).minPasswordLen)
         throw new HttpError(400, 'Password does not meet configured minimum length');
       const hash = await passwordHash(data.newPassword);
       await transaction(pool, async (db) => {
@@ -1700,7 +1701,7 @@ export function createApp(
       const userId = z.uuid().safeParse(req.params.id);
       if (!userId.success) throw invalidId();
       const settings = (await get<AppSettings>(pool, 'settings', 'main')) || DEFAULT_SETTINGS;
-      if (data.password.length < settings.securityPolicy.minPasswordLen)
+      if (data.password.length < effectiveSecurityPolicy(settings).minPasswordLen)
         throw new HttpError(400, 'Password does not meet configured minimum');
       const hash = await passwordHash(data.password);
       await transaction(pool, async (db) => {

@@ -152,3 +152,46 @@ test('matchConfidence settings default and survive a shallow partial patch', () 
     false,
   );
 });
+
+test('securityPolicy round-trips autoAliasTtlDays and defaults a missing policy', () => {
+  // `autoAliasTtlDays` is part of AppSettings and read by the alias lifecycle.
+  // It was absent from the schema, so zod stripped it on every save: a configured
+  // non-default TTL was silently reset to the default.
+  const preserved = settingsSchema.parse({
+    ...DEFAULT_SETTINGS,
+    securityPolicy: { ...DEFAULT_SETTINGS.securityPolicy, autoAliasTtlDays: 7 },
+  });
+  assert.equal(preserved.securityPolicy.autoAliasTtlDays, 7);
+
+  // A legacy row that predates `securityPolicy` parses to the shipped defaults
+  // instead of failing the whole settings save.
+  const legacy = settingsSchema.parse({ ...DEFAULT_SETTINGS, securityPolicy: undefined });
+  assert.deepEqual(legacy.securityPolicy, {
+    sessionTimeoutMins: 30,
+    minPasswordLen: 14,
+    maxLoginAttempts: 5,
+    lockoutMins: 15,
+    autoAliasTtlDays: 30,
+  });
+
+  // A partial policy keeps the supplied field and defaults the rest.
+  const partial = settingsSchema.parse({ ...DEFAULT_SETTINGS, securityPolicy: { minPasswordLen: 20 } });
+  assert.equal(partial.securityPolicy.minPasswordLen, 20);
+  assert.equal(partial.securityPolicy.sessionTimeoutMins, 30);
+
+  // The alias TTL is bounded like the other day-valued settings.
+  assert.equal(
+    settingsSchema.safeParse({
+      ...DEFAULT_SETTINGS,
+      securityPolicy: { ...DEFAULT_SETTINGS.securityPolicy, autoAliasTtlDays: 0 },
+    }).success,
+    false,
+  );
+  assert.equal(
+    settingsSchema.safeParse({
+      ...DEFAULT_SETTINGS,
+      securityPolicy: { ...DEFAULT_SETTINGS.securityPolicy, autoAliasTtlDays: 400 },
+    }).success,
+    false,
+  );
+});
