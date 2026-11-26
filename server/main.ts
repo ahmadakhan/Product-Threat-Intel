@@ -27,7 +27,6 @@ import { createMailSender, deliverNext } from './delivery';
 import { releaseExpiredClaims } from './deliveryClaims';
 import { flushDueDigest } from './digest';
 import { runDailyDigest } from './dailyDigest';
-import { closePdfRenderer } from './pdf';
 import { initMlRuntime } from './ml/integration.ts';
 import { encryptionKeys } from './secrets';
 import { runScheduledTraining, TrainingAlreadyRunningError } from './ml/train/cron.ts';
@@ -1193,7 +1192,6 @@ async function shutdown() {
     }
   }
   await correlation.stop();
-  await closePdfRenderer();
   await leadership.close();
   await pool.end();
   clearTimeout(deadline);

@@ -1,7 +1,7 @@
 import { build } from 'esbuild';
 import { cp, mkdir } from 'node:fs/promises';
 await build({
-  entryPoints: ['server/main.ts', 'server/create-user.ts', 'server/migrate.ts'],
+  entryPoints: ['server/main.ts', 'server/main-api.ts', 'server/main-worker.ts', 'server/create-user.ts', 'server/migrate.ts'],
   outdir: 'server-dist',
   bundle: true,
   packages: 'external',

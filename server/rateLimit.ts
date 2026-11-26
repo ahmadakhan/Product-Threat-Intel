@@ -91,6 +91,13 @@ const DEGRADED_RETRY_HINT_MS = 1_000;
  * which can grant one extra burst and never denies a legitimate caller.
  */
 export const MAX_FALLBACK_BUCKETS = 10_000;
+/**
+ * Upper bound on cached denied decisions. Denials never consume tokens, so
+ * caching them is safe: serving a cached denial cannot exceed the quota. The
+ * TTL bounds how long a client can be short-circuited before a DB re-check.
+ */
+export const DENIED_CACHE_TTL_MS = 1_000;
+export const MAX_DENIED_CACHE_ENTRIES = 10_000;
 
 /**
  * Database-backed limiter shared by every application replica.
@@ -116,7 +123,26 @@ export function createDatabaseRateLimiter(
   // does not lift the quota entirely; the limits are per replica until the
   // database recovers (see RateLimitDegradedMode).
   const fallbackBuckets = new Map<string, TokenBucket>();
+  // Cache of denied decisions keyed by operator id. A denial never consumes a
+  // token, so serving it from cache cannot exceed the quota. The entry stores
+  // the time until which the denial should be served without re-querying the
+  // database. This collapses burst retries from a throttled client into a single
+  // DB decision.
+  const deniedCache = new Map<string, { allowed: false; retryAfterMs: number; expiresAt: number }>();
+  const evictDenied = () => {
+    if (deniedCache.size <= MAX_DENIED_CACHE_ENTRIES) return;
+    const oldest = deniedCache.keys().next().value;
+    if (oldest !== undefined) deniedCache.delete(oldest);
+  };
   return async (key) => {
+    const now = Date.now();
+    // Serve a cached denial without touching the database. A denial consumes no
+    // token, so this cannot cause over-delivery of the quota. Once the TTL
+    // elapses, fall through to the database for an authoritative re-check.
+    const cached = deniedCache.get(key);
+    if (cached && now < cached.expiresAt)
+      return { allowed: false, retryAfterMs: cached.retryAfterMs };
+    if (cached && now >= cached.expiresAt) deniedCache.delete(key);
     try {
       const result = await pool.query<{ allowed: boolean; retry_after_ms: number }>(
         'SELECT allowed, retry_after_ms FROM consume_rate_limit_token($1, $2, $3)',
@@ -124,7 +150,20 @@ export function createDatabaseRateLimiter(
       );
       const row = result.rows[0];
       if (!row) throw new Error('Rate limiter returned no decision');
-      return { allowed: row.allowed, retryAfterMs: Number(row.retry_after_ms) };
+      const allowed = row.allowed;
+      const retryAfterMs = Number(row.retry_after_ms);
+      // Cache denials so repeated retries from a throttled client are answered
+      // from memory. Allowed decisions are never cached: the token must be
+      // consumed atomically in the database on every request.
+      if (!allowed) {
+        deniedCache.set(key, {
+          allowed: false,
+          retryAfterMs,
+          expiresAt: now + Math.max(1, Math.min(retryAfterMs, DENIED_CACHE_TTL_MS)),
+        });
+        evictDenied();
+      }
+      return { allowed, retryAfterMs };
     } catch (error) {
       // Database unreachable: the installation-wide quota cannot be enforced. The
       // chosen posture decides what replaces it, and either way the change is

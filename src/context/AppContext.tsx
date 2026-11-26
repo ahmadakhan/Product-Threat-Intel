@@ -46,6 +46,12 @@ import {
 
 const SESSION_RENEW_THRESHOLD_SEC = 60;
 /**
+ * Adaptive polling intervals (ms). When the server's ETag is unchanged the
+ * interval steps up, reducing redundant HTTP requests. When state changes the
+ * interval resets to the first entry so fresh data arrives promptly.
+ */
+const POLL_INTERVALS_MS = [30_000, 60_000, 120_000, 300_000, 600_000];
+/**
  * Resolve which document a Template Studio shows.
  *
  * Precedence, highest first:
@@ -109,6 +115,12 @@ function useApplication() {
   const sessionRenewingRef = useRef(false);
   // Monotonic id so an older snapshot response can never overwrite a newer one.
   const refreshId = useRef(0);
+  const lastStateEtag = useRef<string | null>(null);
+  // Index into POLL_INTERVALS_MS; steps up on unchanged ETag, resets on change.
+  const pollIntervalIndex = useRef(0);
+  // BroadcastChannel coordinates cross-tab polling so only one tab hits /api/state.
+  const broadcastChannelRef = useRef<BroadcastChannel | null>(null);
+  const isPollingTabRef = useRef(false);
   const [activeExecutionId, setActiveExecutionId] = useState<string | null>(
     () =>
       snapshot.executions.find((e) => ['RUNNING', 'QUEUED'].includes(e.status))?.id ??
@@ -116,21 +128,35 @@ function useApplication() {
       null,
   );
   const inFlightMutations = new Set<string>();
+  // Concurrent GETs to the same URL (e.g. rapid tab visibility changes
+  // re-triggering /api/state polls) share one in-flight promise instead of
+  // issuing duplicate requests.
+  const inFlightReads = new Map<string, Promise<unknown>>();
   const request = useCallback(
     async <T,>(url: string, body?: unknown, method = body === undefined ? 'GET' : 'POST'): Promise<T> => {
-      // Debounce repeated mutations to the same endpoint to prevent rapid-fire
-      // requests (e.g. double-clicking a button, accidental re-submission).
-      if (method !== 'GET') {
-        const key = `${method}:${url}`;
-        if (inFlightMutations.has(key)) throw new Error('Request already in progress');
-        inFlightMutations.add(key);
+      const key = `${method}:${url}`;
+      // Dedupe idempotent GETs: return the in-flight promise so concurrent
+      // callers receive the same response without a second network round-trip.
+      if (method === 'GET') {
+        const inFlight = inFlightReads.get(key);
+        if (inFlight) return inFlight as Promise<T>;
+        const promise = executeRequest<T>(url, body, method, undefined).then((result) => result.data);
+        inFlightReads.set(key, promise);
         try {
-          return await executeRequest(url, body, method, undefined);
+          return await promise;
         } finally {
-          inFlightMutations.delete(key);
+          inFlightReads.delete(key);
         }
       }
-      return executeRequest(url, body, method, undefined);
+      // Debounce repeated mutations to the same endpoint to prevent rapid-fire
+      // requests (e.g. double-clicking a button, accidental re-submission).
+      if (inFlightMutations.has(key)) throw new Error('Request already in progress');
+      inFlightMutations.add(key);
+      try {
+        return (await executeRequest<T>(url, body, method, undefined)).data;
+      } finally {
+        inFlightMutations.delete(key);
+      }
     },
     [],
   );
@@ -141,7 +167,7 @@ function useApplication() {
     body: unknown,
     method: string,
     signal: AbortSignal | undefined,
-  ): Promise<T> {
+  ): Promise<{ data: T; etag: string | null }> {
     let response: Response;
     for (let attempt = 0; ; attempt++) {
       response = await fetch(`/api${url}`, {
@@ -158,9 +184,10 @@ function useApplication() {
       if (method !== 'GET' || ![502, 503, 504].includes(response.status) || attempt >= 2) break;
       await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
     }
-    const data = await response
+    const raw: { error?: string; details?: unknown } = await response
       .json()
       .catch(() => ({ error: `Server returned an empty or non-JSON response (HTTP ${response.status})` }));
+    const data = raw as T;
     if (!response.ok) {
       if (response.status === 401) {
         setSessionExpired(true);
@@ -168,12 +195,12 @@ function useApplication() {
         setSnapshot(emptyState());
       }
       throw new Error(
-        data.error === 'Validation failed'
-          ? `${data.error}: ${Array.isArray(data.details) ? (data.details as any[]).map((d: any) => d.path.join('.') + ': ' + d.message).join('; ') : data.details || ''}`
-          : data.error || 'Request failed',
+        raw.error === 'Validation failed'
+          ? `${raw.error}: ${Array.isArray(raw.details) ? (raw.details as any[]).map((d: any) => d.path.join('.') + ': ' + d.message).join('; ') : raw.details || ''}`
+          : raw.error || 'Request failed',
       );
     }
-    return data;
+    return { data, etag: response.headers.get('etag') ?? null };
   }
 
   /**
@@ -228,16 +255,43 @@ function useApplication() {
   const refresh = useCallback(async () => {
     const id = ++refreshId.current;
     let next: AppState;
+    let etag: string | null = null;
     try {
-      next = await request<AppState>('/state');
+      const result = await executeRequest<AppState>('/state', undefined, 'GET', undefined);
+      next = result.data;
+      etag = result.etag;
+      // Skip state update when the server's ETag is unchanged: the client
+      // already has the current snapshot, so re-rendering is wasted work.
+      if (lastStateEtag.current !== null && lastStateEtag.current === etag) {
+        // State is stable: back off the polling interval to reduce redundant
+        // HTTP requests. Cap at the slowest interval.
+        pollIntervalIndex.current = Math.min(
+          pollIntervalIndex.current + 1,
+          POLL_INTERVALS_MS.length - 1,
+        );
+        // Announce the stable ETag to other tabs so they can skip their polls.
+        if (broadcastChannelRef.current && isPollingTabRef.current) {
+          broadcastChannelRef.current.postMessage({
+            type: 'STATE_ETAG',
+            etag: lastStateEtag.current ?? '',
+          });
+        }
+        return;
+      }
+      lastStateEtag.current = etag;
+      // State changed: reset to fast polling so updates arrive promptly.
+      pollIntervalIndex.current = 0;
+      // Announce the new ETag to other tabs.
+      if (broadcastChannelRef.current && isPollingTabRef.current) {
+        broadcastChannelRef.current.postMessage({
+          type: 'STATE_ETAG',
+          etag: etag ?? '',
+        });
+      }
     } catch (error) {
-      // A stale request that failed after a newer refresh succeeded must not
-      // surface an error banner for state that is already current.
       if (refreshId.current !== id) return;
       throw error;
     }
-    // Concurrent polls and post-mutation refreshes can resolve out of order.
-    // Apply only the newest request so a slow response cannot roll state back.
     if (refreshId.current !== id) return;
     setSnapshot(next);
     // Signals bounded collection views to refetch their current page after a
@@ -341,20 +395,63 @@ function useApplication() {
   useEffect(() => {
     if (!session) return;
     let active = true;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    // BroadcastChannel coordinates cross-tab polling: only one tab hits
+    // /api/state, others listen for ETag announcements and skip their polls.
+    if (typeof BroadcastChannel !== 'undefined' && !broadcastChannelRef.current) {
+      try {
+        broadcastChannelRef.current = new BroadcastChannel('vulnstream-state-poll');
+        broadcastChannelRef.current.onmessage = (event: MessageEvent) => {
+          if (!active) return;
+          const { type, etag } = event.data ?? {};
+          if (type === 'STATE_ETAG' && typeof etag === 'string' && etag) {
+            // Adopt the announcing tab's ETag and reset to fast polling so this
+            // tab's next refresh picks up any state change promptly.
+            lastStateEtag.current = etag;
+            pollIntervalIndex.current = 0;
+          }
+        };
+      } catch {
+        // BroadcastChannel may be unavailable or blocked in some environments;
+        // fall back to single-tab adaptive polling.
+        broadcastChannelRef.current = null;
+      }
+    }
+
+    // Elect the first initialised tab as the polling tab; other tabs skip their
+    // interval polls and wait for ETag announcements from the leader.
+    if (!isPollingTabRef.current) {
+      isPollingTabRef.current = broadcastChannelRef.current === null;
+    }
+
     const poll = () => {
-      // Idle background tabs do not need the full snapshot every ten seconds.
-      // Refresh immediately when the tab becomes visible again.
-      if (active && document.visibilityState !== 'hidden') void refresh().catch((e) => setError(e.message));
+      if (!active || document.visibilityState === 'hidden') return;
+      // Non-leader tabs defer to the polling tab's BroadcastChannel announcements.
+      if (broadcastChannelRef.current && !isPollingTabRef.current) return;
+      void refresh().catch((e) => setError(e.message));
     };
-    const timer = setInterval(poll, 10000);
+
+    const schedulePoll = () => {
+      if (timer) clearInterval(timer);
+      timer = setInterval(poll, POLL_INTERVALS_MS[pollIntervalIndex.current]);
+    };
+    schedulePoll();
+
     const onVisibility = () => {
       if (document.visibilityState === 'visible') poll();
     };
     document.addEventListener('visibilitychange', onVisibility);
+
     return () => {
       active = false;
-      clearInterval(timer);
+      if (timer) clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisibility);
+      try {
+        broadcastChannelRef.current?.close();
+      } catch {}
+      broadcastChannelRef.current = null;
+      isPollingTabRef.current = false;
     };
   }, [!!session, refresh]);
   useEffect(() => {
@@ -824,6 +921,13 @@ function useApplication() {
     triggerPipelineRun: async (scopeHours?: number, incrementalFeeds = true) =>
       (await call<PipelineExecution>('/pipeline', { scopeHours, incrementalFeeds })) || null,
     templateCustomization: customization,
+    // The last persisted customization (snapshot). `templateCustomization`
+    // above is the live draft (or the saved value when no draft exists); this
+    // is the baseline the studio compares against to tell "changed" from
+    // "already saved" for the Save & Apply button.
+    savedTemplateCustomization: snapshot.templateCustomization,
+    savedDailyDigestCustomization: snapshot.dailyDigestCustomization,
+    savedNewsDigestCustomization: snapshot.newsDigestCustomization,
     customAdvisoryTemplate: snapshot.customAdvisoryTemplate,
     advisoryTemplate: snapshot.customAdvisoryTemplate || snapshot.advisoryTemplate,
     updateTemplateCustomization: (update: Partial<TemplateCustomization>) =>

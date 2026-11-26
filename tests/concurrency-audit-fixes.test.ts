@@ -117,6 +117,49 @@ test('poolFeedBound leaves the configured reserve for checkpoints and API work',
   assert.equal(poolFeedBound({ POOL_MAX_CONNECTIONS: 4, POOL_RESERVED_CONNECTIONS: 9 }), 1);
 });
 
+test('poolFeedBound subtracts the API reserve from feed concurrency', () => {
+  assert.equal(
+    poolFeedBound({ POOL_MAX_CONNECTIONS: 25, POOL_RESERVED_CONNECTIONS: 4, POOL_API_RESERVED_CONNECTIONS: 4 }),
+    17,
+  );
+  // With no API reserve, behavior matches the pre-existing default.
+  assert.equal(
+    poolFeedBound({ POOL_MAX_CONNECTIONS: 25, POOL_RESERVED_CONNECTIONS: 4 }),
+    21,
+  );
+  // A combined reserve can never disable ingestion outright.
+  assert.equal(
+    poolFeedBound({ POOL_MAX_CONNECTIONS: 4, POOL_RESERVED_CONNECTIONS: 2, POOL_API_RESERVED_CONNECTIONS: 2 }),
+    1,
+  );
+});
+
+test('loadConfig rejects a combined reserve that consumes the whole pool', () => {
+  assert.throws(
+    () =>
+      loadConfig(
+        baseConfigEnv({
+          POOL_MAX_CONNECTIONS: '8',
+          POOL_RESERVED_CONNECTIONS: '4',
+          POOL_API_RESERVED_CONNECTIONS: '4',
+        }),
+      ),
+    /POOL_RESERVED_CONNECTIONS \+ POOL_API_RESERVED_CONNECTIONS must be less than POOL_MAX_CONNECTIONS/,
+  );
+});
+
+test('loadConfig accepts a combined reserve that leaves at least one slot', () => {
+  const config = loadConfig(
+    baseConfigEnv({
+      POOL_MAX_CONNECTIONS: '10',
+      POOL_RESERVED_CONNECTIONS: '4',
+      POOL_API_RESERVED_CONNECTIONS: '4',
+    }),
+  );
+  assert.equal(config.POOL_API_RESERVED_CONNECTIONS, 4);
+  assert.equal(poolFeedBound(config), 2);
+});
+
 test('boundedEnvInt never returns NaN or a zero interval for a bad override', () => {
   // `Number('abc')` is NaN, which `setInterval` treats as ~0ms (a busy loop).
   assert.equal(boundedEnvInt('abc', 5000, 250, 3_600_000), 5000);
@@ -134,7 +177,7 @@ test('boundedEnvInt never returns NaN or a zero interval for a bad override', ()
 test('loadConfig rejects a reserve that consumes the whole pool', () => {
   assert.throws(
     () => loadConfig(baseConfigEnv({ POOL_MAX_CONNECTIONS: '8', POOL_RESERVED_CONNECTIONS: '8' })),
-    /POOL_RESERVED_CONNECTIONS must be less than POOL_MAX_CONNECTIONS/,
+    /POOL_RESERVED_CONNECTIONS.*must be less than POOL_MAX_CONNECTIONS/,
   );
 });
 

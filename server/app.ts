@@ -837,7 +837,7 @@ export function createApp(
       });
       if (configured && config.NODE_ENV !== 'test') {
         await createMailSender(
-          { ...config, ATTACH_ADVISORY_PDF: 'false' },
+          config,
           pool,
           request,
         )({
@@ -1744,9 +1744,17 @@ export function createApp(
     '/api/state',
     requireAuth(pool, config),
     requireRole('ADMIN', 'OPERATOR', 'VIEWER'),
-    asyncRoute(async (_req, res) =>
-      res.json(publicState(await state(pool, { limits: STATE_COLLECTION_LIMITS }))),
-    ),
+    asyncRoute(async (_req, res) => {
+      const state_ = await state(pool, { limits: STATE_COLLECTION_LIMITS });
+      const public_ = publicState(state_);
+      const etag = createHash('sha256').update(stableJson(public_)).digest('hex').slice(0, 32);
+      res.setHeader('ETag', `"${etag}"`);
+      if (_req.headers['if-none-match'] === etag) {
+        res.status(304).end();
+        return;
+      }
+      res.json(public_);
+    }),
   );
   app.get(
     '/api/collections/:kind',

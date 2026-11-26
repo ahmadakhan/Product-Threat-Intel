@@ -3,7 +3,6 @@ import { DEFAULT_ADVISORY_EMAIL_TEMPLATE } from '../src/utils/defaultAdvisoryEma
 import { confidenceIsLimited, renderAdvisory } from './advisoryRender.ts';
 import { advisoryEmail } from './advisoryEmail.ts';
 import { mlComposeAdvisoryEmail } from './ml/integration.ts';
-import { PDF_MAX_HTML_BYTES } from './pdf.ts';
 
 /**
  * Canonical delivery document builder.
@@ -26,12 +25,15 @@ import { PDF_MAX_HTML_BYTES } from './pdf.ts';
  */
 
 /**
- * Max rendered HTML size accepted by the PDF renderer.
+ * Max rendered HTML size accepted by the delivery gate.
  *
- * Imported from the renderer rather than duplicated so the delivery gate and the
- * renderer can never disagree about what is attachable.
+ * This is a hard ceiling on the HTML document size that can be attached to an
+ * email. Chromium PDF rendering has been removed from the delivery path, so
+ * this limit exists purely to keep attachments within provider message-size
+ * caps (commonly 15-25 MB). The limit is shared with `deliveryHtmlIsAttachable`
+ * so the delivery gate and the attachment builder can never disagree.
  */
-export const DELIVERY_HTML_MAX_BYTES = PDF_MAX_HTML_BYTES;
+export const DELIVERY_HTML_MAX_BYTES = 2_000_000;
 
 /**
  * Size ceiling for attaching the HTML document itself.
@@ -137,6 +139,13 @@ export interface SavedTemplateRecord {
   templateCustomization?: TemplateCustomization;
   /** A hand-authored advisory template that replaces the generated layout. */
   customAdvisoryTemplate?: string | null;
+  /**
+   * The stored, fully-compiled advisory template. `template.save` writes this as
+   * either the operator's hand-authored body or the professional default
+   * compiled from the saved customization, so a colour/typography-only save is
+   * reflected in the delivered email.
+   */
+  advisoryTemplate?: string | null;
 }
 
 /**
@@ -148,8 +157,16 @@ export interface SavedTemplateRecord {
  * records remain readable but no longer replace the canonical default HTML. The
  * consolidated finding path previously rendered from the built-in default, which
  * made real emails differ from the preview in layout, colours and branding.
+ *
+ * `advisoryTemplate` is the stored, compilation-aware document that
+ * `template.save` writes (custom body or professional default compiled from the
+ * saved customization). It is preferred so the delivered email and its HTML
+ * attachment are byte-identical to the Studio preview, and only falls back to the
+ * raw custom body / stock markup for legacy records predating that field.
  */
 export function resolveAdvisoryTemplate(record?: SavedTemplateRecord | null): string {
+  const stored = record?.advisoryTemplate;
+  if (typeof stored === 'string' && stored.trim()) return stored;
   const custom = record?.customAdvisoryTemplate;
   if (typeof custom === 'string' && custom.trim()) return custom;
   return DEFAULT_ADVISORY_EMAIL_TEMPLATE;

@@ -4,9 +4,10 @@ import assert from 'node:assert/strict';
 
 /**
  * Host capacity and topology are deployment contracts, not preferences: an
- * unlimited db/proxy can consume the host, a second app instance duplicates
- * background work, and a bundled Prometheus is deliberately not shipped.
- * Keep these assertions mechanical so a later edit cannot quietly undo them.
+ * unlimited db/proxy can consume the host, the API and worker services must
+ * declare explicit limits so neither can starve the host, and a bundled
+ * Prometheus is deliberately not shipped. Keep these assertions mechanical so
+ * a later edit cannot quietly undo them.
  */
 const compose = readFileSync(new URL('../compose.yaml', import.meta.url), 'utf8');
 
@@ -19,21 +20,29 @@ function serviceBlock(name: string): string {
   return next === -1 ? rest : rest.slice(0, next);
 }
 
-test('the app runs as a single instance with explicit 2 CPU / 2 GiB limits', () => {
-  assert.match(compose, /^\s{6}replicas: 1$/m);
-  assert.doesNotMatch(compose, /^\s{6}replicas: [2-9]\d*$/m);
+test('the API service runs with explicit CPU and memory limits', () => {
   const app = serviceBlock('app');
-  assert.match(app, /cpus: '2'/);
-  assert.match(app, /memory: 2G/);
+  assert.match(app, /replicas:/);
+  assert.match(app, /cpus: '1'/);
+  assert.match(app, /memory: 1G/);
   assert.match(app, /NODE_OPTIONS: --expose-gc --max-old-space-size=1536/);
+  assert.match(app, /WORKER_ENABLED:.*false/);
 });
 
-test('db and proxy have explicit CPU and memory limits', () => {
+test('the worker service runs with explicit CPU and memory limits', () => {
+  const worker = serviceBlock('worker');
+  assert.match(worker, /replicas: 1/);
+  assert.match(worker, /cpus: '2'/);
+  assert.match(worker, /memory: 2G/);
+  assert.match(worker, /WORKER_ENABLED:.*true/);
+  assert.match(worker, /POOL_API_RESERVED_CONNECTIONS: 0/);
+});
+
+test('db, proxy, migrate, app and worker have explicit CPU and memory limits', () => {
   // Every service that consumes host resources must declare limits: db, app,
-  // proxy, and the one-shot migrate job (it runs a full migration pass and
-  // should not be able to starve the host during an upgrade). Changing the set
-  // of services requires updating this list deliberately.
-  const limited = ['db', 'migrate', 'app', 'proxy'];
+  // worker, proxy, and the one-shot migrate job (it runs a full migration pass
+  // and should not be able to starve the host during an upgrade).
+  const limited = ['db', 'migrate', 'app', 'worker', 'proxy'];
   for (const name of limited) {
     const block = serviceBlock(name);
     assert.match(block, /resources:/, `${name} must declare resources`);

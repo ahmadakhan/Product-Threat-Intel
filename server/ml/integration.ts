@@ -36,6 +36,7 @@ import { extractFindingImportanceFeatures } from './models/findingImportanceRank
 import type { Db } from '../db.ts';
 import { writeEvent } from '../events.ts';
 import { composeAdvisoryEmail, predictAdvisoryComposition, orderFindingsByMlImportance, type EmailCompositionPrediction } from '../advisoryComposer.ts';
+import { stableJson } from '../../src/utils/deduplicator.ts';
 
 interface MlContext {
   runtime: MlRuntime | null;
@@ -45,6 +46,43 @@ interface MlContext {
 
 /** Module-level singleton — initialized once at server startup. */
 const ctx: MlContext = { runtime: null, storage: null, pool: null };
+
+/**
+ * TTL cache for ML predictions. The same raw score, confidence, or attempt
+ * number repeats across findings and pipeline runs, so caching avoids
+ * redundant model inference. Entries expire after ML_PREDICTION_CACHE_TTL_MS
+ * so a model update (retraining) is reflected within the TTL window.
+ */
+export const ML_PREDICTION_CACHE_TTL_MS = 30_000;
+export const ML_PREDICTION_CACHE_MAX_ENTRIES = 1_000;
+
+interface MlPredictionCacheEntry<T> {
+  value: T;
+  expiresAt: number;
+}
+
+const mlPredictionCache = new Map<string, MlPredictionCacheEntry<unknown>>();
+const evictMlCache = () => {
+  if (mlPredictionCache.size <= ML_PREDICTION_CACHE_MAX_ENTRIES) return;
+  const oldest = mlPredictionCache.keys().next().value;
+  if (oldest !== undefined) mlPredictionCache.delete(oldest);
+};
+
+/**
+ * Cached ML prediction wrapper. Returns the cached value if present and
+ * unexpired, otherwise computes, caches, and returns. A cache miss on an
+ * expired entry recomputes and replaces it, so retrained models take effect
+ * within one TTL window without a restart.
+ */
+function cachedMlPrediction<T>(key: string, compute: () => T): T {
+  const now = Date.now();
+  const entry = mlPredictionCache.get(key);
+  if (entry && now < entry.expiresAt) return entry.value as T;
+  const value = compute();
+  mlPredictionCache.set(key, { value, expiresAt: now + ML_PREDICTION_CACHE_TTL_MS });
+  evictMlCache();
+  return value;
+}
 
 /**
  * Initializes the ML runtime by loading artifacts from disk.
@@ -93,19 +131,21 @@ export function getMlRuntime(): MlRuntime | null {
  * untrained or uncertain cases — never blocks valid CPEs.
  */
 export function cpePreFilter(cpe: string): boolean {
-  const model = ctx.runtime?.cpeValidityGate;
-  if (!model?.isTrained()) return true;
-  const result = model.shouldParse(cpe);
-  // Only log actual skips. This function is called on every ingested CPE, and
-  // logging each successful evaluation would flood the operational event table.
-  if (!result) {
-    void logMlEvent('ml.cpe_pre_filter', 'CPE validity gate skipped malformed input', {
-      cpe,
-      result,
-      modelVersion: model.getMetadata().version,
-    });
-  }
-  return result;
+  return cachedMlPrediction(`cpe:${cpe}`, () => {
+    const model = ctx.runtime?.cpeValidityGate;
+    if (!model?.isTrained()) return true;
+    const result = model.shouldParse(cpe);
+    // Only log actual skips. This function is called on every ingested CPE, and
+    // logging each successful evaluation would flood the operational event table.
+    if (!result) {
+      void logMlEvent('ml.cpe_pre_filter', 'CPE validity gate skipped malformed input', {
+        cpe,
+        result,
+        modelVersion: model.getMetadata().version,
+      });
+    }
+    return result;
+  });
 }
 
 /**
@@ -119,26 +159,28 @@ export function calibrateCredibilityScore(rawScore: number): {
   probability: number;
   confidence: 'LOW' | 'MEDIUM' | 'HIGH';
 } {
-  const model = ctx.runtime?.confidenceCalibrator;
-  if (!model?.isTrained()) {
-    void logMlEvent('ml.credibility_calibration.fallback', 'Calibrator untrained — using raw score', {
+  return cachedMlPrediction(`calibrate:${rawScore}`, () => {
+    const model = ctx.runtime?.confidenceCalibrator;
+    if (!model?.isTrained()) {
+      void logMlEvent('ml.credibility_calibration.fallback', 'Calibrator untrained — using raw score', {
+        rawScore,
+      });
+      return { score: rawScore, probability: rawScore / 100, confidence: 'LOW' };
+    }
+    const result = model.predict({ credibility_score: rawScore });
+    void logMlEvent('ml.credibility_calibration', 'Credibility score calibrated', {
       rawScore,
+      calibratedScore: result.score,
+      probability: result.probability,
+      confidence: result.confidence,
+      modelVersion: model.getMetadata().version,
     });
-    return { score: rawScore, probability: rawScore / 100, confidence: 'LOW' };
-  }
-  const result = model.predict({ credibility_score: rawScore });
-  void logMlEvent('ml.credibility_calibration', 'Credibility score calibrated', {
-    rawScore,
-    calibratedScore: result.score,
-    probability: result.probability,
-    confidence: result.confidence,
-    modelVersion: model.getMetadata().version,
+    return {
+      score: result.score,
+      probability: result.probability ?? result.score / 100,
+      confidence: result.confidence,
+    };
   });
-  return {
-    score: result.score,
-    probability: result.probability ?? result.score / 100,
-    confidence: result.confidence,
-  };
 }
 
 /**
@@ -150,14 +192,16 @@ export function calibrateCredibilityScore(rawScore: number): {
  * the static policy.
  */
 export function shouldAutoDispatch(confidence: number, settings?: AppSettings): boolean {
-  // A trained auto-dispatch-threshold model is authoritative when available.
-  const model = ctx.runtime?.autoDispatchThreshold;
-  if (model?.isTrained?.()) {
-    return model.shouldDispatch(confidence);
-  }
-  // Fall back to operator-configured threshold (0-100), then to the default 90%.
   const threshold = settings?.mlAutoDispatchThreshold ?? 90;
-  return confidence >= threshold;
+  return cachedMlPrediction(`autodispatch:${confidence}:${threshold}`, () => {
+    // A trained auto-dispatch-threshold model is authoritative when available.
+    const model = ctx.runtime?.autoDispatchThreshold;
+    if (model?.isTrained?.()) {
+      return model.shouldDispatch(confidence);
+    }
+    // Fall back to operator-configured threshold (0-100), then to the default 90%.
+    return confidence >= threshold;
+  });
 }
 
 /** Whether a named model is loaded *and* trained. Used to gate opt-in routing. */
@@ -212,10 +256,12 @@ export function rankReviewFindings(
 export function isTelemetryAnomaly(
   metrics: TelemetryMetric,
 ): boolean {
-  const model = ctx.runtime?.metricAnomalyDetector;
-  if (!model?.isTrained()) return false;
-  const features = extractMetricFeatures(metrics);
-  return model.isAnomaly(features);
+  return cachedMlPrediction(`telemetryAnomaly:${stableJson(metrics)}`, () => {
+    const model = ctx.runtime?.metricAnomalyDetector;
+    if (!model?.isTrained()) return false;
+    const features = extractMetricFeatures(metrics);
+    return model.isAnomaly(features);
+  });
 }
 
 /**
@@ -255,22 +301,24 @@ export const ML_TELEMETRY_SAMPLE_INTERVAL_MS = 60_000;
  * Falls back to the default exponential backoff when untrained.
  */
 export function computeRetryDelay(attempt: number): number {
-  const model = ctx.runtime?.deliveryOptimizer;
-  if (!model?.isTrained()) {
-    const fallbackDelay = Math.min(1440 * 60_000, 5 * 60_000 * 2 ** Math.max(0, attempt - 1));
-    void logMlEvent('ml.delivery_retry.fallback', 'Delivery optimizer untrained — using exponential backoff', {
+  return cachedMlPrediction(`retry:${attempt}`, () => {
+    const model = ctx.runtime?.deliveryOptimizer;
+    if (!model?.isTrained()) {
+      const fallbackDelay = Math.min(1440 * 60_000, 5 * 60_000 * 2 ** Math.max(0, attempt - 1));
+      void logMlEvent('ml.delivery_retry.fallback', 'Delivery optimizer untrained — using exponential backoff', {
+        attempt,
+        delayMs: fallbackDelay,
+      });
+      return fallbackDelay;
+    }
+    const result = model.computeDelay(attempt);
+    void logMlEvent('ml.delivery_retry', 'Retry delay computed (ML)', {
       attempt,
-      delayMs: fallbackDelay,
+      delayMs: result,
+      modelVersion: model.getMetadata().version,
     });
-    return fallbackDelay;
-  }
-  const result = model.computeDelay(attempt);
-  void logMlEvent('ml.delivery_retry', 'Retry delay computed (ML)', {
-    attempt,
-    delayMs: result,
-    modelVersion: model.getMetadata().version,
+    return result;
   });
-  return result;
 }
 
 /**
@@ -282,21 +330,23 @@ export function predictRemediation(
   features: RemediationFeatures,
   actualPlaybook?: Partial<RemediationPlaybook>,
 ): RemediationPrediction {
-  const model = ctx.runtime?.remediationHelper;
-  if (!model?.isTrained()) {
-    return {
-      patchUrl: 0.2,
-      vendorAdvisory: features.cisaKev ? 0.8 : 0.3,
-      immediateActions: features.exploitStatus > 2 ? 0.7 : 0.3,
-      workarounds: features.epssScore > 0.5 ? 0.4 : 0.6,
-      rollbackPlan: features.cvssScore > 8 ? 0.6 : features.cvssScore > 4 ? 0.4 : 0.2,
-      stepByStep: features.hasVersionEvidence ? 0.7 : 0.4,
-      overall: 0.5,
-      recommendation: 'partial',
-      generatedContent: actualPlaybook ?? {},
-    };
-  }
-   return model.predictRemediation(features, actualPlaybook);
+  return cachedMlPrediction(`remediation:${stableJson(features)}`, () => {
+    const model = ctx.runtime?.remediationHelper;
+    if (!model?.isTrained()) {
+      return {
+        patchUrl: 0.2,
+        vendorAdvisory: features.cisaKev ? 0.8 : 0.3,
+        immediateActions: features.exploitStatus > 2 ? 0.7 : 0.3,
+        workarounds: features.epssScore > 0.5 ? 0.4 : 0.6,
+        rollbackPlan: features.cvssScore > 8 ? 0.6 : features.cvssScore > 4 ? 0.4 : 0.2,
+        stepByStep: features.hasVersionEvidence ? 0.7 : 0.4,
+        overall: 0.5,
+        recommendation: 'partial',
+        generatedContent: actualPlaybook ?? {},
+      };
+    }
+    return model.predictRemediation(features, actualPlaybook);
+  });
 }
 
 /**
@@ -312,12 +362,14 @@ export function predictExploitRisk(f: {
   exploitationSourcesCount: number;
   daysSincePublished: number;
 }): ExploitRiskLevel {
-  const model = ctx.runtime?.exploitRisk;
-  if (!model?.isTrained()) {
-    return fallbackExploitRisk(f);
-  }
-  const result = model.predict(extractExploitRiskFeatures(f));
-  return model.getRiskLevels()[result.score] ?? 'STANDARD';
+  return cachedMlPrediction(`exploitRisk:${stableJson(f)}`, () => {
+    const model = ctx.runtime?.exploitRisk;
+    if (!model?.isTrained()) {
+      return fallbackExploitRisk(f);
+    }
+    const result = model.predict(extractExploitRiskFeatures(f));
+    return model.getRiskLevels()[result.score] ?? 'STANDARD';
+  });
 }
 
 function fallbackExploitRisk(f: {
@@ -351,20 +403,22 @@ export function predictMatchConfidence(f: {
   daysSincePublished: number;
   negated: boolean;
 }): number {
-  const model = ctx.runtime?.matchConfidence;
-  if (!model?.isTrained()) {
-    return fallbackMatchConfidence(f);
-  }
-  return model.predictConfidence({
-    matchMethod: f.matchMethod,
-    hasVersionEvidence: f.hasVersionEvidence,
-    versionVerifiedInRange: f.hasVersionEvidence && f.matchMethod === 'STRICT_CPE_INTERVAL',
-    cvssScore: f.cvssScore,
-    epssScore: f.epssScore,
-    cisaKev: f.cisaKev,
-    sourceFeedWeight: f.sourceFeedWeight,
-    daysSincePublished: f.daysSincePublished,
-    negated: f.negated,
+  return cachedMlPrediction(`matchConfidence:${stableJson(f)}`, () => {
+    const model = ctx.runtime?.matchConfidence;
+    if (!model?.isTrained()) {
+      return fallbackMatchConfidence(f);
+    }
+    return model.predictConfidence({
+      matchMethod: f.matchMethod,
+      hasVersionEvidence: f.hasVersionEvidence,
+      versionVerifiedInRange: f.hasVersionEvidence && f.matchMethod === 'STRICT_CPE_INTERVAL',
+      cvssScore: f.cvssScore,
+      epssScore: f.epssScore,
+      cisaKev: f.cisaKev,
+      sourceFeedWeight: f.sourceFeedWeight,
+      daysSincePublished: f.daysSincePublished,
+      negated: f.negated,
+    });
   });
 }
 
@@ -409,7 +463,7 @@ export function rankFindingsByImportance(findings: Array<{
   if (!model?.isTrained()) {
     return findings.map((_, i) => 1 / (i + 1));
   }
-  return findings.map((f) => {
+  return findings.map((f) => cachedMlPrediction(`findingImportance:${stableJson(f)}`, () => {
     const feats = extractFindingImportanceFeatures({
       cvssScore: f.cvssScore,
       epssScore: f.epssScore,
@@ -424,7 +478,7 @@ export function rankFindingsByImportance(findings: Array<{
     });
     const result = model.predict(feats);
     return result.probability ?? result.score ?? 0;
-  });
+  }));
 }
 
 /**
@@ -441,11 +495,13 @@ export function predictCredibilityWeights(): { feedWeight: number; keywordWeight
 }
 
 export function computeCredibilityScore(feedWeight: number, keywordScore: number): number {
-  const model = ctx.runtime?.credibilityWeights;
-  if (!model?.isTrained()) {
-    return Math.round(feedWeight * DEFAULT_FEED_CREDIBILITY_WEIGHT + keywordScore * DEFAULT_KEYWORD_CREDIBILITY_WEIGHT);
-  }
-  return model.computeCredibility(feedWeight, keywordScore);
+  return cachedMlPrediction(`credibility:${feedWeight}:${keywordScore}`, () => {
+    const model = ctx.runtime?.credibilityWeights;
+    if (!model?.isTrained()) {
+      return Math.round(feedWeight * DEFAULT_FEED_CREDIBILITY_WEIGHT + keywordScore * DEFAULT_KEYWORD_CREDIBILITY_WEIGHT);
+    }
+    return model.computeCredibility(feedWeight, keywordScore);
+  });
 }
 
 /**
@@ -460,14 +516,16 @@ export function classifyDeliveryError(f: {
   attemptNumber: number;
   hourOfDay: number;
 }): { isPermanent: boolean; isTransient: boolean; reason: string } {
-  const model = ctx.runtime?.deliveryErrorClassifier;
-  if (!model?.isTrained()) {
-    const s = f.statusCode;
-    const isPermanent = s >= 400 && s < 500 && ![408, 429].includes(s);
-    return { isPermanent, isTransient: !isPermanent, reason: `hardcoded status code classification (HTTP ${s})` };
-  }
-  const isPermanent = model.isPermanentError(f);
-  return { isPermanent, isTransient: !isPermanent, reason: 'ML delivery error classifier' };
+  return cachedMlPrediction(`deliveryError:${stableJson(f)}`, () => {
+    const model = ctx.runtime?.deliveryErrorClassifier;
+    if (!model?.isTrained()) {
+      const s = f.statusCode;
+      const isPermanent = s >= 400 && s < 500 && ![408, 429].includes(s);
+      return { isPermanent, isTransient: !isPermanent, reason: `hardcoded status code classification (HTTP ${s})` };
+    }
+    const isPermanent = model.isPermanentError(f);
+    return { isPermanent, isTransient: !isPermanent, reason: 'ML delivery error classifier' };
+  });
 }
 
 /**
@@ -476,11 +534,13 @@ export function classifyDeliveryError(f: {
  * Falls back to 50 when untrained.
  */
 export function getZeroDayCap(): number {
-  const model = ctx.runtime?.zeroDayRateLimit;
-  if (!model?.isTrained()) {
-    return DEFAULT_MAX_ZERO_DAYS_PER_RUN;
-  }
-  return model.getCap();
+  return cachedMlPrediction('zeroDayCap', () => {
+    const model = ctx.runtime?.zeroDayRateLimit;
+    if (!model?.isTrained()) {
+      return DEFAULT_MAX_ZERO_DAYS_PER_RUN;
+    }
+    return model.getCap();
+  });
 }
 
 /**
@@ -500,11 +560,13 @@ export function shouldSelectForDigest(f: {
   findingInDigest: boolean;
   timeInDigestMinutes: number;
 }): number {
-  const model = ctx.runtime?.digestSelector;
-  if (!model?.isTrained()) {
-    return 1.0;
-  }
-  return model.selectForDigest(f);
+  return cachedMlPrediction(`digestSelector:${stableJson(f)}`, () => {
+    const model = ctx.runtime?.digestSelector;
+    if (!model?.isTrained()) {
+      return 1.0;
+    }
+    return model.selectForDigest(f);
+  });
 }
 
 /**
@@ -521,12 +583,14 @@ export function predictSeverityTier(f: {
   sourceFeedWeight: number;
   cvssSeverity: string;
 }): SeverityTier {
-  const model = ctx.runtime?.severityTier;
-  if (!model?.isTrained()) {
-    return fallbackSeverityTier(f);
-  }
-  const result = model.predict(extractSeverityTierFeatures(f));
-  return model.getTiers()[result.score] ?? 'INFORMATIONAL';
+  return cachedMlPrediction(`severityTier:${stableJson(f)}`, () => {
+    const model = ctx.runtime?.severityTier;
+    if (!model?.isTrained()) {
+      return fallbackSeverityTier(f);
+    }
+    const result = model.predict(extractSeverityTierFeatures(f));
+    return model.getTiers()[result.score] ?? 'INFORMATIONAL';
+  });
 }
 
 function fallbackSeverityTier(f: {
@@ -568,18 +632,20 @@ function fallbackSeverityTier(f: {
  * backoff in feedRecovery.ts:12. Falls back to the default backoff when untrained.
  */
 export function computeFeedRecoveryDelay(failures: number): number {
-  const model = ctx.runtime?.feedRecoveryBackoff;
-  if (!model?.isTrained()) {
-    const base = DEFAULT_FEED_RECOVERY_INITIAL_DELAY_MINUTES * 60_000;
+  return cachedMlPrediction(`feedRecovery:${failures}`, () => {
+    const model = ctx.runtime?.feedRecoveryBackoff;
+    if (!model?.isTrained()) {
+      const base = DEFAULT_FEED_RECOVERY_INITIAL_DELAY_MINUTES * 60_000;
+      return Math.min(
+        DEFAULT_FEED_RECOVERY_MAX_DELAY_MINUTES * 60_000,
+        base * DEFAULT_FEED_RECOVERY_BACKOFF_MULTIPLIER ** Math.min(DEFAULT_FEED_RECOVERY_MAX_STEPS, Math.max(0, failures - 1)),
+      );
+    }
     return Math.min(
       DEFAULT_FEED_RECOVERY_MAX_DELAY_MINUTES * 60_000,
-      base * DEFAULT_FEED_RECOVERY_BACKOFF_MULTIPLIER ** Math.min(DEFAULT_FEED_RECOVERY_MAX_STEPS, Math.max(0, failures - 1)),
+      Math.max(60_000, model.computeRecoveryDelay(failures)),
     );
-  }
-  return Math.min(
-    DEFAULT_FEED_RECOVERY_MAX_DELAY_MINUTES * 60_000,
-    Math.max(60_000, model.computeRecoveryDelay(failures)),
-  );
+  });
 }
 
 /**
@@ -598,15 +664,17 @@ export function predictAliasConfidence(f: {
   hasVersionEvidence: boolean;
   matchMethod: string;
 }): number {
-  const model = ctx.runtime?.aliasConfidence;
-  if (!model?.isTrained()) {
-    if (f.matchConfidence === 0) return 0;
-    if (f.cisaKev) return 1;
-    if (f.epssScore >= 0.4) return 1;
-    if (f.exploitStatus > 0) return 1;
-    return f.matchConfidence >= 70 ? 1 : 0;
-  }
-  return model.predictConfirmationProbability(f);
+  return cachedMlPrediction(`aliasConfidence:${stableJson(f)}`, () => {
+    const model = ctx.runtime?.aliasConfidence;
+    if (!model?.isTrained()) {
+      if (f.matchConfidence === 0) return 0;
+      if (f.cisaKev) return 1;
+      if (f.epssScore >= 0.4) return 1;
+      if (f.exploitStatus > 0) return 1;
+      return f.matchConfidence >= 70 ? 1 : 0;
+    }
+    return model.predictConfirmationProbability(f);
+  });
 }
 
 /**

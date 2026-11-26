@@ -168,6 +168,14 @@ const poolSchema = {
   // POOL_MAX_CONNECTIONS after parsing: a reserve that consumed the whole pool
   // would clamp feed concurrency to 1 and defeat the setting.
   POOL_RESERVED_CONNECTIONS: poolNumber(0, 1_000, 4),
+  // Pool slots reserved for API traffic so feed workers cannot starve the
+  // request path. Subtracted from POOL_MAX_CONNECTIONS alongside
+  // POOL_RESERVED_CONNECTIONS before feed concurrency is bounded, so a feed
+  // burst cannot consume every connection that checkpoints and API mutations
+  // need. Defaults to the same value as POOL_RESERVED_CONNECTIONS so a
+  // default-configured installation bounds feed concurrency at 17 instead of
+  // 21, leaving 8 slots for API, leadership, and pipeline transactions.
+  POOL_API_RESERVED_CONNECTIONS: poolNumber(0, 1_000, 4),
   POOL_CONNECTION_TIMEOUT_MS: poolNumber(100, 600_000, 5_000),
   POOL_IDLE_TIMEOUT_MS: poolNumber(1_000, 3_600_000, 30_000),
   POOL_MAX_LIFETIME_MS: poolNumber(1_000, 86_400_000, 600_000),
@@ -239,10 +247,6 @@ const schema = z.object({
   // a worker that looks wedged. Raise it for a provider with a documented slow
   // accept path.
   EMAIL_PROVIDER_TIMEOUT_MS: poolNumber(1_000, 120_000, 30_000),
-  // A PDF copy of each advisory is attached to outbound emails when enabled.
-  // Rendering converts advisory HTML to text and generates a PDF server-side;
-  // set ATTACH_ADVISORY_PDF=false to deliver HTML-only messages.
-  ATTACH_ADVISORY_PDF: z.enum(['true', 'false']).default('true'),
   // Deprecated compatibility setting. Automatic retries always confirm whether
   // an earlier attempt was delivered; this flag can no longer disable that guard.
   MAIL_CONFIRM_BEFORE_SEND: z.enum(['true', 'false']).default('true'),
@@ -329,9 +333,14 @@ export type Config = z.infer<typeof schema>;
  * Exported so the bound is testable without running a pipeline.
  */
 export function poolFeedBound(
-  config: Pick<Config, 'POOL_MAX_CONNECTIONS' | 'POOL_RESERVED_CONNECTIONS'>,
+  config: {
+    POOL_MAX_CONNECTIONS: number;
+    POOL_RESERVED_CONNECTIONS: number;
+    POOL_API_RESERVED_CONNECTIONS?: number;
+  },
 ): number {
-  return Math.max(1, config.POOL_MAX_CONNECTIONS - config.POOL_RESERVED_CONNECTIONS);
+  const apiReserve = config.POOL_API_RESERVED_CONNECTIONS ?? 0;
+  return Math.max(1, config.POOL_MAX_CONNECTIONS - config.POOL_RESERVED_CONNECTIONS - apiReserve);
 }
 
 /**
@@ -429,9 +438,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error('FEED_RETRY_MAX_DELAY_MS must be >= FEED_RETRY_BASE_DELAY_MS');
   // The reserve is subtracted from the pool bound for feed concurrency, so it
   // must leave at least one connectable slot (see `poolFeedBound`).
-  if (parsed.POOL_RESERVED_CONNECTIONS >= parsed.POOL_MAX_CONNECTIONS)
+  const totalReserve = parsed.POOL_RESERVED_CONNECTIONS + parsed.POOL_API_RESERVED_CONNECTIONS;
+  if (totalReserve >= parsed.POOL_MAX_CONNECTIONS)
     throw new Error(
-      'POOL_RESERVED_CONNECTIONS must be less than POOL_MAX_CONNECTIONS: it is held back from feed concurrency, so a reserve of the whole pool leaves no connection to ingest with',
+      'POOL_RESERVED_CONNECTIONS + POOL_API_RESERVED_CONNECTIONS must be less than POOL_MAX_CONNECTIONS: the combined reserve is held back from feed concurrency, so a reserve of the whole pool leaves no connection to ingest with',
     );
   const config = {
     ...parsed,

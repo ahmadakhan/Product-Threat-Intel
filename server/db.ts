@@ -27,6 +27,38 @@ import { loadPoolSettings } from './config.ts';
 export type Db = pg.Pool | PoolClient;
 
 /**
+ * TTL cache for state_metrics reads. `state()` is called on every `/api/state`
+ * poll and every pipeline run; the summary table rarely changes between polls,
+ * so caching avoids a full-table scan on every request.
+ */
+const STATE_METRICS_CACHE_TTL_MS = 10_000;
+let stateMetricsCache: { metrics: Map<string, number>; expiresAt: number } | null = null;
+
+/**
+ * Template compilation cache. Compiled Handlebars templates are deterministic
+ * given the same customization input, so caching by input string avoids
+ * re-parsing on every state() / pipelineState() call. Bounded at 1,000 entries
+ * to prevent unbounded growth.
+ */
+const TEMPLATE_CACHE_TTL_MS = 300_000;
+const templateCompileCache = new Map<string, { template: string; expiresAt: number }>();
+const evictTemplateCache = () => {
+  if (templateCompileCache.size <= 1_000) return;
+  const oldest = templateCompileCache.keys().next().value;
+  if (oldest !== undefined) templateCompileCache.delete(oldest);
+};
+
+function cachedCompileTemplate(key: string, compile: () => string): string {
+  const now = Date.now();
+  const entry = templateCompileCache.get(key);
+  if (entry && now < entry.expiresAt) return entry.template;
+  const template = compile();
+  templateCompileCache.set(key, { template, expiresAt: now + TEMPLATE_CACHE_TTL_MS });
+  evictTemplateCache();
+  return template;
+}
+
+/**
  * Merge libpq options into a connection string without discarding the ones the
  * caller already set.
  *
@@ -1206,10 +1238,16 @@ export async function state(db: Db, options: StateOptions = {}): Promise<AppStat
   snapshot.advisoryTemplate = snapshot.customAdvisoryTemplate || DEFAULT_ADVISORY_EMAIL_TEMPLATE;
   snapshot.dailyDigestTemplate =
     snapshot.dailyDigestCustomTemplate ||
-    compileDailyDigestTemplate(snapshot.dailyDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION);
+    cachedCompileTemplate(
+      `dailyDigest:${JSON.stringify(snapshot.dailyDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION)}`,
+      () => compileDailyDigestTemplate(snapshot.dailyDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION),
+    );
   snapshot.newsDigestTemplate =
     snapshot.newsDigestCustomTemplate ||
-    compileNewsTemplate(snapshot.newsDigestCustomization || DEFAULT_NEWS_EMAIL_CUSTOMIZATION);
+    cachedCompileTemplate(
+      `newsDigest:${JSON.stringify(snapshot.newsDigestCustomization || DEFAULT_NEWS_EMAIL_CUSTOMIZATION)}`,
+      () => compileNewsTemplate(snapshot.newsDigestCustomization || DEFAULT_NEWS_EMAIL_CUSTOMIZATION),
+    );
   await attachCounts(db, snapshot);
   return snapshot;
 }
@@ -1219,8 +1257,15 @@ export async function state(db: Db, options: StateOptions = {}): Promise<AppStat
  * the bounded arrays so a large installation still shows truthful totals.
  */
 async function attachCounts(db: Db, snapshot: AppState) {
-  const rows = await db.query<{ name: string; value: string }>('SELECT name,value FROM state_metrics');
-  const metrics = new Map(rows.rows.map((row) => [row.name, Number(row.value)]));
+  const now = Date.now();
+  let metrics: Map<string, number>;
+  if (stateMetricsCache && now < stateMetricsCache.expiresAt) {
+    metrics = stateMetricsCache.metrics;
+  } else {
+    const rows = await db.query<{ name: string; value: string }>('SELECT name,value FROM state_metrics');
+    metrics = new Map(rows.rows.map((row) => [row.name, Number(row.value)]));
+    stateMetricsCache = { metrics, expiresAt: now + STATE_METRICS_CACHE_TTL_MS };
+  }
   for (const kind of COLLECTION_KINDS) snapshot.counts[kind] = metrics.get(`collection:${kind}`) ?? 0;
   snapshot.summary = {
     activeFindings: metrics.get('summary:activeFindings') ?? 0,
@@ -1259,9 +1304,15 @@ export async function pipelineState(db: Db): Promise<AppState> {
   snapshot.advisoryTemplate = snapshot.customAdvisoryTemplate || DEFAULT_ADVISORY_EMAIL_TEMPLATE;
   snapshot.dailyDigestTemplate =
     snapshot.dailyDigestCustomTemplate ||
-    compileDailyDigestTemplate(snapshot.dailyDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION);
+    cachedCompileTemplate(
+      `dailyDigest:${JSON.stringify(snapshot.dailyDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION)}`,
+      () => compileDailyDigestTemplate(snapshot.dailyDigestCustomization || DEFAULT_DAILY_DIGEST_CUSTOMIZATION),
+    );
   snapshot.newsDigestTemplate =
     snapshot.newsDigestCustomTemplate ||
-    compileNewsTemplate(snapshot.newsDigestCustomization || DEFAULT_NEWS_EMAIL_CUSTOMIZATION);
+    cachedCompileTemplate(
+      `newsDigest:${JSON.stringify(snapshot.newsDigestCustomization || DEFAULT_NEWS_EMAIL_CUSTOMIZATION)}`,
+      () => compileNewsTemplate(snapshot.newsDigestCustomization || DEFAULT_NEWS_EMAIL_CUSTOMIZATION),
+    );
   return snapshot;
 }

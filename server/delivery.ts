@@ -2,7 +2,6 @@ import { validateNativeDelivery, type NativeDelivery } from './correlation/notif
 import { describeError, writeEvent } from './events';
 import { classifyDeliveryError, computeRetryDelay, getMlRuntime } from './ml/integration.ts';
 import { advisoryEmail } from './advisoryEmail';
-import { advisoryFilename, renderAdvisoryPdf } from './pdf';
 import {
   deliveryHtmlIsAttachable,
   htmlAttachmentIsAttachable,
@@ -42,6 +41,59 @@ import type {
 } from '../src/types/index.ts';
 import { FINDING_SUBSCRIPTIONS, recipientSubscriptions } from '../src/types/index.ts';
 import { recordNewsDeliveries } from './newsQueue.ts';
+import { buildAliasMap, parseCPE23 } from '../src/utils/cpeMatcher';
+import { randomUUID, createHmac, createHash } from 'node:crypto';
+import { mergeCveRecords, stableJson } from '../src/utils/deduplicator';
+import nodemailer from 'nodemailer';
+import type { Config } from './config';
+import {
+  transaction,
+  get,
+  getForUpdate,
+  getMany,
+  getManyForUpdate,
+  list,
+  put,
+  appendAudit,
+  schemaLockKey,
+} from './db';
+import type { Db } from './db';
+import { createRequester, type Requester } from './network';
+import { isFindingDelivery } from '../src/utils/findingDelivery.ts';
+import {
+  activeClaims,
+  attachClaimsToJob,
+  claimItems,
+  claimsForJob,
+  markClaimsDelivered,
+  releaseClaims,
+  reconcileDuplicateOutboxClaims,
+} from './deliveryClaims.ts';
+import { newsArticleIdentity } from './newsEmail.ts';
+import {
+  effectiveSubject, normalizeEmailSubject, renderReviewEdits, renderReviewText } from './emailEdits';
+import {
+  EMAIL_PROVIDER_LABELS,
+  EmailProviderError,
+  emailIsConfigured,
+  lookupProviderDelivery,
+  sendProviderEmail,
+} from './emailProviders';
+import { uniqueEnabledEmailRecipients } from './emailRecipients';
+import { decrypt, encryptionKeys } from './secrets';
+import { isSmtpEmailProvider } from '../src/types/index.ts';
+import type {
+  Advisory,
+  Finding,
+  EmailRecipient,
+  WebhookEndpoint,
+  EmailDeliveryLog,
+  WebhookDeliveryLog,
+  AlertedCVE,
+  EmailConfiguration,
+  AppSettings,
+  ReviewEdits,
+} from '../src/types/index.ts';
 /**
  * Payload carried by a consolidated news delivery job.
  *
@@ -90,60 +142,8 @@ export interface ZeroDayDigestPayload {
     credibilityScore?: number;
   }>;
   articles: Array<{ id: string; title: string; url: string; sourceFeeds: string[] }>;
-}
+};
 
-import { buildAliasMap, parseCPE23 } from '../src/utils/cpeMatcher';
-import { randomUUID, createHmac, createHash } from 'node:crypto';
-import { mergeCveRecords, stableJson } from '../src/utils/deduplicator';
-import nodemailer from 'nodemailer';
-import type { Config } from './config';
-import {
-  transaction,
-  get,
-  getForUpdate,
-  getMany,
-  getManyForUpdate,
-  list,
-  put,
-  appendAudit,
-  schemaLockKey,
-} from './db';
-import type { Db } from './db';
-import { createRequester, type Requester } from './network';
-import { isFindingDelivery } from '../src/utils/findingDelivery.ts';
-import {
-  activeClaims,
-  attachClaimsToJob,
-  claimItems,
-  claimsForJob,
-  markClaimsDelivered,
-  releaseClaims,
-  reconcileDuplicateOutboxClaims,
-} from './deliveryClaims.ts';
-import { newsArticleIdentity } from './newsEmail.ts';
-import { effectiveSubject, normalizeEmailSubject, renderReviewEdits, renderReviewText } from './emailEdits';
-import {
-  EMAIL_PROVIDER_LABELS,
-  EmailProviderError,
-  emailIsConfigured,
-  lookupProviderDelivery,
-  sendProviderEmail,
-} from './emailProviders';
-import { uniqueEnabledEmailRecipients } from './emailRecipients';
-import { decrypt, encryptionKeys } from './secrets';
-import { isSmtpEmailProvider } from '../src/types/index.ts';
-import type {
-  Advisory,
-  Finding,
-  EmailRecipient,
-  WebhookEndpoint,
-  EmailDeliveryLog,
-  WebhookDeliveryLog,
-  AlertedCVE,
-  EmailConfiguration,
-  AppSettings,
-  ReviewEdits,
-} from '../src/types/index.ts';
 export interface Job {
   id: string;
   dedupe_key: string;
@@ -728,58 +728,6 @@ export function webhookAllows(hook: WebhookEndpoint, finding: Finding): boolean 
     (hook.events.includes('CISA_KEV') && finding.cve.cisaKev?.isKev)
   );
 }
-/** Converts the email body into a PDF attachment, or returns undefined when PDF
- *  delivery is disabled, the job carries no HTML body, or rendering fails.
- *  Failures degrade to HTML-only delivery instead of blocking the send.
- *
- *  The input is the *exact* HTML the message is sent with (the caller passes the
- *  output of `applyJobEdits`), so the attachment is the same document as the
- *  email — identical header, styling, colours, CVE cards, low-confidence notices
- *  and footer. Rendering from `payload.html` directly left an operator's edit
- *  (or a custom body override) visible in the email but absent from its
- *  attachment. */
-async function buildPdfAttachment(
-  content: Job,
-  config: Config,
-  db?: Db,
-): Promise<EmailAttachment | undefined> {
-  if (config.ATTACH_ADVISORY_PDF !== 'true' || !content.payload.html) return undefined;
-  // Only a document that is itself deliverable can be attached; the renderer
-  // has a hard size limit and an oversized body would fail the whole send.
-  if (!deliveryHtmlIsAttachable(content.payload.html)) return undefined;
-  // Operational self-healing alerts are infrastructure messages, not advisories;
-  // they must never carry a PDF attachment.
-  if (typeof content.advisory_id === 'string' && content.advisory_id.startsWith('SELFHEAL:'))
-    return undefined;
-  if (content.payload.dailyDigest) return undefined;
-  try {
-    const pdf = await renderAdvisoryPdf(content.payload.html);
-    // The attachment is the document the email carries, so it is named after that
-    // document's identity. Synthetic bundles (news, consolidated findings,
-    // zero-day digest) get a readable stem instead of their internal prefix.
-    const filename = advisoryFilename(deliveryAttachmentStem(content));
-    return {
-      filename,
-      content: Buffer.from(pdf),
-      contentType: 'application/pdf',
-    };
-  } catch (error) {
-    if (db)
-      await writeEvent(db, {
-        category: 'EMAIL',
-        level: 'WARNING',
-        code: 'delivery.pdf_attachment_failed',
-        message: 'Advisory PDF attachment could not be generated; delivering HTML only',
-        context: {
-          jobId: content.id,
-          channel: content.channel,
-          advisoryId: content.advisory_id,
-          error: String((error as Error)?.message || error),
-        },
-      }).catch(() => undefined);
-    return undefined;
-  }
-}
 /**
  * Attachment stem for a delivery.
  *
@@ -922,13 +870,13 @@ export function createMailSender(
       if (settings.emailEnabled === false) throw new Error('Email delivery is disabled by settings');
     }
     // Apply operator edits exactly once and build the attachment from the very
-    // body being sent, so the PDF is byte-identical to the email.
+    // Apply operator edits exactly once and build the attachment from the very
+    // body being sent, so the HTML attachment matches the email.
     const content = applyJobEdits(job);
-    const pdfAttachment = await buildPdfAttachment(content, config, db);
     // The HTML file contains precisely the HTML sent as the email body, named
     // after the subject, and is attached to every finding email automatically.
     const htmlAttachment = findingHtmlAttachment(content);
-    const attachments = [htmlAttachment, pdfAttachment].filter((item): item is EmailAttachment =>
+    const attachments = [htmlAttachment].filter((item): item is EmailAttachment =>
       Boolean(item),
     );
     if (!isSmtpEmailProvider(saved.provider)) {

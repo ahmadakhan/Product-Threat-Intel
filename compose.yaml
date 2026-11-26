@@ -110,8 +110,10 @@ services:
       # slow source request or a wedged statement) must fit below it; raise this
       # value if operators observe aborts while a run is still making progress.
       STUCK_PROMISE_MS: ${STUCK_PROMISE_MS:-300000}
-      # Single application instance: it runs the API and all background work.
-      WORKER_ENABLED: ${WORKER_ENABLED:-true}
+      # API instance: serves the SPA and /api endpoints only. No background
+      # work runs here; the `worker` service handles pipeline, feeds, delivery,
+      # retention, ML training and all other periodic jobs.
+      WORKER_ENABLED: ${WORKER_ENABLED:-false}
       # Make /live answer 503 when the event loop has been blocked for more
       # than 10 seconds. The Compose healthcheck below marks the container
       # unhealthy; the host heal timer restarts it.
@@ -132,15 +134,14 @@ services:
       - correlation-deadletters:/var/lib/vulnstream/deadletters
       - ml-models:/var/lib/vulnstream/ml
     deploy:
-      replicas: 1
+      replicas: ${APP_REPLICAS:-2}
       resources:
         limits:
-          # Single-instance topology contract: 2 CPUs / 2 GiB, matching
-          # deploy/kubernetes/ha.yaml and compose-topology.test.ts. Keep the V8
-          # heap (NODE_OPTIONS max-old-space-size=1536) below the 2 GiB limit so
-          # the base image, native buffers and Chromium retain headroom.
-          cpus: '2'
-          memory: 2G
+          # API instances are stateless and I/O-bound. 1 CPU / 1 GiB is
+          # sufficient; scale replicas horizontally to handle more API traffic.
+          cpus: '1'
+          memory: 1G
+    command: ["node", "server-dist/main-api.js"]
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -155,6 +156,88 @@ services:
           node,
           -e,
           "fetch('http://127.0.0.1:8080/live').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 60s
+    networks: [backend, egress]
+  worker:
+    build: .
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      # Worker instance: runs all background work (pipeline, feeds, outbox
+      # delivery, retention, ML training, digest, self-healing). Exactly one
+      # replica is active at a time via PostgreSQL advisory-lock leader
+      // election; extra replicas are hot standbys.
+      WORKER_ENABLED: ${WORKER_ENABLED:-true}
+      # Keep the V8 heap below the container limit while leaving room for the
+      # base image and native buffers. --expose-gc enables the 90%
+      # memory-pressure GC hint.
+      NODE_OPTIONS: --expose-gc --max-old-space-size=1536
+      NODE_ENV: production
+      DATABASE_URL: postgresql://vulnstream_app:${APP_DB_PASSWORD:?Set runtime password}@db:5432/vulnstream
+      APP_ORIGIN: https://${APP_HOST:?Set public hostname}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set a base64 32-byte encryption key}
+      ENCRYPTION_KEYS: ${ENCRYPTION_KEYS:-}
+      ML_SIGNING_KEY: ${ML_SIGNING_KEY:-}
+      EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS-raw.githubusercontent.com,services.nvd.nist.gov,api.osv.dev,services.nvd.nist.gov,www.googleapis.com,www.cisa.gov,cisa.gov,api.first.org,api.github.com,api.vulncheck.com,otx.alienvault.com,send.api.mailtrap.io,sandbox.api.mailtrap.io,mailtrap.io,api.sendgrid.com,smtp.sendgrid.net,api.postmarkapp.com,smtp.maileroo.com,smtp.lettr.com,api.mailgun.net,api.eu.mailgun.net,in-v3.mailjet.com,api.mailjet.com,smtp.gmail.com,www.bleepingcomputer.com,isc.sans.edu,api.msrc.microsoft.com,www.fortiguard.com,filestore.fortinet.com,www.kb.cert.org,kb.cert.org,thehackernews.com,feeds.feedburner.com,www.securityweek.com,www.rapid7.com,googleprojectzero.blogspot.com,projectzero.google,krebsonsecurity.com,tools.cisco.com,sec.cloudapps.cisco.com,security.paloaltonetworks.com,labs.watchtowr.com,www.talosintelligence.com,blog.talosintelligence.com,www.thezdi.com,www.exploit-db.com,www.debian.org,www.cisecurity.com,cisecurity.com,cisecurity.org,www.cisecurity.org,seclists.org,blog.sucuri.net,www.welivesecurity.com,wordpress.org,www.darkreading.com,blog.google,cloud.google.com,docs.cloud.google.com,workspace.google.com,www.greynoise.io,www.malwarebytes.com,cloudblog.withgoogle.com,www.sophos.com,therecord.media,blog.twitter.com,blog.x.com,github.com,github.blog,www.pentestpartners.com,www.forbes.com,www.theregister.com,api.theregister.com,news.google.com,www.cve.org,cve.org,support.apple.com,helpx.adobe.com,access.redhat.com,security.access.redhat.com,security.redhat.com,usn.ubuntu.com,ubuntu.com,www.crowdstrike.com,crowdstrike.com,securelist.com,www.securelist.com,psirtapi.global.sonicwall.com,psirt.global.sonicwall.com}
+      EGRESS_ALLOWED_HOSTS_EXTRA: ${EGRESS_ALLOWED_HOSTS_EXTRA-}
+      TRUST_PROXY: ${TRUST_PROXY:-loopback,linklocal,uniquelocal}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      # Worker pool: leadership + pipeline lock pin 2 sessions; feed workers
+      # get the rest. POOL_API_RESERVED_CONNECTIONS=0 since the worker never
+      # serves HTTP.
+      POOL_MAX_CONNECTIONS: ${POOL_MAX_CONNECTIONS:-25}
+      POOL_RESERVED_CONNECTIONS: ${POOL_RESERVED_CONNECTIONS:-4}
+      POOL_API_RESERVED_CONNECTIONS: 0
+      FEED_MAX_DURATION_SECONDS: ${FEED_MAX_DURATION_SECONDS:-1800}
+      FEED_RETRY_MAX_ATTEMPTS: ${FEED_RETRY_MAX_ATTEMPTS:-3}
+      FEED_RETRY_VULNCHECK_MAX_ATTEMPTS: ${FEED_RETRY_MAX_ATTEMPTS:-5}
+      FEED_RETRY_BASE_DELAY_MS: ${FEED_RETRY_BASE_DELAY_MS:-2000}
+      FEED_RETRY_MAX_DELAY_MS: ${FEED_RETRY_MAX_DELAY_MS:-30000}
+      FEED_RETRY_JITTER_FACTOR: ${FEED_RETRY_JITTER_FACTOR:-0.2}
+      FEED_CONCURRENCY: ${FEED_CONCURRENCY:-10}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      STUCK_PROMISE_MS: ${STUCK_PROMISE_MS:-300000}
+      HANG_DETECTION_ENABLED: 'true'
+      CORRELATION_DLQ_DIRECTORY: /var/lib/vulnstream/deadletters
+      CORRELATION_DLQ_STORAGE_MODE: database
+      ML_DIRECTORY: /var/lib/vulnstream/ml
+      ML_STORAGE_MODE: database
+    volumes:
+      - correlation-deadletters:/var/lib/vulnstream/deadletters
+      - ml-models:/var/lib/vulnstream/ml
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          # Worker does ingestion, ML training, delivery and all background
+          # jobs. 2 CPUs / 2 GiB matches the previous single-instance contract.
+          cpus: '2'
+          memory: 2G
+    command: ["node", "server-dist/main-worker.js"]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 35s
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:8080/ready').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
         ]
       interval: 30s
       timeout: 8s
