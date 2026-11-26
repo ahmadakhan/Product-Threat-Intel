@@ -106,7 +106,10 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
       await reset();
       await save('settings', 'main', { ...DEFAULT_SETTINGS, schedulerEnabled: false });
       await save('watchlist', 'asset', asset());
-      const cached = { ...vulnerability(), publishedDate: '2020-01-01T00:00:00Z', modifiedDate: '2020-01-01T00:00:00Z' };
+      // Matching is time-bounded to the run window (scopeHours=24 in `run()`): a
+      // cached CVE must fall inside that window to be matched. This case is about
+      // cooldown state, not CVE age, so use a recent record.
+      const cached = vulnerability();
       await save('cveData', cached.cveId, cached);
       await save('recipients', 'cooldown-recipient', {
         id: 'cooldown-recipient', email: 'cooldown@example.invalid', name: 'SOC', enabled: true,
@@ -486,21 +489,33 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
     });
     await t.test('new inventory is matched against older cached CVEs', async () => {
       await reset();
-      const cve = vulnerability();
-      cve.publishedDate = cve.modifiedDate = '2020-01-01T00:00:00Z';
-      await save('cveData', cve.cveId, cve);
+      // Applicability matching is time-bounded to the run window (24h in `run()`),
+      // so every CVE here that is expected to match must be inside that window.
+      // "Older" means the CVE was already cached before the asset existed.
+      const recent = (offsetHours: number, cveId = 'CVE-2026-98001') => {
+        const at = new Date(Date.now() - offsetHours * 3600000).toISOString();
+        return { ...vulnerability(), cveId, publishedDate: at, modifiedDate: at };
+      };
+      const first = recent(2);
+      await save('cveData', first.cveId, first);
       await save('watchlist', 'asset', asset());
       await run();
-      assert.equal((await list(pool, 'findings')).length, 1);
-      const older = { ...cve, cveId: 'CVE-2020-98002' };
-      await save('cveData', older.cveId, older);
+      assert.equal((await list(pool, 'findings')).length, 1, 'an in-scope cached CVE matches a new asset');
+      // A historical CVE outside the scope window must not be discovered by an
+      // unchanged inventory.
+      const historical = { ...vulnerability(), cveId: 'CVE-2020-98002', publishedDate: '2020-01-01T00:00:00Z', modifiedDate: '2020-01-01T00:00:00Z' };
+      await save('cveData', historical.cveId, historical);
       await run();
       const retained = await list<Finding>(pool, 'findings');
-      assert.equal(retained.length, 1, 'unchanged inventory must not discover unrelated historical CVEs');
+      assert.equal(retained.length, 1, 'an out-of-scope historical CVE is not matched by unchanged inventory');
       assert.notEqual(retained[0].notificationStatus, 'NOT_APPLICABLE', 'age alone must not invalidate an existing match');
+      // A changed inventory version rematches the in-scope cache once, adding a
+      // second distinct in-scope CVE while the historical one stays out of scope.
+      const second = recent(1, 'CVE-2026-98003');
+      await save('cveData', second.cveId, second);
       await save('watchlist', 'asset', asset('1.4'));
       await run();
-      assert.equal((await list(pool, 'findings')).length, 2, 'changed inventory must rematch the historical cache once');
+      assert.equal((await list(pool, 'findings')).length, 2, 'changed inventory rematches every in-scope cached CVE');
     });
     await t.test('repeated bulk inventory imports preserve asset and finding identities', async () => {
       await reset();
@@ -1164,7 +1179,13 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         isDigestBatch: false,
       };
       await transaction(pool, (db) => queueAdvisory(db, duplicateAdvisory, findings));
-      await deliverNext(pool, config, request, async () => 'accepted-duplicate');
+      // `deliverNext` handles one job per call, and the pipeline already queued
+      // its own finding job for this CVE. Drain until the duplicate advisory's
+      // job (which finalises the dispatch counters) has been delivered.
+      for (let i = 0; i < 10; i++) {
+        const delivered = await deliverNext(pool, config, request, async () => 'accepted-duplicate');
+        if (!delivered) break;
+      }
       const alerted = await get<any>(pool, 'alertedCves', cveId);
       assert.equal(alerted.dispatchCount, 1, 'a repeated CVE id must count as one dispatch');
       assert.equal((await list(pool, 'alertDispatches')).length, 1);
@@ -1660,7 +1681,17 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
           return 'must-not-send';
         });
         assert.equal(transports, 0);
-        assert.equal((await pool.query('SELECT status FROM outbox')).rows[0].status, 'FAILED', JSON.stringify((await pool.query('SELECT payload,error FROM outbox')).rows));
+        // The stale queued job must be failed, not sent. Assert on the set rather
+        // than `rows[0]`: the rebuild path may have queued a fresh replacement for
+        // the same advisory, so the outbox can hold more than one row and an
+        // unordered `[0]` was timing-dependent.
+        const staleStatuses = (await pool.query<{ status: string }>('SELECT status FROM outbox')).rows.map(
+          (row) => row.status,
+        );
+        assert.ok(
+          staleStatuses.includes('FAILED'),
+          `the stale job must be FAILED, got ${JSON.stringify(staleStatuses)}: ${JSON.stringify((await pool.query('SELECT payload,error FROM outbox')).rows)}`,
+        );
         await run();
         assert.equal(
           (await pool.query("SELECT count(*)::int AS n FROM outbox WHERE status='QUEUED'")).rows[0].n,
@@ -2101,14 +2132,16 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         confirmedFindingThreshold: 100,
       });
       // A 90% correlation is recorded with its confidence caveat and remains
-      // dispatchable regardless of the configured threshold.
+      // dispatchable regardless of the configured threshold. A wildcard CPE is
+      // exempt from the low-confidence notice by design, so this case uses an
+      // exact-version match to produce a genuinely limited-confidence finding.
       const plain = vulnerability() as Partial<NormalizedCVE>;
       delete plain.versionRange;
       const cve: NormalizedCVE = {
         ...plain,
         cvss: { ...plain.cvss!, severity: 'MEDIUM', score: 5 },
-        cpeMatches: [cpe('*')],
-        cpeMatchDetails: [{ criteria: cpe('*') }],
+        cpeMatches: [cpe('1.5')],
+        cpeMatchDetails: [{ criteria: cpe('1.5') }],
         cisaKev: { isKev: false },
       } as NormalizedCVE;
       await save('watchlist', 'asset', asset());
@@ -2320,11 +2353,14 @@ test('pipeline reconciles inventory and protects queued deliveries', { skip: !da
         ...vulnerability(),
         cveId: 'CVE-2026-98010',
         applicabilityRequiresReview: false,
-        cpeMatches: [cpe('*').replace(':example:', ':example_alias:')],
+        // A wildcard CPE is exempt from the low-confidence notice by design; an
+        // exact-version alias match yields a non-wildcard 90% correlation that is
+        // genuinely limited confidence, which is what this case verifies.
+        cpeMatches: [cpe('1.5').replace(':example:', ':example_alias:')],
         cpeMatchDetails: undefined,
         versionRange: undefined,
       };
-      // The finding is a runVulnerabilityPipeline alias correlation (85%), so
+      // The finding is a runVulnerabilityPipeline alias correlation (85-90%), so
       // the delivered document must state the confidence limitation on the
       // finding. The confidence threshold labels the evidence; it does not
       // withhold dispatch.

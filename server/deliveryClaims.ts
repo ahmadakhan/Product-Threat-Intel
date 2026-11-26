@@ -132,7 +132,13 @@ export async function claimItems(
         -- transport may already have accepted, so this EXISTS removes the claim
         -- from the re-grantable set.
         --
-        -- The exception narrows the blocker to failures the finalize path is
+        -- A transport attempt with an UNKNOWN or ACCEPTED outcome may already have
+        -- delivered (migration 040: "inherited UNKNOWN unless independent evidence
+        -- proves non-delivery"). This is the same polarity as the SUPERSEDED branch
+        -- below. Only a job whose outcome proves non-delivery (NOT_ATTEMPTED or
+        -- REJECTED) or that failed 'no longer applicable' may release the claim.
+        --
+        -- The exceptions narrow the blocker to failures the finalize path is
         -- entitled to release. A permanent recipient fault — the address was
         -- removed/changed/disabled, or the subscription no longer permits the
         -- bundle — is in neither of those sets: finalize deliberately keeps the
@@ -144,7 +150,7 @@ export async function claimItems(
           SELECT 1 FROM outbox o
            WHERE o.id = delivery_claims.job_id
              AND o.status = 'FAILED'
-             AND (o.delivery_outcome NOT IN ('UNKNOWN','ACCEPTED')
+             AND (o.delivery_outcome IN ('UNKNOWN','ACCEPTED')
                   OR COALESCE(o.error,'') LIKE '%no longer applicable%')
              AND COALESCE(o.error,'') NOT LIKE '%Recipient removed, changed, or disabled%'
              AND COALESCE(o.error,'') NOT LIKE 'Recipient subscription no longer permits%'
