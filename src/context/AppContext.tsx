@@ -928,6 +928,8 @@ function useApplication() {
     savedTemplateCustomization: snapshot.templateCustomization,
     savedDailyDigestCustomization: snapshot.dailyDigestCustomization,
     savedNewsDigestCustomization: snapshot.newsDigestCustomization,
+    savedDailyDigestCustomTemplate: snapshot.dailyDigestCustomTemplate,
+    savedNewsDigestCustomTemplate: snapshot.newsDigestCustomTemplate,
     customAdvisoryTemplate: snapshot.customAdvisoryTemplate,
     advisoryTemplate: snapshot.customAdvisoryTemplate || snapshot.advisoryTemplate,
     updateTemplateCustomization: (update: Partial<TemplateCustomization>) =>
