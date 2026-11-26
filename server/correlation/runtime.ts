@@ -29,7 +29,7 @@ const samePayload = (left: unknown, right: unknown): boolean => {
 };
 
 /**
- * Hard ceiling for one drain pass.
+ * How long one drain pass may go without reporting progress.
  *
  * A drain that never settles used to pin `this.draining` forever: every later
  * tick returned early on the `this.draining` guard, so ingestion, notification
@@ -37,56 +37,92 @@ const samePayload = (left: unknown, right: unknown): boolean => {
  * while the worker still looked healthy. The guard is necessary (one pass at a
  * time), so the fix is to bound the pass rather than drop the guard.
  *
- * Deliberately generous: a legitimate pass processes a bounded batch, so five
- * seconds is already an order of magnitude above a normal pass and only trips on
- * genuinely wedged work (a statement parked on a dead socket).
+ * The budget is measured from the last progress checkpoint, not from the start
+ * of the pass. A wall-clock ceiling could not distinguish a wedged statement
+ * from a pass that simply was not scheduled: when the event loop is busy - for
+ * example while startup ingestion parses feeds on the main thread - both the
+ * awaited continuation and the watchdog are delayed, so a healthy pass was
+ * reported as CRITICAL `pending.drain_timeout`. Progress accounting only trips
+ * when the pass has genuinely stopped advancing between awaits.
+ *
+ * Deliberately generous: a legitimate pass reports a checkpoint after every
+ * awaited step, so five seconds without a single checkpoint only happens when
+ * work is wedged (a statement parked on a dead socket).
  */
 const DRAIN_TIMEOUT_MS = 5_000;
+/** How often the stall watchdog re-checks the last progress checkpoint. */
+const DRAIN_WATCHDOG_POLL_MS = 500;
 /** Pause between successful drain batches so the loop cannot spin hot. */
 const DRAIN_INTER_BATCH_MS = 100;
 
-/** Signals that a bounded operation exceeded its deadline. */
+/** Signals that a bounded operation made no progress within its deadline. */
 class DrainTimeoutError extends Error {
   constructor(
     readonly label: string,
     readonly timeoutMs: number,
   ) {
-    super(`${label} exceeded ${timeoutMs}ms`);
+    super(`${label} made no progress for ${timeoutMs}ms`);
     this.name = 'DrainTimeoutError';
   }
 }
 
 /**
- * Resolve/reject with `work`, or reject once `timeoutMs` elapses.
+ * Resolve/reject with `work`, or reject once `timeoutMs` has elapsed without a
+ * progress checkpoint.
+ *
+ * `work` must call the supplied `onProgress` after every awaited step. The
+ * watchdog polls that checkpoint instead of racing a one-shot timer against the
+ * whole pass, so an event-loop stall cannot make a healthy pass look wedged. It
+ * also waits for two consecutive overdue polls before rejecting: if the loop
+ * resumes and the pass reports progress, the deadline is extended rather than
+ * the pass being abandoned in the same tick.
  *
  * The loser is NOT cancelled - `work` keeps running - so this only bounds how
  * long the caller waits. It does not by itself release a liveness guard: the
  * caller must keep observing the abandoned work (or cancel it) until it really
  * exits, which is what `cancelDrain` and the per-pass guard in `start()` do. Any
- * rejection the abandoned promise produces later is swallowed here, so a
- * timed-out drain can never surface as an unhandled rejection (which would
- * terminate the worker).
+ * rejection the abandoned promise produces later is swallowed by the pass's
+ * `.catch`, so a timed-out drain can never surface as an unhandled rejection
+ * (which would terminate the worker).
  */
-async function withHardTimeout<T>(
-  work: (signal: AbortSignal) => Promise<T>,
+export async function withProgressTimeout<T>(
+  work: (signal: AbortSignal, onProgress: () => void) => Promise<T>,
   timeoutMs: number,
   label: string,
 ): Promise<T> {
   const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let lastProgressAt = Date.now();
+  const onProgress = () => {
+    lastProgressAt = Date.now();
+  };
+  let timer: ReturnType<typeof setInterval> | undefined;
   try {
     return await Promise.race([
-      work(controller.signal),
+      work(controller.signal, onProgress),
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
+        // Poll often enough to notice a stall promptly without adding
+        // meaningful load; small test budgets get a proportionally small poll.
+        const pollMs = Math.max(10, Math.min(DRAIN_WATCHDOG_POLL_MS, Math.floor(timeoutMs / 2)));
+        let overduePolls = 0;
+        timer = setInterval(() => {
+          if (Date.now() - lastProgressAt < timeoutMs) {
+            overduePolls = 0;
+            return;
+          }
+          // Give the pass one more poll to report progress. A resumed event loop
+          // can run the pending continuation just after the watchdog callback;
+          // rejecting on the first late observation would recreate the false
+          // positive this watchdog exists to avoid.
+          overduePolls++;
+          if (overduePolls < 2) return;
           controller.abort();
           reject(new DrainTimeoutError(label, timeoutMs));
-        }, timeoutMs);
+        }, pollMs);
         timer.unref?.();
       }),
     ]);
   } finally {
-    if (timer) clearTimeout(timer);
+    if (timer) clearInterval(timer);
   }
 }
 import { Heartbeat } from './heartbeat.ts';
@@ -252,8 +288,9 @@ export class CorrelationRuntime {
   /**
    * One drain pass, exposed for testing. `isCancelled` is polled at every point
    * where the pass could still take work, so an abandoned pass winds down instead
-   * of competing. The pass is wrapped in `withHardTimeout` so an abandoned pass is
-   * aborted via AbortSignal rather than left running beside its replacement.
+   * of competing. The pass is wrapped in `withProgressTimeout` so an abandoned
+   * pass is aborted via AbortSignal rather than left running beside its
+   * replacement, and a busy event loop cannot make it look wedged.
    */
   async drain(): Promise<void> {
     let cancelled = false;
@@ -262,8 +299,8 @@ export class CorrelationRuntime {
     };
     this.cancelDrain = markCancelled;
     try {
-      await withHardTimeout(
-        (signal) => this.drainPass(() => cancelled || signal.aborted),
+      await withProgressTimeout(
+        (signal, onProgress) => this.drainPass(() => cancelled || signal.aborted, onProgress),
         DRAIN_TIMEOUT_MS,
         'correlation drain',
       );
@@ -275,14 +312,19 @@ export class CorrelationRuntime {
   /**
    * One drain pass. `isCancelled` is polled at every point where the pass could
    * still take work, so an abandoned pass winds down instead of competing.
+   * `onProgress` is reported after every awaited step so the stall watchdog can
+   * tell a slow-but-advancing pass from a wedged one.
    */
-  private async drainPass(isCancelled: () => boolean): Promise<void> {
+  private async drainPass(isCancelled: () => boolean, onProgress: () => void = () => {}): Promise<void> {
     // First checkpoint is before any stage, not after the first one: a pass
     // abandoned before it began must not open a transaction at all.
     if (isCancelled()) return;
+    onProgress();
     await this.cleanupStaleMatches();
+    onProgress();
     if (isCancelled()) return;
     await this.queueNotifications();
+    onProgress();
     if (isCancelled()) return;
     // Rows the claim no longer offers have exhausted MAX_PENDING_ATTEMPTS. Log
     // their count once per drain pass: silently leaving them in the table would
@@ -297,16 +339,19 @@ export class CorrelationRuntime {
     } catch {
       // Metrics on a missing column (pre-032 database) must not block draining.
     }
+    onProgress();
     // Retention is re-checked here rather than once per pass: a pass can keep
     // looping for far longer than a floor (one batch per 100ms), so a single
     // evaluation left a failing sweep retried on every iteration.
     await this.maybeRunRetention();
+    onProgress();
     if (isCancelled()) return;
     // Sweep exhausted pending rows to prevent poison advisories from blocking the queue
     const swept = await sweepExhaustedPending(
       this.pool,
       this.supervisor.ingestor.deadLetterQueue,
     ).catch(() => 0);
+    onProgress();
     if (swept) {
       this.supervisor.ingestor.telemetry.log('INFO', 'pending.exhausted_swept', { count: swept });
     }
@@ -318,6 +363,7 @@ export class CorrelationRuntime {
       // Leased SKIP LOCKED claims survive crashes; final ingestion is idempotent.
       // Claim at most concurrency slots, so leases don't expire behind a local queue.
       const batch = await claimPending(this.pool, this.supervisor.concurrencyLimit);
+      onProgress();
       if (!batch.jobs.length) return;
       // Re-check after the (awaited) claim. Cancellation can arrive while the
       // claim query is in flight; the pre-claim check above cannot cover that
@@ -363,7 +409,9 @@ export class CorrelationRuntime {
           this.supervisor.concurrencyLimit,
           this.pool,
         );
+        onProgress();
         await acknowledgePending(this.pool, batch);
+        onProgress();
       } catch (error) {
         // At least one record could not be made durable. Its pending row is the
         // last copy, so it is retained — but only it. Acknowledging the whole
@@ -383,6 +431,7 @@ export class CorrelationRuntime {
         if (retainedIds.length < batch.jobs.length) {
           await acknowledgePendingExcept(this.pool, batch, retainedIds).catch(() => 0);
         }
+        onProgress();
         this.supervisor.ingestor.telemetry.log('CRITICAL', 'pending.batch_partially_acknowledged', {
           count: batch.jobs.length - retainedIds.length,
         });
@@ -390,19 +439,23 @@ export class CorrelationRuntime {
       } finally {
         clearInterval(heartbeat);
         await renewing;
+        onProgress();
       }
       if (isCancelled()) return;
       await this.queueNotifications();
+      onProgress();
       // Retention is time-gated, so calling it each iteration is cheap when the
       // floor has not elapsed. Keeping it inside the loop is what bounds a
       // failing sweep to one attempt per floor even when the pass is long.
       await this.maybeRunRetention();
+      onProgress();
       // Yield between batches. `acknowledgePending` deletes rows that are already
       // gone from the claim query, so a busy queue lets this loop re-enter
       // `claimPending` immediately and hold a pool connection (plus a claim and a
       // notification transaction) continuously. A short pause lets the tick timer
       // and other pool users run, and keeps the drain from starving them.
       await delay(DRAIN_INTER_BATCH_MS);
+      onProgress();
     }
   }
 
