@@ -1306,6 +1306,7 @@ export async function queueEveryoneDeliveryJobs(
         new Date(),
         template,
         templateCustomization,
+        await resolveMatchConfidence(db),
       );
       const evidence = deliveryRevisionEvidence(permitted);
       // Full digest, like every other content revision: this value is part of a
@@ -1461,6 +1462,7 @@ export function consolidatedFindingsDocument(
   generatedAt: Date,
   template?: string,
   templateCustomization?: TemplateCustomization,
+  matchConfidence?: { matchConfidenceEnabled: boolean; matchConfidenceThreshold: number },
 ): { advisory: Advisory; document: { subject: string; text: string; html: string } } {
   const batchId = consolidatedFindingBatchId(findings.map((finding) => finding.id));
   const advisory: Advisory = {
@@ -1479,7 +1481,14 @@ export function consolidatedFindingsDocument(
     affectedSystems: uniqueSorted(findings.map((finding) => finding.matchedAssetName)),
     isDigestBatch: findings.length > 1,
   };
-  const document = renderFindingsDocument({ advisory, findings, generatedAt, template, templateCustomization });
+  const document = renderFindingsDocument({
+    advisory,
+    findings,
+    generatedAt,
+    template,
+    templateCustomization,
+    ...matchConfidence,
+  });
   return { advisory, document: { subject: document.subject, text: document.text, html: document.html } };
 }
 
@@ -1490,9 +1499,16 @@ function consolidatedPayloadFor(
   cveIds: string[],
   template?: string,
   templateCustomization?: TemplateCustomization,
+  matchConfidence?: { matchConfidenceEnabled: boolean; matchConfidenceThreshold: number },
 ): Job['payload'] {
   const generatedAt = new Date();
-  const { document } = consolidatedFindingsDocument(findings, generatedAt, template, templateCustomization);
+  const { document } = consolidatedFindingsDocument(
+    findings,
+    generatedAt,
+    template,
+    templateCustomization,
+    matchConfidence,
+  );
   const evidence = deliveryRevisionEvidence(findings);
   return {
     ...document,
@@ -1519,6 +1535,23 @@ async function operatorTemplate(db: Db): Promise<{ template: string | undefined;
   return {
     template: resolveAdvisoryTemplate(record),
     templateCustomization: record.templateCustomization,
+  };
+}
+
+/**
+ * Reads the operator's match-confidence presentation setting for a delivery.
+ *
+ * Rendering is pure, so the flag and threshold are resolved here (once per
+ * document) and passed down. A missing row falls back to `DEFAULT_SETTINGS`,
+ * which shows confidence at the historical 100% bar.
+ */
+async function resolveMatchConfidence(
+  db: Db,
+): Promise<{ matchConfidenceEnabled: boolean; matchConfidenceThreshold: number }> {
+  const settings = (await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
+  return {
+    matchConfidenceEnabled: settings.matchConfidence?.enabled ?? true,
+    matchConfidenceThreshold: settings.matchConfidence?.threshold ?? 100,
   };
 }
 
@@ -1557,6 +1590,10 @@ export async function queueConsolidatedFindingNotifications(
 
   const settings = (await get<AppSettings>(db, 'settings', 'main')) || DEFAULT_SETTINGS;
   const deferEveryone = settings.deferEveryoneUntilSecurityDelivered;
+  const matchConfidence = {
+    matchConfidenceEnabled: settings.matchConfidence?.enabled ?? true,
+    matchConfidenceThreshold: settings.matchConfidence?.threshold ?? 100,
+  };
   const allRecipients = await list<EmailRecipient>(db, 'recipients');
   const securityRecipients = allRecipients.filter(
     (r) => r.enabled && (r.deliveryGroup === 'SECURITY_TEAM' || r.deliveryGroup === undefined),
@@ -1609,7 +1646,13 @@ export async function queueConsolidatedFindingNotifications(
       let built = documentCache.get(bucket);
       if (!built) {
         const { template, templateCustomization } = await operatorTemplate(tx);
-        const { advisory, document } = consolidatedFindingsDocument(ownedFindings, generatedAt, template, templateCustomization);
+        const { advisory, document } = consolidatedFindingsDocument(
+          ownedFindings,
+          generatedAt,
+          template,
+          templateCustomization,
+          matchConfidence,
+        );
         const evidence = deliveryRevisionEvidence(ownedFindings);
         built = {
           payload: {
@@ -1680,7 +1723,13 @@ export async function queueConsolidatedFindingNotifications(
     let built = documentCache.get(bucket);
     if (!built) {
       const { template, templateCustomization } = await operatorTemplate(db);
-      const { advisory, document } = consolidatedFindingsDocument(permitted, generatedAt, template, templateCustomization);
+      const { advisory, document } = consolidatedFindingsDocument(
+        permitted,
+        generatedAt,
+        template,
+        templateCustomization,
+        matchConfidence,
+      );
       const evidence = deliveryRevisionEvidence(permitted);
       built = {
         payload: {
@@ -2207,7 +2256,10 @@ export async function deliverNext(
       }
       const generatedAt = job.payload.generatedAt ? new Date(job.payload.generatedAt) : new Date();
       const { template, templateCustomization } = await operatorTemplate(pool);
-      advisory = consolidatedFindingsDocument(findings, generatedAt, template, templateCustomization).advisory;
+      advisory = consolidatedFindingsDocument(findings, generatedAt, template, templateCustomization, {
+        matchConfidenceEnabled: settings.matchConfidence?.enabled ?? true,
+        matchConfidenceThreshold: settings.matchConfidence?.threshold ?? 100,
+      }).advisory;
     }
     const currentFindings: Finding[] = [];
     // Zero-day digest jobs are standalone summaries: their findings were
@@ -2433,7 +2485,17 @@ export async function deliverNext(
           const { template, templateCustomization } = await operatorTemplate(pool);
           job.payload = {
             ...job.payload,
-            ...consolidatedPayloadFor(advisory, surviving, declaredCveIds, template, templateCustomization),
+            ...consolidatedPayloadFor(
+              advisory,
+              surviving,
+              declaredCveIds,
+              template,
+              templateCustomization,
+              {
+                matchConfidenceEnabled: settings.matchConfidence?.enabled ?? true,
+                matchConfidenceThreshold: settings.matchConfidence?.threshold ?? 100,
+              },
+            ),
           };
         } else if (!surviving.length) {
           // Nothing in this bundle can still be delivered.

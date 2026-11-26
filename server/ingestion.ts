@@ -3,7 +3,7 @@ import type { ThreatFeed, NormalizedCVE, IntelligenceArticle } from '../src/type
 import { ingestionWindow, type IngestionState } from './ingestionState';
 import { parseSyndication, RSS_MAX_BYTES, RSS_USER_AGENT } from './rss';
 import type { Requester, RequestOptions, ResponseData } from './network';
-import { cveSchema } from './validation';
+import { cveSchema, referenceUrlValue } from './validation';
 import { decrypt, encryptionKeys } from './secrets';
 import type { Config } from './config';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -326,8 +326,12 @@ export function normalizeNvd(item: any, feedId: string): NormalizedCVE | null {
     exploitStatus: 'None',
     remediation: {
       patchUrl: '',
-      vendorAdvisoryRef:
-        (cve.references || []).find((r: any) => r.tags?.includes('Vendor Advisory'))?.url || '',
+      // A feed-controlled URL must not fail the whole record: the schema rejects
+      // embedded credentials, so an unguarded link here drops the CVE on server
+      // NVD. Guard it instead; an unusable link becomes an empty field.
+      vendorAdvisoryRef: referenceUrlValue(
+        (cve.references || []).find((r: any) => r.tags?.includes('Vendor Advisory'))?.url,
+      ),
       immediateActions: [],
       workarounds: [],
       rollbackPlan: '',
@@ -1592,8 +1596,11 @@ function normalizeNvdItem(item: any, feedId: string): NormalizeNvdItemResult {
       exploitStatus: 'None',
       remediation: {
         patchUrl: '',
-        vendorAdvisoryRef:
-          (cve.references || []).find((r: any) => r.tags?.includes('Vendor Advisory'))?.url || '',
+        // Same guard as normalizeNvd: a malformed Vendor Advisory URL must not
+        // reject the entire NVD++ record, which would lose the finding.
+        vendorAdvisoryRef: referenceUrlValue(
+          (cve.references || []).find((r: any) => r.tags?.includes('Vendor Advisory'))?.url,
+        ),
         immediateActions: [],
         workarounds: [],
         rollbackPlan: '',

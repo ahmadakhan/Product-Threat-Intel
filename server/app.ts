@@ -719,7 +719,15 @@ export function createApp(
       const anyError = Object.values(healthChecks).some((c) => c.status === 'error');
       const overall = anyError ? 'unhealthy' : allOk ? 'healthy' : 'degraded';
       if (!detailsAuthorized) {
-        res.status(anyError ? 503 : 200).json({ status: overall });
+        // Unauthenticated probes get the overall status plus the NAMES of the
+        // checks that are not ok, so a degraded node is diagnosable without the
+        // METRICS_TOKEN. Values are withheld deliberately (queue backlog, leader
+        // id and dead-letter counts are operationally useful to an attacker
+        // mapping the deployment); only the fixed check vocabulary is exposed.
+        const failing = Object.entries(healthChecks)
+          .filter(([, check]) => check.status !== 'ok')
+          .map(([name]) => name);
+        res.status(anyError ? 503 : 200).json({ status: overall, failing });
         return;
       }
       res.status(anyError ? 503 : 200).json({

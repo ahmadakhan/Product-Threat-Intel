@@ -16,6 +16,11 @@ services:
       -c maintenance_work_mem=128MB
       -c max_connections=80
       -c effective_cache_size=768MB
+      -c max_wal_size=4GB
+      -c min_wal_size=256MB
+      -c checkpoint_timeout=15min
+      -c checkpoint_completion_target=0.9
+      -c wal_compression=on
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./deploy/init-db.sh:/docker-entrypoint-initdb.d/01-runtime-role.sh:ro

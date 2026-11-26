@@ -1404,6 +1404,24 @@ export interface AppSettings {
     /** Include a server health-check snapshot in the daily report. */
     includeHealthReport: boolean;
   };
+  /**
+   * Match-confidence presentation in delivered emails.
+   *
+   *  - `enabled`: when true, the limited-confidence notice (and the confidence
+   *    percentage) is included in the email body and text alternative; when
+   *    false, no confidence information is written to the email at all.
+   *  - `threshold`: a finding whose match confidence is below this percentage is
+   *    labelled as limited confidence. A finding at or above the threshold is
+   *    treated as a confident match. Defaults to 100 (any shortfall is flagged).
+   */
+  matchConfidence: MatchConfidenceSettings;
+}
+
+/** Presentation of finding match confidence in delivered emails. */
+export interface MatchConfidenceSettings {
+  enabled: boolean;
+  /** Percentage (0-100); a finding below it is labelled limited confidence. */
+  threshold: number;
 }
 
 /** ML operations status returned by `GET /api/ml/status`. */

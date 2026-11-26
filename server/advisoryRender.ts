@@ -184,11 +184,17 @@ function formattedDate(value?: string | null): string {
  * version, 85% alias) still carry their notice because those limitations are
  * independent of the wildcard.
  */
-export function confidenceIsLimited(finding: Finding): boolean {
+export function confidenceIsLimited(finding: Finding, threshold = 100): boolean {
   const confidence = finding.confidence;
   const measured = typeof confidence === 'number' && Number.isFinite(confidence);
+  // A wildcard scope is a declared monitoring scope, not a limitation: the
+  // matcher scores it at 90% or above and it must render as a normal finding.
+  // This exemption is structural and independent of the operator threshold;
+  // lowering the threshold must not start flagging wildcard findings.
   if (finding.wildcardScopeMatch && measured && confidence >= 90) return false;
-  return !measured || confidence < 100;
+  // An unmeasured confidence is always limited (nothing to compare); a measured
+  // one is limited only when it falls below the configured threshold.
+  return !measured || confidence < threshold;
 }
 
 function confidencePercent(finding: Finding): string {
@@ -227,6 +233,18 @@ export interface AdvisoryRenderOptions {
   contactEmail?: string;
   /** Distribution marking shown in the footer (e.g. `TLP:AMBER // INTERNAL`). */
   tlpClassification?: string;
+  /**
+   * When false, the HTML body omits every match-confidence notice. Operators
+   * set this through Settings > match confidence; the default (undefined) keeps
+   * the notice so any caller that does not opt in renders unchanged.
+   */
+  matchConfidenceEnabled?: boolean;
+  /**
+   * A finding whose match confidence is below this percentage is treated as
+   * limited confidence. Undefined keeps the legacy 100% bar (any shortfall is
+   * flagged). Only consulted when `matchConfidenceEnabled` is not false.
+   */
+  matchConfidenceThreshold?: number;
 }
 
 interface EnterpriseCve {
@@ -269,6 +287,8 @@ function enterpriseTemplateValues(
   vulnerabilityDetails: { cve_id: string; cvss_score: string; description: string; published_date: string; last_modified_date: string }[],
   escape: (value: string) => string,
 ): Record<string, unknown> {
+  const showConfidence = options.matchConfidenceEnabled !== false;
+  const confidenceThreshold = options.matchConfidenceThreshold ?? 100;
   const rankOrder = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
   const cveIds = [...advisory.cveIds].sort(
     (a, b) => severityRank(b, advisory, findings) - severityRank(a, advisory, findings) || a.localeCompare(b),
@@ -342,7 +362,7 @@ function enterpriseTemplateValues(
       // `{{{description}}}` in the template, so escape here: the value is CVE
       // prose from an external source, never markup we intend to honour.
       description: `${escape(detail?.description || primary?.cve.description || 'No vendor description published.')}${
-        primary && confidenceIsLimited(primary)
+        showConfidence && primary && confidenceIsLimited(primary, confidenceThreshold)
           ? `<br><strong>Low confidence${confidencePercent(primary) ? ` (${escape(confidencePercent(primary))})` : ''}:</strong> ${escape(stripConfidenceEvidence(primary.matchingEvidence) || 'Applicability could not be fully verified; confirm the affected version with the vendor before remediation.')}`
           : ''
       }`,
@@ -407,6 +427,11 @@ export function renderAdvisory(
       (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!,
     );
   const edits: ReviewEdits = advisory.edits || {};
+  // Match-confidence presentation is operator-controlled (Settings). When
+  // disabled, no confidence notice is written anywhere in the body; when enabled
+  // the configured threshold decides which findings are labelled limited.
+  const showConfidence = options.matchConfidenceEnabled !== false;
+  const confidenceThreshold = options.matchConfidenceThreshold ?? 100;
   // ML-guided summary uses the actual finding mix. Remediation stays tied to
   // supplied vendor guidance and playbooks rather than model-selected claims.
   let composedSummary = advisory.executiveSummary;
@@ -521,7 +546,7 @@ export function renderAdvisory(
           name: escape(f.cve.cveId),
         }));
       const lowConfidenceNote = (finding?: Finding) => {
-        if (!finding || !confidenceIsLimited(finding)) return '';
+        if (!showConfidence || !finding || !confidenceIsLimited(finding, confidenceThreshold)) return '';
         const confidenceLabel = confidencePercent(finding);
         const evidence = stripConfidenceEvidence(finding.matchingEvidence);
         return `<div style="margin:5px 0 0;padding:7px 9px;border-left:3px solid #b7791f;background:#fffbeb;font-size:11px;line-height:17px;color:#7c2d12;"><strong>Low confidence${confidenceLabel ? ` (${escape(confidenceLabel)})` : ''}:</strong> ${escape(evidence || 'Applicability could not be fully verified; confirm the affected version with the vendor before remediation.')}</div>`;

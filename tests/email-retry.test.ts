@@ -11,6 +11,7 @@ import {
 } from '../server/delivery.ts';
 import { settingsSchema } from '../server/validation.ts';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
+import type { AppSettings } from '../src/types/index.ts';
 
 test('email retry policy defaults apply to legacy settings', () => {
   assert.deepEqual(emailRetryPolicy(undefined), DEFAULT_EMAIL_RETRY_POLICY);
@@ -124,4 +125,30 @@ test('settings schema applies digestWindowMinutes default for legacy settings', 
   });
   assert.equal(legacy.digestBatchingEnabled, true);
   assert.equal(legacy.digestWindowMinutes, 5);
+});
+
+test('matchConfidence settings default and survive a shallow partial patch', () => {
+  // A row stored before the setting existed parses to the shipped default.
+  const legacy = settingsSchema.parse({ ...DEFAULT_SETTINGS, matchConfidence: undefined });
+  assert.deepEqual(legacy.matchConfidence, { enabled: true, threshold: 100 });
+
+  // The server merges a patch shallowly (`{ ...old, ...patch }`). A client that
+  // sends only the toggle must not blank the threshold: the schema fills it.
+  const toggled = settingsSchema.parse({
+    ...DEFAULT_SETTINGS,
+    matchConfidence: { enabled: false } as unknown as AppSettings['matchConfidence'],
+  });
+  assert.deepEqual(toggled.matchConfidence, { enabled: false, threshold: 100 });
+
+  // Out-of-range thresholds are rejected.
+  assert.equal(
+    settingsSchema.safeParse({ ...DEFAULT_SETTINGS, matchConfidence: { enabled: true, threshold: 101 } })
+      .success,
+    false,
+  );
+  assert.equal(
+    settingsSchema.safeParse({ ...DEFAULT_SETTINGS, matchConfidence: { enabled: true, threshold: -1 } })
+      .success,
+    false,
+  );
 });

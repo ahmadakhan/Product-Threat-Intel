@@ -110,6 +110,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
     cooldownMinutes: 30,
     emailNotifications: true,
   },
+  // Confidence is shown by default, with the historical 100% bar: any finding
+  // whose match confidence is short of a perfect match carries its notice, which
+  // preserves the pre-setting behavior for existing deployments.
+  matchConfidence: {
+    enabled: true,
+    threshold: 100,
+  },
 };
 /**
  * Collections that can grow without bound in a large installation. `/api/state`

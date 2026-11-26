@@ -171,6 +171,10 @@ export interface DeliveryDocumentInput {
   templateCustomization?: TemplateCustomization;
   /** Pinned render instant; one value per delivery. */
   generatedAt?: Date;
+  /** Operator setting: when false, no match-confidence text is written. */
+  matchConfidenceEnabled?: boolean;
+  /** Operator setting: findings below this percentage are labelled limited. */
+  matchConfidenceThreshold?: number;
 }
 
 /**
@@ -183,6 +187,13 @@ export interface DeliveryDocumentInput {
 export function renderFindingsDocument(input: DeliveryDocumentInput): DeliveryDocument {
   const { advisory, findings } = input;
   const generatedAt = input.generatedAt ?? new Date();
+  const showConfidence = input.matchConfidenceEnabled !== false;
+  const confidenceThreshold = input.matchConfidenceThreshold ?? 100;
+  const renderOptions = {
+    generatedAt,
+    matchConfidenceEnabled: showConfidence,
+    matchConfidenceThreshold: confidenceThreshold,
+  };
   const template = input.template ?? (input.templateCustomization
     ? compileCustomizedTemplate(input.templateCustomization)
     : DEFAULT_ADVISORY_EMAIL_TEMPLATE);
@@ -192,7 +203,7 @@ export function renderFindingsDocument(input: DeliveryDocumentInput): DeliveryDo
   // template is used instead and the failure is reported loudly.
   let html: string;
   try {
-    html = renderAdvisory(template, advisory, findings, { generatedAt });
+    html = renderAdvisory(template, advisory, findings, renderOptions);
   } catch (error) {
     console.error(
       JSON.stringify({
@@ -202,15 +213,10 @@ export function renderFindingsDocument(input: DeliveryDocumentInput): DeliveryDo
         error: error instanceof Error ? error.message : String(error),
       }),
     );
-    html = renderAdvisory(
-      DEFAULT_ADVISORY_EMAIL_TEMPLATE,
-      advisory,
-      findings,
-      { generatedAt },
-    );
+    html = renderAdvisory(DEFAULT_ADVISORY_EMAIL_TEMPLATE, advisory, findings, renderOptions);
   }
   const email = advisoryEmail(advisory, html, findings.map(deliveryFindingDetail), { findings });
-  const limited = limitedConfidenceLines(findings);
+  const limited = showConfidence ? limitedConfidenceLines(findings, confidenceThreshold) : [];
   const text = limited.length ? `${email.text}\n\n${limited.join('\n')}` : email.text;
   return { ...email, text, html: email.html ?? html, generatedAt };
 }
@@ -231,6 +237,7 @@ export function renderFindingsText(
   advisory: Advisory,
   findings: Finding[],
   sections: PlainTextSection[] = [],
+  options: { matchConfidenceEnabled?: boolean; matchConfidenceThreshold?: number } = {},
 ): string {
   const lines: string[] = [
     `Advisory ID: ${advisory.id}`,
@@ -239,7 +246,10 @@ export function renderFindingsText(
     `Created: ${advisory.createdDate}`,
   ];
   for (const section of sections) if (section.lines.length) lines.push('', `${section.heading}:`, ...section.lines);
-  const limited = limitedConfidenceLines(findings);
+  const limited =
+    options.matchConfidenceEnabled === false
+      ? []
+      : limitedConfidenceLines(findings, options.matchConfidenceThreshold ?? 100);
   if (limited.length) lines.push('', ...limited);
   lines.push(
     '',
@@ -268,8 +278,8 @@ const stripLine = (value: string | undefined) =>
  * every finding is fully confident. Shared by every text alternative so the
  * single-document and digest paths cannot word it differently.
  */
-function limitedConfidenceLines(findings: readonly Finding[]): string[] {
-  const limited = findings.filter(isLowConfidence);
+function limitedConfidenceLines(findings: readonly Finding[], threshold = 100): string[] {
+  const limited = findings.filter((finding) => confidenceIsLimited(finding, threshold));
   if (!limited.length) return [];
   return [
     'Limited confidence (confirm applicability before remediation):',

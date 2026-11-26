@@ -141,6 +141,49 @@ test('a wildcard CPE match is a normal finding with no low-confidence notice', (
   assert.match(exactOnly.text, /Limited confidence/);
 });
 
+test('match confidence is omitted from both HTML and text when disabled', () => {
+  const low = finding({ id: 'f1', cveId: 'CVE-2026-10001', confidence: 70 });
+  const view = deliveryAdvisoryView(advisory, [low]);
+  const enabled = renderFindingsDocument({
+    advisory: view,
+    findings: [low],
+    generatedAt: new Date('2026-01-01T00:00:00Z'),
+  });
+  assert.match(enabled.html, /Low confidence/);
+  assert.match(enabled.text, /Limited confidence/);
+
+  const disabled = renderFindingsDocument({
+    advisory: view,
+    findings: [low],
+    generatedAt: new Date('2026-01-01T00:00:00Z'),
+    matchConfidenceEnabled: false,
+  });
+  assert.ok(!disabled.html.includes('Low confidence'), 'no HTML confidence notice when disabled');
+  assert.ok(!disabled.text.includes('Limited confidence'), 'no text confidence notice when disabled');
+  assert.ok(!disabled.html.includes('70% match confidence'), 'no confidence percentage when disabled');
+});
+
+test('the confidence threshold decides which findings are labelled limited', () => {
+  const at85 = finding({ id: 'f1', cveId: 'CVE-2026-10001', confidence: 85 });
+  const view = deliveryAdvisoryView(advisory, [at85]);
+  const render = (threshold: number) =>
+    renderFindingsDocument({
+      advisory: view,
+      findings: [at85],
+      generatedAt: new Date('2026-01-01T00:00:00Z'),
+      matchConfidenceEnabled: true,
+      matchConfidenceThreshold: threshold,
+    });
+
+  // At or above the threshold: a confident match, no notice.
+  assert.ok(!render(80).html.includes('Low confidence'));
+  assert.ok(!render(85).html.includes('Low confidence'));
+  // Below the threshold: labelled limited confidence in both renderings.
+  assert.match(render(86).html, /Low confidence/);
+  assert.match(render(86).text, /Limited confidence/);
+  assert.match(render(100).html, /Low confidence/);
+});
+
 test('the email body is the document attached to it', () => {
   const findings = [finding({ id: 'f1', cveId: 'CVE-2026-10001' }), finding({ id: 'f2', cveId: 'CVE-2026-10002' })];
   const view = deliveryAdvisoryView(advisory, findings);

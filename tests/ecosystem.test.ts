@@ -63,6 +63,29 @@ test('normalized feed remediation links reject executable URL schemes', () => {
     'https://example.com/patch',
   );
 });
+test('a malformed Vendor Advisory URL is dropped, not the whole CVE', () => {
+  // A feed-controlled reference carrying embedded credentials is exactly the
+  // case cveSchema rejects. Before the guard, that one field made normalizeNvd
+  // return null and the vulnerability was lost (and the operator saw an open
+  // ingestion rejection). The record must survive with an empty link instead.
+  const withReference = (url: string) => {
+    const item = structuredClone(nvd()) as { cve: Record<string, unknown> };
+    item.cve.references = [{ url, tags: ['Vendor Advisory'] }];
+    return item;
+  };
+
+  const normalized = normalizeNvd(withReference('https://user:secret@vendor.example/advisory'), 'source-a');
+  assert.ok(normalized, 'the CVE must be normalized despite the rejected link');
+  assert.equal(normalized.remediation.vendorAdvisoryRef, '');
+  // The salvaged record is exactly what the persisted schema accepts.
+  assert.doesNotThrow(() => cveSchema.parse(normalized));
+
+  // A well-formed link is still preserved verbatim.
+  assert.equal(
+    normalizeNvd(withReference('https://vendor.example/advisory'), 'source-a')?.remediation.vendorAdvisoryRef,
+    'https://vendor.example/advisory',
+  );
+});
 const asset: WatchListItem = {
   id: 'asset',
   vendor: 'example',

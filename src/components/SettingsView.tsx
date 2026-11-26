@@ -53,6 +53,7 @@ const withProcessingDefaults = (value: AppSettings): AppSettings => ({
     cooldownMinutes: 30,
     emailNotifications: true,
   },
+  matchConfidence: value.matchConfidence ?? { enabled: true, threshold: 100 },
 });
 
 const confidenceInputError = (value: string): string => {
@@ -322,7 +323,9 @@ export function SettingsView() {
     (form.dailyDigest?.enabled ?? false) !== (settings.dailyDigest?.enabled ?? false) ||
     (form.dailyDigest?.time ?? '09:00') !== (settings.dailyDigest?.time ?? '09:00') ||
     (form.dailyDigest?.includeHealthReport ?? true) !== (settings.dailyDigest?.includeHealthReport ?? true) ||
-    selfHealingForm.emailNotifications !== (settings.selfHealing?.emailNotifications ?? true);
+    selfHealingForm.emailNotifications !== (settings.selfHealing?.emailNotifications ?? true) ||
+    (form.matchConfidence?.enabled ?? true) !== (settings.matchConfidence?.enabled ?? true) ||
+    (form.matchConfidence?.threshold ?? 100) !== (settings.matchConfidence?.threshold ?? 100);
   const securityDirty = securityDirtyFrom(securityForm, settings.securityPolicy);
   const sections = [
     ...(admin
@@ -403,6 +406,7 @@ export function SettingsView() {
       timezone: form.timezone,
       dailyDigest: form.dailyDigest,
       selfHealing: selfHealingForm,
+      matchConfidence: form.matchConfidence ?? { enabled: true, threshold: 100 },
     });
     setProcessingSaveError(!saved);
     setMessage(
@@ -1147,6 +1151,55 @@ export function SettingsView() {
                         setSelfHealingForm({ ...selfHealingForm, emailNotifications: checked })
                       }
                     />
+                  </ProcessingSection>
+                  <ProcessingSection
+                    number="08"
+                    id="processing-match-confidence"
+                    title="Match confidence in emails"
+                    description="Control whether finding match confidence is shown in delivered advisory emails."
+                  >
+                    <ProcessingToggle
+                      id="match-confidence-enabled"
+                      title="Show match confidence in emails"
+                      description="When enabled, each finding whose match confidence is below the threshold is labelled with a limited-confidence notice. When disabled, no confidence information is included in the email."
+                      checked={form.matchConfidence?.enabled ?? true}
+                      onChange={(checked) =>
+                        setForm({
+                          ...form,
+                          matchConfidence: {
+                            enabled: checked,
+                            threshold: form.matchConfidence?.threshold ?? 100,
+                          },
+                        })
+                      }
+                    />
+                    <ProcessingField
+                      id="match-confidence-threshold"
+                      label="Confidence threshold"
+                      unit="%"
+                      hint="Findings below this percentage are labelled as limited confidence. At 100%, any finding short of a perfect match is flagged."
+                    >
+                      <input
+                        id="match-confidence-threshold"
+                        type="number"
+                        min={0}
+                        max={100}
+                        required
+                        disabled={!(form.matchConfidence?.enabled ?? true)}
+                        aria-describedby="match-confidence-threshold-hint"
+                        className={field}
+                        value={form.matchConfidence?.threshold ?? 100}
+                        onChange={(event) =>
+                          setForm({
+                            ...form,
+                            matchConfidence: {
+                              enabled: form.matchConfidence?.enabled ?? true,
+                              threshold: Math.min(100, Math.max(0, Number(event.target.value) || 0)),
+                            },
+                          })
+                        }
+                      />
+                    </ProcessingField>
                   </ProcessingSection>
                 </fieldset>
                 <div className="ui-actions processing-save-actions">

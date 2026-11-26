@@ -20,5 +20,10 @@ COPY --from=build --chown=node:node /app/server-dist ./server-dist
 RUN mkdir -p /var/lib/vulnstream/deadletters /var/lib/vulnstream/ml && chown -R node:node /var/lib/vulnstream
 USER node
 EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s CMD node -e "fetch('http://127.0.0.1:8080/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+# Probe /live (process liveness), not /ready (readiness): /ready runs a
+# database SELECT and returns 503 during any database stall, so using it as the
+# container healthcheck restarts a healthy process on every slow checkpoint.
+# This matches compose.yaml, which overrides the healthcheck with /live for the
+# same reason. /ready stays available for load-balancer readiness gating.
+HEALTHCHECK --interval=30s --timeout=8s --start-period=60s CMD node -e "fetch('http://127.0.0.1:8080/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node","server-dist/main.js"]

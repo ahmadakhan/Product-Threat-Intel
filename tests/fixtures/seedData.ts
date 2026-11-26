@@ -823,6 +823,10 @@ export const INITIAL_SETTINGS: AppSettings = {
     time: '09:00',
     includeHealthReport: true,
   },
+  matchConfidence: {
+    enabled: true,
+    threshold: 100,
+  },
 };
 
 export const INITIAL_ADVISORY_TEMPLATE = `<!DOCTYPE html>

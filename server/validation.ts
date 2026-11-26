@@ -15,6 +15,42 @@ const httpsUrl = z
     const u = new URL(s);
     return u.protocol === 'https:' && !u.username && !u.password;
   }, 'HTTPS URL without embedded credentials required');
+/**
+ * Is `value` a renderable HTTP(S) reference URL?
+ *
+ * A single predicate backs both the persisted schema (`referenceUrl`) and the
+ * ingest-time salvage helper (`referenceUrlValue`), so a URL that the schema
+ * would accept is exactly one the helper preserves, and vice versa. A URL is
+ * accepted only when it parses, is at most 2048 characters, uses http/https and
+ * carries no embedded credentials (which make a feed-controlled link an
+ * `https://user:pass@host` phishing/SSRF target in a delivered email or PDF).
+ */
+export function isRenderableReferenceUrl(value: string): boolean {
+  if (value.length > 2048) return false;
+  try {
+    const url = new URL(value);
+    return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+/**
+ * Salvage a feed-supplied reference URL for ingestion.
+ *
+ * Feed records are external input. A single malformed `Vendor Advisory` link (an
+ * embedded `user:pass@`, a `javascript:` scheme, a non-URL) must not cause the
+ * whole vulnerability to be dropped: `cveSchema` validates the URL field, so an
+ * unguarded value turns one cosmetic field into a lost finding (the record is
+ * rejected and `remediation.vendorAdvisoryRef` is what typically trips). This
+ * returns the URL unchanged when it is renderable and an empty string when it is
+ * not, so the rest of the CVE is still persisted. The persisted value always
+ * passes `isRenderableReferenceUrl`, which is the same rule `referenceUrl`
+ * enforces.
+ */
+export function referenceUrlValue(value: unknown): string {
+  if (typeof value !== 'string' || value === '') return '';
+  return isRenderableReferenceUrl(value) ? value : '';
+}
 const referenceUrl = z.union([
   z.literal(''),
   z
@@ -552,6 +588,18 @@ export const settingsSchema = z
         includeHealthReport: z.boolean().default(true),
       })
       .default({ enabled: true, time: '09:00', includeHealthReport: true }),
+    // Match-confidence presentation in emails. Each inner field carries its own
+    // default because the settings patch is merged shallowly (`{ ...old, ...patch }`):
+    // a client that sends only `{ enabled: false }` must not make `threshold`
+    // undefined. Enabling is the default so existing deployments keep emitting
+    // confidence; the 100% bar reproduces the historical 'below a perfect match'
+    // notice exactly.
+    matchConfidence: z
+      .object({
+        enabled: z.boolean().default(true),
+        threshold: z.number().int().min(0).max(100).default(100),
+      })
+      .default({ enabled: true, threshold: 100 }),
   })
   .superRefine((value, ctx) => {
     if (value.emailRetryMaxDelayMinutes < value.emailRetryInitialDelayMinutes)
