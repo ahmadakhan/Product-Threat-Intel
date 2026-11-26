@@ -935,7 +935,7 @@ export async function ingestFeed(
       if (!parsed.success) {
         rejections.push({
           feedId: feed.id,
-          cveId: typeof (record as any)?.cveId === 'string' ? (record as any).cveId : undefined,
+          cveId: typeof record === 'object' && record !== null && 'cveId' in record && typeof record.cveId === 'string' ? record.cveId : undefined,
           recordHash: stableJson(record).slice(0, 128),
           category: 'SCHEMA_VALIDATION',
           summary: parsed.error.issues[0]?.message?.slice(0, 240) || 'Record failed schema validation',
@@ -1039,7 +1039,7 @@ export async function ingestFeed(
     // no record in the window changed. The checkpoint must still advance, or a
     // quiet feed would re-request the same window forever.
     const { data: firstOr304, etag } = resumingWindow
-      ? { data: undefined as any, etag: context.indexEtag }
+      ? { data: undefined, etag: context.indexEtag }
       : await fetchInitialNvdPage();
     if (!resumingWindow && firstOr304 === undefined)
       return {

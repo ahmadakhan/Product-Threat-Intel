@@ -58,7 +58,7 @@ const verboseLog = (event: string, context: Record<string, unknown> = {}) => {
   if (VERBOSE) console.log(JSON.stringify({ level: 'info', event, ...context }));
 };
 pool.on('error', (error) =>
-  console.error(JSON.stringify({ level: 'error', event: 'database-connection', code: (error as any).code })),
+  console.error(JSON.stringify({ level: 'error', event: 'database-connection', code: (error as { code?: string }).code })),
 );
 if (config.NODE_ENV === 'production') {
   const initialized = await pool.query("SELECT to_regclass('schema_migrations') AS name");

@@ -196,7 +196,11 @@ function useApplication() {
       }
       throw new Error(
         raw.error === 'Validation failed'
-          ? `${raw.error}: ${Array.isArray(raw.details) ? (raw.details as any[]).map((d: any) => d.path.join('.') + ': ' + d.message).join('; ') : raw.details || ''}`
+          ? `${raw.error}: ${Array.isArray(raw.details)
+              ? (raw.details as { path: (string | number)[]; message: string }[])
+                  .map((d) => d.path.join('.') + ': ' + d.message)
+                  .join('; ')
+              : raw.details || ''}`
           : raw.error || 'Request failed',
       );
     }
@@ -449,7 +453,9 @@ function useApplication() {
       document.removeEventListener('visibilitychange', onVisibility);
       try {
         broadcastChannelRef.current?.close();
-      } catch {}
+      } catch (error) {
+        console.debug('BroadcastChannel close failed:', error);
+      }
       broadcastChannelRef.current = null;
       isPollingTabRef.current = false;
     };
@@ -459,7 +465,9 @@ function useApplication() {
     document.documentElement.classList.toggle('light', theme === 'light');
     try {
       localStorage.setItem('vulnstream_theme', theme);
-    } catch {}
+    } catch (error) {
+      console.debug('localStorage theme persist failed:', error);
+    }
   }, [theme]);
   const login = async (username: string, password: string) =>
     safely(async () => {

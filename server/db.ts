@@ -171,8 +171,8 @@ export const createPool = (url: string) => {
       JSON.stringify({
         level: 'error',
         event: 'database-pool-error',
-        error: (error as any).message,
-        code: (error as any).code,
+        error: error.message,
+        code: (error as { code?: string }).code,
         timestamp: new Date().toISOString(),
       }),
     );

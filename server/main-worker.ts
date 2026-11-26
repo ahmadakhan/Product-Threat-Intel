@@ -915,9 +915,11 @@ async function shutdown() {
     ['mlTraining', trainingRunning],
     ['mlTelemetry', mlTelemetryRunning],
   ];
-  const settled = await Promise.allSettled(
-    workerEntries.filter(([, p]): p is Promise<unknown> => p !== null).map(([, p]) => p),
-  );
+  const promises: Promise<unknown>[] = [];
+  for (const [, p] of workerEntries) {
+    if (p !== null) promises.push(p);
+  }
+  const settled = await Promise.allSettled(promises);
   let settledIndex = 0;
   for (const [name, promise] of workerEntries) {
     if (promise === null) continue;

@@ -64,7 +64,7 @@ const acquireAdvisoryLock = async (db: Db, lockName: string): Promise<boolean> =
       event: 'advisory-lock-acquisition-failed',
       lockName,
       error: (error as Error).message,
-      code: (error as any).code,
+      code: (error as { code?: string }).code,
       timestamp: new Date().toISOString(),
     }));
     return false;
@@ -688,7 +688,7 @@ export async function applyCommand(db: pg.PoolClient, config: Config, request: C
       await appendAudit(
         db,
         'Recipient save failed',
-        `Error: ${(error as Error).message}, email: ${(data as any)?.email}`,
+        `Error: ${(error as Error).message}, email: ${(data as { email?: string })?.email}`,
         actor,
         'SECURITY',
         'ERROR',

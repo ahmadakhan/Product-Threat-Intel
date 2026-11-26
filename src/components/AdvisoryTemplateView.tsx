@@ -409,13 +409,17 @@ const handleInsertToken = (token: string) => {
   const scrollToIframeTop = () => {
     try {
       iframeRef.current?.contentWindow?.scrollTo({ top: 0, behavior: 'smooth' });
-    } catch {}
+    } catch (error) {
+      console.debug('Advisory iframe scroll-to-top failed:', error);
+    }
   };
 
   const scrollToIframeBottom = () => {
     try {
       iframeRef.current?.contentWindow?.scrollTo({ top: 99999, behavior: 'smooth' });
-    } catch {}
+    } catch (error) {
+      console.debug('Advisory iframe scroll-to-bottom failed:', error);
+    }
   };
 
   const handleDownloadHtml = () => {
