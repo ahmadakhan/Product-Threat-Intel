@@ -213,7 +213,6 @@ export const AdvisoryTemplateView: React.FC = () => {
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [saveToast, setSaveToast] = useState(false);
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'mobile'>('desktop');
-  const [copiedToken, setCopiedToken] = useState<string | null>(null);
   const [confirmSave, setConfirmSave] = useState(false);
   const [savingTemplate, setSavingTemplate] = useState(false);
   const [confirmSendTest, setConfirmSendTest] = useState(false);
@@ -346,9 +345,6 @@ const handleInsertToken = (token: string) => {
         }, 0);
       }
     };
-
-  // Active customization tool tab
-  const [toolTab, setToolTab] = useState<'typography' | 'colors' | 'stamps' | 'tokens'>('colors');
 
   // Dynamically sync iframe height to eliminate internal scrollbars and scroll trapping
   const syncIframeHeight = useCallback(() => {
@@ -812,13 +808,6 @@ const handleInsertToken = (token: string) => {
     }
   };
 
-  const handleCopyToken = async (token: string) => {
-    if (await copyText(token)) {
-      setCopiedToken(token);
-      setTimeout(() => setCopiedToken(null), 1800);
-    }
-  };
-
   return (
     <div className="space-y-6">
       {/* Top Header */}
@@ -855,436 +844,6 @@ const handleInsertToken = (token: string) => {
             {saveToast ? 'Applied to All Notifications!' : 'Save & Apply to Notifications'}
           </button>
         </div>
-      </div>
-
-      {/* Live Controls Toolbar (Direct Customization) */}
-      <div className="ui-panel bg-zinc-900/60 dark:bg-zinc-900/60 light:bg-white border border-zinc-800/80 dark:border-zinc-800/80 light:border-zinc-200 rounded-2xl p-4 shadow-sm space-y-4 transition-colors">
-        {/* Tool Sub-Tabs */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 dark:border-zinc-800 light:border-zinc-200 pb-3">
-          <div className="flex min-w-0 max-w-full overflow-x-auto items-center space-x-1 bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 p-1 rounded-xl">
-            <button
-              onClick={() => setToolTab('colors')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center space-x-1.5 ${
-                toolTab === 'colors'
-                  ? 'bg-zinc-800 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 light:bg-white light:text-zinc-900 shadow-sm font-semibold'
-                  : 'text-zinc-400 hover:text-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 light:text-zinc-600 light:hover:text-zinc-900'
-              }`}
-            >
-              <Palette className="w-3.5 h-3.5" />
-              <span>Background &amp; Colors</span>
-            </button>
-
-            <button
-              onClick={() => setToolTab('typography')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center space-x-1.5 ${
-                toolTab === 'typography'
-                  ? 'bg-zinc-800 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 light:bg-white light:text-zinc-900 shadow-sm font-semibold'
-                  : 'text-zinc-400 hover:text-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 light:text-zinc-600 light:hover:text-zinc-900'
-              }`}
-            >
-              <Type className="w-3.5 h-3.5" />
-              <span>Font Style &amp; Typography</span>
-            </button>
-
-            <button
-              onClick={() => setToolTab('stamps')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center space-x-1.5 ${
-                toolTab === 'stamps'
-                  ? 'bg-zinc-800 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 light:bg-white light:text-zinc-900 shadow-sm font-semibold'
-                  : 'text-zinc-400 hover:text-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 light:text-zinc-600 light:hover:text-zinc-900'
-              }`}
-            >
-              <Stamp className="w-3.5 h-3.5" />
-              <span>Drawing Objects &amp; Stamps</span>
-            </button>
-
-            <button
-              onClick={() => setToolTab('tokens')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center space-x-1.5 ${
-                toolTab === 'tokens'
-                  ? 'bg-zinc-800 text-zinc-100 dark:bg-zinc-800 dark:text-zinc-100 light:bg-white light:text-zinc-900 shadow-sm font-semibold'
-                  : 'text-zinc-400 hover:text-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 light:text-zinc-600 light:hover:text-zinc-900'
-              }`}
-            >
-              <Sliders className="w-3.5 h-3.5" />
-              <span>Dynamic Tokens</span>
-            </button>
-          </div>
-
-          {/* Device Preview Switcher */}
-          <div className="flex items-center space-x-1 bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 p-1 rounded-xl">
-            <button
-              onClick={() => setPreviewDevice('desktop')}
-              className={`p-1.5 rounded-lg transition ${
-                previewDevice === 'desktop'
-                  ? 'bg-zinc-800 dark:bg-zinc-800 light:bg-white text-zinc-100 dark:text-zinc-100 light:text-zinc-900 shadow-sm'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-              title="Desktop View (680px)"
-            >
-              <Monitor className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => setPreviewDevice('mobile')}
-              className={`p-1.5 rounded-lg transition ${
-                previewDevice === 'mobile'
-                  ? 'bg-zinc-800 dark:bg-zinc-800 light:bg-white text-zinc-100 dark:text-zinc-100 light:text-zinc-900 shadow-sm'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-              title="Mobile Client View (390px)"
-            >
-              <Smartphone className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-
-        {/* Tab 1: Colors & Backgrounds */}
-        {toolTab === 'colors' && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 text-xs">
-            <div>
-              <label className="block text-zinc-400 dark:text-zinc-400 light:text-zinc-600 font-mono mb-1.5">
-                Canvas Background
-              </label>
-              <div className="flex items-center space-x-2">
-                <input
-                  type="color"
-                  value={templateCustomization.canvasBg}
-                  onChange={(e) => updateTemplateCustomization({ canvasBg: e.target.value })}
-                  className="w-8 h-8 rounded-lg cursor-pointer bg-transparent border-0"
-                />
-                <input
-                  type="text"
-                  value={templateCustomization.canvasBg}
-                  onChange={(e) => updateTemplateCustomization({ canvasBg: e.target.value })}
-                  className="bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-lg px-2.5 py-1 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 font-mono text-xs flex-1"
-                />
-              </div>
-              <div className="flex gap-1.5 mt-2">
-                {['#09090b', '#0b0f19', '#18181b', '#f8fafc'].map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => updateTemplateCustomization({ canvasBg: c })}
-                    className="w-5 h-5 rounded-md border border-zinc-700"
-                    style={{ backgroundColor: c }}
-                  />
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-zinc-400 dark:text-zinc-400 light:text-zinc-600 font-mono mb-1.5">
-                Card Background
-              </label>
-              <div className="flex items-center space-x-2">
-                <input
-                  type="color"
-                  value={templateCustomization.cardBg}
-                  onChange={(e) => updateTemplateCustomization({ cardBg: e.target.value })}
-                  className="w-8 h-8 rounded-lg cursor-pointer bg-transparent border-0"
-                />
-                <input
-                  type="text"
-                  value={templateCustomization.cardBg}
-                  onChange={(e) => updateTemplateCustomization({ cardBg: e.target.value })}
-                  className="bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-lg px-2.5 py-1 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 font-mono text-xs flex-1"
-                />
-              </div>
-              <div className="flex gap-1.5 mt-2">
-                {['#18181b', '#1e293b', '#27272a', '#ffffff'].map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => updateTemplateCustomization({ cardBg: c })}
-                    className="w-5 h-5 rounded-md border border-zinc-700"
-                    style={{ backgroundColor: c }}
-                  />
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-zinc-400 dark:text-zinc-400 light:text-zinc-600 font-mono mb-1.5">
-                Header Banner Bg
-              </label>
-              <div className="flex items-center space-x-2">
-                <input
-                  type="color"
-                  value={templateCustomization.headerBg}
-                  onChange={(e) => updateTemplateCustomization({ headerBg: e.target.value })}
-                  className="w-8 h-8 rounded-lg cursor-pointer bg-transparent border-0"
-                />
-                <input
-                  type="text"
-                  value={templateCustomization.headerBg}
-                  onChange={(e) => updateTemplateCustomization({ headerBg: e.target.value })}
-                  className="bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-lg px-2.5 py-1 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 font-mono text-xs flex-1"
-                />
-              </div>
-              <div className="flex gap-1.5 mt-2">
-                {['#1e293b', '#09090b', '#312e81', '#450a0a'].map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => updateTemplateCustomization({ headerBg: c })}
-                    className="w-5 h-5 rounded-md border border-zinc-700"
-                    style={{ backgroundColor: c }}
-                  />
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-zinc-400 dark:text-zinc-400 light:text-zinc-600 font-mono mb-1.5">
-                Link Color
-              </label>
-              <div className="flex items-center space-x-2">
-                <input
-                  type="color"
-                  value={templateCustomization.accentColor}
-                  onChange={(e) => updateTemplateCustomization({ accentColor: e.target.value })}
-                  className="w-8 h-8 rounded-lg cursor-pointer bg-transparent border-0"
-                />
-                <input
-                  type="text"
-                  value={templateCustomization.accentColor}
-                  onChange={(e) => updateTemplateCustomization({ accentColor: e.target.value })}
-                  className="bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-lg px-2.5 py-1 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 font-mono text-xs flex-1"
-                />
-              </div>
-              <div className="flex gap-1.5 mt-2">
-                {['#3b82f6', '#10b981', '#8b5cf6', '#ef4444'].map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => updateTemplateCustomization({ accentColor: c })}
-                    className="w-5 h-5 rounded-md border border-zinc-700"
-                    style={{ backgroundColor: c }}
-                  />
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Tab 2: Typography */}
-        {toolTab === 'typography' && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 text-xs">
-            <div>
-              <label className="block text-zinc-400 dark:text-zinc-400 light:text-zinc-600 font-mono mb-1.5">
-                Font Style / Family
-              </label>
-              <select
-                value={templateCustomization.fontFamily}
-                onChange={(e) =>
-                  updateTemplateCustomization({
-                    fontFamily: e.target.value as any,
-                  })
-                }
-                className="w-full bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-lg px-3 py-2 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 font-medium"
-              >
-                <option value="sans">Plus Jakarta Sans / Modern</option>
-                <option value="mono">JetBrains Mono / Technical</option>
-                <option value="serif">Georgia / Editorial Serif</option>
-                <option value="system">System Clean / Native</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-zinc-400 dark:text-zinc-400 light:text-zinc-600 font-mono mb-1.5">
-                Heading Font Color
-              </label>
-              <div className="flex items-center space-x-2">
-                <input
-                  type="color"
-                  value={templateCustomization.headingColor}
-                  onChange={(e) => updateTemplateCustomization({ headingColor: e.target.value })}
-                  className="w-8 h-8 rounded-lg cursor-pointer bg-transparent border-0"
-                />
-                <input
-                  type="text"
-                  value={templateCustomization.headingColor}
-                  onChange={(e) => updateTemplateCustomization({ headingColor: e.target.value })}
-                  className="bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-lg px-2.5 py-1 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 font-mono text-xs flex-1"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-zinc-400 font-mono mb-1.5">Body Font Color</label>
-              <div className="flex items-center space-x-2">
-                <input
-                  type="color"
-                  value={templateCustomization.fontColor}
-                  onChange={(e) => updateTemplateCustomization({ fontColor: e.target.value })}
-                  className="w-8 h-8 rounded-lg cursor-pointer bg-transparent border-0"
-                />
-                <input
-                  type="text"
-                  value={templateCustomization.fontColor}
-                  onChange={(e) => updateTemplateCustomization({ fontColor: e.target.value })}
-                  className="bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-lg px-2.5 py-1 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 font-mono text-xs flex-1"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-zinc-400 font-mono mb-1.5">Border Style &amp; Radius</label>
-              <div className="flex items-center space-x-2">
-                <select
-                  value={templateCustomization.borderStyle}
-                  onChange={(e) => updateTemplateCustomization({ borderStyle: e.target.value as any })}
-                  className="bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-lg px-2 py-1.5 text-zinc-200 text-xs flex-1"
-                >
-                  <option value="solid">Solid Border</option>
-                  <option value="dashed">Dashed Border</option>
-                  <option value="none">No Border</option>
-                </select>
-                <select
-                  value={templateCustomization.borderRadius}
-                  onChange={(e) => updateTemplateCustomization({ borderRadius: e.target.value })}
-                  className="bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-lg px-2 py-1.5 text-zinc-200 text-xs"
-                >
-                  <option value="0px">Sharp (0px)</option>
-                  <option value="8px">Round (8px)</option>
-                  <option value="12px">Pill (12px)</option>
-                  <option value="20px">Curved (20px)</option>
-                </select>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Tab 3: Drawing Objects & Stamps */}
-        {toolTab === 'stamps' && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 text-xs">
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <label className="text-zinc-400 dark:text-zinc-400 light:text-zinc-600 font-mono">
-                  Security Stamp Object
-                </label>
-                <input
-                  type="checkbox"
-                  checked={templateCustomization.showStamp}
-                  onChange={(e) => updateTemplateCustomization({ showStamp: e.target.checked })}
-                  className="rounded border-zinc-700 text-zinc-200"
-                />
-              </div>
-              <input
-                type="text"
-                value={templateCustomization.badgeStampText}
-                onChange={(e) => updateTemplateCustomization({ badgeStampText: e.target.value })}
-                placeholder="e.g. OFFICIAL SECURITY BULLETIN"
-                disabled={!templateCustomization.showStamp}
-                className="w-full bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-lg px-3 py-2 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 disabled:opacity-40 font-mono text-xs"
-              />
-              <div className="flex items-center space-x-1.5 mt-2">
-                <span className="text-[11px] text-zinc-500 font-mono">Presets:</span>
-                {['CONFIDENTIAL', 'URGENT ACTION', 'OFFICIAL BULLETIN', 'CSAF VEX'].map((t) => (
-                  <button
-                    key={t}
-                    onClick={() => updateTemplateCustomization({ badgeStampText: t })}
-                    className="px-2 py-0.5 rounded bg-zinc-800 dark:bg-zinc-800 light:bg-zinc-200 text-zinc-300 dark:text-zinc-300 light:text-zinc-800 text-[10px] font-mono hover:bg-zinc-700"
-                  >
-                    {t}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-zinc-400 dark:text-zinc-400 light:text-zinc-600 font-mono mb-1.5">
-                Stamp Color
-              </label>
-              <div className="flex items-center space-x-2">
-                <input
-                  type="color"
-                  value={templateCustomization.badgeStampColor}
-                  onChange={(e) => updateTemplateCustomization({ badgeStampColor: e.target.value })}
-                  disabled={!templateCustomization.showStamp}
-                  className="w-8 h-8 rounded-lg cursor-pointer bg-transparent border-0 disabled:opacity-40"
-                />
-                <input
-                  type="text"
-                  value={templateCustomization.badgeStampColor}
-                  onChange={(e) => updateTemplateCustomization({ badgeStampColor: e.target.value })}
-                  disabled={!templateCustomization.showStamp}
-                  className="bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-lg px-2.5 py-1 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 font-mono text-xs flex-1 disabled:opacity-40"
-                />
-              </div>
-              <div className="flex gap-1.5 mt-2">
-                {['#ef4444', '#f59e0b', '#10b981', '#6366f1'].map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => updateTemplateCustomization({ badgeStampColor: c })}
-                    className="w-5 h-5 rounded-md border border-zinc-700"
-                    style={{ backgroundColor: c }}
-                  />
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <label className="text-zinc-400 dark:text-zinc-400 light:text-zinc-600 font-mono">
-                  Classification Banner
-                </label>
-                <input
-                  type="checkbox"
-                  checked={templateCustomization.showClassificationBanner}
-                  onChange={(e) =>
-                    updateTemplateCustomization({ showClassificationBanner: e.target.checked })
-                  }
-                  className="rounded border-zinc-700 text-zinc-200"
-                />
-              </div>
-              <input
-                type="text"
-                value={templateCustomization.classificationText}
-                onChange={(e) => updateTemplateCustomization({ classificationText: e.target.value })}
-                disabled={!templateCustomization.showClassificationBanner}
-                className="w-full bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 rounded-lg px-3 py-2 text-zinc-200 dark:text-zinc-200 light:text-zinc-800 disabled:opacity-40 font-mono text-xs"
-              />
-              <span className="text-[10px] text-zinc-500 dark:text-zinc-500 light:text-zinc-600 font-mono block mt-1">
-                Rendered across the top edge of email notices
-              </span>
-            </div>
-          </div>
-        )}
-
-        {/* Tab 4: Dynamic Tokens */}
-        {toolTab === 'tokens' && (
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            <span className="text-zinc-500 dark:text-zinc-500 light:text-zinc-600 font-mono text-[11px] font-medium">
-              Click to Copy:
-            </span>
-            {            [
-              '{{severity_header_badge}}',
-              '{{severity_badge}}',
-              '{{advisory_id}}',
-              '{{advisory_title}}',
-              '{{severity}}',
-              '{{dispatch_date}}',
-              '{{executive_summary}}',
-              '{{cve_id_links}}',
-              '{{affected_systems_html}}',
-              '{{vendor_products_html}}',
-              '{{cve_details}}',
-              '{{remediation_steps}}',
-              '{{remediation_link}}',
-              '{{mitigation_steps}}',
-              '{{references_link}}',
-              '{{recommended_actions}}',
-              '{{vendor_link}}',
-            ].map((token) => (
-              <button
-                key={token}
-                onClick={() => handleCopyToken(token)}
-                className="bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-300 text-zinc-300 dark:text-zinc-300 light:text-zinc-700 px-2.5 py-1 rounded-lg text-[11px] font-mono hover:border-zinc-600 transition flex items-center space-x-1"
-                title="Click to copy token"
-              >
-                <span>{token}</span>
-                {copiedToken === token && <Check className="w-3 h-3 text-emerald-400" />}
-              </button>
-            ))}
-          </div>
-        )}
       </div>
 
       {/* RENDERED CLIENT PREVIEW: RENAMED TO "HTML template" WITH ENTERPRISE SCROLL ENGINE */}
@@ -1344,6 +903,32 @@ const handleInsertToken = (token: string) => {
                 <span>HTML Code</span>
               </button>
             </div>
+          </div>
+
+          {/* Device Preview Switcher */}
+          <div className="flex items-center space-x-1 bg-zinc-950 dark:bg-zinc-950 light:bg-zinc-100 border border-zinc-800 dark:border-zinc-800 light:border-zinc-200 p-1 rounded-xl">
+            <button
+              onClick={() => setPreviewDevice('desktop')}
+              className={`p-1.5 rounded-lg transition ${
+                previewDevice === 'desktop'
+                  ? 'bg-zinc-800 dark:bg-zinc-800 light:bg-white text-zinc-100 dark:text-zinc-100 light:text-zinc-900 shadow-sm'
+                  : 'text-zinc-500 hover:text-zinc-300'
+              }`}
+              title="Desktop View (680px)"
+            >
+              <Monitor className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setPreviewDevice('mobile')}
+              className={`p-1.5 rounded-lg transition ${
+                previewDevice === 'mobile'
+                  ? 'bg-zinc-800 dark:bg-zinc-800 light:bg-white text-zinc-100 dark:text-zinc-100 light:text-zinc-900 shadow-sm'
+                  : 'text-zinc-500 hover:text-zinc-300'
+              }`}
+              title="Mobile Client View (390px)"
+            >
+              <Smartphone className="w-4 h-4" />
+            </button>
           </div>
 
           {/* Right Toolbar: Scroll Mode, Zoom, Export & Fullscreen */}
