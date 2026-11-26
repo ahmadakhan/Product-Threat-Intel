@@ -1,8 +1,7 @@
 import type pg from 'pg';
 import { DEFAULT_SETTINGS } from '../shared/state.ts';
-import { DEFAULT_TEMPLATE_CUSTOMIZATION, compileCustomizedTemplate } from '../src/utils/templateCompiler.ts';
 import { formatAdvisoryId } from '../src/utils/executionName.ts';
-import type { Advisory, AppSettings, Finding, TemplateCustomization } from '../src/types/index.ts';
+import type { Advisory, AppSettings, Finding } from '../src/types/index.ts';
 import {
   acquireSessionClassLock,
   get,
@@ -17,6 +16,7 @@ import {
 import { writeEvent } from './events.ts';
 import { queueDigestAdvisory } from './delivery.ts';
 import { renderAdvisory } from './advisoryRender.ts';
+import { resolveAdvisoryTemplate, type SavedTemplateRecord } from './deliveryDocument.ts';
 
 /**
  * Durable digest buffer.
@@ -169,18 +169,15 @@ const buildDigestAdvisory = (findings: Finding[], settings: AppSettings): Adviso
 };
 
 async function readSettingsAndTemplate(db: Db): Promise<{ settings: AppSettings; template: string }> {
-  const [settings, template] = await Promise.all([
+  const [settings, record] = await Promise.all([
     get<AppSettings>(db, 'settings', 'main'),
-    get<{ templateCustomization?: TemplateCustomization }>(db, 'template', 'main'),
+    get<SavedTemplateRecord>(db, 'template', 'main'),
   ]);
   return {
     settings: settings ?? DEFAULT_SETTINGS,
     // Match pipelineState: regenerate from the saved layout so a digest uses
     // the same current template even when the denormalized HTML is outdated.
-    template:
-      (template?.templateCustomization &&
-        compileCustomizedTemplate(template.templateCustomization)) ||
-      compileCustomizedTemplate(DEFAULT_TEMPLATE_CUSTOMIZATION),
+    template: resolveAdvisoryTemplate(record),
   };
 }
 

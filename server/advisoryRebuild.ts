@@ -1,9 +1,9 @@
-import type { Advisory, Finding, TemplateCustomization } from '../src/types/index.ts';
-import { DEFAULT_TEMPLATE_CUSTOMIZATION, compileCustomizedTemplate } from '../src/utils/templateCompiler.ts';
+import type { Advisory, Finding } from '../src/types/index.ts';
 import { get, type Db } from './db.ts';
 import { advisoryEmail } from './advisoryEmail.ts';
 import { renderAdvisory } from './advisoryRender.ts';
 import { mlComposeAdvisoryEmail } from './ml/integration.ts';
+import { resolveAdvisoryTemplate, type SavedTemplateRecord } from './deliveryDocument.ts';
 
 /** Rebuilt content must describe current findings, never an old rendered body. */
 export function currentAdvisoryView(original: Advisory, findings: Finding[]): Advisory {
@@ -34,12 +34,8 @@ export function currentAdvisoryView(original: Advisory, findings: Finding[]): Ad
 }
 
 export async function currentAdvisoryBody(db: Db, view: Advisory, findings: Finding[]) {
-  const template = await get<{ templateCustomization?: TemplateCustomization }>(db, 'template', 'main');
-  const html = renderAdvisory(
-    compileCustomizedTemplate(template?.templateCustomization || DEFAULT_TEMPLATE_CUSTOMIZATION),
-    view,
-    findings,
-  );
+  const record = await get<SavedTemplateRecord>(db, 'template', 'main');
+  const html = renderAdvisory(resolveAdvisoryTemplate(record), view, findings);
   return advisoryEmail(
     view,
     html,

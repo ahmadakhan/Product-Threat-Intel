@@ -1,6 +1,5 @@
 import type { Advisory, Finding, TemplateCustomization } from '../src/types/index.ts';
 import { DEFAULT_ADVISORY_EMAIL_TEMPLATE } from '../src/utils/defaultAdvisoryEmailTemplate.ts';
-import { compileCustomizedTemplate } from '../src/utils/templateCompiler.ts';
 import { confidenceIsLimited, renderAdvisory } from './advisoryRender.ts';
 import { advisoryEmail } from './advisoryEmail.ts';
 import { mlComposeAdvisoryEmail } from './ml/integration.ts';
@@ -194,9 +193,11 @@ export function renderFindingsDocument(input: DeliveryDocumentInput): DeliveryDo
     matchConfidenceEnabled: showConfidence,
     matchConfidenceThreshold: confidenceThreshold,
   };
-  const template = input.template ?? (input.templateCustomization
-    ? compileCustomizedTemplate(input.templateCustomization)
-    : DEFAULT_ADVISORY_EMAIL_TEMPLATE);
+  // Strictly the email studio template: the operator's saved custom advisory
+  // template, otherwise the canonical product default. Legacy
+  // templateCustomization (colour/layout) records no longer influence the
+  // delivered body, so previews and deliveries can never diverge.
+  const template = input.template ?? DEFAULT_ADVISORY_EMAIL_TEMPLATE;
   // An operator template that does not render must not cost the recipient the
   // finding. A malformed custom template (unbalanced blocks) used to throw out of
   // renderAdvisory, which failed the delivery and lost the alert; the built-in
