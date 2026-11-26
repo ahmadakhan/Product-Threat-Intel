@@ -871,10 +871,14 @@ async function confirmPriorDelivery(
   const cached = providerLookupCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.verdict;
   const verdict = await lookupProviderDelivery(saved, token, messageId, request);
-  // 'not-delivered' is deliberately not cached: it is the one answer that lets
-  // the caller resend, and it must be re-confirmed against the provider each time
-  // rather than replayed from memory.
-  if (verdict !== 'not-delivered') {
+  // Only 'delivered' is cached. It is the one terminal verdict: a message the
+  // provider accepted stays delivered, so replaying it collapses a retry storm
+  // without changing the outcome. 'not-delivered' must be re-confirmed each time
+  // because it is what lets the caller resend. 'unknown' is likewise not cached:
+  // it is a transient observation, and caching it masked a later confirmed
+  // 'not-delivered' for the full TTL — a retry that the provider had proven was
+  // never delivered was withheld until the entry expired.
+  if (verdict === 'delivered') {
     if (providerLookupCache.size >= PROVIDER_LOOKUP_CACHE_MAX) {
       const now = Date.now();
       for (const [key, entry] of providerLookupCache)
