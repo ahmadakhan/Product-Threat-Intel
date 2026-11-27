@@ -5,6 +5,7 @@ import { formatDate } from '../src/utils/dateTime.ts';
 import { stripGeneratedExecutiveSummaryMarkup } from '../src/utils/templateCompiler.ts';
 import { renderEmailTemplate } from '../src/utils/emailTemplate.ts';
 import { mlComposeAdvisoryEmail, mlSummarizeAdvisoryEmail } from './ml/integration';
+import { escapeHtml } from '../shared/escapeHtml.ts';
 
 const SEVERITY_COLORS: Record<string, string> = {
   CRITICAL: '#ef4444',
@@ -30,7 +31,7 @@ const SEVERITY_PILL: Record<string, { bg: string; border: string; text: string; 
 const SEVERITY_BADGE = (severity: string, suffix = '') => {
   const label = severity || 'UNKNOWN';
   const color = SEVERITY_COLORS[label] || SEVERITY_COLORS.UNKNOWN;
-  const escapedLabel = label.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch] ?? ch);
+  const escapedLabel = escapeHtml(label);
   return `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:${color};color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">${escapedLabel}${suffix}</span>`;
 };
 
@@ -475,10 +476,7 @@ export function renderAdvisory(
   // any expensive value assembly runs (the renderer re-checks the same limit).
   assertTemplateBlockDepth(template);
   const escape = (v: string) =>
-    v.replace(
-      /[&<>"']/g,
-      (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!,
-    );
+    escapeHtml(v);
   const edits: ReviewEdits = advisory.edits || {};
   // Match-confidence presentation is operator-controlled (Settings). When
   // disabled, no confidence notice is written anywhere in the body; when enabled

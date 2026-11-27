@@ -211,11 +211,6 @@ const outboxId = (value: unknown): string => {
   if (!parsed.success) throw invalidId();
   return parsed.data;
 };
-const escapeHtml = (value: string) =>
-  value.replace(
-    /[&<>"']/g,
-    (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!,
-  );
 /**
  * Statuses whose `outbox` row can still be previewed and edited.
  *

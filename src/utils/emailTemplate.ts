@@ -33,15 +33,7 @@ export const MAX_TEMPLATE_BLOCK_DEPTH = 100;
 const PLAIN_TOKEN = /^\{\{\s*(?:#if\s+[^}\s]+|#each\s+[^}\s]+|\/[a-z]+|else|[^}]+?)\s*\}\}$/;
 const RAW_TOKEN = /^\{\{\{\s*([^}]+?)\s*\}\}\}$/;
 
-function escapeHtml(value: string): string {
-	return value.replace(/[&<>"']/g, (char) => ({
-		'&': '&amp;',
-		'<': '&lt;',
-		'>': '&gt;',
-		'"': '&quot;',
-		"'": '&#39;',
-	})[char]!);
-}
+import { escapeHtml } from '../../shared/escapeHtml.ts';
 
 function parse(template: string): Node[] {
 	// Tokenise first, then build the tree iteratively. Scanning and building in

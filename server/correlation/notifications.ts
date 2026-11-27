@@ -8,6 +8,7 @@ import {
   deliveryRevisionEvidence,
 } from '../delivery.ts';
 import { readNativeEvidence } from './notificationEvidence.ts';
+import { escapeHtml } from '../../shared/escapeHtml.ts';
 
 /**
  * Escapes a feed-derived value for an HTML text node or attribute.
@@ -16,10 +17,7 @@ import { readNativeEvidence } from './notificationEvidence.ts';
  * from ingested feeds. Rendering them uneescaped would let a hostile source
  * inject markup into a delivered email.
  */
-const submitSafe = (value: string) =>
-  String(value ?? '').replace(/[&<>"']/g, (character) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!,
-  );
+const submitSafe = (value: string) => escapeHtml(String(value ?? ''));
 
 /**
  * Builds a Finding[] from native correlation evidence so every delivered match

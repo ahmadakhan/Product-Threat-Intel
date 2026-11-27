@@ -56,6 +56,18 @@ const tone = (status: string) =>
       : status === 'RUNNING' || status === 'WARNING'
         ? 'text-amber-400 light:text-amber-800'
         : 'text-zinc-400 light:text-zinc-600';
+
+/** Dedupe repeated identity tokens (vendor/product) case-insensitively so a
+ *  `php / php` pair renders once instead of `Php - Php`. */
+const uniqueStrings = (items: string[]): string[] => {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const key = item.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
 const StatusIcon = ({ status }: { status: string }) =>
   status === 'RUNNING' ? (
     <LoaderCircle className="h-4 w-4 animate-spin" />
@@ -466,7 +478,7 @@ export const PipelineExecutionsView: React.FC = () => {
                       <p className="mt-2 text-sm font-medium text-zinc-200 light:text-zinc-800">
                         {finding.matchedAssetName}
                         {finding.matchedAssetVendor || finding.matchedAssetProduct
-                          ? ` · ${[finding.matchedAssetVendor, finding.matchedAssetProduct].filter(Boolean).join(' - ')}`
+                          ? ` · ${uniqueStrings([finding.matchedAssetVendor, finding.matchedAssetProduct].filter((item): item is string => Boolean(item))).join(' - ')}`
                           : ''}
                       </p>
                       <p className="mt-2 text-sm leading-relaxed text-zinc-400 light:text-zinc-600">

@@ -35,15 +35,9 @@ import {
   stripGeneratedExecutiveSummaryMarkup,
 } from '../utils/templateCompiler';
 import { renderEmailTemplate } from '../utils/emailTemplate';
+import { escapeHtml as escapeHtmlShared } from '../../shared/escapeHtml.ts';
 
-const escapeTemplateValue = (value: string) =>
-  value.replace(/[&<>"']/g, (char) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;',
-  })[char]!);
+const escapeTemplateValue = escapeHtmlShared;
 
 /**
  * The studio preview shows at most this many products/CVEs.

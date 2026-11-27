@@ -1,6 +1,7 @@
 import { TemplateCustomization } from '../types/index.ts';
 import { resolveTimezone, utcOffsetLabel } from './dateTime.ts';
 import { renderEmailTemplate } from './emailTemplate.ts';
+import { escapeHtml as escapeHtmlShared } from '../../shared/escapeHtml.ts';
 
 export const DEFAULT_TEMPLATE_CUSTOMIZATION: TemplateCustomization = {
   fontFamily: 'sans',
@@ -50,11 +51,7 @@ export function compileCustomizedTemplate(config: TemplateCustomization): string
   }
   if (!['solid', 'dashed', 'none'].includes(config.borderStyle)) config.borderStyle = 'solid';
   if (!/^\d{1,3}(?:px|rem|%)$/.test(config.borderRadius)) config.borderRadius = '12px';
-  const escapeHtml = (value: string) =>
-    String(value).replace(
-      /[&<>"']/g,
-      (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!,
-    );
+  const escapeHtml = (value: string) => escapeHtmlShared(String(value));
   config.badgeStampText = escapeHtml(config.badgeStampText);
   config.classificationText = escapeHtml(config.classificationText);
   const fontCss = getFontFamilyCss(config.fontFamily);
@@ -391,11 +388,7 @@ export interface DailyDigestParts {
   held_for_review?: string;
 }
 
-const digestEscapeHtml = (value: string) =>
-  String(value).replace(
-    /[&<>"']/g,
-    (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!,
-  );
+const digestEscapeHtml = (value: string) => escapeHtmlShared(String(value));
 
 function normalizeDigestConfig(config: TemplateCustomization): TemplateCustomization {
   config = { ...DEFAULT_DAILY_DIGEST_CUSTOMIZATION, ...config };

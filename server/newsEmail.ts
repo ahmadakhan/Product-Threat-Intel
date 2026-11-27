@@ -71,10 +71,7 @@ function formatNewsDate(timezone: string | undefined): string {
   }
 }
 
-const escapeHtml = (value: string) =>
-  value.replace(/[&<>"']/g, (character) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!,
-  );
+import { escapeHtml } from '../shared/escapeHtml.ts';
 
 /** Only absolute http(s) URLs without credentials may be hyperlinked. */
 const safeHref = (value: string): string => {

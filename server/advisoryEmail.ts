@@ -1,8 +1,7 @@
 import type { Advisory, Finding } from '../src/types/index.ts';
 import { stripGeneratedExecutiveSummaryMarkup } from '../src/utils/templateCompiler.ts';
 
-const escapeHtml = (value: string) => value.replace(/[&<>"']/g, ch =>
-  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
+import { escapeHtml } from '../shared/escapeHtml.ts';
 
 const stripCrlf = (value: string) => value.replace(/[\r\n]/g, ' ');
 

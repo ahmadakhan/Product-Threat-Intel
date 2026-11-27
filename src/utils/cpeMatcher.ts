@@ -392,6 +392,55 @@ const CPE_PLATFORM_FIELDS = [
   'other',
 ] as const;
 
+/**
+ * Tokens that name a platform, language or delivery vehicle rather than a
+ * product identity.
+ *
+ * The free-text fallback treats "vendor and product are both named" as two
+ * independent pieces of evidence. That reasoning collapses when the identity is
+ * itself a generic word: an inventory item `PHP / PHP` is satisfied by any
+ * advisory whose prose happens to say "written in PHP", so an unrelated
+ * SourceCodester hotel-reservation CVE matched it at 70% confidence. These words
+ * still match through strict CPE, alias or PURL evidence - only the weakest
+ * prose path refuses them.
+ */
+const GENERIC_PROSE_IDENTITIES = new Set([
+  // Languages and runtimes.
+  'php', 'sql', 'html', 'css', 'javascript', 'typescript', 'java', 'python', 'django',
+  'flask', 'rails', 'ruby', 'perl', 'node', 'nodejs', 'dotnet', 'golang', 'go', 'rust',
+  // Platforms and operating systems.
+  'linux', 'unix', 'windows', 'android', 'ios', 'macos', 'mac', 'bsd', 'solaris',
+  // Protocols and data formats.
+  'web', 'http', 'https', 'api', 'rest', 'soap', 'xml', 'json', 'yaml', 'ftp', 'smtp',
+  // Delivery vehicles and generic components.
+  'plugin', 'plugins', 'module', 'modules', 'theme', 'themes', 'widget', 'widgets',
+  'addon', 'addons', 'extension', 'extensions', 'component', 'components',
+  'library', 'libraries', 'framework', 'frameworks', 'core', 'server', 'client',
+  'service', 'services', 'application', 'applications', 'app', 'apps',
+]);
+
+/** Normalised single tokens of an identity, for prose-evidence checks. */
+const identityTokens = (value: string): string[] =>
+  value
+    .normalize('NFKC')
+    .toLowerCase()
+    .split(IDENTITY_TOKEN_SPLIT)
+    .filter(Boolean);
+
+/**
+ * Whether `identity` is too generic to stand as evidence on the prose path.
+ *
+ * True for a name whose every token is a platform/language word, or a single
+ * one- or two-character token. Such a name carries no distinguishing power: the
+ * words appear in advisories for unrelated products.
+ */
+function isGenericProseIdentity(identity: string): boolean {
+  const tokens = identityTokens(identity);
+  if (!tokens.length) return true;
+  if (tokens.length === 1 && tokens[0].length <= 2) return true;
+  return tokens.every((token) => GENERIC_PROSE_IDENTITIES.has(token));
+}
+
 function cpeCriterionConflict(asset: ParsedCPE, vuln: ParsedCPE): boolean {
   if (CPE_PLATFORM_FIELDS.some((field) => !matchComponent(asset[field], vuln[field]))) return true;
   return (
@@ -844,6 +893,13 @@ export interface MatchResult {
   suppressedByVex?: boolean;
   suppressedReason?: string;
   applicabilityRequiresReview?: boolean;
+  /**
+   * Present only when package identity alone proves this match cannot apply.
+   * `IDENTITY_MISMATCH` - a different package; `VERSION_EXCLUDED` - the same
+   * package at a version outside the advisory range. Both are authoritative
+   * exclusions and must be treated identically by callers.
+   */
+  packageVerdict?: 'IDENTITY_MISMATCH' | 'VERSION_EXCLUDED';
   /** Matched a complete product-wide registration (every component but vendor/product wildcarded). */
   productWideAllVersions?: boolean;
   /** The match relied on a wildcard vendor/product or an all-versions (`*`) registration. */
@@ -1146,11 +1202,34 @@ export function matchesWatchlistItem(
   // vendor/product differently, which the alias and fallback steps below can
   // still resolve.
   if (assetPurls?.length && vulnPurls?.length) {
+    // Both causes are a proof of non-applicability, and callers must treat them
+    // identically: the engine excludes a match whose package identifiers
+    // contradict it. They were previously distinguished only by prose, which the
+    // engine matched with a string comparison - so rewording the message silently
+    // disabled a false-positive guard. The distinction is now carried by
+    // `packageVerdict`, and the evidence text explains which one applies.
+    //
+    // "Same package, installed version not affected" is the common case: the
+    // candidate loop above drops a PURL precisely when the range proves
+    // OUT_OF_RANGE, so a matched identity here means version exclusion. Telling an
+    // operator the identifiers "did not match" in that case sent them looking for
+    // a spelling bug in a release that was simply patched.
+    const identityMatched = assetPurls.some((assetPurl) =>
+      vulnPurls.some(
+        (vulnPurl) =>
+          matchPurl(assetPurl, vulnPurl) ||
+          // Versionless advisory PURL: compare identity alone.
+          (purlIdentity(assetPurl) !== null && purlIdentity(assetPurl) === purlIdentity(vulnPurl)),
+      ),
+    );
     return {
       matched: false,
       method: 'NONE',
       confidence: 0,
-      evidence: 'Package identifiers did not match',
+      packageVerdict: identityMatched ? 'VERSION_EXCLUDED' : 'IDENTITY_MISMATCH',
+      evidence: identityMatched
+        ? 'Package identity matched but the installed version is outside the advisory range'
+        : 'Package identifiers did not match',
     };
   }
 
@@ -1368,9 +1447,23 @@ export function matchesWatchlistItem(
     hasProductWideRegistration &&
     normProduct &&
     containsIdentityWords(fullText, normProduct);
+  // Vendor and product are two independent facts only when they are two
+  // identities. When they are the same generic word (`php` / `php`), one
+  // incidental mention in the prose satisfied both tests and an unrelated
+  // advisory matched: "written in PHP" was read as "PHP, the product". A generic
+  // identity therefore needs a distinct, more specific partner in this sentence;
+  // otherwise the advisory cannot be attributed to it on prose evidence alone.
+  const genericVendor = isGenericProseIdentity(normVendor);
+  const genericProduct = isGenericProseIdentity(normProduct);
+  const sameIdentity =
+    normalizeAliasToken(normVendor) === normalizeAliasToken(normProduct) ||
+    (genericVendor && genericProduct);
+  const distinctEvidence =
+    !sameIdentity || (!genericVendor && !genericProduct && Boolean(normVendor) && Boolean(normProduct));
   if (
     normVendor &&
     normProduct &&
+    distinctEvidence &&
     ((containsIdentityWords(fullText, normVendor) && containsIdentityWords(fullText, normProduct)) ||
       productOnlyKevFallback)
   ) {

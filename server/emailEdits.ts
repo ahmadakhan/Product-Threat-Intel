@@ -24,11 +24,10 @@ export const REVIEWER_COMMENT_END = '<!-- vulnstream:reviewer-comment:end -->';
 
 const MAX_SUBJECT_LENGTH = 200;
 
-export const escapeHtml = (value: string) =>
-  value.replace(
-    /[&<>"']/g,
-    (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!,
-  );
+// One implementation for the whole codebase; re-exported so imports from this
+// module keep working.
+import { escapeHtml } from '../shared/escapeHtml.ts';
+export { escapeHtml };
 
 /**
  * Email subjects are header values. An operator-supplied CR/LF or control

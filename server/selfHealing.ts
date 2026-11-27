@@ -8,6 +8,7 @@ import { enqueue } from './delivery';
 
 import type { Pool } from 'pg';
 import type { AppSettings, EmailRecipient, PipelineExecution, ThreatFeed } from '../src/types/index';
+import { escapeHtml } from '../shared/escapeHtml.ts';
 
 /**
  * Self-healing watchdog.
@@ -261,8 +262,8 @@ async function queueSecurityAlert(
         `${subject}\n\n${text}\n\nComponent: ${component}\n` +
         `Incident: ${safeLine(incident)}\nDetected at: ${new Date().toISOString()}\n` +
         'This alert was generated automatically by the VulnStream self-healing watchdog.';
-      const escape = (value: string) =>
-        value.replace(/[&<>]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[ch]!);
+      // Text inside <pre>, but escaped through the shared helper so this module has
+      // exactly one escape rule like every other.
       let queued = 0;
       for (const recipient of recipients) {
         const id = await enqueue(
@@ -274,7 +275,7 @@ async function queueSecurityAlert(
             subject: `[SECURITY ALERT] ${subject}`,
             text: body,
             // Plain markup on purpose: an infra alert must not depend on templating.
-            html: `<pre style="font-family:ui-monospace,monospace;white-space:pre-wrap">${escape(body)}</pre>`,
+            html: `<pre style="font-family:ui-monospace,monospace;white-space:pre-wrap">${escapeHtml(body)}</pre>`,
             cveIds: [],
             recipientEmail: recipient.email,
           },

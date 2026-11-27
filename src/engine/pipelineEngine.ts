@@ -644,9 +644,10 @@ export function runVulnerabilityPipeline(
       // tree into an OR when a concrete asset might not satisfy every branch;
       // a product-wide registration matches every branch by construction, so
       // the flag has nothing left to protect against for this asset.
-      const packageRejected = matches.some(
-        (match) => !match.matched && match.evidence === 'Package identifiers did not match',
-      );
+      // Structured, not textual: this used to compare `match.evidence` against a
+      // sentence, so any rewording of the message silently disabled the guard and
+      // let an unaffected dependency be dispatched. Both verdicts are proofs.
+      const packageRejected = matches.some((match) => !match.matched && match.packageVerdict !== undefined);
       const result = matches.filter((match) => match.matched).sort((a, b) => b.confidence - a.confidence)[0];
       if (!result?.matched) continue;
       const confirmedProductWideMatch = Boolean(result.productWideAllVersions) && !result.applicabilityRequiresReview;

@@ -9,6 +9,7 @@ import { CveLink } from './CveLink';
 import { formatDate as fmtDate } from '../utils/dateTime';
 import { stripGeneratedExecutiveSummaryMarkup } from '../utils/templateCompiler';
 import { useApp } from '../context/AppContext';
+import { escapeHtml } from '../../shared/escapeHtml.ts';
 
 export const AdvisoriesView: React.FC = () => {
   const { settings } = useApp();
@@ -54,11 +55,7 @@ ${adv.remediationInstructions}
   };
 
   const handleDownloadHtmlPdf = (original: Advisory) => {
-    const escape = (value: string) =>
-      value.replace(
-        /[&<>"']/g,
-        (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!,
-      );
+    const escape = escapeHtml;
     const adv = {
       ...original,
       id: escape(original.id),

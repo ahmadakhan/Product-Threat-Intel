@@ -28,3 +28,11 @@ cookies.txt
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Transient build directories created by the Template Studio render tests
+# (`mkdtemp` under process.cwd()). They are removed in the tests' `finally`, but a
+# run that is interrupted (Ctrl+C, timeout) leaves one behind and it then shows up
+# as untracked noise in every later `git status`.
+.studio-latest-test-*/
+.studio-preview-test-*/
+.template-editor-*/
