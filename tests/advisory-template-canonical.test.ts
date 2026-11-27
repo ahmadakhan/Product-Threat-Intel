@@ -147,3 +147,46 @@ test('every placeholder resolves against real advisory data', async () => {
     if (options.contactEmail) assert.ok(html.includes('mailto:soc@example.com'), 'override is honoured');
   }
 });
+
+/**
+ * A CVE that matches several inventory assets must list every one of them.
+ *
+ * The `cves` array behind `{{#each cves}}` used to be keyed by CVE id alone, so a
+ * consolidated advisory covering one CVE on three assets rendered a single row.
+ * The plain-text alternative and `advisory.affectedSystems` listed all three, so
+ * the HTML silently under-reported exposure.
+ */
+test('one CVE matched to several assets renders a row per asset', async () => {
+  const { renderAdvisory } = await import('../server/advisoryRender.ts');
+  const cveId = 'CVE-2026-30001';
+  const finding = (n: number, asset: string) =>
+    ({
+      id: `f${n}`,
+      cveId,
+      cve: {
+        cveId, title: 't', description: 'A vendor description.',
+        cvss: { score: 9.8, severity: 'CRITICAL', vector: '', version: '3.1' },
+        cpeMatches: [], cwe: [], sourceFeeds: [],
+        publishedDate: '2026-11-19T00:00:00Z', modifiedDate: '2026-11-20T00:00:00Z',
+        remediation: { immediateActions: ['Apply the vendor update.'], patchUrl: '', vendorAdvisoryRef: '' },
+      },
+      matchedAssetId: asset, matchedAssetName: asset, matchedAssetVendor: 'acme',
+      matchedAssetProduct: '', matchedCpe: '', matchingMethod: 'CPE', matchingEvidence: 'e',
+      confidence: 90, exposure: 'INTERNAL', exploitRisk: 'STANDARD', dispatchDeferred: false,
+      notificationStatus: 'QUEUED_FOR_DISPATCH', status: 'MONITORED', autoDispatchedAt: null,
+      advisoryId: null, reviewNotifiedAt: null, timeline: [],
+    }) as never;
+  const findings = [finding(1, 'edge-router-01'), finding(2, 'auth-service'), finding(3, 'portal-web')];
+  const advisory = {
+    id: 'ADV-0002', title: 'Vulnerability notice', severity: 'CRITICAL', cveIds: [cveId],
+    findingIds: ['f1', 'f2', 'f3'], createdDate: '2026-11-19T00:00:00Z', deliveryStatus: 'PENDING',
+    recipientCount: 1, executiveSummary: 'A summary.', remediationInstructions: 'Remediate.',
+    affectedSystems: ['edge-router-01', 'auth-service', 'portal-web'],
+  };
+  const html = renderAdvisory(CANONICAL, advisory as never, findings);
+  // displayName title-cases and de-hyphenates asset names.
+  for (const asset of ['Edge Router 01', 'Auth Service', 'Portal Web'])
+    assert.ok(html.includes(asset), `${asset} must be listed in the advisory body`);
+  assert.match(html, /3 Assets Flagged/, 'the asset count reflects the affected assets');
+  assert.deepEqual([...new Set(html.match(/\{\{[^}]+\}\}/g) ?? [])], [], 'no token survives');
+});

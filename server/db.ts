@@ -27,14 +27,6 @@ import { loadPoolSettings } from './config.ts';
 export type Db = pg.Pool | PoolClient;
 
 /**
- * TTL cache for state_metrics reads. `state()` is called on every `/api/state`
- * poll and every pipeline run; the summary table rarely changes between polls,
- * so caching avoids a full-table scan on every request.
- */
-const STATE_METRICS_CACHE_TTL_MS = 10_000;
-let stateMetricsCache: { metrics: Map<string, number>; expiresAt: number } | null = null;
-
-/**
  * Template compilation cache. Compiled Handlebars templates are deterministic
  * given the same customization input, so caching by input string avoids
  * re-parsing on every state() / pipelineState() call. Bounded at 1,000 entries
@@ -1257,15 +1249,7 @@ export async function state(db: Db, options: StateOptions = {}): Promise<AppStat
  * the bounded arrays so a large installation still shows truthful totals.
  */
 async function attachCounts(db: Db, snapshot: AppState) {
-  const now = Date.now();
-  let metrics: Map<string, number>;
-  if (stateMetricsCache && now < stateMetricsCache.expiresAt) {
-    metrics = stateMetricsCache.metrics;
-  } else {
-    const rows = await db.query<{ name: string; value: string }>('SELECT name,value FROM state_metrics');
-    metrics = new Map(rows.rows.map((row) => [row.name, Number(row.value)]));
-    stateMetricsCache = { metrics, expiresAt: now + STATE_METRICS_CACHE_TTL_MS };
-  }
+  const metrics = await readCountMetrics(db);
   for (const kind of COLLECTION_KINDS) snapshot.counts[kind] = metrics.get(`collection:${kind}`) ?? 0;
   snapshot.summary = {
     activeFindings: metrics.get('summary:activeFindings') ?? 0,
@@ -1273,6 +1257,22 @@ async function attachCounts(db: Db, snapshot: AppState) {
     kevFindings: metrics.get('summary:kevFindings') ?? 0,
     deliveredEmails: metrics.get('summary:deliveredEmails') ?? 0,
   };
+}
+
+/**
+ * Read the trigger-maintained counters.
+ *
+ * This is deliberately a plain read with no cache of any kind. state_metrics is
+ * updated synchronously by statement-level triggers on `records` and `audit`
+ * (migration 036) precisely so a read observes every committed write; a
+ * process-wide TTL cache broke that contract by serving pre-write counts, and a
+ * session cache that recomputed from `records` instead was correct but measurably
+ * slower than this read. The table holds a handful of rows behind a primary key,
+ * so the honest read is also the fast one.
+ */
+async function readCountMetrics(db: Db): Promise<Map<string, number>> {
+  const rows = await db.query<{ name: string; value: string }>('SELECT name,value FROM state_metrics');
+  return new Map(rows.rows.map((row) => [row.name, Number(row.value)]));
 }
 
 /** Pipeline-only snapshot avoids loading executions, delivery logs, recipients and audit history.

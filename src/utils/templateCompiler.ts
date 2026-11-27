@@ -986,7 +986,8 @@ export function renderDailyHealthReport(health: DigestHealth | null, config: Tem
     STALE: '#ea580c',
     NOT_OBSERVED: '#64748b',
   };
-  const workerLabel = workerStatusLabel[health.workerStatus] || health.workerStatus;
+  // Unknown worker states are escaped like any other cell value.
+  const workerLabel = workerStatusLabel[health.workerStatus] || String(health.workerStatus);
   const workerColor = workerStatusColor[health.workerStatus] || '#64748b';
   const dbLabel = health.database === 'connected' ? `Operational (${health.databaseLatencyMs} ms)` : 'Degraded';
   const dbColor = health.database === 'connected' ? '#16a34a' : '#dc2626';
@@ -1071,10 +1072,10 @@ export function renderDailyHealthReport(health: DigestHealth | null, config: Tem
 
                 <tr>
                     <td style="padding:10px;border:1px solid #e2e8f0;font-size:12px;">
-                        Notification Service
+                        Notification Worker
                     </td>
                     <td style="padding:10px;border:1px solid #e2e8f0;color:${workerColor};font-size:12px;">
-                        ${workerLabel}
+                        ${digestEscapeHtml(workerLabel)}
                     </td>
                 </tr>
 

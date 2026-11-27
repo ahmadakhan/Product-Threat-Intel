@@ -149,10 +149,22 @@ test(
 
       const afterDestroy = await pool.connect();
       try {
-        const reacquired = await afterDestroy.query<{ locked: boolean }>(
-          `SELECT pg_try_advisory_lock(${lockClass}, ${lockKeySql}) AS locked`,
-        );
-        assert.equal(reacquired.rows[0]?.locked, true, 'destroying the holder must release the lock');
+        // `release(true)` discards the client asynchronously: the backend is gone
+        // only once its socket has been torn down and PostgreSQL has noticed. On a
+        // loaded machine that can trail the next `connect()` by a few milliseconds,
+        // which made this assertion fail intermittently in the full suite while
+        // passing on its own. Poll for the release instead of assuming it happened
+        // synchronously; the loop is bounded so a real leak still fails.
+        let reacquired: { locked: boolean } | undefined;
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const result = await afterDestroy.query<{ locked: boolean }>(
+            `SELECT pg_try_advisory_lock(${lockClass}, ${lockKeySql}) AS locked`,
+          );
+          reacquired = result.rows[0];
+          if (reacquired?.locked) break;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        assert.equal(reacquired?.locked, true, 'destroying the holder must release the lock');
         await afterDestroy.query(`SELECT pg_advisory_unlock(${lockClass}, ${lockKeySql})`);
       } finally {
         afterDestroy.release();

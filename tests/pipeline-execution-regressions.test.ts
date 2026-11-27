@@ -294,10 +294,13 @@ test('E-5: a multi-select subscription decides finding eligibility, not the lega
   } as EmailRecipient;
   assert.equal(recipientAllows(allSeverities, low), true, 'ALL_SEVERITIES admits a LOW finding');
   assert.equal(recipientAllows(allSeverities, kev), true);
+  // News alone is not a finding stream. (The daily digest is a separate cadence:
+  // it delivers findings to its own recipients, so it is asserted on its own in
+  // tests/email-consolidation.test.ts rather than being conflated here.)
   const newsOnly: EmailRecipient = {
     ...allSeverities,
     subscriptionTier: 'ALL_SEVERITIES',
-    subscriptions: ['NEWS', 'DAILY_DIGEST'],
+    subscriptions: ['NEWS'],
   } as EmailRecipient;
   assert.equal(recipientAllows(newsOnly, low), false, 'a news-only recipient receives no findings');
   const kevOnly: EmailRecipient = { ...allSeverities, subscriptions: ['CISA_KEV_ONLY'] } as EmailRecipient;

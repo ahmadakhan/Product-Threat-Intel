@@ -92,3 +92,17 @@ test('Prometheus is not part of the Compose deployment', () => {
   assert.doesNotMatch(compose, /prometheus-data/);
   assert.doesNotMatch(compose, /PROMETHEUS_PORT/);
 });
+
+/**
+ * YAML comments start with `#`. A `//` line inside compose.yaml makes the file
+ * unparseable for `docker compose`, and the substring assertions above would
+ * never notice because they only look for the keys they care about.
+ */
+test('compose.yaml contains no JavaScript-style comment lines', () => {
+  const offenders = compose
+    .split('\n')
+    .map((line, index) => ({ line, number: index + 1 }))
+    .filter(({ line }) => /^\s*\/\//.test(line))
+    .map(({ line, number }) => `line ${number}: ${line.trim()}`);
+  assert.deepEqual(offenders, [], `compose.yaml has non-YAML '//' comments:\n${offenders.join('\n')}`);
+});

@@ -43,6 +43,8 @@ import type {
 /** Advisory-lock class dedicated to the daily digest, distinct from the burst-digest lock (800003). */
 const DAILY_LOCK_CLASS = 800004;
 const DAILY_SCHEDULE_ID = 'dailyDigest-schedule';
+/** Upper bound on a health probe's lock wait, so one stuck read cannot stall the digest. */
+const HEALTH_PROBE_LOCK_TIMEOUT_MS = 5_000;
 const SEVERITY_RANK: Advisory['severity'][] = ['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 
 /**
@@ -270,6 +272,20 @@ async function computeHealth(
       // A server that does not support savepoints (or a connection outside a
       // transaction) still gets the plain behavior below.
     }
+    // These are read-only probes. Without a bound, one probe parked behind a
+    // held lock would block the digest (and its day claim) indefinitely. The
+    // value is captured and restored afterwards: leaving 5s in place silently
+    // applied it to the finding reads, claim writes and enqueue below, so a
+    // transient lock on the outbox turned a healthy digest into a failure.
+    const priorLockTimeout = (
+      await db.query<{ value: string }>("SELECT current_setting('lock_timeout') AS value").catch(() => undefined)
+    )?.rows[0]?.value;
+    try {
+      await db.query(`SET LOCAL lock_timeout = '${HEALTH_PROBE_LOCK_TIMEOUT_MS}ms'`);
+    } catch {
+      // Outside a transaction SET LOCAL is a no-op/errorless; either way the
+      // probe below still runs.
+    }
     try {
       const result = await run();
       if (savepoint) await db.query('RELEASE SAVEPOINT daily_health').catch(() => undefined);
@@ -277,6 +293,9 @@ async function computeHealth(
     } catch {
       if (savepoint) await db.query('ROLLBACK TO SAVEPOINT daily_health').catch(() => undefined);
       throw new Error('health query failed');
+    } finally {
+      if (priorLockTimeout !== undefined)
+        await db.query(`SET LOCAL lock_timeout = '${priorLockTimeout}'`).catch(() => undefined);
     }
   };
   try {

@@ -174,7 +174,7 @@ services:
       # Worker instance: runs all background work (pipeline, feeds, outbox
       # delivery, retention, ML training, digest, self-healing). Exactly one
       # replica is active at a time via PostgreSQL advisory-lock leader
-      // election; extra replicas are hot standbys.
+      # election; extra replicas are hot standbys.
       WORKER_ENABLED: ${WORKER_ENABLED:-true}
       # Keep the V8 heap below the container limit while leaving room for the
       # base image and native buffers. --expose-gc enables the 90%

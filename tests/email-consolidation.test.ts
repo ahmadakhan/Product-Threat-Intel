@@ -333,6 +333,40 @@ test('recipient subscription filters which findings a document may carry', async
   );
 });
 
+/**
+ * Selecting only "Daily digest" in the recipient form saves exactly
+ * `subscriptions: ['DAILY_DIGEST']`. The digest is a cadence, not a severity
+ * filter, so that recipient must receive every finding: denying them made the
+ * delivered email report "0 findings / NO NEW FINDINGS" beside a real corpus.
+ */
+test('a digest-only recipient still receives every finding', async () => {
+  const { recipientAllows } = await import('../server/delivery.ts');
+  const digestOnly: EmailRecipient = {
+    id: 'd1', name: 'd1', email: 'd1@example.invalid', role: 'ADMIN', deliveryGroup: 'SECURITY_TEAM',
+    subscriptionTier: 'DAILY_DIGEST', subscriptions: ['DAILY_DIGEST'], dailyDigest: true,
+    enabled: true, deliverySuccessRate: 100,
+  };
+  const critical = finding({ id: 'f1', cveId: 'CVE-2026-10001' });
+  const low = finding({ id: 'f2', cveId: 'CVE-2026-10002' });
+  low.cve.cvss.severity = 'LOW';
+  assert.equal(recipientAllows(digestOnly, critical), true);
+  assert.equal(recipientAllows(digestOnly, low), true);
+  // A legacy record (no list, only the boolean mirror) that also carries an
+  // explicit severity tier keeps that tier's narrowing: the digest flag selects
+  // the cadence, it does not widen a severity subscription the operator chose.
+  const legacyNarrowed = { ...digestOnly, subscriptions: undefined, dailyDigest: true, subscriptionTier: 'CRITICAL_HIGH_ONLY' as const };
+  assert.equal(recipientAllows(legacyNarrowed, low), false);
+  assert.equal(recipientAllows(legacyNarrowed, critical), true);
+  // A news-only recipient is still not a finding subscriber.
+  assert.equal(recipientAllows({ ...digestOnly, subscriptions: ['NEWS'], dailyDigest: false }, critical), false);
+  // A digest plus an explicit severity tier keeps that tier's narrowing.
+  assert.equal(recipientAllows({ ...digestOnly, subscriptions: ['CRITICAL_HIGH_ONLY', 'DAILY_DIGEST'] }, low), false);
+  // A disabled digest-only recipient is not queued a digest at all.
+  const { dailyDigestRecipients } = await import('../server/emailRecipients.ts');
+  assert.deepEqual(dailyDigestRecipients([{ ...digestOnly, enabled: false }]), []);
+  assert.deepEqual(dailyDigestRecipients([digestOnly]).map((r) => r.id), ['d1']);
+});
+
 test('the administrators group is a separate automatic stream, routed by subscription', async () => {
   const { newsRecipients, dailyDigestRecipients } = await import('../server/emailRecipients.ts');
   const { recipientAllows } = await import('../server/delivery.ts');
@@ -450,6 +484,33 @@ test('same CVE from different sources is deduplicated to one article', () => {
   assert.equal(kept.article.id, 'a2', 'higher credibility feed wins');
   assert.equal(kept.consolidationReason, 'cve_dedup_kept');
   assert.deepEqual(kept.suppressesCveIds, ['CVE-2026-12345']);
+});
+
+test('CVE de-duplication never drops a CVE from the delivered email', () => {
+  // Two articles share CVE-1111; each also reports a CVE unique to itself. The
+  // higher-credibility article wins the shared CVE, but CVE-3333 (reported only by
+  // the losing article) must still reach the recipient. The losing article's list
+  // was previously filtered before its own ownership was decided, so a CVE that
+  // only it reported vanished and the item itself could be discarded.
+  const a1 = article('a1', 'https://feed-a.com/one', 'One', ['CVE-2026-1111', 'CVE-2026-2222']);
+  const a2 = article('a2', 'https://feed-b.com/two', 'Two', ['CVE-2026-1111', 'CVE-2026-3333']);
+  const items = consolidateNewsMatches(
+    [
+      { ...match('m1', 'asset-1', ['a1'], 'ev', 90, 'CVE-2026-1111') },
+      { ...match('m2', 'asset-1', ['a2'], 'ev', 70, 'CVE-2026-1111') },
+    ],
+    new Map([[a1.id, a1], [a2.id, a2]]),
+    () => 'server-1',
+  );
+  const reported = new Set(items.flatMap((item) => item.cveIds));
+  for (const cve of ['CVE-2026-1111', 'CVE-2026-2222', 'CVE-2026-3333'])
+    assert.ok(reported.has(cve), `${cve} must survive consolidation`);
+  // a2 is suppressed because every CVE it reports is also covered: CVE-1111 by the
+  // higher-credibility a1 and CVE-3333 folded onto a1. What matters is that no CVE
+  // disappears from the delivered document.
+  const document = renderConsolidatedNewsEmail(items);
+  for (const cve of ['CVE-2026-1111', 'CVE-2026-2222', 'CVE-2026-3333'])
+    assert.ok(document.html.includes(cve) && document.text.includes(cve), `${cve} must render`);
 });
 
 test('articles with no CVE IDs are never suppressed by CVE dedup', () => {

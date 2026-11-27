@@ -707,13 +707,26 @@ const advisoryPriority = (findings: Finding[]) =>
  * `RECIPIENT ALLOWS` path in every queue site (consolidated findings, news,
  * daily digest, delivery-time revalidation) now agrees with the UI model.
  *
- * A recipient subscribed only to non-finding streams (news/digest) is not
- * eligible for findings.
+ * A recipient with no severity tier is not eligible for findings.
+ *
+ * The daily digest is NOT such a subscriber. It is a delivery cadence, not a
+ * severity filter: an operator who selects only "Daily digest" in the recipient
+ * form saves `subscriptions: ['DAILY_DIGEST']`, and this function used to deny
+ * every finding to that recipient. The digest then rendered "0 findings / NO NEW
+ * FINDINGS" beside a real corpus, and because no claim was taken the same
+ * findings were absent from every later digest too. A digest-only recipient
+ * receives the full - unfiltered - finding set, which is what "Daily digest"
+ * states in the recipient form ("Daily findings summary").
+ *
+ * News-only recipients stay excluded: that stream carries matched articles, not
+ * findings.
  */
 export function recipientAllows(recipient: EmailRecipient, finding: Finding): boolean {
   const tiers = recipientSubscriptions(recipient);
-  const allowsSeverity = tiers.some((tier) => FINDING_SUBSCRIPTIONS.includes(tier));
-  if (!allowsSeverity) return false;
+  const findingTiers = tiers.filter((tier) => FINDING_SUBSCRIPTIONS.includes(tier));
+  // Digest-only (or no severity tier at all, including a legacy record whose
+  // only marker is the `dailyDigest` flag) receives everything.
+  if (!findingTiers.length) return tiers.includes('DAILY_DIGEST');
   const severity = finding.cve?.cvss?.severity;
   return (
     tiers.includes('ALL_SEVERITIES') ||
@@ -869,7 +882,6 @@ export function createMailSender(
       const settings = (db && (await get<AppSettings>(db, 'settings', 'main'))) || DEFAULT_SETTINGS;
       if (settings.emailEnabled === false) throw new Error('Email delivery is disabled by settings');
     }
-    // Apply operator edits exactly once and build the attachment from the very
     // Apply operator edits exactly once and build the attachment from the very
     // body being sent, so the HTML attachment matches the email.
     const content = applyJobEdits(job);

@@ -178,22 +178,35 @@ export function consolidateNewsMatches(
   }
   // An item is kept only if it owns at least one CVE (is the winner for that
   // CVE) or has no CVE IDs at all. Items that own no CVEs are fully suppressed.
+  //
+  // Each check reads the ORIGINAL CVE list. Deriving `suppressesCveIds` after
+  // `cveIds` had been filtered against `cveOwners` could never match anything, and
+  // filtering an item's list before a later item was classified made the retained
+  // and suppressed sets disagree about the same CVE.
+  const originalCveIds = items.map((item) => item.cveIds);
   items.forEach((item, index) => {
-    const ownsCve = item.cveIds.some((cveId) => cveOwners.get(cveId) === index);
-    if (ownsCve || item.cveIds.length === 0) {
+    const allCveIds = originalCveIds[index];
+    const ownsCve = allCveIds.some((cveId) => cveOwners.get(cveId) === index);
+    if (ownsCve || allCveIds.length === 0) {
       keptIndices.add(index);
-      // Filter the item's CVEs down to only those it owns; CVEs owned by
-      // another (higher-scoring) article are dropped from this item.
-      const allCveIds = item.cveIds;
-      item.cveIds = allCveIds.filter((cveId) => cveOwners.get(cveId) === index);
       item.consolidationReason = ownsCve ? 'cve_dedup_kept' : 'new_article';
-      // CVEs this item is the authoritative source for that other articles
-      // also reported — i.e., CVEs this item's presence suppresses elsewhere.
-      item.suppressesCveIds = [...new Set(allCveIds.filter((cveId) => cveOwners.get(cveId) === index && items.some((other, oi) => oi !== index && other.cveIds.includes(cveId))))];
+      item.suppressesCveIds = [
+        ...new Set(
+          allCveIds.filter(
+            (cveId) =>
+              cveOwners.get(cveId) === index &&
+              originalCveIds.some((other, oi) => oi !== index && other.includes(cveId)),
+          ),
+        ),
+      ];
     } else {
       item.consolidationReason = 'cve_dedup_suppressed';
     }
   });
+  // The per-article lists are left intact for the items that are kept, so an
+  // article that reports several CVEs still lists them all. De-duplication is
+  // already expressed by the winning item and `suppressedByCve`; trimming the
+  // winner's list was what dropped a CVE from the delivered email entirely.
 
   return items.filter((_, i) => keptIndices.has(i))
     .map((item) => ({

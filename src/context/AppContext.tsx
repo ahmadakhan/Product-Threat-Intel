@@ -52,6 +52,13 @@ const SESSION_RENEW_THRESHOLD_SEC = 60;
  */
 const POLL_INTERVALS_MS = [30_000, 60_000, 120_000, 300_000, 600_000];
 /**
+ * How long a follower tab waits for a leader announcement before polling itself.
+ * The slowest interval is 10 minutes, so a silent leader would otherwise strand
+ * the tab; two of the slowest intervals is long enough that a healthy leader at
+ * its slow cadence is not mistaken for an absent one.
+ */
+const LEADER_SILENCE_MS = POLL_INTERVALS_MS[POLL_INTERVALS_MS.length - 1] * 2;
+/**
  * Resolve which document a Template Studio shows.
  *
  * Precedence, highest first:
@@ -402,19 +409,48 @@ function useApplication() {
     let timer: ReturnType<typeof setInterval> | null = null;
 
     // BroadcastChannel coordinates cross-tab polling: only one tab hits
-    // /api/state, others listen for ETag announcements and skip their polls.
+    // /api/state, others listen for ETag announcements.
+    //
+    // A follower must ACT on the announcement. Merely adopting the ETag marked the
+    // follower's copy as current while its own snapshot stayed stale, and the
+    // follower never polls, so that tab stopped updating for as long as it stayed
+    // open (the previous leader kept the election until it closed). Followers now
+    // refresh on every announcement, which is still one HTTP request per state
+    // change rather than one per tab per interval.
+    let leaderSeenAt = 0;
+    const poll = () => {
+      if (!active || document.visibilityState === 'hidden') return;
+      // A non-leader normally defers to the leader's announcements. If no
+      // announcement has arrived for several intervals the leader is gone or is
+      // itself backgrounded (it skips polls while hidden), so this tab takes over
+      // rather than leaving every open tab frozen on stale data.
+      if (broadcastChannelRef.current && !isPollingTabRef.current) {
+        if (Date.now() - leaderSeenAt <= LEADER_SILENCE_MS) return;
+        isPollingTabRef.current = true;
+        // A takeover must announce itself, or every other follower waits out the
+        // full silence window and takes over too, leaving several tabs polling.
+        // Only liveness is needed here: followers count ANY announcement as a
+        // leader heartbeat and refetch only when the ETag differs from theirs.
+        broadcastChannelRef.current.postMessage({ type: 'STATE_ETAG', etag: lastStateEtag.current ?? '' });
+      }
+      void refresh().catch((e) => setError(e.message));
+    };
     if (typeof BroadcastChannel !== 'undefined' && !broadcastChannelRef.current) {
       try {
         broadcastChannelRef.current = new BroadcastChannel('vulnstream-state-poll');
         broadcastChannelRef.current.onmessage = (event: MessageEvent) => {
           if (!active) return;
           const { type, etag } = event.data ?? {};
-          if (type === 'STATE_ETAG' && typeof etag === 'string' && etag) {
-            // Adopt the announcing tab's ETag and reset to fast polling so this
-            // tab's next refresh picks up any state change promptly.
-            lastStateEtag.current = etag;
-            pollIntervalIndex.current = 0;
-          }
+          if (type !== 'STATE_ETAG') return;
+          // Any announcement proves a leader is alive, even one that carries no
+          // ETag (a takeover announcement does not have one yet).
+          leaderSeenAt = Date.now();
+          if (typeof etag !== 'string' || !etag) return;
+          // The leader just told us the state it holds. Apply the same decision a
+          // poll would: unchanged means nothing to fetch.
+          if (etag === lastStateEtag.current) return;
+          pollIntervalIndex.current = 0;
+          poll();
         };
       } catch {
         // BroadcastChannel may be unavailable or blocked in some environments;
@@ -423,18 +459,12 @@ function useApplication() {
       }
     }
 
-    // Elect the first initialised tab as the polling tab; other tabs skip their
-    // interval polls and wait for ETag announcements from the leader.
+    // Elect the first initialised tab as the polling tab; other tabs refresh in
+    // response to its announcements (see above).
     if (!isPollingTabRef.current) {
       isPollingTabRef.current = broadcastChannelRef.current === null;
+      leaderSeenAt = Date.now();
     }
-
-    const poll = () => {
-      if (!active || document.visibilityState === 'hidden') return;
-      // Non-leader tabs defer to the polling tab's BroadcastChannel announcements.
-      if (broadcastChannelRef.current && !isPollingTabRef.current) return;
-      void refresh().catch((e) => setError(e.message));
-    };
 
     const schedulePoll = () => {
       if (timer) clearInterval(timer);

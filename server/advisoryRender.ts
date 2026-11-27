@@ -154,7 +154,17 @@ function findingProductLabel(finding?: Finding): string {
   return product || finding.matchedAssetName || 'Unavailable';
 }
 
-/** Display vendor/product for a finding, preferring the matched asset data. */
+/**
+ * Display vendor/product for a finding, preferring the matched asset data.
+ *
+ * `matchedAssetProduct` is the inventory *product* (e.g. "Widget"), which is the
+ * same for every asset running it. When it is absent the CPE product is used, and
+ * only then the asset name. A consolidated advisory lists affected systems as
+ * vendor/product rows, so two assets matched against one CVE without a recorded
+ * product must still be distinguishable: falling back to the asset name keeps
+ * them separate, whereas an empty product made both rows read "Acme - " and the
+ * second asset's row looked like a duplicate of the first.
+ */
 function findingDisplayNames(finding?: Finding): { vendor: string; product: string } {
   if (!finding) return { vendor: '', product: '' };
   const parsed = parseCPE23(finding.matchedCpe || '');
@@ -162,7 +172,7 @@ function findingDisplayNames(finding?: Finding): { vendor: string; product: stri
   const cpeProduct = parsed.isValid && !['*', '-'].includes(parsed.product) ? parsed.product : '';
   return {
     vendor: displayName(finding.matchedAssetVendor || cpeVendor),
-    product: displayName(finding.matchedAssetProduct || cpeProduct),
+    product: displayName(finding.matchedAssetProduct || cpeProduct || finding.matchedAssetName || ''),
   };
 }
 
@@ -249,7 +259,17 @@ export interface AdvisoryRenderOptions {
 
 interface EnterpriseCve {
   id: string;
+  /** Alias the shipped template addresses inside `cves`; `id` is the older name. */
+  cve_id: string;
   source_url: string;
+  /** Aliases of `source_url` kept for templates that use the older names. */
+  url: string;
+  nvd_url: string;
+  /** Palette values the template writes straight into CSS/bgcolor attributes. */
+  pill_bg: string;
+  pill_border: string;
+  pill_text: string;
+  badge_bg: string;
   severity: string;
   is_critical: boolean;
   is_high: boolean;
@@ -311,20 +331,43 @@ function enterpriseTemplateValues(
     ? distinctSeverities.sort((a, b) => rankOrder.indexOf(a) - rankOrder.indexOf(b)).join(' & ')
     : (distinctSeverities[0] ?? worst);
 
-  const cves: EnterpriseCve[] = cveIds.map((cveId) => {
+  /**
+   * One entry per affected (CVE, asset) pair.
+   *
+   * This list feeds `{{#each cves}}` in the shipped template, which is how the
+   * email lists affected systems. Keying it by CVE alone collapsed a CVE that \n   * matches several assets into a single row, so the delivered advisory silently
+   * omitted every asset after the first while its own text body and the
+   * advisory's `affectedSystems` listed them all. A CVE with no finding still
+   * renders once (as a CVE-level row) so a pruned cache entry does not drop the
+   * item entirely.
+   */
+  const cves: EnterpriseCve[] = cveIds.flatMap((cveId) => {
     const cveFindings = findings?.filter((finding) => finding.cveId === cveId) ?? [];
     const severity = severityOf(cveId);
-    // Report the most severe finding first: it is the one an operator must act on.
-    const primary =
-      cveFindings.find((finding) => finding.cve.cvss.severity.toUpperCase() === severity) ?? cveFindings[0];
+    if (!cveFindings.length) return [cveEntry(cveId, severity, undefined)];
+    // Report the most severe findings first: they are the ones an operator must act on.
+    const ordered = [
+      ...cveFindings.filter((finding) => finding.cve.cvss.severity.toUpperCase() === severity),
+      ...cveFindings.filter((finding) => finding.cve.cvss.severity.toUpperCase() !== severity),
+    ];
+    return ordered.map((finding) => cveEntry(cveId, severity, finding));
+  });
+
+  function cveEntry(cveId: string, severity: string, primary: Finding | undefined): EnterpriseCve {
     const detail = vulnerabilityDetails.find((entry) => entry.cve_id === escape(cveId));
-    const versionLines = [...new Set(cveFindings.map((finding) => affectedVersionLabel(finding)).filter(Boolean))];
-    const mitigations = [...
-      new Set(
-        cveFindings.flatMap((finding) => [
-          ...(finding.cve.remediation?.immediateActions ?? []),
-          ...(finding.cve.remediation?.stepByStep ?? []),
-        ]),
+    // Version and mitigation columns describe THIS row's asset, not every asset
+    // that shares the CVE. Aggregating across the CVE repeated the first asset's
+    // versions on each row and attributed one asset's guidance to another.
+    const versionLine = primary ? affectedVersionLabel(primary) : '';
+    const versionLines = versionLine ? [versionLine] : [];
+    const mitigations = [
+      ...new Set(
+        primary
+          ? [
+              ...(primary.cve.remediation?.immediateActions ?? []),
+              ...(primary.cve.remediation?.stepByStep ?? []),
+            ]
+          : [],
       ),
     ].filter((action) => action.trim());
     const sourceUrl = `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(cveId)}`;
@@ -357,7 +400,14 @@ function enterpriseTemplateValues(
       is_low: severity === 'LOW' || severity === 'UNKNOWN',
       cvss_score: typeof primary?.cve.cvss.score === 'number' ? primary.cve.cvss.score.toFixed(1) : 'N/A',
       vendor: findingDisplayNames(primary).vendor || 'Unknown',
-      product: findingDisplayNames(primary).product || findingProductLabel(primary),
+      // The template renders one row per entry as `vendor / product`, so the
+      // asset must be distinguishable through these two fields. `matchedAssetProduct`
+      // is the inventory product shared by every asset running it, which made two
+      // assets render as identical rows; the asset name is appended when it differs
+      // so each affected system stays identifiable.
+      product: [findingDisplayNames(primary).product || findingProductLabel(primary), displayName(primary?.matchedAssetName || '')]
+        .filter((part, index, all) => part && all.indexOf(part) === index)
+        .join(' on '),
       affected_versions: versionLines.length ? versionLines.join(', ') : 'All unpatched releases',
       // `{{{description}}}` in the template, so escape here: the value is CVE
       // prose from an external source, never markup we intend to honour.
@@ -371,7 +421,7 @@ function enterpriseTemplateValues(
         : ['Apply the vendor security update once tested in your environment.',
              'Restrict network access to affected systems until remediation is validated.'],
     };
-  });
+  }
 
   const generatedAt = options.generatedAt ?? new Date();
   const commissioned = new Date(advisory.createdDate);
@@ -387,8 +437,11 @@ function enterpriseTemplateValues(
     published_date: formattedDate(advisory.createdDate),
     updated_date:
       Number.isNaN(commissioned.getTime()) ? formattedDate(advisory.createdDate) : formattedDate(generatedAt.toISOString()),
+    // `cves` now has one entry per affected asset, so this count is the number of
+    // flagged assets, which is what the label claims.
     inventory_status: `${cves.length} Asset${cves.length === 1 ? '' : 's'} Flagged`,
-    cve_count: cves.length,
+    // Distinct CVEs, not rows: one CVE on three assets is still one CVE.
+    cve_count: new Set(cves.map((entry) => entry.id)).size,
     cves,
     honeywell_actions: [
       { title: 'Inventory & Scope', detail: ' Identify all instances of the listed vendor products in your environment.' },
