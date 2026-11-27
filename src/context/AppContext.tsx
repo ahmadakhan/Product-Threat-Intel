@@ -30,6 +30,7 @@ import type {
   ThreatAnalytics,
   CpeMatchSimulation,
   ReviewEdits,
+  CommandResult,
   VulnerabilitySearchParams,
   VulnerabilitySearchResponse,
   MlStatusResponse,
@@ -531,7 +532,7 @@ function useApplication() {
     );
   const command = async (action: string, data?: unknown, id?: string) =>
     safely(async () => {
-      const result = await request<any>('/commands', { action, data, id });
+      const result = await request<CommandResult>('/commands', { action, data, id });
       return result;
     });
   // A committed mutation is a success even if the follow-up snapshot refresh
@@ -829,7 +830,13 @@ function useApplication() {
     bulkImportWatchlist: async (items: unknown[]) => {
       const result = await command('asset.import', items);
       if (result && !result.errors?.length) await refreshAfterMutation();
-      return result || { imported: 0, errors: ['Import failed. See the error banner.'] };
+      // Normalise to the guaranteed shape callers rely on. The server omits both
+      // fields on success, so passing its response through left `errors`
+      // undefined and every caller's `result.errors.length` threw.
+      return {
+        imported: result?.imported ?? 0,
+        errors: result?.errors ?? (result ? [] : ['Import failed. See the error banner.']),
+      };
     },
     addCustomCve: (cve: NormalizedCVE) => save('cve.save', cve),
     updateFindingStatus: async (id: string, status: Finding['status'], note?: string) => {

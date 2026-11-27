@@ -1445,6 +1445,26 @@ export interface MlModelStatus {
   } | null;
 }
 
+/**
+ * Response of `POST /api/commands`.
+ *
+ * Mirrors the server's `CommandResult` for the fields this client reads. It is
+ * declared here rather than imported from `server/commands.ts` so the browser
+ * bundle never pulls in server modules; `tests/command-contract.test.ts` fails if
+ * the two drift.
+ */
+export interface CommandResult {
+  success: boolean;
+  error?: string;
+  imported?: number;
+  errors?: string[];
+  assetId?: string;
+  recipientId?: string;
+  webhookId?: string;
+  cveId?: string;
+  action?: string;
+}
+
 export interface MlStatusResponse {
   initialized: boolean;
   models: MlModelStatus[];
