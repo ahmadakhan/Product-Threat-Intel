@@ -10,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { normalizeCveId, sourceCveContentHash, stableJson } from '../src/utils/deduplicator';
 import { parseCPE23 } from '../src/utils/cpeMatcher.ts';
+import { buildCveRemediationFromCwe, mergeRemediation } from '../src/utils/cveRemediation.ts';
 import { cpePreFilter } from './ml/integration.ts';
 import { paceConcurrent } from './concurrency';
 import { cvssSeverity, normalizeCvssVersion, sanitizeCvssVector } from './cvss.ts';
@@ -207,6 +208,9 @@ function normalizeOpenCve(detail: any, feedId: string): NormalizedCVE | null {
     walk(config);
   const score = Number(metric?.score || 0);
   const description = String(detail.title || detail.cve_id).slice(0, 30000);
+  const cweList = Array.isArray(detail.weaknesses)
+    ? detail.weaknesses.filter((v: unknown) => typeof v === 'string').slice(0, 100)
+    : [];
   try {
     return cveSchema.parse({
       cveId: detail.cve_id,
@@ -223,7 +227,7 @@ function normalizeOpenCve(detail: any, feedId: string): NormalizedCVE | null {
         // comment in normalizeNvd. `cvssSeverity(0)` would mislabel it LOW.
         severity: !metric || !Number.isFinite(score) || metric.score == null ? 'UNKNOWN' : cvssSeverity(score),
       },
-      cwe: Array.isArray(detail.weaknesses) ? detail.weaknesses.filter((v: unknown) => typeof v === 'string').slice(0, 100) : [],
+      cwe: cweList,
       cpeMatches: details.map(({ criteria }) => criteria),
       cpeMatchDetails: details,
       applicabilityRequiresReview: applicabilityRequiresReview || details.length === 0,
@@ -233,7 +237,7 @@ function normalizeOpenCve(detail: any, feedId: string): NormalizedCVE | null {
         ? { isKev: true, dateAdded: metrics.kev.data.dateAdded, dueDate: metrics.kev.data.dueDate }
         : { isKev: false },
       exploitStatus: 'None',
-      remediation: { patchUrl: '', vendorAdvisoryRef: '', immediateActions: [], workarounds: [], rollbackPlan: '', stepByStep: [] },
+      remediation: buildCveRemediationFromCwe(cweList),
     });
   } catch {
     return null;
@@ -288,6 +292,9 @@ export function normalizeNvd(item: any, feedId: string): NormalizedCVE | null {
     30000,
   );
   const score = metric?.baseScore ?? 0;
+  const cweList = (Array.isArray(cve.weaknesses) ? cve.weaknesses : [])
+    .flatMap((w: any) => (Array.isArray(w?.description) ? w.description : []).filter((d: any) => d && d.lang === 'en').map((d: any) => d.value))
+    .slice(0, 100);
   try {
     return cveSchema.parse({
     cveId: cve.id,
@@ -308,9 +315,7 @@ export function normalizeNvd(item: any, feedId: string): NormalizedCVE | null {
       // sentinel case the comment above describes, not a real CVSS 0.0.
       severity: !metric || metric.baseScore == null ? 'UNKNOWN' : cvssSeverity(score),
     },
-    cwe: (Array.isArray(cve.weaknesses) ? cve.weaknesses : [])
-      .flatMap((w: any) => (Array.isArray(w?.description) ? w.description : []).filter((d: any) => d && d.lang === 'en').map((d: any) => d.value))
-      .slice(0, 100),
+    cwe: cweList,
     cpeMatches: validDetails.map((d) => d.criteria),
     cpeMatchDetails: validDetails,
     applicabilityRequiresReview,
@@ -324,19 +329,7 @@ export function normalizeNvd(item: any, feedId: string): NormalizedCVE | null {
     epss: { score: 0, percentile: 0 },
     cisaKev: { isKev: false },
     exploitStatus: 'None',
-    remediation: {
-      patchUrl: '',
-      // A feed-controlled URL must not fail the whole record: the schema rejects
-      // embedded credentials, so an unguarded link here drops the CVE on server
-      // NVD. Guard it instead; an unusable link becomes an empty field.
-      vendorAdvisoryRef: referenceUrlValue(
-        (cve.references || []).find((r: any) => r.tags?.includes('Vendor Advisory'))?.url,
-      ),
-      immediateActions: [],
-      workarounds: [],
-      rollbackPlan: '',
-      stepByStep: [],
-    },
+    remediation: buildCveRemediationFromCwe(cweList),
   });
   } catch {
     return null;
@@ -1399,14 +1392,10 @@ export async function ingestFeed(
         epss: { score: 0, percentile: 0 },
         cisaKev: { isKev: false },
         exploitStatus: 'None',
-        remediation: {
-          patchUrl: '',
-          vendorAdvisoryRef: `https://cve.mitre.org/cgi-bin/cvename.cgi?name=${cveId}`,
-          immediateActions: [],
-          workarounds: [],
-          rollbackPlan: '',
-          stepByStep: [],
-        },
+        remediation: mergeRemediation(
+          buildCveRemediationFromCwe([]),
+          { vendorAdvisoryRef: `https://cve.mitre.org/cgi-bin/cvename.cgi?name=${cveId}` },
+        ),
       });
       totalFetched++;
       revisions[cveId] = modifiedDate;
@@ -1594,18 +1583,14 @@ function normalizeNvdItem(item: any, feedId: string): NormalizeNvdItemResult {
       epss: { score: 0, percentile: 0 },
       cisaKev: { isKev: false },
       exploitStatus: 'None',
-      remediation: {
-        patchUrl: '',
-        // Same guard as normalizeNvd: a malformed Vendor Advisory URL must not
-        // reject the entire NVD++ record, which would lose the finding.
-        vendorAdvisoryRef: referenceUrlValue(
-          (cve.references || []).find((r: any) => r.tags?.includes('Vendor Advisory'))?.url,
-        ),
-        immediateActions: [],
-        workarounds: [],
-        rollbackPlan: '',
-        stepByStep: [],
-      },
+      remediation: mergeRemediation(
+        buildCveRemediationFromCwe(cwe),
+        {
+          vendorAdvisoryRef: referenceUrlValue(
+            (cve.references || []).find((r: any) => r.tags?.includes('Vendor Advisory'))?.url,
+          ),
+        },
+      ),
     }) };
   } catch (e) {
     return {
