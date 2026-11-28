@@ -39,6 +39,8 @@ import {
   digestSeveritySummary,
   digestSeverityKpi,
   formatExecutiveSummary,
+  countDigestSeverities,
+  formatDigestSeverityCounts,
   renderDailyDigest,
   renderHeldForReview,
   compileDailyDigestTemplate,
@@ -67,38 +69,19 @@ const formatDigestDate = (dateKey: string): string => {
 const DIGEST_SEVERITY_ORDER = ['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const;
 type DigestSeverity = (typeof DIGEST_SEVERITY_ORDER)[number];
 
-const countDigestSeverities = (findings: DigestFinding[]): Record<string, number> => {
-  const counts: Record<string, number> = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, UNKNOWN: 0 };
-  // Bucket by a NORMALISED severity. `finding.severity` is raw CVSS text and can
-  // be lowercase or padded upstream; keying the map with it created stray
-  // buckets (`high`, `Critical`) that formatSeverityCounts then printed next to
-  // the real ones, so the breakdown disagreed with the KPI totals. Anything
-  // unrecognised counts as UNKNOWN rather than inventing a bucket.
-  for (const finding of findings) {
-    const severity = String(finding.severity ?? '').trim().toUpperCase();
-    counts[severity in counts ? severity : 'UNKNOWN'] += 1;
-  }
-  return counts;
-};
-
-const formatSeverityCounts = (counts: Record<string, number>): string =>
-  Object.entries(counts)
-    .filter(([, count]) => count > 0)
-    .map(([severity, count]) => `${count} ${severity.toLowerCase()}`)
-    .join(', ');
-
 const highestDigestSeverity = (findings: DigestFinding[]): DigestSeverity => {
   let highest: DigestSeverity = 'UNKNOWN';
   for (const finding of findings) {
     // Normalise before matching, exactly as countDigestSeverities does. Without
     // it a lowercase `high` was counted in the HIGH tile but left the headline
     // badge at UNKNOWN ("NO NEW FINDINGS"), so the header contradicted the KPI.
-    const candidate = String(finding.severity ?? '').trim().toUpperCase();
+    const candidate = String(finding.severity ?? '')
+      .trim()
+      .toUpperCase();
     const severity: DigestSeverity = (DIGEST_SEVERITY_ORDER as readonly string[]).includes(candidate)
       ? (candidate as DigestSeverity)
       : 'UNKNOWN';
-    if (DIGEST_SEVERITY_ORDER.indexOf(severity) > DIGEST_SEVERITY_ORDER.indexOf(highest))
-      highest = severity;
+    if (DIGEST_SEVERITY_ORDER.indexOf(severity) > DIGEST_SEVERITY_ORDER.indexOf(highest)) highest = severity;
   }
   return highest;
 };
@@ -283,7 +266,12 @@ export const DailyDigestView: React.FC = () => {
       JSON.stringify(dailyDigestCustomization) !== JSON.stringify(savedDailyDigestCustomization);
     const bodyChanged = customTemplate !== savedDailyDigestCustomTemplate;
     return customizationChanged || bodyChanged;
-  }, [dailyDigestCustomization, savedDailyDigestCustomization, customTemplate, savedDailyDigestCustomTemplate]);
+  }, [
+    dailyDigestCustomization,
+    savedDailyDigestCustomization,
+    customTemplate,
+    savedDailyDigestCustomTemplate,
+  ]);
 
   // Map the authenticated health endpoint onto the digest's health shape so the
   // Platform Health table reports the running system, not fixture values.
@@ -350,7 +338,7 @@ export const DailyDigestView: React.FC = () => {
         dispatch_date: previewTimestamp,
         severity: previewSeverity,
         finding_count: previewFindings.length,
-        severity_counts: formatSeverityCounts(previewSeverityCounts),
+        severity_counts: formatDigestSeverityCounts(previewSeverityCounts),
         findings_summary: findingsSummary,
         health_report: healthReport,
         recipient_name: 'preview@example.invalid',
@@ -574,7 +562,6 @@ export const DailyDigestView: React.FC = () => {
           </button>
         </div>
       </div>
-
 
       {/* RENDERED CLIENT PREVIEW: RENAMED TO "HTML template" WITH ENTERPRISE SCROLL ENGINE */}
       <div className="ui-panel bg-zinc-900/60 dark:bg-zinc-900/60 light:bg-white border border-zinc-800/80 dark:border-zinc-800/80 light:border-zinc-200 rounded-2xl p-5 shadow-sm space-y-4 transition-colors">

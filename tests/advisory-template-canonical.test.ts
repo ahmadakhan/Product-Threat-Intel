@@ -12,7 +12,10 @@ import { DEFAULT_ADVISORY_EMAIL_TEMPLATE } from '../src/utils/defaultAdvisoryEma
  * from disk. A stray edit to one of them silently ships a different email, so
  * the expected text is stored beside the test rather than reconstructed.
  */
-const CANONICAL = readFileSync('./tests/fixtures/canonical-advisory-template.html', 'utf8').replace(/\n$/, '');
+const CANONICAL = readFileSync('./tests/fixtures/canonical-advisory-template.html', 'utf8').replace(
+  /\n$/,
+  '',
+);
 
 test('the shipped advisory template is byte-identical to the canonical document', () => {
   assert.equal(DEFAULT_ADVISORY_EMAIL_TEMPLATE.replace(/\n$/, ''), CANONICAL);
@@ -31,7 +34,9 @@ test('the canonical document declares exactly the expected placeholder set', () 
     '{{#each mitigations}}',
     '{{#if contact_email}}',
     '{{#if contact_team}}',
+    '{{#if critical_count}}',
     '{{#if executive_summary}}',
+    '{{#if high_count}}',
     '{{#if is_critical}}',
     '{{#if is_high}}',
     '{{#if is_medium}}',
@@ -39,6 +44,8 @@ test('the canonical document declares exactly the expected placeholder set', () 
     '{{#if is_top_critical}}',
     '{{#if is_top_high}}',
     '{{#if is_top_medium}}',
+    '{{#if low_count}}',
+    '{{#if medium_count}}',
     '{{#if mitigations}}',
     '{{#if tlp_classification}}',
     '{{/each}}',
@@ -49,11 +56,15 @@ test('the canonical document declares exactly the expected placeholder set', () 
     '{{contact_email}}',
     '{{contact_team}}',
     '{{correlation_count}}',
+    '{{critical_count}}',
     '{{cve_count}}',
     '{{cvss_score}}',
     '{{else}}',
+    '{{high_count}}',
     '{{id}}',
     '{{inventory_status}}',
+    '{{low_count}}',
+    '{{medium_count}}',
     '{{nvd_url}}',
     '{{product}}',
     '{{published_date}}',
@@ -135,12 +146,23 @@ test('every placeholder resolves against real advisory data', async () => {
   };
   const cveIds = advisory.cveIds;
 
-  for (const options of [{}, { contactTeam: 'SOC', contactEmail: 'soc@example.com', tlpClassification: 'TLP:RED' }]) {
+  for (const options of [
+    {},
+    { contactTeam: 'SOC', contactEmail: 'soc@example.com', tlpClassification: 'TLP:RED' },
+  ]) {
     const html = renderAdvisory(CANONICAL, advisory as never, findings, options);
     assert.deepEqual([...new Set(html.match(/\{\{[^}]+\}\}/g) ?? [])], [], 'no token survives');
-    for (const blank of ['bgcolor=""', 'href=""', 'href="mailto:"', 'background-color: ;', 'color: ;', 'border: 1px solid ;'])
+    for (const blank of [
+      'bgcolor=""',
+      'href=""',
+      'href="mailto:"',
+      'background-color: ;',
+      'color: ;',
+      'border: 1px solid ;',
+    ])
       assert.ok(!html.includes(blank), `no unresolved attribute: ${blank}`);
-    for (const sev of ['CRITICAL (9.8)', 'HIGH (7.2)', 'MEDIUM (5.0)', 'LOW (3.1)']) assert.ok(html.includes(sev), sev);
+    for (const sev of ['CRITICAL (9.8)', 'HIGH (7.2)', 'MEDIUM (5.0)', 'LOW (3.1)'])
+      assert.ok(html.includes(sev), sev);
     for (const cve of cveIds) assert.ok(html.includes(cve), cve);
     // The footer address must always be a real mailbox, never an empty link.
     assert.match(html, /href="mailto:[^"@]+@[^"]+"/);
@@ -164,23 +186,47 @@ test('one CVE matched to several assets renders a row per asset', async () => {
       id: `f${n}`,
       cveId,
       cve: {
-        cveId, title: 't', description: 'A vendor description.',
+        cveId,
+        title: 't',
+        description: 'A vendor description.',
         cvss: { score: 9.8, severity: 'CRITICAL', vector: '', version: '3.1' },
-        cpeMatches: [], cwe: [], sourceFeeds: [],
-        publishedDate: '2026-11-19T00:00:00Z', modifiedDate: '2026-11-20T00:00:00Z',
+        cpeMatches: [],
+        cwe: [],
+        sourceFeeds: [],
+        publishedDate: '2026-11-19T00:00:00Z',
+        modifiedDate: '2026-11-20T00:00:00Z',
         remediation: { immediateActions: ['Apply the vendor update.'], patchUrl: '', vendorAdvisoryRef: '' },
       },
-      matchedAssetId: asset, matchedAssetName: asset, matchedAssetVendor: 'acme',
-      matchedAssetProduct: '', matchedCpe: '', matchingMethod: 'CPE', matchingEvidence: 'e',
-      confidence: 90, exposure: 'INTERNAL', exploitRisk: 'STANDARD', dispatchDeferred: false,
-      notificationStatus: 'QUEUED_FOR_DISPATCH', status: 'MONITORED', autoDispatchedAt: null,
-      advisoryId: null, reviewNotifiedAt: null, timeline: [],
+      matchedAssetId: asset,
+      matchedAssetName: asset,
+      matchedAssetVendor: 'acme',
+      matchedAssetProduct: '',
+      matchedCpe: '',
+      matchingMethod: 'CPE',
+      matchingEvidence: 'e',
+      confidence: 90,
+      exposure: 'INTERNAL',
+      exploitRisk: 'STANDARD',
+      dispatchDeferred: false,
+      notificationStatus: 'QUEUED_FOR_DISPATCH',
+      status: 'MONITORED',
+      autoDispatchedAt: null,
+      advisoryId: null,
+      reviewNotifiedAt: null,
+      timeline: [],
     }) as never;
   const findings = [finding(1, 'edge-router-01'), finding(2, 'auth-service'), finding(3, 'portal-web')];
   const advisory = {
-    id: 'ADV-0002', title: 'Vulnerability notice', severity: 'CRITICAL', cveIds: [cveId],
-    findingIds: ['f1', 'f2', 'f3'], createdDate: '2026-11-19T00:00:00Z', deliveryStatus: 'PENDING',
-    recipientCount: 1, executiveSummary: 'A summary.', remediationInstructions: 'Remediate.',
+    id: 'ADV-0002',
+    title: 'Vulnerability notice',
+    severity: 'CRITICAL',
+    cveIds: [cveId],
+    findingIds: ['f1', 'f2', 'f3'],
+    createdDate: '2026-11-19T00:00:00Z',
+    deliveryStatus: 'PENDING',
+    recipientCount: 1,
+    executiveSummary: 'A summary.',
+    remediationInstructions: 'Remediate.',
     affectedSystems: ['edge-router-01', 'auth-service', 'portal-web'],
   };
   const html = renderAdvisory(CANONICAL, advisory as never, findings);

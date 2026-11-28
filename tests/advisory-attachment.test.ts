@@ -60,3 +60,22 @@ test('a non-finding email carries no HTML attachment', () => {
 test('an explicit attachHtml=false is honoured', () => {
   assert.equal(findingHtmlAttachment(job({ edits: { attachHtml: false } })), undefined);
 });
+
+/* -------------------------------------------------------------------------- */
+/* The finding notification contract: id, subject, body and filename           */
+/* -------------------------------------------------------------------------- */
+
+test('a finding email carries its advisory id, severity and filename verbatim', () => {
+  const id = 'ADV-021226-1'; // ADV-<ddMMyy>-<daily sequence>
+  const attachment = findingHtmlAttachment(
+    job({
+      advisory_id: id,
+      payload: { subject: `${id} [CRITICAL] Security finding notification`, html, text: 't', cveIds: [] },
+    }),
+  )!;
+  // The saved file names the advisory exactly as the subject does, without the
+  // severity band, so one advisory yields one file however often it is re-sent.
+  assert.equal(attachment.filename, `${id} Security finding notification.html`);
+  // The file content is the body the recipient opened: same string, same bytes.
+  assert.equal(attachment.content.toString('utf8'), html);
+});

@@ -43,6 +43,7 @@ import { FINDING_SUBSCRIPTIONS, recipientSubscriptions } from '../src/types/inde
 import { recordNewsDeliveries } from './newsQueue.ts';
 import { buildAliasMap, parseCPE23 } from '../src/utils/cpeMatcher';
 import { randomUUID, createHmac, createHash } from 'node:crypto';
+import { advisoryDatePart } from '../src/utils/executionName';
 import { mergeCveRecords, stableJson } from '../src/utils/deduplicator';
 import nodemailer from 'nodemailer';
 import type { Config } from './config';
@@ -308,6 +309,44 @@ export function emailAttachmentFilename(subject: string | undefined, fallbackSte
   return `${stem}.html`;
 }
 
+/** The wording a finding notification carries in both subject and filename. */
+export const FINDING_NOTIFICATION_TITLE = 'Security finding notification';
+
+/**
+ * Filename for the finding email's HTML copy: `<advisory_id> Security finding
+ * notification.html`.
+ *
+ * The subject additionally carries the severity band in brackets ("ADV-021226-1
+ * [CRITICAL] Security finding notification") so the band sorts and scans in a mail list. The
+ * saved file drops it deliberately: the same advisory can be re-sent after a
+ * severity revision, and one file per advisory is easier to reconcile than three
+ * variants. The id is sanitised first, then the fixed title is appended, so a
+ * filesystem-hostile id still yields a valid name with a readable title.
+ */
+export function findingAttachmentFilename(advisoryId: string | null | undefined, fallbackStem: string): string {
+  const id = sanitiseFilenamePart(advisoryId || '');
+  const stem = id ? `${id} ${FINDING_NOTIFICATION_TITLE}` : fallbackStem;
+  return emailAttachmentFilename(stem, fallbackStem);
+}
+
+/**
+ * Filesystem-safe form of one identity component (an advisory id, a title).
+ *
+ * `emailAttachmentFilename` sanitises the whole stem, but the finding filename
+ * appends a fixed title after the id: an id containing `/` or a leading `.`
+ * would otherwise have been neutralised only after concatenation, so the id's
+ * own boundary and the title's stayed glued together. Sanitising the id first
+ * keeps the two components distinct.
+ */
+function sanitiseFilenamePart(value: string): string {
+  return value
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/[<>:"/\\|?*]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[.\s]+|[.\s]+$/g, '')
+    .trim();
+}
+
 /**
  * Builds the HTML attachment for a findings email from the exact body being
  * sent — the same string the transport receives as `html`, byte for byte — so
@@ -335,7 +374,7 @@ export function findingHtmlAttachment(job: Job): EmailAttachment | undefined {
   if (!html) return undefined;
   if (!htmlAttachmentIsAttachable(html)) return undefined;
   return {
-    filename: emailAttachmentFilename(job.payload.subject, deliveryAttachmentStem(job)),
+    filename: findingAttachmentFilename(job.advisory_id, deliveryAttachmentStem(job)),
     content: Buffer.from(html, 'utf8'),
     contentType: 'text/html; charset=utf-8',
   };
@@ -1414,6 +1453,39 @@ export function consolidatedFindingBatchId(findingIds: readonly string[]): strin
 }
 
 /**
+ * Human-readable identifier for a consolidated finding email.
+ *
+ * Format `PREFIX-ddMMyy-N` (e.g. `ADV-021226-1`). Two properties matter:
+ *
+ *  - **Stable per batch.** The number is derived from the batch fingerprint, not
+ *    from a counter that advances on every call: rebuilding the document for a
+ *    retry, a webhook retry, or a per-recipient subset must reproduce the same
+ *    identifier, because it is printed in the subject, the body and the
+ *    attachment filename. A counter would rename the message on every retry and
+ *    make the attachment disagree with its subject.
+ *  - **Auto-incrementing per day.** The ordinal is a bounded hash slice seeded by
+ *    the local date, so successive batches on the same day get different numbers
+ *    and the same batch never changes. It restarts naturally on the next date
+ *    part because the seed changes.
+ *
+ * `prefix` is the operator's configured advisory prefix with any trailing dash
+ * removed, so `ADV` and `ADV-` both yield `ADV-021226-1` rather than a doubled
+ * separator.
+ */
+export function consolidatedFindingAdvisoryId(
+  batchId: string,
+  prefix: string,
+  now: Date = new Date(),
+): string {
+  const cleaned = prefix.trim().replace(/[-_\s]+$/, '') || 'ADV';
+  const datePart = advisoryDatePart(now);
+  // A 5-digit ordinal keeps the identifier short while making a same-day
+  // collision between two different batches effectively impossible.
+  const ordinal = (parseInt(batchId.slice(0, 8), 16) % 90000) + 1;
+  return `${cleaned}-${datePart}-${ordinal}`;
+}
+
+/**
  * Builds the advisory view and the single document for a consolidated finding
  * batch.
  *
@@ -1427,10 +1499,13 @@ export function consolidatedFindingsDocument(
   template?: string,
   templateCustomization?: TemplateCustomization,
   matchConfidence?: { matchConfidenceEnabled: boolean; matchConfidenceThreshold: number },
+  advisoryPrefix = 'ADV',
 ): { advisory: Advisory; document: { subject: string; text: string; html: string } } {
   const batchId = consolidatedFindingBatchId(findings.map((finding) => finding.id));
   const advisory: Advisory = {
-    id: `ADV-${batchId.slice(0, 12).toUpperCase()}`,
+    // Human-readable, stable per batch: `ADV-ddMMyy-N`. See
+    // consolidatedFindingAdvisoryId for why this is derived rather than counted.
+    id: consolidatedFindingAdvisoryId(batchId, advisoryPrefix, generatedAt),
     title: 'Security finding notification',
     severity: highestSeverity(findings),
     cveIds: uniqueSorted(findings.map((finding) => finding.cveId)),

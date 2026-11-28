@@ -329,11 +329,40 @@ export function normalizeNvd(item: any, feedId: string): NormalizedCVE | null {
     epss: { score: 0, percentile: 0 },
     cisaKev: { isKev: false },
     exploitStatus: 'None',
-    remediation: buildCveRemediationFromCwe(cweList),
+    // The NVD record's own remediation, then the vendor link: the reference
+    // tagged `Vendor Advisory` is the authoritative fix location when the CWE
+    // guidance has no patch URL of its own. `referenceUrlValue` drops a
+    // malformed link instead of letting `cveSchema` reject the whole record.
+    remediation: mergeRemediation(
+      buildCveRemediationFromCwe(cweList),
+      { vendorAdvisoryRef: vendorAdvisoryUrl(cve.references) },
+    ),
   });
   } catch {
     return null;
   }
+}
+
+/**
+ * First reference URL tagged `Vendor Advisory`, salvaged for ingestion.
+ *
+ * Feed references are external input: `references` may be a non-array, an entry
+ * may be null, and `tags` may be a string rather than an array. Any of those
+ * would throw inside `normalizeNvd` and turn one malformed link into a dropped
+ * finding, so the shape is checked here and the URL is passed through
+ * `referenceUrlValue`, which empties anything that is not a renderable
+ * HTTP(S) URL without embedded credentials.
+ */
+function vendorAdvisoryUrl(references: unknown): string {
+  if (!Array.isArray(references)) return '';
+  for (const ref of references) {
+    if (!ref || typeof ref !== 'object') continue;
+    const { url, tags } = ref as { url?: unknown; tags?: unknown };
+    if (typeof url !== 'string') continue;
+    const tagged = Array.isArray(tags) ? tags.some((tag) => tag === 'Vendor Advisory') : tags === 'Vendor Advisory';
+    if (tagged) return referenceUrlValue(url);
+  }
+  return '';
 }
 
 export interface CVERejection {
@@ -1585,11 +1614,9 @@ function normalizeNvdItem(item: any, feedId: string): NormalizeNvdItemResult {
       exploitStatus: 'None',
       remediation: mergeRemediation(
         buildCveRemediationFromCwe(cwe),
-        {
-          vendorAdvisoryRef: referenceUrlValue(
-            (cve.references || []).find((r: any) => r.tags?.includes('Vendor Advisory'))?.url,
-          ),
-        },
+        // Same salvage rule as `normalizeNvd`: a malformed reference shape or a
+        // non-renderable URL empties the link instead of dropping the record.
+        { vendorAdvisoryRef: vendorAdvisoryUrl(cve.references) },
       ),
     }) };
   } catch (e) {

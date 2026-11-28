@@ -14,21 +14,45 @@ export const resetAdvisoryCounterForTest = (prefix: string, datePart: string): v
   advisoryCounter.delete(`${prefix}|${datePart}`);
 };
 
-/** Build a professional, human-readable advisory identifier.
+/**
+ * `ddmmyy` date component of a finding-advisory identifier.
  *
- * Format: `PREFIX-ddMMMyyyy-NNN` (e.g. `ADV-29Oct2026-001`).
- * Each day starts at `001` and increments by one for every subsequent advisory. */
-export const formatAdvisoryId = (prefix: string, now: Date = new Date()): string => {
-  const datePart = now
-    .toLocaleDateString('en-GB', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-    })
-    .replace(/ /g, '');
-  const key = `${prefix}|${datePart}`;
-  const count = (advisoryCounter.get(key) ?? 0) + 1;
-  advisoryCounter.set(key, count);
-  const sequence = String(count).padStart(3, '0');
-  return `${prefix}${datePart}-${sequence}`;
+ * Built from the local calendar parts in UTC-agnostic form rather than
+ * `toLocaleDateString`, which is locale- and ICU-dependent: the same instant could
+ * produce `12/02/2026`, `2026-12-02` or `2 Dec 2026` on different hosts, and the
+ * identifier appears in email subjects and attachment filenames that must be
+ * reproducible across deployments.
+ */
+export function advisoryDatePart(now: Date = new Date()): string {
+  const day = String(now.getDate()).padStart(2, '0');
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const year = String(now.getFullYear() % 100).padStart(2, '0');
+  return `${day}${month}${year}`;
+}
+
+/**
+ * Format a finding-advisory identifier: `PREFIX-ddMMyy-N` (e.g. `ADV-021226-1`).
+ *
+ * The date is the local calendar date, and the sequence restarts at `1` each day
+ * and increments once per identifier issued. The sequence is NOT zero-padded: the
+ * agreed format is `ADV-021226-1`, not `ADV-021226-001`.
+ *
+ * The sequence is process-local. That is deliberate for the finding-email path,
+ * whose identifier must be stable for the same batch on retry (it is derived from
+ * the batch fingerprint by the caller, not re-minted per delivery). Callers that
+ * need a globally unique, restart-safe number should pass an explicit `sequence`
+ * obtained from durable storage.
+ */
+export const formatAdvisoryId = (prefix: string, now: Date = new Date(), sequence?: number): string => {
+  const datePart = advisoryDatePart(now);
+  let ordinal: number;
+  if (sequence !== undefined) {
+    ordinal = Math.max(1, Math.floor(sequence));
+  } else {
+    const key = `${prefix}|${datePart}`;
+    const count = (advisoryCounter.get(key) ?? 0) + 1;
+    advisoryCounter.set(key, count);
+    ordinal = count;
+  }
+  return `${prefix}-${datePart}-${ordinal}`;
 };

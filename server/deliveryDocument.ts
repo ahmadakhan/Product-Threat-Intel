@@ -67,6 +67,20 @@ export interface DeliveryDocument {
 
 const uniqueSorted = (values: string[]) => [...new Set(values.filter(Boolean))].sort();
 
+/**
+ * Subject line for a finding email: `<ADV-id> [<SEVERITY>] Security finding notification`.
+ *
+ * The identifier leads so the message threads and sorts by advisory, and the
+ * severity is bracketed per the wording contract, e.g.
+ * `ADV-021226-1 [CRITICAL] Security finding notification`. Built here rather than
+ * in `advisoryEmail` so other mail kinds (news, digests) keep their own subject
+ * shape; only the finding notification uses this wording.
+ */
+export function findingEmailSubject(advisory: Pick<Advisory, 'id' | 'severity'>): string {
+  const severity = String(advisory.severity || 'UNKNOWN').trim().toUpperCase();
+  return `${advisory.id} [${severity}] Security finding notification`;
+}
+
 const SEVERITY_RANK: Record<string, number> = {
   UNKNOWN: 0,
   LOW: 1,
@@ -236,7 +250,12 @@ export function renderFindingsDocument(input: DeliveryDocumentInput): DeliveryDo
   const email = advisoryEmail(advisory, html, findings.map(deliveryFindingDetail), { findings });
   const limited = showConfidence ? limitedConfidenceLines(findings, confidenceThreshold) : [];
   const text = limited.length ? `${email.text}\n\n${limited.join('\n')}` : email.text;
-  return { ...email, text, html: email.html ?? html, generatedAt };
+  // The subject is pinned here, not taken from `advisoryEmail`, because the finding
+  // notification has its own wording contract:
+  //   `<ADV-id> [<SEVERITY>] Security finding notification`
+  // The attachment filename is derived from this same subject in `delivery.ts`, so
+  // setting it once keeps the mail header and the saved file in step.
+  return { ...email, subject: findingEmailSubject(advisory), text, html: email.html ?? html, generatedAt };
 }
 
 export interface PlainTextSection {

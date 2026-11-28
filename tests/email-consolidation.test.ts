@@ -647,20 +647,25 @@ test('the attachment is on by default and can be suppressed explicitly', () => {
   assert.equal(findingHtmlAttachment(job('FINDINGS:b', HTML_DOC, { attachHtml: false })), undefined);
 });
 
-test('the attached file is named after the email subject, sanitised for a filesystem', () => {
-  const named = findingHtmlAttachment(job('FINDINGS:b', HTML_DOC));
-  assert.equal(named?.filename, 'Critical Acme widget remote code execution (CVE-2026-10001).html');
-  const unsafe = findingHtmlAttachment({
-    ...job('FINDINGS:b', HTML_DOC),
-    payload: { ...attachmentOptions(HTML_DOC), subject: 'a/b\\c:d*e?f"g<h>i|j\n\tend...' },
-  } as Job);
-  assert.equal(unsafe?.filename, 'a b c d e f g h i j end.html');
-  // No subject at all still yields a usable, identifiable name.
+test('the attached file is named after the advisory, not the email subject', () => {
+  // The subject carries the severity band so it sorts in a mail list; the saved
+  // file does not, so one advisory yields one file even after a re-send.
+  const named = findingHtmlAttachment(job('ADV-021226-1', HTML_DOC));
+  assert.equal(named?.filename, 'ADV-021226-1 Security finding notification.html');
+  // A synthetic bundle id is fingerprint-truncated, then given the same title.
+  const bundle = findingHtmlAttachment(job('FINDINGS:b', HTML_DOC));
+  assert.match(bundle!.filename, /^FINDINGS-[0-9A-F]{12} Security finding notification\.html$/);
+});
+
+test('a hostile advisory id cannot escape the attachment filename', () => {
+  const unsafe = findingHtmlAttachment(job('ADV/02\\12:26*1?"<x>|y', HTML_DOC));
+  assert.equal(unsafe?.filename, 'ADV 02 12 26 1 x y Security finding notification.html');
+  // No id at all still yields a usable, identifiable name.
   const fallback = findingHtmlAttachment({
     ...job('FINDINGS:b', HTML_DOC),
     payload: { html: HTML_DOC },
   } as Job);
-  assert.match(fallback!.filename, /^FINDINGS-[0-9A-F]{12}\.html$/);
+  assert.match(fallback!.filename, /^FINDINGS-[0-9A-F]{12} Security finding notification\.html$/);
 });
 
 test('the attached document declares UTF-8 without changing the body', () => {

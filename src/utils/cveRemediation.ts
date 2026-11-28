@@ -16,12 +16,15 @@
 import type { NormalizedCVE, RemediationPlaybook } from '../types/index.ts';
 
 /** Canonical remediation step sets keyed by CWE id. */
-const CWE_REMEDIATION: Record<string, {
-  immediateActions: string[];
-  workarounds: string[];
-  rollbackPlan: string;
-  stepByStep: string[];
-}> = {
+const CWE_REMEDIATION: Record<
+  string,
+  {
+    immediateActions: string[];
+    workarounds: string[];
+    rollbackPlan: string;
+    stepByStep: string[];
+  }
+> = {
   // Injection families
   'CWE-89': {
     immediateActions: [
@@ -32,7 +35,8 @@ const CWE_REMEDIATION: Record<string, {
       'Apply input sanitization on all user-controlled parameters as a compensating control while patches are tested.',
       'Deploy a web application firewall (WAF) rule set tuned to block SQL injection patterns.',
     ],
-    rollbackPlan: 'Revert to the previous application build and restore the pre-incident database configuration from backup.',
+    rollbackPlan:
+      'Revert to the previous application build and restore the pre-incident database configuration from backup.',
     stepByStep: [
       'Audit all database queries in the affected component for string concatenation with user input.',
       'Rewrite each query using parameterized statements or an ORM with built-in injection protection.',
@@ -49,7 +53,8 @@ const CWE_REMEDIATION: Record<string, {
       'Restrict network access to the affected service until the command-injection vector is eliminated.',
       'Run the affected component in a sandboxed or containerized environment with a non-privileged user and a read-only filesystem where possible.',
     ],
-    rollbackPlan: 'Roll back to the last known-good application version and restore configuration from backup.',
+    rollbackPlan:
+      'Roll back to the last known-good application version and restore configuration from backup.',
     stepByStep: [
       'Identify every call site that passes user-controlled data to a shell or system function.',
       'Replace each call with a language-native API or a parameterized process-invocation API that does not use a shell.',
@@ -66,7 +71,8 @@ const CWE_REMEDIATION: Record<string, {
       'Deploy a WAF rule set targeting cross-site-scripting payloads as a temporary compensating control.',
       'Sanitize user input on the server side as a defense-in-depth measure while output encoding is rolled out.',
     ],
-    rollbackPlan: 'Revert the affected frontend component to the previous build and clear any malicious stored payloads from the database.',
+    rollbackPlan:
+      'Revert the affected frontend component to the previous build and clear any malicious stored payloads from the database.',
     stepByStep: [
       'Inventory every template and response that reflects user-controlled data back to the client.',
       'Apply output encoding appropriate to each output context (HTML body, attribute, JavaScript block, CSS, URL).',
@@ -102,7 +108,8 @@ const CWE_REMEDIATION: Record<string, {
       'Enable compiler-based buffer-overflow mitigations (stack canaries, ASLR, DEP/NX) if not already active.',
       'Run the affected component under a memory-safe sandbox or with reduced privileges.',
     ],
-    rollbackPlan: 'Revert to the previous component version and validate service operation before restoring full access.',
+    rollbackPlan:
+      'Revert to the previous component version and validate service operation before restoring full access.',
     stepByStep: [
       'Confirm the deployed version falls within the affected range identified in the advisory.',
       'Download the vendor patch from the official advisory link.',
@@ -136,7 +143,8 @@ const CWE_REMEDIATION: Record<string, {
       'Run the affected service under a dedicated OS user with read-only access to directories outside the intended root.',
       'Deploy a WAF rule that blocks path-traversal sequences (.., %2e, encoded variants).',
     ],
-    rollbackPlan: 'Revert the affected application code and restore filesystem permissions from the last known-good state.',
+    rollbackPlan:
+      'Revert the affected application code and restore filesystem permissions from the last known-good state.',
     stepByStep: [
       'Find every code path that accepts a file path or filename from an untrusted source.',
       'Canonicalize the resolved path and verify it remains within the allowed directory tree.',
@@ -154,7 +162,8 @@ const CWE_REMEDIATION: Record<string, {
       'Restrict access to affected authentication endpoints to trusted networks or a VPN.',
       'Enable account lockout after a small number of failed attempts.',
     ],
-    rollbackPlan: 'Restore the previous authentication configuration and revert any credential-store changes from backup.',
+    rollbackPlan:
+      'Restore the previous authentication configuration and revert any credential-store changes from backup.',
     stepByStep: [
       'Inventory all authentication entry points in the affected application.',
       'Enable MFA and strong password policies for every account with access.',
@@ -171,7 +180,8 @@ const CWE_REMEDIATION: Record<string, {
       'Restrict network access to the affected application to known-trusted clients.',
       'Enable audit logging on all authorization decisions for review.',
     ],
-    rollbackPlan: 'Revert authorization-policy changes and restore the previous role configuration from backup.',
+    rollbackPlan:
+      'Revert authorization-policy changes and restore the previous role configuration from backup.',
     stepByStep: [
       'Map each API endpoint and UI function to the roles that should be allowed to access it.',
       'Implement a centralized authorization check that runs before every protected operation.',
@@ -223,7 +233,8 @@ const CWE_REMEDIATION: Record<string, {
       'Restrict filesystem and backup access to only the service account that needs it.',
       'Mask or tokenize sensitive fields in non-production environments.',
     ],
-    rollbackPlan: 'Restore data from the pre-change backup and re-encrypt using the prior key management configuration.',
+    rollbackPlan:
+      'Restore data from the pre-change backup and re-encrypt using the prior key management configuration.',
     stepByStep: [
       'Classify all sensitive data stored or logged by the affected component.',
       'Implement encryption at rest using a FIPS-validated or industry-standard cryptographic module.',
@@ -240,7 +251,8 @@ const CWE_REMEDIATION: Record<string, {
       'Terminate TLS at a load balancer or ingress proxy if the application cannot be patched immediately.',
       'Restrict access to unencrypted endpoints to trusted networks only.',
     ],
-    rollbackPlan: 'Revert TLS configuration to the previous state and reissue certificates from backup if needed.',
+    rollbackPlan:
+      'Revert TLS configuration to the previous state and reissue certificates from backup if needed.',
     stepByStep: [
       'Identify every network endpoint used by the affected component.',
       'Obtain and install valid certificates from a trusted certificate authority.',
@@ -257,7 +269,8 @@ const CWE_REMEDIATION: Record<string, {
       'Isolate the affected component from untrusted networks until cryptography is remediated.',
       'Monitor for signs of data tampering or decryption-based attacks.',
     ],
-    rollbackPlan: 'Restore the previous cryptographic configuration and re-encrypt data with the prior scheme from backup.',
+    rollbackPlan:
+      'Restore the previous cryptographic configuration and re-encrypt data with the prior scheme from backup.',
     stepByStep: [
       'Audit all cryptographic functions in the affected code for weak or custom algorithms.',
       'Replace each with a standard library implementation (AES-GCM, RSA-OAEP, ECDSA, SHA-256 or stronger).',
@@ -275,7 +288,8 @@ const CWE_REMEDIATION: Record<string, {
       'Restrict access to repositories and images containing embedded secrets.',
       'Scan code and artifacts for secrets and block future commits that contain them.',
     ],
-    rollbackPlan: 'Restore code from a pre-secret commit and rotate credentials back to known values if rotation is not yet complete.',
+    rollbackPlan:
+      'Restore code from a pre-secret commit and rotate credentials back to known values if rotation is not yet complete.',
     stepByStep: [
       'Run a secrets scanner across source code, configuration, CI variables, and container images.',
       'Move discovered credentials into a secrets manager or environment variables.',
@@ -310,7 +324,8 @@ const CWE_REMEDIATION: Record<string, {
       'Restrict network access to the affected deserialization endpoint.',
       'Apply integrity checks or signatures to all serialized data before deserialization.',
     ],
-    rollbackPlan: 'Revert to the previous application version and restore serialization configuration from backup.',
+    rollbackPlan:
+      'Revert to the previous application version and restore serialization configuration from backup.',
     stepByStep: [
       'Identify every deserialization call site that accepts data from untrusted sources.',
       'Replace each with a safe format parser or a constrained deserializer.',
@@ -345,7 +360,8 @@ const CWE_REMEDIATION: Record<string, {
       'Restrict network access to the affected XML-processing endpoint.',
       'Apply schema validation to reject documents containing DOCTYPE declarations.',
     ],
-    rollbackPlan: 'Restore the previous XML parser configuration from backup and clear any retrieved external content.',
+    rollbackPlan:
+      'Restore the previous XML parser configuration from backup and clear any retrieved external content.',
     stepByStep: [
       'Find every XML parser instantiation in the affected code.',
       'Configure each parser to disallow external entities and DTD processing.',
@@ -363,7 +379,8 @@ const CWE_REMEDIATION: Record<string, {
       'Deploy a WAF or API gateway rule that limits request frequency per client.',
       'Monitor CPU, memory, and connection usage for signs of abuse.',
     ],
-    rollbackPlan: 'Remove rate limits and quotas added during remediation and restore the previous configuration.',
+    rollbackPlan:
+      'Remove rate limits and quotas added during remediation and restore the previous configuration.',
     stepByStep: [
       'Identify endpoints vulnerable to uncontrolled resource consumption.',
       'Implement per-client rate limiting, request size caps, and timeouts.',
@@ -403,7 +420,8 @@ const GENERIC_REMEDIATION: RemediationPlaybook = {
     'Restrict network access to affected systems until the fix is validated in your environment.',
     'Monitor affected assets for exploitation attempts and review logs for indicators of compromise.',
   ],
-  rollbackPlan: 'Restore systems to the last known-good configuration from backup if remediation causes instability.',
+  rollbackPlan:
+    'Restore systems to the last known-good configuration from backup if remediation causes instability.',
   stepByStep: [
     'Verify which deployed versions fall within the affected range in the advisory.',
     'Obtain the vendor patch or documented fix from the official advisory.',
@@ -532,7 +550,9 @@ export function mergeRemediation(
       const normalized = item.trim();
       if (!normalized || seen[key].has(normalized)) continue;
       seen[key].add(normalized);
-      merged[key === 'immediate' ? 'immediateActions' : key === 'workaround' ? 'workarounds' : 'stepByStep'].push(normalized);
+      merged[
+        key === 'immediate' ? 'immediateActions' : key === 'workaround' ? 'workarounds' : 'stepByStep'
+      ].push(normalized);
     }
   };
 
@@ -548,11 +568,10 @@ export function mergeRemediation(
     if (source.stepByStep?.length) push(source.stepByStep, 'step');
   }
 
-  if (!hasContent || (
-    !merged.immediateActions.length &&
-    !merged.workarounds.length &&
-    !merged.stepByStep.length
-  )) {
+  if (
+    !hasContent ||
+    (!merged.immediateActions.length && !merged.workarounds.length && !merged.stepByStep.length)
+  ) {
     return GENERIC_REMEDIATION;
   }
 
@@ -561,4 +580,163 @@ export function mergeRemediation(
   if (!merged.stepByStep.length) merged.stepByStep = [...GENERIC_REMEDIATION.stepByStep];
 
   return merged;
+}
+
+/**
+ * Severity- and exploitation-aware fallback actions.
+ *
+ * The CWE knowledge base above covers the weaknesses NVD actually publishes, but
+ * a record can legitimately arrive with no CWE (a feed that omits `weaknesses`,
+ * a vendor advisory with only prose). Substituting a fixed "confirm with the
+ * vendor" sentence in that case is not an action, and it made the required-
+ * actions section look auto-generated even when it had not been. These entries
+ * are derived from the two signals every record does carry - severity and
+ * exploitation status - so the section is always a real, severity-appropriate
+ * instruction set.
+ */
+const SEVERITY_URGENCY: Record<
+  'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN',
+  {
+    immediateActions: string[];
+    workarounds: string[];
+  }
+> = {
+  CRITICAL: {
+    immediateActions: [
+      'Isolate affected systems from untrusted networks until the vendor fix is applied; treat exposure as ongoing until patched.',
+      'Apply the vendor-supplied update on an emergency change, prioritising internet-facing and privileged instances first.',
+    ],
+    workarounds: [
+      'Enable compensating network controls (deny-by-default ingress, WAF rules, or network segmentation) for the affected service.',
+      'Increase logging and alerting on the affected component and review for signs of exploitation.',
+    ],
+  },
+  HIGH: {
+    immediateActions: [
+      'Schedule the vendor-supplied update in the current patch cycle and prioritise internet-facing instances.',
+      'Confirm which deployed versions fall inside the affected range before remediation begins.',
+    ],
+    workarounds: [
+      'Restrict access to the affected component to trusted networks or authenticated clients meanwhile.',
+      'Monitor the affected service for exploitation attempts and review logs for anomalies.',
+    ],
+  },
+  MEDIUM: {
+    immediateActions: [
+      'Apply the vendor-supplied update in the normal patch cycle after testing in a non-production environment.',
+      'Confirm affected versions against current inventory and record the remediation decision.',
+    ],
+    workarounds: ['Limit unnecessary network exposure of the affected component until it is updated.'],
+  },
+  LOW: {
+    immediateActions: [
+      'Apply the vendor-supplied update at the next scheduled maintenance window.',
+      'Record the affected versions and the planned remediation date.',
+    ],
+    workarounds: ['Maintain standard monitoring on the affected component.'],
+  },
+  UNKNOWN: {
+    immediateActions: [
+      'Confirm the severity and affected versions from the vendor advisory before scheduling remediation.',
+      'Apply the vendor-supplied update once applicability is confirmed.',
+    ],
+    workarounds: ['Limit network exposure of the affected component until applicability is confirmed.'],
+  },
+};
+
+/** Exploitation adds a real-time instruction regardless of the CWE table. */
+const EXPLOITATION_ACTIONS = {
+  kev: 'The CVE is in the CISA KEV catalogue: apply the vendor fix on an emergency timeline and verify no evidence of prior exploitation.',
+  exploited:
+    'Active exploitation has been reported: treat the affected systems as potentially compromised and run a compromise assessment.',
+};
+
+const GENERIC_HUNT_STEP =
+  'Confirm applicability by comparing the installed version against the affected range in the vendor advisory.';
+
+/**
+ * Whether a remediation playbook is effectively empty.
+ *
+ * Used by the advisory renderer to decide whether to generate actions. A
+ * playbook counts as missing when it has no immediate action and no step-by-step
+ * guidance - the two lists the message actually renders - not when it merely
+ * differs from the generic text.
+ */
+export function remediationIsEmpty(playbook: Partial<RemediationPlaybook> | null | undefined): boolean {
+  if (!playbook) return true;
+  const filled = (values?: string[]) => Boolean(values?.some((value) => value.trim()));
+  return !filled(playbook.immediateActions) && !filled(playbook.stepByStep);
+}
+
+/**
+ * Build the Required Actions & Mitigation list for one finding.
+ *
+ * Source precedence, most specific first:
+ *
+ *  1. the remediation already attached to the CVE record (CWE-derived at
+ *     ingestion, or merged from a vendor/OSV source);
+ *  2. the CWE knowledge base, rebuilt from the record's own CWE list;
+ *  3. severity- and exploitation-derived instructions.
+ *
+ * The exploitation notes and the applicability confirmation step are appended to
+ * whatever tier supplied the body, so a delivered email always tells the operator
+ * both what to do and how this particular record became urgent.
+ *
+ * Pure: no network, no clock, no mutation of the input.
+ */
+export function resolveRequiredActions(input: {
+  remediation?: Partial<RemediationPlaybook> | null;
+  cwe?: string[];
+  severity?: string;
+  kev?: boolean;
+  exploited?: boolean;
+  maxActions?: number;
+}): string[] {
+  const { remediation, cwe = [], severity = 'UNKNOWN', kev = false, exploited = false } = input;
+  const maxActions = input.maxActions ?? 6;
+  const seen = new Set<string>();
+  const actions: string[] = [];
+  const add = (value: string | undefined) => {
+    const action = (value ?? '').trim();
+    if (!action || seen.has(action) || actions.length >= maxActions) return;
+    seen.add(action);
+    actions.push(action);
+  };
+
+  if (!remediationIsEmpty(remediation)) {
+    for (const action of remediation?.immediateActions ?? []) add(action);
+    // One worked example from the step-by-step plan; the full plan stays in the
+    // CVE record, and the email must stay scannable.
+    add(remediation?.stepByStep?.[0]);
+    for (const action of remediation?.workarounds ?? []) add(action);
+  } else {
+    // CWE-derived guidance is more specific than severity guidance, so it is
+    // tried first even when the record's own playbook was empty.
+    const fromCwe = buildCveRemediationFromCwe(cwe);
+    const hasCweGuidance = cwe.some((entry) => CWE_REMEDIATION[normalizeCwe(entry) ?? ''] !== undefined);
+    if (hasCweGuidance) {
+      for (const action of fromCwe.immediateActions) add(action);
+      for (const action of fromCwe.workarounds) add(action);
+      add(fromCwe.stepByStep[0]);
+    } else {
+      const band = SEVERITY_URGENCY[normaliseSeverity(severity)];
+      for (const action of band.immediateActions) add(action);
+      for (const action of band.workarounds) add(action);
+      // The step-by-step guidance is generic in this branch, so the applicability
+      // check is the only step worth carrying into the message.
+      add(GENERIC_HUNT_STEP);
+    }
+  }
+
+  if (kev) add(EXPLOITATION_ACTIONS.kev);
+  else if (exploited) add(EXPLOITATION_ACTIONS.exploited);
+
+  return actions;
+}
+
+function normaliseSeverity(value: string): 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN' {
+  const upper = value.trim().toUpperCase();
+  return upper === 'CRITICAL' || upper === 'HIGH' || upper === 'MEDIUM' || upper === 'LOW'
+    ? upper
+    : 'UNKNOWN';
 }

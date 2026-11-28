@@ -92,6 +92,20 @@ export const DEFAULT_ADVISORY_EMAIL_TEMPLATE = String.raw`<!doctype html>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="font-size:12px;line-height:17px;font-weight:bold;letter-spacing:1px;color:#075985;">02&nbsp; Vulnerability Summary Matrix</td></tr></table>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:10px;border:1px solid #cbd5e1;">
               <tr bgcolor="#eaf2f7">
+                <th class="matrix-head" align="center" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;border-right:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">Critical</th>
+                <th class="matrix-head" align="center" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;border-right:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">High</th>
+                <th class="matrix-head" align="center" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;border-right:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">Medium</th>
+                <th class="matrix-head" align="center" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">Low</th>
+              </tr>
+              <tr>
+                <td class="matrix-value" align="center" style="padding:9px 10px;border-right:1px solid #e2e8f0;font-size:13px;line-height:18px;font-weight:bold;color:#b42318;"><span class="cell-label" style="display:none;">Critical: </span>{{#if critical_count}}{{critical_count}}{{else}}-{{/if}}</td>
+                <td class="matrix-value" align="center" style="padding:9px 10px;border-right:1px solid #e2e8f0;font-size:13px;line-height:18px;font-weight:bold;color:#b54708;"><span class="cell-label" style="display:none;">High: </span>{{#if high_count}}{{high_count}}{{else}}-{{/if}}</td>
+                <td class="matrix-value" align="center" style="padding:9px 10px;border-right:1px solid #e2e8f0;font-size:13px;line-height:18px;font-weight:bold;color:#8a6500;"><span class="cell-label" style="display:none;">Medium: </span>{{#if medium_count}}{{medium_count}}{{else}}-{{/if}}</td>
+                <td class="matrix-value" align="center" style="padding:9px 10px;font-size:13px;line-height:18px;font-weight:bold;color:#16794b;"><span class="cell-label" style="display:none;">Low: </span>{{#if low_count}}{{low_count}}{{else}}-{{/if}}</td>
+              </tr>
+            </table>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:10px;border:1px solid #cbd5e1;">
+              <tr bgcolor="#eaf2f7">
                 <th class="matrix-head" align="left" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">CVE Identifier</th>
                 <th class="matrix-head" align="left" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">Severity</th>
                 <th class="matrix-head" align="left" style="padding:9px 10px;border-bottom:1px solid #cbd5e1;font-size:11px;line-height:15px;color:#334155;">Vendor</th>

@@ -86,6 +86,39 @@ test('a malformed Vendor Advisory URL is dropped, not the whole CVE', () => {
     'https://vendor.example/advisory',
   );
 });
+test('the advisory link is found wherever the tagged reference sits in the list', () => {
+  // The tag is the whole signal, and it is not always first: NVD routinely lists
+  // Patch or Third Party Advisory links ahead of the vendor bulletin. Scanning
+  // only the first reference (or the first entry at all) silently dropped the
+  // remediation link, so the adapter must walk the whole list. A reference with
+  // no `tags` field is not a vendor advisory, and a tagged entry with a URL that
+  // fails validation does not stop the scan from finding a usable one later.
+  const withReferences = (references: unknown) => {
+    const item = structuredClone(nvd()) as { cve: Record<string, unknown> };
+    item.cve.references = references;
+    return normalizeNvd(item, 'source-a')?.remediation.vendorAdvisoryRef;
+  };
+  const vendor = { url: 'https://vendor.example/advisory', tags: ['Vendor Advisory'] };
+
+  assert.equal(withReferences([vendor]), 'https://vendor.example/advisory');
+  assert.equal(withReferences([{ url: 'https://example.com/fix', tags: ['Patch'] }]), '');
+  assert.equal(withReferences([{ url: 'https://example.com/analysis', tags: ['Third Party Advisory'] }]), '');
+  assert.equal(withReferences([{ url: 'https://example.com/untagged' }]), '');
+  assert.equal(withReferences(undefined), '');
+
+  // The regression: the tagged reference is second, third, or last.
+  assert.equal(withReferences([{ url: 'https://example.com/fix', tags: ['Patch'] }, vendor]), 'https://vendor.example/advisory');
+  assert.equal(
+    withReferences([
+      { url: 'https://example.com/fix', tags: ['Patch'] },
+      { url: 'https://example.com/analysis', tags: ['Third Party Advisory'] },
+      vendor,
+    ]),
+    'https://vendor.example/advisory',
+  );
+  // A malformed entry earlier in the list must not stop the scan.
+  assert.equal(withReferences([null, { url: 'https://example.com/fix', tags: 'Patch' }, vendor]), 'https://vendor.example/advisory');
+});
 const asset: WatchListItem = {
   id: 'asset',
   vendor: 'example',

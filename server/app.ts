@@ -167,6 +167,8 @@ import {
   digestSeveritySummary,
   digestSeverityKpi,
   formatExecutiveSummary,
+  countDigestSeverities,
+  formatDigestSeverityCounts,
   renderHeldForReview,
 } from '../src/utils/templateCompiler.ts';
 function publicState(data: AppState): AppState {
@@ -2878,7 +2880,12 @@ export function createApp(
           systemUptimePercentage: null,
           pipelineJobs: { total: 0, succeeded: 0, failed: 0 },
         };
-        const severityCounts = { CRITICAL: 2, HIGH: 1, MEDIUM: 1, LOW: 1, UNKNOWN: 0 };
+        // Derived from the sample rows, never hard-coded: the Studio preview must
+        // show the same arithmetic the real digest performs. Hard-coded counts
+        // silently desynchronised from `sampleFindings` the moment a sample row
+        // was added or its severity edited, which made the preview contradict the
+        // list printed directly beneath the KPI tiles.
+        const severityCounts = countDigestSeverities(sampleFindings);
         const reportGenerated = new Date().toLocaleString('en-GB', {
           day: 'numeric',
           month: 'long',
@@ -2897,7 +2904,7 @@ export function createApp(
           dispatch_date: new Date().toISOString(),
           severity: testSeverity,
           finding_count: sampleFindings.length,
-          severity_counts: '2 critical, 1 high, 1 medium, 1 low',
+          severity_counts: formatDigestSeverityCounts(severityCounts),
           findings_summary: renderDailyFindingSummary(sampleFindings, dailyConfig),
           health_report: renderDailyHealthReport(sampleHealth, dailyConfig),
           recipient_name: email,

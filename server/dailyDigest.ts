@@ -1,5 +1,15 @@
 import type pg from 'pg';
-import { get, getMany, list, put, safeAdvisoryUnlock, transaction, schemaLockKey, acquireSessionClassLock, type Db } from './db';
+import {
+  get,
+  getMany,
+  list,
+  put,
+  safeAdvisoryUnlock,
+  transaction,
+  schemaLockKey,
+  acquireSessionClassLock,
+  type Db,
+} from './db';
 import { writeEvent } from './events';
 import { advisoryRevision, enqueue, findingRevision, revision, recipientAllows } from './delivery';
 import {
@@ -27,6 +37,8 @@ import {
   digestSeverityKpi,
   formatExecutiveSummary,
   formatExecutiveSummaryText,
+  countDigestSeverities,
+  formatDigestSeverityCounts,
   type DigestFinding,
 } from '../src/utils/templateCompiler';
 import type {
@@ -192,25 +204,11 @@ const buildDailyDigestAdvisory = (findings: Finding[], settings: AppSettings, da
   };
 };
 
-const formatSeverityCounts = (counts: Record<string, number>) =>
-  Object.entries(counts)
-    .filter(([, n]) => n > 0)
-    .map(([s, n]) => `${n} ${s.toLowerCase()}`)
-    .join(', ');
+const formatSeverityCounts = formatDigestSeverityCounts;
 
-const countSeverities = (findings: Finding[]): Record<string, number> => {
-  const counts: Record<string, number> = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, UNKNOWN: 0 };
-  // Normalise before bucketing: `cvss.severity` is raw provider text (NVD, OSV
-  // and RSS adapters do not all upper-case it). Keying the map with it created
-  // stray buckets that `formatSeverityCounts` printed, so the delivered email's
-  // breakdown disagreed with its own KPI tiles and executive summary. Anything
-  // unrecognised counts as UNKNOWN instead of inventing a bucket.
-  for (const finding of findings) {
-    const severity = String(finding.cve?.cvss?.severity ?? '').trim().toUpperCase();
-    counts[severity in counts ? severity : 'UNKNOWN'] += 1;
-  }
-  return counts;
-};
+/** Delegates to the canonical bucket counter; see `countDigestSeverities`. */
+const countSeverities = (findings: Finding[]): Record<string, number> =>
+  countDigestSeverities(findings.map((finding) => ({ severity: finding.cve?.cvss?.severity })));
 
 const formatReportGenerated = (date: Date, timezone: string): string => {
   const parts = new Intl.DateTimeFormat('en-GB', {
@@ -278,7 +276,9 @@ async function computeHealth(
     // applied it to the finding reads, claim writes and enqueue below, so a
     // transient lock on the outbox turned a healthy digest into a failure.
     const priorLockTimeout = (
-      await db.query<{ value: string }>("SELECT current_setting('lock_timeout') AS value").catch(() => undefined)
+      await db
+        .query<{ value: string }>("SELECT current_setting('lock_timeout') AS value")
+        .catch(() => undefined)
     )?.rows[0]?.value;
     try {
       await db.query(`SET LOCAL lock_timeout = '${HEALTH_PROBE_LOCK_TIMEOUT_MS}ms'`);
@@ -785,9 +785,7 @@ export async function runDailyDigest(pool: pg.Pool, signal?: AbortSignal): Promi
           // same scope as every other KPI on the card. When the recipient has no
           // findings (health-report-only digest) it must be 0, not the size of a
           // set built from an empty list under a different name.
-          const uniqueAssets = new Set(
-            included.map((finding) => finding.matchedAssetId).filter(Boolean),
-          );
+          const uniqueAssets = new Set(included.map((finding) => finding.matchedAssetId).filter(Boolean));
           const reportGenerated = formatReportGenerated(new Date(), timezone);
           // Keep the narrative's scope and counts identical to the recipient's KPIs.
           const executiveSummary = formatExecutiveSummary(included.length, severityCounts);

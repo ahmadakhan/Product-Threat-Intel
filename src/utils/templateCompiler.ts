@@ -361,7 +361,7 @@ export interface DigestHealth {
 }
 
 export interface DailyDigestParts {
-   advisory_id: string;
+  advisory_id: string;
   advisory_title: string;
   dispatch_date: string;
   severity: string;
@@ -803,7 +803,8 @@ export function compileDailyDigestTemplate(config: TemplateCustomization): strin
   );
   // Canvas-coloured viewport wrappers. The canonical document may wrap this tag
   // across lines, so attribute whitespace is `\s*`.
-  const wrapper = /(<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor=")#f1f5f9("\s*style=")([^"]*?background-color: )#f1f5f9;/g;
+  const wrapper =
+    /(<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor=")#f1f5f9("\s*style=")([^"]*?background-color: )#f1f5f9;/g;
   apply(wrapper, `$1${safe.canvasBg}$2$3${safe.canvasBg};`, 'viewport wrapper');
   // Main card: background plus the configured border. Attributes may be wrapped
   // across lines in the canonical document, so inter-attribute whitespace is
@@ -829,11 +830,7 @@ export function compileDailyDigestTemplate(config: TemplateCustomization): strin
     'header kicker',
   );
   // Numbered section accents (01 / 02 / 03).
-  apply(
-    /(<span style="color: )#1d4ed8(;">0[123]<\/span>)/g,
-    `$1${safe.accentColor}$2`,
-    'section numbers',
-  );
+  apply(/(<span style="color: )#1d4ed8(;">0[123]<\/span>)/g, `$1${safe.accentColor}$2`, 'section numbers');
   // Header band, headline and strap line.
   apply(
     /(<td class="mobile-pad" bgcolor=")#f8fafc("\s+style="background-color: )#f8fafc;/,
@@ -929,9 +926,12 @@ export function renderDailyFindingSummary(findings: DigestFinding[], config: Tem
           if (typeof f.epssScore === 'number' && f.epssScore > 0.2) {
             tags.push(`EPSS ${(f.epssScore * 100).toFixed(0)}%`);
           }
-          const tagHtml = tags.map((tag) =>
-            `<span style="display:inline-block;margin:3px 5px 0 0;padding:2px 6px;border:1px solid #dbe2ea;border-radius:3px;background:#f8fafc;color:#475569;font-size:10px;line-height:15px;">${digestEscapeHtml(tag)}</span>`,
-          ).join('');
+          const tagHtml = tags
+            .map(
+              (tag) =>
+                `<span style="display:inline-block;margin:3px 5px 0 0;padding:2px 6px;border:1px solid #dbe2ea;border-radius:3px;background:#f8fafc;color:#475569;font-size:10px;line-height:15px;">${digestEscapeHtml(tag)}</span>`,
+            )
+            .join('');
           return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 10px;border-collapse:collapse;table-layout:fixed;">
     <tr class="vulnstream-pdf-card" data-pdf-accent="${style.border}" data-pdf-cve="${digestEscapeHtml(f.cveId)}" data-pdf-severity="${digestEscapeHtml(f.severity)}">
         <td style="padding:12px 14px;border:1px solid #e2e8f0;border-left:4px solid ${style.border};background:#ffffff;">
@@ -950,9 +950,10 @@ export function renderDailyFindingSummary(findings: DigestFinding[], config: Tem
 </table>`;
         })
         .join('');
-      const extra = items.length > 25
-        ? `<p style="margin:0;font-size:11px;line-height:17px;color:#71717a;">${items.length - 25} more ${severity.toLowerCase()} finding${items.length - 25 === 1 ? '' : 's'} omitted</p>`
-        : '';
+      const extra =
+        items.length > 25
+          ? `<p style="margin:0;font-size:11px;line-height:17px;color:#71717a;">${items.length - 25} more ${severity.toLowerCase()} finding${items.length - 25 === 1 ? '' : 's'} omitted</p>`
+          : '';
       return `<div${marginBottom}>
     <p style="margin:0 0 9px;font-size:12px;line-height:18px;font-weight:700;color:${style.text};">${severity} (${items.length})</p>
     ${cards}${extra}
@@ -961,7 +962,10 @@ export function renderDailyFindingSummary(findings: DigestFinding[], config: Tem
     .join('\n');
 }
 
-export function renderDailyHealthReport(health: DigestHealth | null, config: TemplateCustomization & { timezone?: string }): string {
+export function renderDailyHealthReport(
+  health: DigestHealth | null,
+  config: TemplateCustomization & { timezone?: string },
+): string {
   if (!health) return '';
   const safe = normalizeDigestConfig(config);
   // Workspace timezone for every timestamp in this table. The digest body is
@@ -982,12 +986,11 @@ export function renderDailyHealthReport(health: DigestHealth | null, config: Tem
   // Unknown worker states are escaped like any other cell value.
   const workerLabel = workerStatusLabel[health.workerStatus] || String(health.workerStatus);
   const workerColor = workerStatusColor[health.workerStatus] || '#64748b';
-  const dbLabel = health.database === 'connected' ? `Operational (${health.databaseLatencyMs} ms)` : 'Degraded';
+  const dbLabel =
+    health.database === 'connected' ? `Operational (${health.databaseLatencyMs} ms)` : 'Degraded';
   const dbColor = health.database === 'connected' ? '#16a34a' : '#dc2626';
   const heartbeatLabel =
-    health.workerHeartbeatAgeSeconds !== null
-      ? `${health.workerHeartbeatAgeSeconds} seconds ago`
-      : 'N/A';
+    health.workerHeartbeatAgeSeconds !== null ? `${health.workerHeartbeatAgeSeconds} seconds ago` : 'N/A';
   const formatHealthDate = (iso: string): string => {
     const date = new Date(iso);
     if (Number.isNaN(date.getTime())) return '—';
@@ -1010,9 +1013,7 @@ export function renderDailyHealthReport(health: DigestHealth | null, config: Tem
     const minute = parts.find((p) => p.type === 'minute')?.value || '';
     return `${day} ${month} ${year} ${hour}:${minute} ${utcOffsetLabel(date, outputTimezone)}`;
   };
-  const nextDigest = health.nextDailyDigestAt
-    ? formatHealthDate(health.nextDailyDigestAt)
-    : 'Not scheduled';
+  const nextDigest = health.nextDailyDigestAt ? formatHealthDate(health.nextDailyDigestAt) : 'Not scheduled';
   const lastCheck = formatHealthDate(health.checkedAt);
   // Built after `formatHealthDate` exists so the retry timestamp renders in the
   // workspace timezone like every other date in the report. A non-zero retained
@@ -1152,25 +1153,84 @@ export const digestSeveritySummary = (
   if (count === 0) return '';
   const safe = normalizeDigestConfig(config);
   const sev = SEVERITY_KPI[severity] ?? { label: severity, color: safe.fontColor, bg: '#f8fafc' };
-  const color = severity === 'CRITICAL' ? '#dc2626' : severity === 'HIGH' ? '#ea580c' : severity === 'MEDIUM' ? '#ca8a04' : '#16a34a';
+  const color =
+    severity === 'CRITICAL'
+      ? '#dc2626'
+      : severity === 'HIGH'
+        ? '#ea580c'
+        : severity === 'MEDIUM'
+          ? '#ca8a04'
+          : '#16a34a';
   return `<td style="font-size:12px;color:${color};" align="center">
     <strong>${SEVERITY_TITLE[severity] ?? severity}:</strong> ${count}
 </td>`;
 };
 
-export const digestSeverityKpi = (
-  severity: string,
-  count: number,
-  config: TemplateCustomization,
-): string => {
-  if (count === 0) return '';
+export const digestSeverityKpi = (severity: string, count: number, config: TemplateCustomization): string => {
+  // A zero band must still render, as `0`. Returning '' collapsed the tile, so an
+  // empty band silently removed a column from the KPI grid and the dashboard
+  // showed fewer severities than the email's own breakdown section listed. `0`
+  // states the fact; the tile is dimmed so it does not compete with real counts.
   const safe = normalizeDigestConfig(config);
   const sev = SEVERITY_KPI[severity] ?? { label: severity, color: safe.fontColor, bg: '#f8fafc' };
-  return `<td align="center" bgcolor="${sev.bg}" style="padding:14px 8px;border:1px solid #e2e8f0;border-radius:8px;">
-    <div style="font-size:22px;line-height:26px;font-weight:bold;color:${sev.color};">${count}</div>
+  const empty = count <= 0;
+  const valueColor = empty ? '#94a3b8' : sev.color;
+  return `<td align="center" bgcolor="${sev.bg}" style="padding:14px 8px;border:1px solid #e2e8f0;border-radius:8px;${empty ? 'opacity:0.75;' : ''}">
+    <div style="font-size:22px;line-height:26px;font-weight:bold;color:${valueColor};">${empty ? 0 : count}</div>
     <div style="padding-top:3px;font-size:10px;line-height:14px;font-weight:700;letter-spacing:0.5px;color:#64748b;">${sev.label}</div>
 </td>`;
 };
+
+/**
+ * The severity buckets every digest surface reports on, in display order.
+ *
+ * `UNKNOWN` is a real bucket rather than being folded into `LOW`: an unscored
+ * record is not the same statement as a low-severity one, and the delivered
+ * email prints both.
+ */
+export const DIGEST_SEVERITY_BUCKETS = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'] as const;
+export type DigestSeverityBucket = (typeof DIGEST_SEVERITY_BUCKETS)[number];
+
+/**
+ * Count findings by severity band. Single canonical implementation.
+ *
+ * This existed in four places (the digest worker, the Studio preview endpoint,
+ * the React preview, and the KPI helper) and they had already diverged on
+ * normalisation. `severity` is raw provider text - NVD, OSV and RSS adapters do
+ * not agree on casing - so bucketing on it directly created stray keys such as
+ * `high` that the breakdown printed next to the real ones, making the delivered
+ * email disagree with its own KPI tiles. Anything unrecognised is UNKNOWN.
+ */
+export function countDigestSeverities(
+  findings: ReadonlyArray<{ severity?: string | null }>,
+): Record<DigestSeverityBucket, number> {
+  const counts = Object.fromEntries(DIGEST_SEVERITY_BUCKETS.map((bucket) => [bucket, 0])) as Record<
+    DigestSeverityBucket,
+    number
+  >;
+  for (const finding of findings) {
+    const severity = String(finding.severity ?? '')
+      .trim()
+      .toUpperCase();
+    const bucket = (DIGEST_SEVERITY_BUCKETS as readonly string[]).includes(severity)
+      ? (severity as DigestSeverityBucket)
+      : 'UNKNOWN';
+    counts[bucket] += 1;
+  }
+  return counts;
+}
+
+/**
+ * "2 critical, 1 high, 1 unknown" - only the non-zero bands, in display order.
+ *
+ * Returns an empty string when every band is zero so callers print "none"
+ * rather than the word "unknown" for a digest with no findings.
+ */
+export function formatDigestSeverityCounts(counts: Record<string, number>): string {
+  return DIGEST_SEVERITY_BUCKETS.filter((bucket) => (counts[bucket] ?? 0) > 0)
+    .map((bucket) => `${counts[bucket]} ${bucket.toLowerCase()}`)
+    .join(', ');
+}
 
 export const formatExecutiveSummary = (total: number, counts: Record<string, number>): string => {
   const overview = `A total of <strong>${total} ${total === 1 ? 'finding' : 'findings'}</strong> matched your subscriptions in the last 24 hours`;
@@ -1193,12 +1253,17 @@ export const formatExecutiveSummary = (total: number, counts: Record<string, num
         : 'no';
   const guidance: string[] = [];
   if (counts.CRITICAL > 0) guidance.push('Prioritize immediate remediation of critical findings.');
-  if (counts.HIGH > 0) guidance.push('Address high-severity findings promptly through your change management process.');
+  if (counts.HIGH > 0)
+    guidance.push('Address high-severity findings promptly through your change management process.');
   const routineSeverities = ['MEDIUM', 'LOW'].filter((severity) => counts[severity] > 0);
-  if (routineSeverities.length) guidance.push(`Address ${routineSeverities.map((severity) => severity.toLowerCase()).join(' and ')} severity findings according to established risk treatment procedures.`);
-  if (counts.UNKNOWN > 0) guidance.push('Assess findings with unknown severity before assigning remediation priority.');
+  if (routineSeverities.length)
+    guidance.push(
+      `Address ${routineSeverities.map((severity) => severity.toLowerCase()).join(' and ')} severity findings according to established risk treatment procedures.`,
+    );
+  if (counts.UNKNOWN > 0)
+    guidance.push('Assess findings with unknown severity before assigning remediation priority.');
   return `${overview}, including ${summary} severity findings across monitored assets. ${guidance.join(' ')}`;
-}
+};
 
 export const formatExecutiveSummaryText = (total: number, counts: Record<string, number>): string =>
   formatExecutiveSummary(total, counts).replace(/<\/?strong>/g, '');
@@ -1230,7 +1295,7 @@ function digestSafeExecutiveSummary(value: string): string {
   // tag inventory alone would still allow arbitrary text inside the tags, and
   // the wording alone would still allow an extra tag to be appended.
   const noForeignMarkup = !value.replace(/<\/?strong>/g, '').includes('<');
-   // The list separator accepts an Oxford comma as well as the generated form, so
+  // The list separator accepts an Oxford comma as well as the generated form, so
   // a hand-authored summary that only differs in punctuation still renders.
   const element = '<strong>\\d+ [A-Z][a-z]+<\\/strong>';
   // Older generated summaries used "no" in place of an empty severity list.
@@ -1255,7 +1320,9 @@ const DIGEST_SEVERITY_BADGE: Record<string, { label: string; color: string }> = 
 
 /** Severity a digest is headed with; anything unrecognised is reported as UNKNOWN. */
 export const digestBadgeSeverity = (severity: string | null | undefined): string => {
-  const upper = String(severity ?? '').trim().toUpperCase();
+  const upper = String(severity ?? '')
+    .trim()
+    .toUpperCase();
   return upper in DIGEST_SEVERITY_BADGE ? upper : 'UNKNOWN';
 };
 
@@ -1264,7 +1331,11 @@ const digestHeaderBadge = (severity: string): string => {
   return `<span style="display:inline-block;padding:4px 10px;border-radius:4px;background:${badge.color};color:#ffffff;font-size:11px;line-height:16px;font-weight:700;letter-spacing:0.5px;">${digestEscapeHtml(badge.label)}</span>`;
 };
 
-export function renderDailyDigest(config: TemplateCustomization, parts: DailyDigestParts, template?: string): string {
+export function renderDailyDigest(
+  config: TemplateCustomization,
+  parts: DailyDigestParts,
+  template?: string,
+): string {
   // Without a hand-authored template, compile the studio markup with the
   // operator's customization. Using the bare constant here discarded every
   // colour, font, stamp and classification choice they had made.
@@ -1687,22 +1758,14 @@ export function compileNewsTemplate(config: TemplateCustomization): string {
     'header meta line',
   );
   // Section numbers and headings.
-  apply(
-    /(<span style="color: )#1d4ed8(;">0[123]<\/span>)/g,
-    `$1${safe.accentColor}$2`,
-    'section numbers',
-  );
+  apply(/(<span style="color: )#1d4ed8(;">0[123]<\/span>)/g, `$1${safe.accentColor}$2`, 'section numbers');
   apply(
     /(line-height: 15px; font-weight: 700; letter-spacing: 0\.5px; text-transform: uppercase; color: )#0f172a;/,
     `$1${safe.headingColor};`,
     'section heading',
   );
   // Article/meta and summary prose.
-  apply(
-    /(line-height: 18px; color: )#334155;/,
-    `$1${softText};`,
-    'summary prose',
-  );
+  apply(/(line-height: 18px; color: )#334155;/, `$1${softText};`, 'summary prose');
   // Footer band and its source-hub link.
   apply(
     /(<td class="mobile-pad" bgcolor=")#f8fafc(" style="background-color: )#f8fafc(; padding: 12px 22px; border-top: 1px solid #cbd5e1;">)/,
@@ -1715,7 +1778,8 @@ export function compileNewsTemplate(config: TemplateCustomization): string {
     'footer source hub link',
   );
   // Per-source links inside the {{#each news_sources}} cards (three per card).
-  const sourceLink = /(style="color: )#1d4ed8(; text-decoration: underline;">(?:Source Link|Read full advisory|Source Link &#8599;))/g;
+  const sourceLink =
+    /(style="color: )#1d4ed8(; text-decoration: underline;">(?:Source Link|Read full advisory|Source Link &#8599;))/g;
   if (/style="color: #1d4ed8; text-decoration: underline;"/.test(html)) {
     html = html.replace(sourceLink, `$1${safe.accentColor}$2`);
   }
@@ -1730,11 +1794,7 @@ export function compileNewsTemplate(config: TemplateCustomization): string {
     `$1${safe.headingColor}$2`,
     'article title link',
   );
-  apply(
-    /(line-height: 16px; color: )#334155;/,
-    `$1${softText};`,
-    'article excerpt',
-  );
+  apply(/(line-height: 16px; color: )#334155;/, `$1${softText};`, 'article excerpt');
 
   if (safe.showStamp) {
     apply(
@@ -1753,7 +1813,11 @@ export function compileNewsTemplate(config: TemplateCustomization): string {
   return html;
 }
 
-export function renderNewsTemplate(config: TemplateCustomization, parts: NewsTemplateParts, template?: string): string {
+export function renderNewsTemplate(
+  config: TemplateCustomization,
+  parts: NewsTemplateParts,
+  template?: string,
+): string {
   // Without hand-authored HTML, compile the studio markup with the operator's
   // customization instead of shipping the stock document.
   const compiled = template || compileNewsTemplate(config);
