@@ -70,8 +70,51 @@ const PASSIVE_CONTEXT_TEMPLATES: readonly string[] = [
  * A negation or platform qualifier applies within a clause, not across the whole
  * document, so the text is split before the guards run. "Acme is not affected.
  * Acme Gateway is affected." must evaluate each claim separately.
+ *
+ * A period between digits is a decimal point, not a terminator: "versions before
+ * 2.0 are affected" is one sentence, and splitting it would strand the predicate
+ * from the subject it belongs to.
  */
-const SENTENCE_SPLIT = /[.!?\n\r]+/;
+const SENTENCE_SPLIT = /\.(?!\d)|[!?\n\r]+/;
+
+/**
+ * Splits into sentences while preserving the original case.
+ *
+ * `evidenceSentences` lower-cases, which the guards need but which destroys the
+ * signal that separates a proper name from a common noun. Callers that inspect
+ * how an identity is used need the uncased text and lower-case their own
+ * comparisons.
+ */
+export function rawEvidenceSentences(text: string): string[] {
+  return text
+    .normalize('NFKC')
+    .split(SENTENCE_SPLIT)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Clause boundaries, for construction checks that must not span two predications.
+ *
+ * A comma alone is deliberately NOT a boundary: "A flaw in Acme Widget, which
+ * allows ..." has its relative clause separated by a comma, and splitting there
+ * would read the relative clause as a second, independent claim about the widget.
+ * 'and'/'or' are also excluded because they join noun phrases ("Acme Widget and
+ * Gadget are affected"), so splitting would hide a shared predicate.
+ */
+const CLAUSE_SPLIT =
+  /[;:()\[\]{}|]|[\u2013\u2014]|,(?![\s,]*\b(?:which|that|who|whom|whose|where)\b)|\s(?:but|yet|however|whereas|although|though)\s/iu;
+
+export function splitExposureClauses(sentence: string): string[] {
+  return sentence
+    .normalize('NFKC')
+    .split(CLAUSE_SPLIT)
+    .map((clause) => clause.trim())
+    // A trailing period after a decimal ("before 2.0.") leaves an empty last
+    // piece. Dropping it keeps the clause count meaningful, which the attribution
+    // analysis relies on to tell a title fragment from a document with a body.
+    .filter((clause) => clause.length > 0);
+}
 
 export function evidenceSentences(text: string): string[] {
   return text
@@ -189,11 +232,41 @@ export function textSupportsExposure(
   // to tokenisation.
   if (!relevant.length) return undefined;
 
-  const reasons = relevant.map((sentence) => rejectionReason(sentence, product));
+  const reasons = relevant.map((sentence) =>
+    clausesWithin(sentence).map((clause) => rejectionReason(clause, product)),
+  );
+  // A sentence is rejected only when every clause that names the product rejects
+  // it. Without the inner nesting, a negation in one clause or a passive role in
+  // one building would veto an affirmative claim about the product made elsewhere
+  // in the same sentence ("Tomcat is affected, but Windows Server 2022 is not").
+  const sentenceReasons = reasons.map((clauseVerdicts) => sentenceVerdict(clauseVerdicts));
   // One sentence that positively asserts exposure is enough: the guards suppress
   // a mention, they do not veto a document.
-  if (reasons.some((reason) => reason === undefined)) return undefined;
-  return reasons[0];
+  if (sentenceReasons.some((reason) => reason === undefined)) return undefined;
+  return sentenceReasons[0];
+}
+
+/**
+ * Clause-level view of a sentence for the guards. Splits on punctuation and
+ * contrast words, which separate predications, but not on `and`/`or`, which join
+ * noun phrases that share one predicate.
+ */
+export function clausesWithin(sentence: string): string[] {
+  return splitExposureClauses(sentence).filter((clause) => clause.trim().length > 0);
+}
+
+/**
+ * Reduces per-clause verdicts to one verdict for the sentence. `undefined` means
+ * at least one clause positively asserts exposure.
+ */
+function sentenceVerdict(
+  clauseVerdicts: ('NEGATED' | 'PASSIVE_PLATFORM' | undefined)[],
+): 'NEGATED' | 'PASSIVE_PLATFORM' | undefined {
+  if (!clauseVerdicts.length) return undefined;
+  if (clauseVerdicts.some((verdict) => verdict === undefined)) return undefined;
+  // Prefer the negation explanation: it is the operator-facing reason the
+  // advisory cannot be used, and it is the stronger of the two.
+  return clauseVerdicts.find((verdict) => verdict === 'NEGATED') ?? clauseVerdicts[0];
 }
 
 /** Word-boundary mention test that supports identities containing `+`, `#`, `.`. */

@@ -289,6 +289,8 @@ export function runVulnerabilityPipeline(
   const newAuditLogs: AuditLog[] = [];
   /** CVEs whose text-only candidate scan was truncated by the per-CVE cap. */
   const textOnlyTruncations: string[] = [];
+  /** Every (CVE, asset) pair emitted this run, for duplicate-integrity checks. */
+  const emittedKeys: string[] = [];
   const addAudit = (event: string, details: string, level: 'INFO' | 'WARNING' = 'INFO') => {
     newAuditLogs.push({
       id: randomUUID(),
@@ -712,8 +714,23 @@ export function runVulnerabilityPipeline(
       newFindings.push(classifyFinding(rawFinding, cve, asset, feedsById));
       if (authoritativeSourceDispatch && confirmed) authoritativeSourceDispatchCount++;
       known.add(key);
+      emittedKeys.push(key);
     }
   }
+  // Duplicate integrity. The loop above deduplicates per (CVE, asset), but a
+  // duplicate would still be catastrophic - an operator receives the same finding
+  // twice - and the persisted store is keyed only by a generated id, so it cannot
+  // catch one. Detect it here at the source rather than trusting the call graph:
+  // any second emission of the same pair increments this counter, and the
+  // execution log records it so a regression is visible on the operations screen
+  // instead of only in a downstream email.
+  const duplicateFindingPairs = emittedKeys.length - new Set(emittedKeys).size;
+  if (duplicateFindingPairs > 0)
+    addAudit(
+      'MATCH_INTEGRITY_DUPLICATE_PAIRS',
+      `${duplicateFindingPairs} duplicate (CVE, asset) finding pair(s) emitted in execution ${executionId}`,
+      'WARNING',
+    );
   const matchingDurationMs = Math.round(performance.now() - matchingStarted);
   const execution: PipelineExecution = {
     id: executionId,
@@ -737,7 +754,7 @@ export function runVulnerabilityPipeline(
           textOnlyTruncations.length
             ? `; ${textOnlyTruncations.length} text-only CVEs capped at ${MAX_TEXT_ONLY_CANDIDATE_ASSETS} candidate assets`
             : ''
-        }`,
+        }${duplicateFindingPairs ? `; ${duplicateFindingPairs} duplicate pairs detected` : ''}`,
       },
     ],
     stats: {

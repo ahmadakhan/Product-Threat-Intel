@@ -567,4 +567,101 @@ export const MATCHING_CORPUS: MatchingCase[] = [
     },
     expected: { matched: false },
   },
+
+  // Prose attribution: the identity must be the affected subject, not the
+  // language, plugin container, dependency or platform a flaw was reported in.
+  // This class is vocabulary-independent on purpose - an unlisted framework name
+  // is caught by the same structural rule, so no stop-list needs extending.
+  {
+    id: 'negative-prose-nested-product-name',
+    description: 'A name that only begins another product name is not that product',
+    tags: ['fallback', 'attribution', 'negative'],
+    input: {
+      assetVendor: 'acme',
+      assetProduct: 'quicksilver',
+      vulnTitle: 'Acme Quicksilver Builder plugin file upload',
+      vulnDescription: 'A SQL injection in the Acme Quicksilver Builder plugin allows file uploads.',
+    },
+    expected: { matched: false },
+  },
+  {
+    id: 'positive-prose-longer-subject-name',
+    description: 'A longer name in subject position keeps its first word inside the affected product',
+    tags: ['fallback', 'attribution', 'positive'],
+    input: {
+      assetVendor: 'acme',
+      assetProduct: 'quicksilver',
+      vulnTitle: 'Acme Quicksilver Data Center flaw',
+      vulnDescription: 'Acme Quicksilver Data Center is vulnerable to a SQL injection.',
+    },
+    expected: { matched: true, methods: ['VENDOR_PRODUCT_FALLBACK'], confidence: 70 },
+  },
+  {
+    id: 'negative-prose-language-vehicle',
+    description: 'A language named only as the vehicle of the flaw is not the affected product',
+    tags: ['fallback', 'attribution', 'negative'],
+    input: {
+      assetVendor: 'acme storefront',
+      assetProduct: 'acme storefront',
+      vulnTitle: 'Checkout export endpoint disclosure',
+      vulnDescription:
+        'A vulnerability in the Acme Storefront checkout module allows an unauthenticated attacker to read order records through an application written in Acme Storefront.',
+    },
+    expected: { matched: false },
+  },
+  {
+    id: 'negative-prose-plugin-container',
+    description: 'A product named only as the container of a plugin is not the affected subject',
+    tags: ['fallback', 'attribution', 'negative'],
+    input: {
+      assetVendor: 'acme',
+      assetProduct: 'storefront',
+      vulnTitle: 'Third-party plugin file upload',
+      vulnDescription:
+        'A file upload flaw affects the ImagePress extension distributed for Acme Storefront sites',
+    },
+    expected: { matched: false },
+  },
+  {
+    id: 'positive-prose-subject-position',
+    description: 'The same identity stated as the affected subject still matches',
+    tags: ['fallback', 'attribution', 'positive'],
+    input: {
+      assetVendor: 'acme',
+      assetProduct: 'storefront',
+      vulnTitle: 'Storefront order export flaw',
+      vulnDescription:
+        'A vulnerability in Acme Storefront allows an unauthenticated attacker to read order records via the export endpoint.',
+    },
+    expected: { matched: true, methods: ['VENDOR_PRODUCT_FALLBACK'], confidence: 70 },
+  },
+  {
+    id: 'negative-prose-negated',
+    description: 'A sentence that negates applicability is not evidence of exposure',
+    tags: ['fallback', 'attribution', 'negative'],
+    input: {
+      assetVendor: 'acme',
+      assetProduct: 'storefront',
+      vulnTitle: 'Acme Storefront security notice',
+      vulnDescription: 'Acme Storefront is not affected by this flaw.',
+    },
+    expected: { matched: false },
+  },
+  {
+    id: 'negative-structural-wildcard-identity',
+    description: 'A partial-glob vendor in the inventory CPE is not an identity assertion for a different product',
+    tags: ['strict', 'wildcard', 'negative'],
+    input: {
+      // The declared identity is acme/widget; the CPE is a broad scope over all
+      // `acme.*` vendors. It must not make the asset match an advisory for a
+      // different product (acme/storefront) merely through the glob.
+      assetCpes: ['cpe:2.3:a:acme.*:widget:1.0:*:*:*:*:*:*:*'],
+      assetVendor: 'acme',
+      assetProduct: 'widget',
+      vulnCpes: [cpe({ vendor: 'acme', product: 'storefront', version: '1.0' })],
+      vulnTitle: 'Acme Storefront vulnerability',
+      vulnDescription: 'A flaw in Acme Storefront allows uploads.',
+    },
+    expected: { matched: false },
+  },
 ];

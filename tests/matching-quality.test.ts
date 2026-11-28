@@ -2,9 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MATCHING_CORPUS } from './fixtures/matching-corpus.ts';
 import {
+  evaluateDeterminism,
   evaluateMatchingCorpus,
   matchingQualityProblems,
   runMatchingCase,
+  wilsonLowerBound,
   type MatchingCase,
 } from '../src/utils/matchingMetrics.ts';
 
@@ -53,6 +55,38 @@ test('the matcher meets the precision and recall gates on the labelled corpus', 
   assert.equal(report.failed, 0);
   assert.ok(report.precision >= 0.95, `precision ${report.precision}`);
   assert.ok(report.recall >= 0.9, `recall ${report.recall}`);
+  assert.ok(report.f1 >= 0.9, `F1 ${report.f1}`);
+});
+
+test('every evidence class reports an F1 score and a 95% lower confidence bound', () => {
+  for (const [method, metrics] of Object.entries(report.byExpectedMethod)) {
+    assert.ok(Number.isFinite(metrics.f1), `${method} F1 must be finite`);
+    assert.ok(metrics.f1 >= 0 && metrics.f1 <= 1, `${method} F1 out of range: ${metrics.f1}`);
+    // A lower bound can never exceed the point estimate it bounds.
+    assert.ok(
+      metrics.precisionLower95 <= metrics.precision + 1e-9,
+      `${method} precision lower bound ${metrics.precisionLower95} > estimate ${metrics.precision}`,
+    );
+    assert.ok(
+      metrics.recallLower95 <= metrics.recall + 1e-9,
+      `${method} recall lower bound ${metrics.recallLower95} > estimate ${metrics.recall}`,
+    );
+  }
+});
+
+test('the corpus matcher is deterministic across repeated runs', () => {
+  // Determinism is measured separately from accuracy: a matcher that returns a
+  // different verdict for identical input dispatches different findings on
+  // different runs, which no precision figure would reveal.
+  assert.deepEqual(evaluateDeterminism(MATCHING_CORPUS).unstable, []);
+});
+
+test('the Wilson lower bound is the pessimistic estimate, not the point estimate', () => {
+  // 9/10 looks like 90% but is consistent with ~56%+ at 95% confidence. That gap
+  // is why a small labelled corpus cannot prove a 95% precision claim on its own.
+  assert.ok(Math.abs(wilsonLowerBound(9, 10) - 0.596) < 0.01, String(wilsonLowerBound(9, 10)));
+  assert.ok(Math.abs(wilsonLowerBound(1000, 1000) - 0.996) < 0.01);
+  assert.equal(wilsonLowerBound(0, 5), 0);
 });
 
 test('no labelled negative reaches the auto-dispatch confidence threshold', () => {

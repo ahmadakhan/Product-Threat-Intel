@@ -4,7 +4,7 @@
  */
 
 import { NvdVersionRange, canCompareRange, evaluateVersionInRange } from './versionComparator.ts';
-import { textSupportsExposure } from './textEvidenceGuards.ts';
+import { proseAttributesExposure, exposureRoleOf } from './textEvidenceRefinements.ts';
 
 export interface ParsedCPE {
   prefix: string; // cpe:2.3
@@ -393,31 +393,31 @@ const CPE_PLATFORM_FIELDS = [
 ] as const;
 
 /**
- * Tokens that name a platform, language or delivery vehicle rather than a
- * product identity.
+ * Structural (word-independent) genericity of an identity, used by the prose
+ * fallback.
  *
- * The free-text fallback treats "vendor and product are both named" as two
- * independent pieces of evidence. That reasoning collapses when the identity is
- * itself a generic word: an inventory item `PHP / PHP` is satisfied by any
- * advisory whose prose happens to say "written in PHP", so an unrelated
- * SourceCodester hotel-reservation CVE matched it at 70% confidence. These words
- * still match through strict CPE, alias or PURL evidence - only the weakest
- * prose path refuses them.
+ * The prose fallback asks whether an advisory *states exposure about* the
+ * inventory's identity; that attribution test lives in
+ * `textEvidenceRefinements.proseAttributesExposure` and depends on grammar, not
+ * on a list of platform names. Two structural cases still need special
+ * treatment because the vendor/product pair carries no independent evidence:
+ *
+ *   - both halves are the same token (`PHP / PHP`), so one incidental prose
+ *     mention would satisfy two "independent" tests;
+ *   - the identity is a single very short token (`go`, `ai`), too ambiguous to
+ *     attribute on prose alone.
+ *
+ * Admitting these only through strict CPE, alias or PURL evidence is the
+ * long-standing policy for short names (`containsIdentityWords` already refuses
+ * prose evidence for them). This exists so the two rules cannot drift apart.
  */
-const GENERIC_PROSE_IDENTITIES = new Set([
-  // Languages and runtimes.
-  'php', 'sql', 'html', 'css', 'javascript', 'typescript', 'java', 'python', 'django',
-  'flask', 'rails', 'ruby', 'perl', 'node', 'nodejs', 'dotnet', 'golang', 'go', 'rust',
-  // Platforms and operating systems.
-  'linux', 'unix', 'windows', 'android', 'ios', 'macos', 'mac', 'bsd', 'solaris',
-  // Protocols and data formats.
-  'web', 'http', 'https', 'api', 'rest', 'soap', 'xml', 'json', 'yaml', 'ftp', 'smtp',
-  // Delivery vehicles and generic components.
-  'plugin', 'plugins', 'module', 'modules', 'theme', 'themes', 'widget', 'widgets',
-  'addon', 'addons', 'extension', 'extensions', 'component', 'components',
-  'library', 'libraries', 'framework', 'frameworks', 'core', 'server', 'client',
-  'service', 'services', 'application', 'applications', 'app', 'apps',
-]);
+const GENERIC_IDENTITY_MAX_TOKEN_LENGTH = 2;
+
+function isStructurallyGenericIdentity(vendor: string, product: string): boolean {
+  if (normalizeAliasToken(vendor) === normalizeAliasToken(product)) return true;
+  const tokens = identityTokens(product);
+  return tokens.length === 1 && tokens[0].length <= GENERIC_IDENTITY_MAX_TOKEN_LENGTH;
+}
 
 /** Normalised single tokens of an identity, for prose-evidence checks. */
 const identityTokens = (value: string): string[] =>
@@ -426,20 +426,6 @@ const identityTokens = (value: string): string[] =>
     .toLowerCase()
     .split(IDENTITY_TOKEN_SPLIT)
     .filter(Boolean);
-
-/**
- * Whether `identity` is too generic to stand as evidence on the prose path.
- *
- * True for a name whose every token is a platform/language word, or a single
- * one- or two-character token. Such a name carries no distinguishing power: the
- * words appear in advisories for unrelated products.
- */
-function isGenericProseIdentity(identity: string): boolean {
-  const tokens = identityTokens(identity);
-  if (!tokens.length) return true;
-  if (tokens.length === 1 && tokens[0].length <= 2) return true;
-  return tokens.every((token) => GENERIC_PROSE_IDENTITIES.has(token));
-}
 
 function cpeCriterionConflict(asset: ParsedCPE, vuln: ParsedCPE): boolean {
   if (CPE_PLATFORM_FIELDS.some((field) => !matchComponent(asset[field], vuln[field]))) return true;
@@ -480,13 +466,22 @@ function resolveGenericCpeIdentity(
   assetCpeStr: string,
   assetVendor: string,
   assetProduct: string,
-): { cpe: string; generic: boolean } {
+): { cpe: string; generic: boolean; structuralWildcard: boolean } {
   const parsed = parseCPE23(assetCpeStr);
-  if (!parsed.isValid) return { cpe: assetCpeStr, generic: false };
+  if (!parsed.isValid) return { cpe: assetCpeStr, generic: false, structuralWildcard: false };
+
+  // A *partial* glob (`acme.*`, `adobe?`) asserts a set of identities rather
+  // than this one. It is never resolved into a concrete identity claim and is
+  // reported so the caller excludes it from identity matching; the engine's
+  // candidate prefilter already classifies the same CPEs as "broad" (see
+  // `assetsWithBroadCpes`).
+  if (hasUnescapedCpeWildcard(parsed.vendor) || hasUnescapedCpeWildcard(parsed.product))
+    return { cpe: assetCpeStr, generic: true, structuralWildcard: true };
 
   const genericVendor = isGenericCpeComponent(parsed.vendor);
   const genericProduct = isGenericCpeComponent(parsed.product);
-  if (!genericVendor && !genericProduct) return { cpe: assetCpeStr, generic: false };
+  if (!genericVendor && !genericProduct)
+    return { cpe: assetCpeStr, generic: false, structuralWildcard: false };
 
   let vendor = parsed.vendor;
   let product = parsed.product;
@@ -499,8 +494,19 @@ function resolveGenericCpeIdentity(
     product = inventoryCpeToken(assetProduct);
     inferred = true;
   }
+  // A substitution must leave a usable literal. Free text that sanitizes to
+  // nothing, or to a `-` (CPE's "not applicable"), would produce a CPE that names
+  // no product and matches an arbitrary advisory. Only a resolved identity the
+  // caller has already asserted as a real name is substituted.
+  const usable = (value: string) => value !== '' && value !== '-' && value !== '*' && !hasUnescapedCpeWildcard(value);
+  if (inferred && (!usable(vendor) || !usable(product)))
+    return { cpe: assetCpeStr, generic: true, structuralWildcard: false };
   if (!inferred)
-    return { cpe: assetCpeStr, generic: isGenericCpeComponent(vendor) || isGenericCpeComponent(product) };
+    return {
+      cpe: assetCpeStr,
+      generic: isGenericCpeComponent(vendor) || isGenericCpeComponent(product),
+      structuralWildcard: false,
+    };
 
   const tokens = splitCpeTokens(parsed.raw.slice(8));
   tokens[1] = vendor;
@@ -511,6 +517,7 @@ function resolveGenericCpeIdentity(
     // A fully resolved CPE is a concrete assertion of the inventory's own
     // vendor/product, so it must not be held for review as an inferred match.
     generic: isGenericCpeComponent(vendor) || isGenericCpeComponent(product),
+    structuralWildcard: false,
   };
 }
 
@@ -553,6 +560,18 @@ export function matchCPE(
   if (!asset.isValid || !vuln.isValid) {
     return { matched: false, reason: 'Invalid CPE syntax' };
   }
+
+  // A CPE vendor/product names ONE thing. A structural glob there (`com.*`) or a
+  // bare `*` with no version claim intersects every advisory of the same part,
+  // and first-match iteration over a candidate set would then pick the "best" of
+  // those coincidences. Such a document is not an identity assertion, so it is not
+  // used as one. `matchesWatchlistItem` handles wildcard inventory scopes through
+  // `resolveGenericCpeIdentity`, which substitutes the inventory's own declared
+  // vendor/product before calling here.
+  if (hasUnescapedCpeWildcard(asset.vendor) || hasUnescapedCpeWildcard(asset.product))
+    return { matched: false, reason: 'Inventory CPE vendor/product is a structural wildcard' };
+  if (hasUnescapedCpeWildcard(vuln.vendor) || hasUnescapedCpeWildcard(vuln.product))
+    return { matched: false, reason: 'Advisory CPE vendor/product is a structural wildcard' };
 
   // Part match (application, os, hardware)
   if (!matchComponent(asset.part, vuln.part)) return { matched: false, reason: 'Part mismatch' };
@@ -1003,7 +1022,7 @@ export function matchesWatchlistItem(
   // criterion. On a large run the parse cache thrashes, so the repeated parses
   // were uncached work on the hottest loop in the engine.
   const preparedAssetCpes = assetCpes.map((rawAssetCpe) => {
-    const { cpe: assetCpe, generic: genericIdentity } = resolveGenericCpeIdentity(
+    const { cpe: assetCpe, generic: genericIdentity, structuralWildcard } = resolveGenericCpeIdentity(
       rawAssetCpe,
       assetVendor,
       assetProduct,
@@ -1014,6 +1033,10 @@ export function matchesWatchlistItem(
       assetCpe,
       genericIdentity,
       parsed,
+      // A partial glob names a set of vendors/products, not this one. It is not an
+      // identity assertion, so it must not enter identity matching; the asset is
+      // still reachable through its declared vendor/product fields.
+      structuralWildcard,
       // The raw CPE is checked before resolution: a generic `*:*` identity is
       // substituted from the inventory fields above, which would otherwise hide
       // the wildcard that made the registration broad.
@@ -1042,8 +1065,10 @@ export function matchesWatchlistItem(
     genericIdentity,
     parsed: assetParsed,
     versionUnasserted,
+    structuralWildcard,
     wildcardVendorProductScope: assetWildcardVendorProductScope,
   } of preparedAssetCpes) {
+    if (structuralWildcard) continue;
     for (const vulnCpe of vulnCpeMatches) {
       const vulnParsed = parseCPE23(vulnCpe);
       const vulnConstrainsVersion =
@@ -1448,57 +1473,63 @@ export function matchesWatchlistItem(
     normProduct &&
     containsIdentityWords(fullText, normProduct);
   // Vendor and product are two independent facts only when they are two
-  // identities. When they are the same generic word (`php` / `php`), one
-  // incidental mention in the prose satisfied both tests and an unrelated
-  // advisory matched: "written in PHP" was read as "PHP, the product". A generic
-  // identity therefore needs a distinct, more specific partner in this sentence;
-  // otherwise the advisory cannot be attributed to it on prose evidence alone.
-  const genericVendor = isGenericProseIdentity(normVendor);
-  const genericProduct = isGenericProseIdentity(normProduct);
-  const sameIdentity =
-    normalizeAliasToken(normVendor) === normalizeAliasToken(normProduct) ||
-    (genericVendor && genericProduct);
-  const distinctEvidence =
-    !sameIdentity || (!genericVendor && !genericProduct && Boolean(normVendor) && Boolean(normProduct));
-  if (
-    normVendor &&
-    normProduct &&
-    distinctEvidence &&
-    ((containsIdentityWords(fullText, normVendor) && containsIdentityWords(fullText, normProduct)) ||
-      productOnlyKevFallback)
-  ) {
+  // identities. When they are the same token (`php` / `php`) one incidental
+  // mention in the prose satisfied both tests and an unrelated advisory matched:
+  // "written in PHP" was read as "PHP, the product". A structurally generic
+  // identity is therefore attributed through the identity alone, as one name,
+  // and only when a clause states exposure about that name.
+  const genericIdentity = isStructurallyGenericIdentity(normVendor, normProduct);
+  const prose = `${vulnTitle} ${vulnDescription}`;
+  // The two names must each be present as whole words. They need not be in the
+  // same sentence - "[vendor] advisory. A flaw in the [product] ..." is normal -
+  // so the document-level role checks below decide attribution. An advisory that
+  // names the product but omits the vendor ("SonicOS ...", where the product name
+  // implies SonicWall) stays eligible only for the product-wide KEV path, which
+  // requires a deliberate all-versions registration and an actively exploited CVE.
+  const namesBothIdentities = containsIdentityWords(prose, normVendor) && containsIdentityWords(prose, normProduct);
+  if (normVendor && normProduct && (namesBothIdentities || productOnlyKevFallback)) {
     // Do not let the text fallback re-admit a release that the advisory range
     // explicitly excludes when every inventory version is comparable.
     if (rangeHasBounds && allVersionsProvablyOutside)
       return { matched: false, method: 'NONE', confidence: 0, evidence: 'Version outside advisory range' };
-    // Presence of both identities is necessary but not sufficient: the sentence
-    // must assert exposure. "X is not affected by …" names every identity an
-    // affected advisory would, and "a flaw in Y running on X" names X only as
-    // the substrate. Both are rejected here, per sentence, so a negation about
-    // one product cannot suppress a real claim about the same product elsewhere
-    // in the document.
-    const support = textSupportsExposure(
-      `${vulnTitle} ${vulnDescription}`,
-      normVendor,
-      normProduct,
-      Boolean(productOnlyKevFallback),
-    );
-    if (support === 'NEGATED' || support === 'PASSIVE_PLATFORM')
+    // Presence of both identities is necessary but not sufficient. The sentence
+    // must state exposure *about* the product, not merely name it: "written in
+    // X", "an X plugin that allows ..." and "X is based on Y" all name it
+    // without saying it is affected. The earlier version of this check was a
+    // stop-list of platform words, which an unlisted framework name defeats on
+    // the day it ships; `proseAttributesExposure` decides from grammar instead.
+    //
+    // The vendor must be present and not be in an attributed role. It is not
+    // required to be a grammatical subject: product titles normally omit it, and
+    // demanding it would reject true positives without rejecting any false one -
+    // the false positives come from the product role, which the product check
+    // covers.
+    const attribution = proseAttributesExposure(prose, normVendor, normProduct, genericIdentity);
+    // The product-only KEV path is a deliberate operator choice (an all-versions
+    // registration for an actively exploited CVE), and advisories for such a
+    // product routinely omit the vendor because the product name implies it
+    // ("SonicOS" for SonicWall). That path therefore requires the product to be
+    // the stated subject, but not the vendor to be present.
+    const productRole = exposureRoleOf(prose, normProduct);
+    const attributed = namesBothIdentities
+      ? attribution.stated
+      : Boolean(productOnlyKevFallback) && productRole === 'subject';
+    if (!attributed) {
       return {
         matched: false,
         method: 'NONE',
         confidence: 0,
-        evidence:
-          support === 'NEGATED'
-            ? 'Advisory text negates applicability for this product'
-            : 'Advisory text names this product only as a passive platform',
+        evidence: attribution.mentioned
+          ? 'Advisory text names this product only as an environment, dependency or modifier, not as the affected subject'
+          : 'Advisory text does not state exposure for this product',
       };
+    }
     return {
       matched: true,
       method: 'VENDOR_PRODUCT_FALLBACK',
       confidence: 70,
       matchedCpe: assetCpes[0] || `cpe:2.3:a:${normVendor}:${normProduct}:*:*:*:*:*:*:*:*`,
-      evidence: `Matched vendor "${normVendor}" and product "${normProduct}" in advisory text (70% confidence)`,
+      evidence: `Matched vendor "${normVendor}" and product "${normProduct}" as the affected subject in advisory text (70% confidence)`,
       productWideAllVersions: productOnlyKevFallback || undefined,
     };
   }

@@ -21,8 +21,9 @@ console.log('Matching quality evaluation');
 console.log(`  cases:     ${report.total}`);
 console.log(`  passed:    ${report.passed}`);
 console.log(`  failed:    ${report.failed}`);
-console.log(`  precision: ${percent(report.precision)}`);
-console.log(`  recall:    ${percent(report.recall)}`);
+console.log(`  precision: ${percent(report.precision)} (95% lower bound ${percent(report.precisionLower95)})`);
+console.log(`  recall:    ${percent(report.recall)} (95% lower bound ${percent(report.recallLower95)})`);
+console.log(`  F1:        ${percent(report.f1)}`);
 console.log(`  accuracy:  ${percent(report.accuracy)}`);
 console.log(
   `  confusion: TP=${report.truePositives} FP=${report.falsePositives} FN=${report.falseNegatives} TN=${report.trueNegatives}`,
@@ -36,7 +37,9 @@ for (const [method, metrics] of Object.entries(report.byExpectedMethod).sort(([a
     `  ${method.padEnd(24)} cases=${String(metrics.cases).padStart(3)} ` +
       (method === 'NEGATIVE'
         ? `specificity=${percent(metrics.specificity).padStart(6)}`
-        : `precision=${percent(metrics.precision).padStart(6)} recall=${percent(metrics.recall).padStart(6)}`),
+        : `precision=${percent(metrics.precision).padStart(6)} (LB ${percent(metrics.precisionLower95)}) ` +
+          `recall=${percent(metrics.recall).padStart(6)} (LB ${percent(metrics.recallLower95)}) ` +
+          `F1=${percent(metrics.f1)}`),
   );
 }
 

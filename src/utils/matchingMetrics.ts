@@ -58,6 +58,12 @@ export interface MethodMetrics {
   trueNegatives: number;
   precision: number;
   recall: number;
+  /** F1 of precision and recall. 0 when both are 0 (no correct evidence). */
+  f1: number;
+  /** Lower bound of the 95% Wilson score interval for precision. */
+  precisionLower95: number;
+  /** Lower bound of the 95% Wilson score interval for recall. */
+  recallLower95: number;
   /** True-negative rate. Only meaningful for the NEGATIVE bucket. */
   specificity: number;
 }
@@ -72,6 +78,12 @@ export interface MatchingReport {
   trueNegatives: number;
   precision: number;
   recall: number;
+  /** F1 over the whole corpus (all evidence classes pooled). */
+  f1: number;
+  /** Lower bound of the 95% Wilson score interval for corpus precision. */
+  precisionLower95: number;
+  /** Lower bound of the 95% Wilson score interval for corpus recall. */
+  recallLower95: number;
   accuracy: number;
   /** False positives at or above the auto-dispatch threshold. These are the
    * only matching errors that can notify a customer without review. */
@@ -85,6 +97,35 @@ const AUTO_DISPATCH_CONFIDENCE = 90;
 
 const ratio = (numerator: number, denominator: number) =>
   denominator === 0 ? 1 : numerator / denominator;
+
+/**
+ * F1 of precision and recall. Undefined (0) when both are zero, which is the
+ * "never matched anything correctly" case, not a perfect score.
+ */
+export function f1Score(precision: number, recall: number): number {
+  if (precision <= 0 || recall <= 0) return 0;
+  return (2 * precision * recall) / (precision + recall);
+}
+
+/**
+ * Wilson score interval for a binomial proportion, at 95% confidence.
+ *
+ * A bare precision figure from a small labelled corpus is misleading: 9/10 looks
+ * like 90% but is consistent with anything from ~56% to ~99%. The lower bound is
+ * the number to gate on, because it is the pessimistic estimate a procurement
+ * reviewer should act on. Wilson is used rather than the normal approximation
+ * because it stays inside [0, 1] and behaves at 0% and 100%, where a matcher on
+ * a small corpus always lands.
+ */
+export function wilsonLowerBound(successes: number, trials: number, z = 1.959963984540054): number {
+  if (trials <= 0) return 0;
+  const p = successes / trials;
+  const z2 = z * z;
+  const denominator = 1 + z2 / trials;
+  const centre = p + z2 / (2 * trials);
+  const margin = z * Math.sqrt((p * (1 - p)) / trials + z2 / (4 * trials * trials));
+  return Math.max(0, Math.min(1, (centre - margin) / denominator));
+}
 
 export function runMatchingCase(testCase: MatchingCase): MatchingCaseOutcome {
   const input = testCase.input;
@@ -149,6 +190,9 @@ export function evaluateMatchingCorpus(cases: readonly MatchingCase[]): Matching
       trueNegatives: 0,
       precision: 1,
       recall: 1,
+      f1: 1,
+      precisionLower95: 0,
+      recallLower95: 0,
       specificity: 1,
     };
     return methods[key];
@@ -190,6 +234,15 @@ export function evaluateMatchingCorpus(cases: readonly MatchingCase[]): Matching
   for (const metrics of Object.values(methods)) {
     metrics.precision = ratio(metrics.truePositives, metrics.truePositives + metrics.falsePositives);
     metrics.recall = ratio(metrics.truePositives, metrics.truePositives + metrics.falseNegatives);
+    metrics.f1 = f1Score(metrics.precision, metrics.recall);
+    metrics.precisionLower95 = wilsonLowerBound(
+      metrics.truePositives,
+      metrics.truePositives + metrics.falsePositives,
+    );
+    metrics.recallLower95 = wilsonLowerBound(
+      metrics.truePositives,
+      metrics.truePositives + metrics.falseNegatives,
+    );
     metrics.specificity = ratio(metrics.trueNegatives, metrics.trueNegatives + metrics.falsePositives);
   }
 
@@ -204,6 +257,12 @@ export function evaluateMatchingCorpus(cases: readonly MatchingCase[]): Matching
     trueNegatives,
     precision: ratio(truePositives, truePositives + falsePositives),
     recall: ratio(truePositives, truePositives + falseNegatives),
+    f1: f1Score(
+      ratio(truePositives, truePositives + falsePositives),
+      ratio(truePositives, truePositives + falseNegatives),
+    ),
+    precisionLower95: wilsonLowerBound(truePositives, truePositives + falsePositives),
+    recallLower95: wilsonLowerBound(truePositives, truePositives + falseNegatives),
     accuracy: ratio(truePositives + trueNegatives, outcomes.length),
     highConfidenceFalsePositives: outcomes.filter(
       (outcome) =>
@@ -222,6 +281,36 @@ export const MATCHING_QUALITY_GATES = {
   recall: 0.9,
   highConfidenceFalsePositives: 0,
 } as const;
+
+const volatileSignature = (result: MatchResult) =>
+  [result.matched, result.method, result.confidence, result.packageVerdict ?? ''].join('|');
+
+/**
+ * Volatility: does every labelled case produce the same decision on a repeated
+ * run?
+ *
+ * Determinism is a separate property from accuracy, and the one an operator
+ * notices first: a matcher that returns a different verdict for the same input
+ * makes the same corpus dispatch different findings on different runs. The
+ * matcher is a pure function of its input by contract, so any disagreement is a
+ * defect regardless of whether either verdict was "correct".
+ */
+export function evaluateDeterminism(cases: readonly MatchingCase[]): {
+  runs: number;
+  unstable: string[];
+} {
+  const unstable: string[] = [];
+  for (const testCase of cases) {
+    const first = volatileSignature(runMatchingCase(testCase).actual);
+    for (let run = 0; run < 2; run += 1) {
+      if (volatileSignature(runMatchingCase(testCase).actual) !== first) {
+        unstable.push(testCase.id);
+        break;
+      }
+    }
+  }
+  return { runs: 3, unstable };
+}
 
 export function matchingQualityProblems(report: MatchingReport): string[] {
   const problems: string[] = [];
